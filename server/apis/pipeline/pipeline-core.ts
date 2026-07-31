@@ -658,6 +658,46 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       if (ra !== rb) parent[ra] = rb;
     }
 
+    // Fix 17: Compatibility gate — two findings may only merge when they share
+    // a claim_id or issue_key AND have no material conflict in structured identity fields.
+    // A material conflict in any gate field blocks consolidation.
+    function areCompatibleForMerge(idxA: number, idxB: number): boolean {
+      const a = findings[idxA] as any;
+      const b = findings[idxB] as any;
+
+      // Gate fields: if BOTH findings have a non-empty value for a field,
+      // and those values differ materially, they are incompatible.
+      const gateFields: Array<{ key: string; normalize?: (v: string) => string }> = [
+        { key: "finding_kind" },
+        { key: "metric", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "period", normalize: (v: string) => v.toLowerCase().trim().replace(/\s+/g, "") },
+        { key: "scope", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "entity", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "currency" },
+        { key: "legal_clause", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "legal_consequence", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "impact_type", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "affected_asset", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "accounting_basis", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "actual_vs_forecast", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "counterparty", normalize: (v: string) => v.toLowerCase().trim() },
+        { key: "contract_provision", normalize: (v: string) => v.toLowerCase().trim() },
+      ];
+
+      for (const { key, normalize } of gateFields) {
+        const valA = a[key];
+        const valB = b[key];
+        // Only check if BOTH have a truthy value for this field
+        if (!valA || !valB) continue;
+        if (typeof valA !== "string" || typeof valB !== "string") continue;
+        const normA = normalize ? normalize(valA) : valA;
+        const normB = normalize ? normalize(valB) : valB;
+        if (normA !== normB) return false; // Material conflict → incompatible
+      }
+
+      return true; // No material conflicts → compatible
+    }
+
     const claimToIndices = new Map<string, number[]>();
     for (let i = 0; i < findings.length; i++) {
       const cids = findings[i].claim_ids ?? [];
@@ -669,7 +709,12 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       }
     }
     for (const indices of claimToIndices.values()) {
-      for (let k = 1; k < indices.length; k++) { union(indices[0], indices[k]); }
+      for (let k = 1; k < indices.length; k++) {
+        // Fix 17: Only union if compatible
+        if (areCompatibleForMerge(indices[0], indices[k])) {
+          union(indices[0], indices[k]);
+        }
+      }
     }
 
     const issueKeyToIndices = new Map<string, number[]>();
@@ -682,7 +727,12 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       if (existing) { existing.push(i); } else { issueKeyToIndices.set(normalized, [i]); }
     }
     for (const indices of issueKeyToIndices.values()) {
-      for (let k = 1; k < indices.length; k++) { union(indices[0], indices[k]); }
+      for (let k = 1; k < indices.length; k++) {
+        // Fix 17: Only union if compatible
+        if (areCompatibleForMerge(indices[0], indices[k])) {
+          union(indices[0], indices[k]);
+        }
+      }
     }
 
     const clusters = new Map<number, number[]>();
