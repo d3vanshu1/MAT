@@ -76,13 +76,35 @@ export default api({
       }
 
       const executiveHeader = String(merged.executiveHeader ?? "");
+      const cpSource = `LoadMergeCheckpoints run=${moduleRunId} L${row.tree_level} N${row.node_index}`;
 
-      // RC2: Use canonical deserializer — preserves finding_id and all fields.
-      // NEVER generates new UUIDs; if finding_id is missing, it's logged as an issue.
-      const { findings } = deserializeFindings(
-        Array.isArray(merged.findings) ? merged.findings : [],
-        `LoadMergeCheckpoints run=${moduleRunId} L${row.tree_level} N${row.node_index}`
-      );
+      // RC2 + RC3: Use strict canonical deserializer — fails closed on identity corruption.
+      // A persisted checkpoint with a missing or invalid finding_id must not be returned
+      // as a valid merge node with reduced findings. This prevents resumed execution from
+      // continuing with fewer findings than the uninterrupted path.
+      let findings;
+      try {
+        const result = deserializeFindings(
+          Array.isArray(merged.findings) ? merged.findings : [],
+          cpSource,
+          { rejectOnError: true }
+        );
+        findings = result.findings;
+      } catch (e: any) {
+        // Identity corruption detected — return as error node so pipeline treats it
+        // as a failed checkpoint (triggers re-merge rather than using corrupt data).
+        const errorMsg = `Checkpoint data integrity failure at L${row.tree_level} N${row.node_index}: ${e.message}`;
+        console.error(`[LoadMergeCheckpoints] ${errorMsg}`);
+        return {
+          treeLevel: row.tree_level,
+          nodeIndex: row.node_index,
+          mergedNode: {
+            error: errorMsg,
+            lastError: errorMsg,
+            timestamp: new Date().toISOString(),
+          },
+        };
+      }
 
       // Reconstruct the text field from executiveHeader + findings.
       // SaveMergeCheckpoint strips the bulky text field to keep JSONB
