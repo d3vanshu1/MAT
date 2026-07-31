@@ -69,7 +69,7 @@ export interface ReconciliationFinding {
  * Persisted in the finding so auditors can trace why IDs were/weren't removed.
  */
 export interface SupersessionDiagnostic {
-  decision: "proven" | "ambiguous_appended";
+  decision: "proven" | "ambiguous_appended" | "no_proven_candidate";
   candidate_ids: string[];
   proven_ids: string[];
   ambiguous_ids: string[];
@@ -669,17 +669,23 @@ export interface SupersessionCandidate {
 }
 
 /**
- * Fix 20: Validate supersession proof — deterministic ID replacement.
+ * Fix 20 + Corrective E3: Validate supersession proof — deterministic ID replacement.
  *
  * RULES (non-negotiable):
- *   1. Exact canonical ID match required — the candidate must be a known prior finding
- *   2. The candidate must share the SAME claim coordinate triple (metric + scope + period)
- *   3. The candidate must originate from the same source document
- *   4. Category, title, issue_key, and text similarity are NOT sufficient proof
- *   5. Any ambiguity → append-only with diagnostic
+ *   1. Only candidates with EXACT coordinate (metric + scope + period) AND exact source_doc
+ *      match are considered. Non-matching candidates are IGNORED (not "ambiguous").
+ *   2. Deduplicate exact matches by canonical_id (multiple evidence rows for one finding
+ *      produce only one match entry).
+ *   3. Zero exact match IDs → append-only with `no_proven_candidate` diagnostic.
+ *   4. Exactly one unique canonical_id → proven supersession.
+ *   5. Two+ distinct canonical_ids → genuinely ambiguous, append-only.
+ *   6. Category, title, issue_key, and text similarity are NOT sufficient proof.
+ *
+ * Corrective E3: A nonmatching evidence row on the same finding must NOT cancel
+ * a matching row. Nonmatching candidates are irrelevant, not ambiguous.
  *
  * @param newFinding The new reconciliation finding being produced
- * @param candidates Prior-run findings that share similar coordinates
+ * @param candidates Current-run findings (one entry per evidence×source_doc coordinate)
  * @returns Validated supersession result with diagnostics
  */
 export function validateSupersessionProof(
@@ -690,49 +696,58 @@ export function validateSupersessionProof(
     return { proven_ids: [], ambiguous_ids: [], diagnostic: null };
   }
 
-  const proven: string[] = [];
-  const ambiguous: string[] = [];
   const claim = newFinding.claim;
+  const claimCoord = coordKey(claim.metric, claim.scope_qualifier, claim.period);
 
+  // Corrective E3: Collect ONLY exact-match candidates; ignore non-matching entirely.
+  const exactMatchIds = new Set<string>();
   for (const candidate of candidates) {
-    // Gate 1: Exact coordinate match (metric + scope + period)
-    const metricMatch = coordKey(claim.metric, claim.scope_qualifier, claim.period) ===
-                        coordKey(candidate.claim_metric, candidate.claim_scope, candidate.claim_period);
-
-    // Gate 2: Same source document
+    const candidateCoord = coordKey(candidate.claim_metric, candidate.claim_scope, candidate.claim_period);
     const sourceMatch = claim.source_doc === candidate.claim_source_doc;
 
-    if (metricMatch && sourceMatch) {
-      // Deterministic proof: same claim coordinate from same document → proven supersession
-      proven.push(candidate.canonical_id);
-    } else {
-      // Cannot prove replacement — mark as ambiguous
-      ambiguous.push(candidate.canonical_id);
+    if (claimCoord === candidateCoord && sourceMatch) {
+      exactMatchIds.add(candidate.canonical_id);
     }
+    // Non-matching candidates are silently ignored — they are irrelevant, not ambiguous.
   }
 
-  // Build diagnostic
+  // Decision logic based on number of UNIQUE exact-match finding IDs
+  const uniqueIds = [...exactMatchIds];
   let diagnostic: SupersessionDiagnostic | null = null;
-  if (proven.length > 0 || ambiguous.length > 0) {
-    const allCandidateIds = candidates.map(c => c.canonical_id);
+
+  if (uniqueIds.length === 0) {
+    // No exact match found → append-only
     diagnostic = {
-      decision: ambiguous.length === 0 ? "proven" : "ambiguous_appended",
-      candidate_ids: allCandidateIds,
-      proven_ids: proven,
-      ambiguous_ids: ambiguous,
-      reason: ambiguous.length === 0
-        ? `All ${proven.length} candidate(s) proven via exact coordinate + source_doc match`
-        : `${ambiguous.length} candidate(s) failed proof gates (coordinate or source_doc mismatch). Append-only: no findings removed.`,
+      decision: "no_proven_candidate" as SupersessionDiagnostic["decision"],
+      candidate_ids: candidates.map(c => c.canonical_id),
+      proven_ids: [],
+      ambiguous_ids: [],
+      reason: `No candidate matched exact coordinate (${claimCoord}) + source_doc. Append-only.`,
     };
+    return { proven_ids: [], ambiguous_ids: [], diagnostic };
   }
 
-  // Fix 20 CRITICAL: If ANY candidate is ambiguous, the entire set is treated as append-only.
-  // We never partially supersede — it's all-proven or all-appended.
-  if (ambiguous.length > 0) {
-    return { proven_ids: [], ambiguous_ids: [...proven, ...ambiguous], diagnostic };
+  if (uniqueIds.length === 1) {
+    // Exactly one unique finding matches → proven supersession
+    diagnostic = {
+      decision: "proven",
+      candidate_ids: candidates.map(c => c.canonical_id),
+      proven_ids: uniqueIds,
+      ambiguous_ids: [],
+      reason: `Exactly 1 finding (${uniqueIds[0]}) matches coordinate + source_doc. Proven supersession.`,
+    };
+    return { proven_ids: uniqueIds, ambiguous_ids: [], diagnostic };
   }
 
-  return { proven_ids: proven, ambiguous_ids: [], diagnostic };
+  // Two+ distinct IDs with exact match → genuinely ambiguous
+  diagnostic = {
+    decision: "ambiguous_appended",
+    candidate_ids: candidates.map(c => c.canonical_id),
+    proven_ids: [],
+    ambiguous_ids: uniqueIds,
+    reason: `${uniqueIds.length} distinct findings match exact coordinate + source_doc. Cannot determine which to supersede. Append-only.`,
+  };
+  return { proven_ids: [], ambiguous_ids: uniqueIds, diagnostic };
 }
 
 // ---------------------------------------------------------------------------
