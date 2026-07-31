@@ -105,6 +105,8 @@ export interface ClaimsLedger {
     docs_processed: number;
     /** Number of memos not yet processed (budget expired before launch) */
     pending: number;
+    /** Number of memos newly processed THIS invocation (for no-progress detection) */
+    completed_this_invocation?: number;
     total_claims: number;
     operating_metric_claims: number;
     deal_mechanics_claims: number;
@@ -113,6 +115,8 @@ export interface ClaimsLedger {
     cross_reference_claims: number;
     extraction_model: string;
     extraction_timestamp: string;
+    /** Consecutive zero-progress invocations (for adaptive work-unit sizing) */
+    consecutive_no_progress?: number;
   };
 }
 
@@ -387,6 +391,18 @@ const MemoDocSchema = z.object({
 export interface ClaimsExtractionOptions {
   /** When true, calls AI directly without headroom guard (for diagnostics with relaxed timeouts) */
   bypassHeadroom?: boolean;
+  /**
+   * Prior partial ledger to resume from. When provided, only memos with
+   * terminal_results[].status === "pending" will be processed. Already-completed
+   * claims are retained and never re-extracted or deleted.
+   */
+  priorLedger?: ClaimsLedger;
+  /**
+   * Maximum number of memos to attempt this invocation. Reduced by no-progress
+   * detection in the caller to prevent repeated failures consuming the entire budget.
+   * Defaults to all pending memos.
+   */
+  maxWorkUnits?: number;
 }
 
 export async function runClaimsExtraction(
@@ -432,6 +448,44 @@ export async function runClaimsExtraction(
   }
 
   console.log(`[ClaimsExtraction] Found ${memos.length} IC memo(s): ${memos.map(m => m.file_name).join(", ")}`);
+
+  // --- Incremental Resume: Determine which memos still need processing ---
+  const priorLedger = options?.priorLedger;
+  const maxWorkUnits = options?.maxWorkUnits;
+
+  // Claims retained from prior invocations (never deleted/reset)
+  const retainedClaims: Claim[] = priorLedger ? [...priorLedger.claims] : [];
+  const retainedTerminals: TerminalResult[] = [];
+
+  // Build a set of memo IDs that already have non-pending terminal results
+  const completedMemoIds = new Set<string>();
+  if (priorLedger) {
+    for (const tr of priorLedger.terminal_results) {
+      if (tr.status !== "pending") {
+        completedMemoIds.add(tr.memo_id);
+        retainedTerminals.push(tr);
+      }
+    }
+    console.log(
+      `[ClaimsExtraction] Resuming: ${completedMemoIds.size}/${memos.length} memos already processed, ` +
+      `${retainedClaims.length} claims retained from prior invocations`
+    );
+  }
+
+  // Filter to only pending (not-yet-processed) memos
+  let pendingMemos = memos.filter(m => !completedMemoIds.has(m.id));
+
+  // Apply maxWorkUnits cap (adaptive work-unit sizing for no-progress recovery)
+  if (maxWorkUnits !== undefined && maxWorkUnits > 0 && pendingMemos.length > maxWorkUnits) {
+    console.log(`[ClaimsExtraction] Capping work units: ${pendingMemos.length} pending → ${maxWorkUnits} this invocation`);
+    pendingMemos = pendingMemos.slice(0, maxWorkUnits);
+  }
+
+  if (pendingMemos.length === 0) {
+    // All memos already processed — ledger is complete
+    console.log(`[ClaimsExtraction] All memos already processed — returning complete ledger`);
+    return priorLedger!; // priorLedger is defined and complete if we reach here
+  }
 
   // Concurrency limit (2 for pipeline, 4 for bypass/diagnostics)
   const CONCURRENCY = options?.bypassHeadroom ? 4 : 2;
@@ -496,9 +550,9 @@ export async function runClaimsExtraction(
     return { claims: parseResult.claims, truncated, parseFailed: parseResult.failed, parseError: parseResult.error };
   };
 
-  // Build job list for the worker pool — include ALL memos (not just validMemos)
+  // Build job list for PENDING memos only (incremental — already-processed memos are retained)
   // Empty-text memos get explicit terminal records instead of being silently filtered
-  const jobs: WorkerPoolJob<ExtractionResult>[] = memos.map((memo) => ({
+  const jobs: WorkerPoolJob<ExtractionResult>[] = pendingMemos.map((memo) => ({
     id: memo.id,
     label: memo.file_name,
     execute: async (): Promise<ExtractionResult> => {
@@ -521,14 +575,14 @@ export async function runClaimsExtraction(
     canLaunch: options?.bypassHeadroom ? undefined : canLaunch,
   });
 
-  // Build terminal results and collect claims
-  const allClaims: Claim[] = [];
-  const terminalResults: TerminalResult[] = [];
+  // Build terminal results and collect NEW claims from this invocation
+  const newClaims: Claim[] = [];
+  const newTerminals: TerminalResult[] = [];
 
   for (const r of poolResult.results) {
     if (r.status === "fulfilled") {
       const extraction = r.value!;
-      allClaims.push(...extraction.claims);
+      newClaims.push(...extraction.claims);
 
       // Determine truthful terminal status
       let terminalStatus: TerminalStatus;
@@ -540,7 +594,7 @@ export async function runClaimsExtraction(
         terminalStatus = "success";
       }
 
-      terminalResults.push({
+      newTerminals.push({
         memo_id: r.job.id,
         file_name: r.job.label,
         status: terminalStatus,
@@ -552,7 +606,7 @@ export async function runClaimsExtraction(
       // Detect timeout vs generic failure
       const isTimeout = errMsg.toLowerCase().includes("timeout") || errMsg.toLowerCase().includes("timed out");
       console.warn(`[ClaimsExtraction] Memo "${r.job.label}" ${isTimeout ? "timed out" : "failed"}: ${errMsg}`);
-      terminalResults.push({
+      newTerminals.push({
         memo_id: r.job.id,
         file_name: r.job.label,
         status: isTimeout ? "timed_out" : "failed",
@@ -562,9 +616,10 @@ export async function runClaimsExtraction(
     }
   }
 
-  // Record pending memos (never launched due to budget)
+  // Record pending memos (never launched due to budget) — includes both pool-pending
+  // and memos beyond the maxWorkUnits cap that weren't even queued
   for (const p of poolResult.pending) {
-    terminalResults.push({
+    newTerminals.push({
       memo_id: p.job.id,
       file_name: p.job.label,
       status: "pending",
@@ -572,17 +627,37 @@ export async function runClaimsExtraction(
     });
   }
 
-  const docsProcessed = terminalResults.filter(r => r.status !== "pending").length;
-  const pendingCount = terminalResults.filter(r => r.status === "pending").length;
+  // Also mark memos that were filtered out by maxWorkUnits but not in pendingMemos
+  const queuedMemoIds = new Set(pendingMemos.map(m => m.id));
+  for (const memo of memos) {
+    if (!completedMemoIds.has(memo.id) && !queuedMemoIds.has(memo.id)) {
+      newTerminals.push({
+        memo_id: memo.id,
+        file_name: memo.file_name,
+        status: "pending",
+        claims_count: 0,
+      });
+    }
+  }
+
+  // --- MERGE: Combine retained (prior invocations) + new (this invocation) ---
+  // CRITICAL: Retained claims are NEVER deleted or reset.
+  const allClaims = [...retainedClaims, ...newClaims];
+  const allTerminals = [...retainedTerminals, ...newTerminals];
+
+  const docsProcessed = allTerminals.filter(r => r.status !== "pending").length;
+  const pendingCount = allTerminals.filter(r => r.status === "pending").length;
   const isComplete = pendingCount === 0;
+  const completedThisInvocation = newTerminals.filter(r => r.status !== "pending").length;
 
   const ledger: ClaimsLedger = {
     claims: allClaims,
     complete: isComplete,
-    terminal_results: terminalResults,
+    terminal_results: allTerminals,
     extraction_metadata: {
       docs_processed: docsProcessed,
       pending: pendingCount,
+      completed_this_invocation: completedThisInvocation,
       total_claims: allClaims.length,
       operating_metric_claims: allClaims.filter(c => c.claim_category === "operating_metric").length,
       deal_mechanics_claims: allClaims.filter(c => c.claim_category === "deal_mechanics").length,
@@ -596,7 +671,8 @@ export async function runClaimsExtraction(
 
   console.log(
     `[ClaimsExtraction] ${isComplete ? "Complete" : "Incomplete (budget expired)"}: ` +
-    `${allClaims.length} claims from ${docsProcessed}/${memos.length} memo(s)` +
+    `${allClaims.length} claims from ${docsProcessed}/${memos.length} memo(s) ` +
+    `(${newClaims.length} new this invocation, ${retainedClaims.length} retained)` +
     `${pendingCount > 0 ? `, ${pendingCount} pending` : ""}. ` +
     `Elapsed: ${Math.round((Date.now() - phaseStart) / 1000)}s`
   );

@@ -3121,15 +3121,26 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   }
 
   // --- Step 0.8: Claims-Reconciliation (contradiction_check only) ---
-  // Extracts structured claims from IC memos and reconciles against verified figures.
-  // Architecture: LLM classifies scope; CODE computes delta. No LLM-computed numbers.
+  // ARCHITECTURE (post-livelock fix):
+  //   - Claims extraction advances through a persisted document/chunk cursor.
+  //   - Completed claims are retained across invocations (never reset/deleted).
+  //   - Insufficient budget causes a checkpointed yield, NOT a skip.
+  //   - Reconciliation resumes from durable work state.
+  //   - Analysis may start independently, but canonical finalization waits on claims.
+  //   - Zero-progress retries emit a no_progress diagnostic and halve work units.
+  //   - Permanent failures produce explicit "degraded" status in the final report.
   //
-  // CHECKPOINT-RESUME: Persists the claims ledger after extraction and the
-  // reconciliation result after completion. On resume, loads both and skips
-  // already-finished work. On budget exhaustion, returns in_progress.
+  // LLM classifies scope; CODE computes delta. No LLM-computed numbers.
   let claimsReconciliation: ReconciliationResult | null = null;
+  /** When true, claims/reconciliation are not yet complete but analysis can proceed */
+  let claimsPending = false;
+  /** When true, claims permanently failed — report must disclose degraded state */
+  let claimsDegraded = false;
+  /** Maximum consecutive no-progress invocations before declaring degraded */
+  const CLAIMS_MAX_NO_PROGRESS = 5;
+
   if (moduleId === "contradiction_check") {
-    // Check for persisted reconciliation result from prior invocation
+    // --- Load persisted reconciliation result (if already complete) ---
     let reconCheckpointLoaded = false;
     try {
       const reconCpRows = await ctx.integrations.db.query(
@@ -3154,54 +3165,88 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     }
 
     if (!reconCheckpointLoaded) {
-      // FIX: Reduced headroom from 120s to 45s to prevent permanent livelock.
-      // With 200s total budget, Steps 0.4–0.7 consume 40-60s before reaching here.
-      // Old formula: min(120k, max(0, remaining-120k)) — required 180s remaining (impossible).
-      // New formula: min(120k, max(0, remaining-45k)) — requires 75s remaining (achievable).
-      // Claims extraction is checkpoint-resumable, so partial results are safe.
-      const claimsTimeBudget = Math.min(120_000, Math.max(0, timeRemaining() - 45_000));
-      if (claimsTimeBudget >= 30_000) {
-        try {
-          // Check for persisted claims ledger from prior invocation
-          let claimsLedger: ClaimsLedger | null = null;
-          try {
-            const ledgerCpRows = await ctx.integrations.db.query(
-              `SELECT payload FROM pipeline_checkpoints
-               WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'
-                 AND COALESCE(status, 'complete') = 'complete'`,
-              z.object({ payload: z.any() }),
-              [runId],
-              { label: "Load claims ledger checkpoint" }
+      // --- Load or initialize claims ledger ---
+      let claimsLedger: ClaimsLedger | null = null;
+      try {
+        const ledgerCpRows = await ctx.integrations.db.query(
+          `SELECT payload FROM pipeline_checkpoints
+           WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'`,
+          z.object({ payload: z.any() }),
+          [runId],
+          { label: "Load claims ledger checkpoint (any status)" }
+        );
+        if (ledgerCpRows.length > 0 && ledgerCpRows[0].payload) {
+          claimsLedger = ledgerCpRows[0].payload as ClaimsLedger;
+          if (claimsLedger.complete && (claimsLedger.extraction_metadata?.pending ?? 0) === 0) {
+            console.log(
+              `[ClaimsExtraction] Loaded COMPLETE checkpoint: ${claimsLedger.claims.length} claims ` +
+              `(${claimsLedger.extraction_metadata.operating_metric_claims} operating_metric)`
             );
-            if (ledgerCpRows.length > 0 && ledgerCpRows[0].payload) {
-              const candidate = ledgerCpRows[0].payload as ClaimsLedger;
-              // Only accept genuinely complete ledgers — payload must also confirm completion
-              if (candidate.complete === true && (candidate.extraction_metadata?.pending ?? 0) === 0) {
-                claimsLedger = candidate;
-                console.log(
-                  `[ClaimsExtraction] Loaded checkpoint: ${claimsLedger.claims.length} claims ` +
-                  `(${claimsLedger.extraction_metadata.operating_metric_claims} operating_metric)`
-                );
-              } else {
-                console.log(
-                  `[ClaimsExtraction] Rejecting partial checkpoint (complete=${candidate.complete}, ` +
-                  `pending=${candidate.extraction_metadata?.pending ?? "unknown"}) — will re-run extraction`
-                );
-              }
-            }
-          } catch {
-            // pipeline_checkpoints may not exist yet
+          } else {
+            console.log(
+              `[ClaimsExtraction] Loaded PARTIAL checkpoint: ${claimsLedger.claims.length} claims retained, ` +
+              `${claimsLedger.extraction_metadata?.pending ?? 0} pending, ` +
+              `consecutive_no_progress=${claimsLedger.extraction_metadata?.consecutive_no_progress ?? 0}`
+            );
           }
+        }
+      } catch {
+        // pipeline_checkpoints may not exist yet
+      }
 
-          // Step 0.8a: Extract structured claims from IC memos (if not checkpointed)
-          if (!claimsLedger) {
+      // --- Check for permanent failure (degraded state) ---
+      const priorNoProgress = claimsLedger?.extraction_metadata?.consecutive_no_progress ?? 0;
+      if (priorNoProgress >= CLAIMS_MAX_NO_PROGRESS) {
+        console.warn(
+          `[ClaimsExtraction] DEGRADED: ${priorNoProgress} consecutive zero-progress invocations. ` +
+          `Declaring permanent failure — analysis will proceed without claims.`
+        );
+        claimsDegraded = true;
+        // Mark checkpoint as degraded so future invocations don't retry
+        try {
+          await ctx.integrations.db.execute(
+            `UPDATE pipeline_checkpoints
+             SET status = 'degraded', updated_at = now()
+             WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'`,
+            [runId],
+            { label: "Mark claims ledger as degraded" }
+          );
+        } catch { /* non-fatal */ }
+      }
+
+      // --- Step 0.8a: Incremental claims extraction ---
+      if (!claimsDegraded && !(claimsLedger?.complete)) {
+        // Compute available time budget — use whatever remains, minimum 15s to do any work
+        const claimsTimeBudget = Math.min(120_000, Math.max(0, timeRemaining() - 15_000));
+        if (claimsTimeBudget >= 15_000) {
+          try {
+            // Adaptive work-unit sizing: halve units on consecutive no-progress
+            const maxWorkUnits = priorNoProgress > 0
+              ? Math.max(1, Math.ceil(10 / Math.pow(2, priorNoProgress)))
+              : undefined; // No cap on first attempt or after progress
+
             claimsLedger = await runClaimsExtraction(
-              ctx, dealId, startTime, claimsTimeBudget * 0.5
+              ctx, dealId, startTime, claimsTimeBudget * 0.6,
+              { priorLedger: claimsLedger ?? undefined, maxWorkUnits },
             );
-            // Persist ledger — status reflects completion state
-            const cpStatus = (claimsLedger.complete && claimsLedger.extraction_metadata.pending === 0)
-              ? "complete"
-              : "partial";
+
+            // --- No-progress detection ---
+            const completedThisInvocation = claimsLedger.extraction_metadata.completed_this_invocation ?? 0;
+            if (completedThisInvocation === 0 && !claimsLedger.complete) {
+              const newNoProgress = priorNoProgress + 1;
+              claimsLedger.extraction_metadata.consecutive_no_progress = newNoProgress;
+              console.warn(
+                `[ClaimsExtraction] NO PROGRESS: 0 memos processed this invocation ` +
+                `(consecutive_no_progress=${newNoProgress}/${CLAIMS_MAX_NO_PROGRESS}). ` +
+                `Next invocation will use smaller work unit.`
+              );
+            } else {
+              // Progress made — reset no-progress counter
+              claimsLedger.extraction_metadata.consecutive_no_progress = 0;
+            }
+
+            // Persist ledger — status reflects completion state. NEVER delete completed claims.
+            const cpStatus = claimsLedger.complete ? "complete" : "partial";
             try {
               await ctx.integrations.db.execute(
                 `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
@@ -3213,81 +3258,66 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             } catch {
               // pipeline_checkpoints table may not exist yet — non-fatal
             }
-
-            // FIX: Incomplete ledger was previously a hard block (returned in_progress),
-            // causing a permanent livelock when claims extraction cannot finish within
-            // the time budget. Claims are a quality enrichment — skip and proceed to
-            // analysis rather than blocking the entire pipeline indefinitely.
-            if (!claimsLedger.complete || claimsLedger.extraction_metadata.pending > 0) {
-              console.log(
-                `[ClaimsExtraction] Incomplete ledger (${claimsLedger.extraction_metadata.pending} pending) — skipping claims (non-blocking)`
-              );
-              // Reset ledger so downstream reconciliation is skipped cleanly
-              claimsLedger = { complete: false, claims: [], extraction_metadata: { pending: 0, completed: 0, total: 0 } } as any;
-            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[ClaimsExtraction] Error (non-fatal, analysis proceeds): ${msg}`);
           }
-
-          // Step 0.8b: Reconcile claims against verified figures
-          // Only proceed if ledger is genuinely complete
-          if (claimsLedger && claimsLedger.complete && claimsLedger.claims.length > 0 && numericReport) {
-            // FIX: Reduced headroom from 90s to 30s and min threshold from 45s to 20s.
-            // Same livelock pattern as outer gate: reconciliation is a quality enrichment
-            // that should not block the entire pipeline.
-            const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 30_000));
-            if (reconTimeBudget >= 20_000) {
-              // Corrective E2: Prior-run DB query removed. Supersession is now
-              // performed against current-run findings in runPostMergePipeline() Stage 3.5,
-              // where current finding IDs are available as deletion targets.
-              claimsReconciliation = await runReconciliation(
-                ctx,
-                claimsLedger,
-                numericReport.figures ?? [],
-                numericReport.discrepancies ?? [],
-                startTime,
-                reconTimeBudget,
-              );
-              console.log(
-                `[ClaimsReconciliation] ${claimsReconciliation.findings.length} findings ` +
-                `(${claimsReconciliation.reconciled_count} reconciled, ` +
-                `${claimsReconciliation.within_tolerance_count} within tolerance, ` +
-                `${claimsReconciliation.unreconcilable_count} unreconcilable)`
-              );
-              // Persist reconciliation result so resume skips re-running
-              try {
-                await ctx.integrations.db.execute(
-                  `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-                   VALUES ($1, 'reconciliation', $2::jsonb, 'complete', $3)
-                   ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-                  [runId, JSON.stringify(claimsReconciliation), getPipelineVersion()],
-                  { label: "Persist reconciliation checkpoint" }
-                );
-              } catch {
-                // pipeline_checkpoints table may not exist yet — non-fatal
-              }
-            } else {
-              // Budget exhausted before reconciliation could start.
-              // FIX: Skip reconciliation rather than blocking the pipeline.
-              // The claims ledger is persisted; reconciliation can be run on the next
-              // invocation if it resumes, or the pipeline proceeds without it.
-              console.log(`[ClaimsReconciliation] Insufficient time for reconciliation (${reconTimeBudget}ms) — SKIPPING (non-blocking)`);
-            }
-          } else if (claimsLedger && claimsLedger.claims.length === 0) {
-            console.log(`[ClaimsReconciliation] No claims extracted — skipping reconciliation`);
-          } else {
-            console.log(`[ClaimsReconciliation] No numeric report available — skipping reconciliation`);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[ClaimsReconciliation] Failed (non-fatal): ${msg}`);
+        } else {
+          // Budget too low even for minimal work — yield. Analysis still proceeds.
+          console.log(`[ClaimsExtraction] Budget too low (${claimsTimeBudget}ms) — yielding. Analysis proceeds independently.`);
         }
-      } else {
-        // Budget exhausted before claims extraction could start.
-        // FIX: Do NOT return in_progress here — skip claims and proceed to analysis.
-        // Claims reconciliation is a quality enrichment, not a prerequisite for the
-        // contradiction_check module's core analysis. Blocking the entire pipeline
-        // on claims causes a permanent livelock when prior steps consume the budget.
-        // The reconciliation result will be null, and the merge prompt proceeds without it.
-        console.log(`[ClaimsReconciliation] Insufficient time budget (${claimsTimeBudget}ms) — SKIPPING claims (non-blocking) and proceeding to analysis`);
+      }
+
+      // --- Step 0.8b: Reconciliation (only when claims fully complete) ---
+      if (claimsLedger?.complete && claimsLedger.claims.length > 0 && numericReport && !claimsDegraded) {
+        const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 15_000));
+        if (reconTimeBudget >= 15_000) {
+          try {
+            claimsReconciliation = await runReconciliation(
+              ctx,
+              claimsLedger,
+              numericReport.figures ?? [],
+              numericReport.discrepancies ?? [],
+              startTime,
+              reconTimeBudget,
+            );
+            console.log(
+              `[ClaimsReconciliation] ${claimsReconciliation.findings.length} findings ` +
+              `(${claimsReconciliation.reconciled_count} reconciled, ` +
+              `${claimsReconciliation.within_tolerance_count} within tolerance, ` +
+              `${claimsReconciliation.unreconcilable_count} unreconcilable)`
+            );
+            // Persist reconciliation result
+            try {
+              await ctx.integrations.db.execute(
+                `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+                 VALUES ($1, 'reconciliation', $2::jsonb, 'complete', $3)
+                 ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
+                [runId, JSON.stringify(claimsReconciliation), getPipelineVersion()],
+                { label: "Persist reconciliation checkpoint" }
+              );
+            } catch {
+              // pipeline_checkpoints table may not exist yet — non-fatal
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn(`[ClaimsReconciliation] Failed (non-fatal): ${msg}`);
+          }
+        } else {
+          // Budget insufficient for reconciliation — yield. Next invocation will complete.
+          console.log(`[ClaimsReconciliation] Budget insufficient (${reconTimeBudget}ms) — yielding for next invocation.`);
+        }
+      } else if (claimsLedger && !claimsLedger.complete && !claimsDegraded) {
+        // Claims still pending — flag for canonical finalization gate
+        claimsPending = true;
+        console.log(
+          `[ClaimsReconciliation] Claims still pending (${claimsLedger.extraction_metadata.pending} memos) — ` +
+          `analysis proceeds independently, canonical finalization will gate on completion.`
+        );
+      } else if (claimsDegraded) {
+        console.log(`[ClaimsReconciliation] Claims degraded — reconciliation skipped. Final report will disclose.`);
+      } else if (claimsLedger?.claims.length === 0) {
+        console.log(`[ClaimsReconciliation] No claims extracted — reconciliation not needed.`);
       }
     }
   }
@@ -4925,6 +4955,48 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
   if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
     console.warn(`[pipeline] mergedText ${mergedText.length} chars exceeds ${MAX_MERGED_TEXT_CHARS} cap — truncating`);
     mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport — full content available in DB checkpoints]";
+  }
+
+  // --- CANONICAL FINALIZATION GATE ---
+  // Analysis may start independently of claims, but the final output cannot be
+  // committed as "completed" while required claims/reconciliation remain pending.
+  // This prevents data loss from premature finalization.
+  if (claimsPending && moduleId === "contradiction_check") {
+    console.log(
+      `[pipeline] CANONICAL FINALIZATION GATE: claims still pending — ` +
+      `returning in_progress with analysis complete. Next invocation will ` +
+      `complete claims/reconciliation and then finalize.`
+    );
+    return {
+      status: "in_progress",
+      runId,
+      phase: "claims_pending_finalization",
+      progress: {
+        analysisTotal: routed.length,
+        analysisCompleted: routed.length,
+        mergeRound: totalMergeRounds,
+        mergeTotal: totalMergeRounds,
+      },
+      result: null,
+      failedChunks,
+      truncatedChunks,
+      truncatedMerges,
+      firstError: null,
+    };
+  }
+
+  // --- DEGRADED DISCLOSURE ---
+  // If claims extraction permanently failed, append a disclosure to the report
+  // so the final output transparently communicates reduced coverage.
+  if (claimsDegraded && moduleId === "contradiction_check") {
+    const degradedNotice = "\n\n---\n\n**⚠️ CLAIMS RECONCILIATION DISCLOSURE**\n\n" +
+      "Claims extraction from IC memos could not be completed after multiple attempts. " +
+      "This report's contradiction analysis is based solely on numeric verification " +
+      "and cross-version comparison. IC memo claims were NOT reconciled against the " +
+      "operating model figures. This represents reduced analytical coverage.\n";
+    mergedText += degradedNotice;
+    if (fullReport) fullReport += degradedNotice;
+    console.warn(`[pipeline] Degraded claims disclosure appended to final report.`);
   }
 
   return {
