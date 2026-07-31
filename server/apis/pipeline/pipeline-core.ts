@@ -2237,26 +2237,38 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // run (from a prior invocation), reload it and skip re-running the engine.
   // If the engine returns partial=true (budget exhaustion), return in_progress.
   if (NUMERIC_MODULES.has(moduleId)) {
-    // Check for persisted complete numeric report from prior invocation
+    // --- FIX 4: Resumable numeric verification with durable checkpoint ---
+    // Load any existing checkpoint (complete OR partial) from prior invocation.
+    // Pass partial checkpoints to runNumericVerifyInline so it resumes from cursor.
     let numericCheckpointLoaded = false;
+    let loadedCheckpointPayload: unknown | null = null;
+    let loadedCheckpointStatus: string | null = null;
     try {
       const cpRows = await ctx.integrations.db.query(
-        `SELECT payload FROM pipeline_checkpoints
+        `SELECT payload, status FROM pipeline_checkpoints
          WHERE module_run_id = $1 AND checkpoint_key = 'numeric_report'
-           AND COALESCE(status, 'complete') = 'complete'`,
-        z.object({ payload: z.any() }),
+         ORDER BY updated_at DESC NULLS LAST
+         LIMIT 1`,
+        z.object({ payload: z.any(), status: z.string().nullable() }),
         [runId],
-        { label: "Load numeric report checkpoint" }
+        { label: "Load numeric checkpoint (any status)" }
       );
       if (cpRows.length > 0 && cpRows[0].payload) {
-        const saved = cpRows[0].payload as { figures: unknown[]; discrepancies: unknown[] };
-        if (saved.figures && saved.discrepancies) {
+        loadedCheckpointPayload = cpRows[0].payload;
+        loadedCheckpointStatus = cpRows[0].status ?? "complete";
+        const saved = cpRows[0].payload as { figures?: unknown[]; discrepancies?: unknown[]; status?: string };
+        // If already complete AND has valid structure, short-circuit without re-running
+        if (loadedCheckpointStatus === "complete" && saved.figures && saved.discrepancies) {
           numericReport = { figures: saved.figures as any[], discrepancies: saved.discrepancies as any[] };
-          numericPartial = false; // Checkpointed means it completed
+          numericPartial = false;
           numericCheckpointLoaded = true;
           console.log(
-            `[NumericInline] Loaded checkpoint: ${saved.figures.length} figures, ` +
-            `${saved.discrepancies.length} discrepancies (complete)`
+            `[NumericInline] Loaded COMPLETE checkpoint: ${saved.figures.length} figures, ` +
+            `${saved.discrepancies.length} discrepancies — skipping engine`
+          );
+        } else {
+          console.log(
+            `[NumericInline] Loaded ${loadedCheckpointStatus} checkpoint — will pass to engine for resume`
           );
         }
       }
@@ -2270,10 +2282,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       const numericTimeBudget = Math.min(60_000, Math.max(0, timeRemaining() - 60_000));
       if (numericTimeBudget >= 15_000) {
         try {
-          const inlineResult: NumericVerifyResult = await runNumericVerifyInline(
+          const inlineResult = await runNumericVerifyInline(
             ctx.integrations.db,
             dealId,
-            numericTimeBudget
+            numericTimeBudget,
+            loadedCheckpointPayload, // Pass existing checkpoint for resume
           );
 
           // Replace the input-provided report with the fresh server-side result
@@ -2284,39 +2297,33 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             };
             numericPartial = inlineResult.partial;
             console.log(
-              `[NumericInline] Replaced client report: ${inlineResult.figures.length} figures, ` +
+              `[NumericInline] Engine result: ${inlineResult.figures.length} figures, ` +
               `${inlineResult.discrepancies.length} discrepancies, partial=${inlineResult.partial}`
             );
-
-            // If COMPLETE, persist to checkpoint so resume skips re-running
-            if (!inlineResult.partial) {
-              try {
-                await ctx.integrations.db.execute(
-                  `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-                   VALUES ($1, 'numeric_report', $2::jsonb, 'complete', $3)
-                   ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-                  [runId, JSON.stringify({ figures: inlineResult.figures, discrepancies: inlineResult.discrepancies }), getPipelineVersion()],
-                  { label: "Persist numeric report checkpoint" }
-                );
-              } catch {
-                // pipeline_checkpoints table may not exist yet — non-fatal
-              }
-            }
           } else if (!numericReport) {
-            // No data from inline either — ensure downstream knows
             numericReport = null;
             numericPartial = null;
             console.log(`[NumericInline] No numeric data found for this deal.`);
-            // Persist empty result so resume knows numeric is done (no data = complete)
+          }
+
+          // Persist checkpoint regardless of status (partial OR complete)
+          // so the next resume invocation can pick up where this one left off.
+          if (inlineResult.checkpoint) {
+            const cpStatus = inlineResult.partial ? "partial" : "complete";
             try {
               await ctx.integrations.db.execute(
                 `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-                 VALUES ($1, 'numeric_report', $2::jsonb, 'complete', $3)
-                 ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-                [runId, JSON.stringify({ figures: [], discrepancies: [] }), getPipelineVersion()],
-                { label: "Persist empty numeric report checkpoint" }
+                 VALUES ($1, 'numeric_report', $2::jsonb, $3, $4)
+                 ON CONFLICT (module_run_id, checkpoint_key)
+                 DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(),
+                              status = EXCLUDED.status, version_hash = EXCLUDED.version_hash`,
+                [runId, JSON.stringify(inlineResult.checkpoint), cpStatus, getPipelineVersion()],
+                { label: `Persist numeric checkpoint (${cpStatus})` }
               );
-            } catch { /* non-fatal */ }
+              console.log(`[NumericInline] Persisted ${cpStatus} checkpoint`);
+            } catch {
+              // pipeline_checkpoints table may not exist yet — non-fatal
+            }
           }
 
           // COMPLETION GATE: if numeric is partial, return in_progress — do NOT proceed to merge
