@@ -84,6 +84,17 @@ export interface TerminalResult {
   error?: string;
 }
 
+/**
+ * Internal result from a single memo extraction — carries enough context
+ * to assign truthful terminal status.
+ */
+export interface ExtractionResult {
+  claims: Claim[];
+  truncated: boolean;
+  parseFailed: boolean;
+  parseError?: string;
+}
+
 export interface ClaimsLedger {
   claims: Claim[];
   /** true only when every input memo has a terminal result and pending = 0 */
@@ -422,20 +433,18 @@ export async function runClaimsExtraction(
 
   console.log(`[ClaimsExtraction] Found ${memos.length} IC memo(s): ${memos.map(m => m.file_name).join(", ")}`);
 
-  // Prepare memo extraction tasks
-  const validMemos = memos.filter(m => m.parsed_text && m.parsed_text.trim().length > 0);
-
   // Concurrency limit (2 for pipeline, 4 for bypass/diagnostics)
   const CONCURRENCY = options?.bypassHeadroom ? 4 : 2;
 
   // Time-budget reserve: stop launching new work when less than this remains
   const BUDGET_RESERVE_MS = 30_000;
 
-  const extractMemo = async (memo: { id: string; file_name: string; parsed_text: string | null }): Promise<Claim[]> => {
+  const extractMemo = async (memo: { id: string; file_name: string; parsed_text: string | null }): Promise<ExtractionResult> => {
     // Truncate very long memos to fit in context window (Sonnet: ~200K tokens)
     // 150K chars ≈ 37K tokens, leaving plenty for prompt + output
     const rawText = memo.parsed_text ?? "";
-    const text = rawText.length > 150_000
+    const truncated = rawText.length > 150_000;
+    const text = truncated
       ? rawText.slice(0, 150_000) + "\n\n[TRUNCATED — document exceeds 150K chars]"
       : rawText;
 
@@ -474,23 +483,30 @@ export async function runClaimsExtraction(
 
     // Parse the response
     const responseText = response.content[0]?.text ?? "";
-    const claims = parseClaimsResponse(responseText, memo.file_name);
+    const parseResult = parseClaimsResponse(responseText, memo.file_name);
 
     console.log(
-      `[ClaimsExtraction] "${memo.file_name}": ${claims.length} claims ` +
-      `(${claims.filter(c => c.claim_category === "operating_metric").length} operating, ` +
-      `${claims.filter(c => c.claim_category === "deal_mechanics").length} deal-mechanics, ` +
-      `${claims.filter(c => c.claim_category === "valuation_structuring").length} valuation, ` +
-      `${claims.filter(c => c.claim_category === "returns_projection").length} returns)`
+      `[ClaimsExtraction] "${memo.file_name}": ${parseResult.claims.length} claims ` +
+      `(${parseResult.claims.filter(c => c.claim_category === "operating_metric").length} operating, ` +
+      `${parseResult.claims.filter(c => c.claim_category === "deal_mechanics").length} deal-mechanics, ` +
+      `${parseResult.claims.filter(c => c.claim_category === "valuation_structuring").length} valuation, ` +
+      `${parseResult.claims.filter(c => c.claim_category === "returns_projection").length} returns)` +
+      `${parseResult.failed ? " [PARSE FAILED]" : ""}${truncated ? " [TRUNCATED]" : ""}`
     );
-    return claims;
+    return { claims: parseResult.claims, truncated, parseFailed: parseResult.failed, parseError: parseResult.error };
   };
 
-  // Build job list for the worker pool
-  const jobs: WorkerPoolJob<Claim[]>[] = validMemos.map((memo) => ({
+  // Build job list for the worker pool — include ALL memos (not just validMemos)
+  // Empty-text memos get explicit terminal records instead of being silently filtered
+  const jobs: WorkerPoolJob<ExtractionResult>[] = memos.map((memo) => ({
     id: memo.id,
     label: memo.file_name,
-    execute: () => extractMemo(memo),
+    execute: async (): Promise<ExtractionResult> => {
+      if (!memo.parsed_text || memo.parsed_text.trim().length === 0) {
+        return { claims: [], truncated: false, parseFailed: true, parseError: `Empty or whitespace-only parsed_text for ${memo.file_name}` };
+      }
+      return extractMemo(memo);
+    },
   }));
 
   // Budget predicate: stop launching when remaining time < reserve
@@ -511,13 +527,25 @@ export async function runClaimsExtraction(
 
   for (const r of poolResult.results) {
     if (r.status === "fulfilled") {
-      const claims = r.value!;
-      allClaims.push(...claims);
+      const extraction = r.value!;
+      allClaims.push(...extraction.claims);
+
+      // Determine truthful terminal status
+      let terminalStatus: TerminalStatus;
+      if (extraction.parseFailed) {
+        terminalStatus = "failed";
+      } else if (extraction.truncated) {
+        terminalStatus = "partial";
+      } else {
+        terminalStatus = "success";
+      }
+
       terminalResults.push({
         memo_id: r.job.id,
         file_name: r.job.label,
-        status: "success",
-        claims_count: claims.length,
+        status: terminalStatus,
+        claims_count: extraction.claims.length,
+        error: extraction.parseError,
       });
     } else {
       const errMsg = r.reason instanceof Error ? r.reason.message : String(r.reason);
@@ -568,7 +596,7 @@ export async function runClaimsExtraction(
 
   console.log(
     `[ClaimsExtraction] ${isComplete ? "Complete" : "Incomplete (budget expired)"}: ` +
-    `${allClaims.length} claims from ${docsProcessed}/${validMemos.length} memo(s)` +
+    `${allClaims.length} claims from ${docsProcessed}/${memos.length} memo(s)` +
     `${pendingCount > 0 ? `, ${pendingCount} pending` : ""}. ` +
     `Elapsed: ${Math.round((Date.now() - phaseStart) / 1000)}s`
   );
@@ -580,8 +608,18 @@ export async function runClaimsExtraction(
 // Response parser — robust to LLM formatting quirks
 // ---------------------------------------------------------------------------
 
-function parseClaimsResponse(responseText: string, sourceFile: string): Claim[] {
+export interface ParseClaimsResult {
+  claims: Claim[];
+  failed: boolean;
+  error?: string;
+}
+
+export function parseClaimsResponse(responseText: string, sourceFile: string): ParseClaimsResult {
   let jsonStr = responseText.trim();
+
+  if (!jsonStr || jsonStr.length === 0) {
+    return { claims: [], failed: true, error: `Empty response from LLM for ${sourceFile}` };
+  }
 
   // Strip markdown code fences if present
   const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
@@ -605,11 +643,11 @@ function parseClaimsResponse(responseText: string, sourceFile: string): Claim[] 
         console.warn(`[ClaimsExtraction] Repaired truncated JSON for ${sourceFile} (cut at char ${lastCompleteObj + 1})`);
       } catch {
         console.warn(`[ClaimsExtraction] JSON parse failed for ${sourceFile} — repair also failed. First 500 chars: ${jsonStr.slice(0, 500)}`);
-        return [];
+        return { claims: [], failed: true, error: `JSON parse failed for ${sourceFile} — repair also failed` };
       }
     } else {
       console.warn(`[ClaimsExtraction] JSON parse failed for ${sourceFile}. First 500 chars: ${jsonStr.slice(0, 500)}`);
-      return [];
+      return { claims: [], failed: true, error: `JSON parse failed for ${sourceFile}` };
     }
   }
 
@@ -620,7 +658,7 @@ function parseClaimsResponse(responseText: string, sourceFile: string): Claim[] 
     rawArray = (parsed as any).claims;
   } else {
     console.warn(`[ClaimsExtraction] Unexpected response structure for ${sourceFile}: ${typeof parsed}`);
-    return [];
+    return { claims: [], failed: true, error: `Unexpected response structure for ${sourceFile}: ${typeof parsed}` };
   }
 
   // Validate each claim individually (don't let one bad claim kill the batch)
@@ -639,5 +677,5 @@ function parseClaimsResponse(responseText: string, sourceFile: string): Claim[] 
     }
   }
 
-  return validClaims;
+  return { claims: validClaims, failed: false };
 }

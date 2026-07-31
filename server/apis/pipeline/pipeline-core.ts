@@ -2320,11 +2320,20 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               { label: "Load claims ledger checkpoint" }
             );
             if (ledgerCpRows.length > 0 && ledgerCpRows[0].payload) {
-              claimsLedger = ledgerCpRows[0].payload as ClaimsLedger;
-              console.log(
-                `[ClaimsExtraction] Loaded checkpoint: ${claimsLedger.claims.length} claims ` +
-                `(${claimsLedger.extraction_metadata.operating_metric_claims} operating_metric)`
-              );
+              const candidate = ledgerCpRows[0].payload as ClaimsLedger;
+              // Only accept genuinely complete ledgers — payload must also confirm completion
+              if (candidate.complete === true && (candidate.extraction_metadata?.pending ?? 0) === 0) {
+                claimsLedger = candidate;
+                console.log(
+                  `[ClaimsExtraction] Loaded checkpoint: ${claimsLedger.claims.length} claims ` +
+                  `(${claimsLedger.extraction_metadata.operating_metric_claims} operating_metric)`
+                );
+              } else {
+                console.log(
+                  `[ClaimsExtraction] Rejecting partial checkpoint (complete=${candidate.complete}, ` +
+                  `pending=${candidate.extraction_metadata?.pending ?? "unknown"}) — will re-run extraction`
+                );
+              }
             }
           } catch {
             // pipeline_checkpoints may not exist yet
@@ -2335,22 +2344,40 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             claimsLedger = await runClaimsExtraction(
               ctx, dealId, startTime, claimsTimeBudget * 0.5
             );
-            // Persist ledger so resume never re-runs LLM extraction
+            // Persist ledger — status reflects completion state
+            const cpStatus = (claimsLedger.complete && claimsLedger.extraction_metadata.pending === 0)
+              ? "complete"
+              : "partial";
             try {
               await ctx.integrations.db.execute(
                 `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-                 VALUES ($1, 'claims_ledger', $2::jsonb, 'complete', $3)
-                 ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-                [runId, JSON.stringify(claimsLedger), getPipelineVersion()],
-                { label: "Persist claims ledger checkpoint" }
+                 VALUES ($1, 'claims_ledger', $2::jsonb, $3, $4)
+                 ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = $3, version_hash = $4`,
+                [runId, JSON.stringify(claimsLedger), cpStatus, getPipelineVersion()],
+                { label: `Persist claims ledger checkpoint (${cpStatus})` }
               );
             } catch {
               // pipeline_checkpoints table may not exist yet — non-fatal
             }
+
+            // If ledger is incomplete, return in_progress — do NOT proceed to reconciliation
+            if (!claimsLedger.complete || claimsLedger.extraction_metadata.pending > 0) {
+              console.log(
+                `[ClaimsExtraction] Incomplete ledger (${claimsLedger.extraction_metadata.pending} pending) — returning in_progress`
+              );
+              return {
+                status: "in_progress",
+                runId,
+                phase: "claims_extraction",
+                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                result: null,
+              };
+            }
           }
 
           // Step 0.8b: Reconcile claims against verified figures
-          if (claimsLedger.claims.length > 0 && numericReport) {
+          // Only proceed if ledger is genuinely complete
+          if (claimsLedger.complete && claimsLedger.claims.length > 0 && numericReport) {
             const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 90_000));
             if (reconTimeBudget >= 45_000) {
               claimsReconciliation = await runReconciliation(
