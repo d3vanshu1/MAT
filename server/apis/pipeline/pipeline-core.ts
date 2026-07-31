@@ -716,6 +716,10 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       const allEvidence: Array<{ figure: string; source_doc: string; verbatim_snippet: string; verified: boolean }> = [];
       const seenEvidenceKeys = new Set<string>();
 
+      // Fix 15: Union structured_impact across all cluster members
+      const allStructuredImpact: Array<Record<string, unknown>> = [];
+      const seenImpactKeys = new Set<string>();
+
       // RC3: Collect merged_from_finding_ids for provenance tracking
       const mergedFromIds: string[] = [];
       for (const idx of members) {
@@ -735,11 +739,37 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         for (const sd of f.source_docs ?? []) allSourceDocs.add(sd);
         for (const ed of f.evidence_docs ?? []) allEvidenceDocs.add(ed);
         for (const ev of f.evidence ?? []) {
-          const key = `${ev.figure}|${ev.source_doc}`;
+          // Fix 15: Use figure|source_doc|verbatim_snippet as dedup key to preserve
+          // coordinate-rich evidence items that share the same figure+source but have
+          // different snippets/coordinates (common in multi-page documents)
+          const key = `${ev.figure}|${ev.source_doc}|${(ev.verbatim_snippet ?? "").slice(0, 80)}`;
           if (!seenEvidenceKeys.has(key)) {
             seenEvidenceKeys.add(key);
             allEvidence.push(ev);
           }
+        }
+        // Fix 15: Collect structured_impact entries from all members
+        const fAny = f as any;
+        if (Array.isArray(fAny.structured_impact)) {
+          for (const si of fAny.structured_impact) {
+            // Dedup by amount+role+currency to prevent exact duplicates
+            const siKey = `${si.amount ?? ""}|${si.role ?? ""}|${si.currency ?? ""}`;
+            if (!seenImpactKeys.has(siKey)) {
+              seenImpactKeys.add(siKey);
+              allStructuredImpact.push(si);
+            }
+          }
+        }
+      }
+
+      // Fix 15: Build consolidated_analyses from non-representative members
+      // This preserves the full_analysis content from absorbed findings for audit trail
+      const consolidatedAnalyses: string[] = [];
+      for (const idx of members) {
+        if (idx === members[0]) continue; // skip representative
+        const f = findings[idx];
+        if (f.full_analysis && f.full_analysis.length > 0) {
+          consolidatedAnalyses.push(f.full_analysis);
         }
       }
 
@@ -750,6 +780,10 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         source_docs: [...allSourceDocs],
         evidence_docs: allEvidenceDocs.size > 0 ? [...allEvidenceDocs] : representative.evidence_docs,
         evidence: allEvidence.length > 0 ? allEvidence : representative.evidence,
+        // Fix 15: Union structured_impact from all members
+        structured_impact: allStructuredImpact.length > 0 ? allStructuredImpact as any : (representative as any).structured_impact,
+        // Fix 15: Preserve non-representative analyses for audit trail
+        ...(consolidatedAnalyses.length > 0 ? { consolidated_analyses: consolidatedAnalyses } : {}),
         // RC3: Track which findings were consolidated into this one
         merged_from_finding_ids: mergedFromIds.length > 0
           ? [...new Set([...(representative.merged_from_finding_ids ?? []), ...mergedFromIds])]

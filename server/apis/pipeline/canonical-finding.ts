@@ -200,6 +200,11 @@ export const CanonicalFindingSchema = z.object({
   // --- Provenance ---
   /** Claim IDs (content-addressed: documentId:contentHashPrefix:chunkId:claimIndex) */
   claim_ids: z.array(z.string()).optional(),
+
+  // --- Fix 15: Consolidation audit trail ---
+  /** Full analyses from non-representative findings absorbed during global consolidation.
+   *  Preserves content that would otherwise be lost when cluster members are merged. */
+  consolidated_analyses: z.array(z.string()).optional(),
 });
 
 export type CanonicalFinding = z.infer<typeof CanonicalFindingSchema>;
