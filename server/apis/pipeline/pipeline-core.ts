@@ -258,22 +258,14 @@ export function enforceMaterialityGate(
     const structuredM = getStructuredMaterialityM(f);
     const hasStructuredImpact = structuredM !== null;
 
-    // --- Degraded fallback: prose £-amounts (only when no structured impact) ---
-    let degradedMaxM: number | null = null;
-    if (!hasStructuredImpact) {
-      const anchorText = f.severity_anchor ?? "";
-      const allText = `${anchorText} ${f.detail}`;
-      const anchorFigures = parsePoundFiguresMillions(anchorText);
-      const allFigures = anchorFigures.length > 0 ? anchorFigures : parsePoundFiguresMillions(allText);
-      degradedMaxM = allFigures.length > 0 ? Math.max(...allFigures) : null;
+    // --- Fix 18: Prose-driven severity escalation REMOVED ---
+    // Free-form prose (severity_anchor, detail, full_analysis) may NEVER supply
+    // the controlling amount for severity escalation. Only verified structured_impact
+    // entries may provide the materiality figure.
+    // When structured_impact is absent, the finding follows a safe degraded path
+    // that records structured_impact_missing and cannot escalate numerically.
+    const effectiveM = hasStructuredImpact ? structuredM : null;
 
-      // Fix 12: numeric_unverified findings cannot receive numeric uplift
-      if (f.numeric_unverified && degradedMaxM !== null) {
-        degradedMaxM = null;
-      }
-    }
-
-    const effectiveM = hasStructuredImpact ? structuredM : degradedMaxM;
     const hasRiskMarker = hasMaterialRiskMarker(f);
     const isCrossVersion = isCrossVersionDivergence(f);
 
@@ -289,23 +281,24 @@ export function enforceMaterialityGate(
             ...f,
             severity: "info",
             category: "housekeeping",
-            materiality_rationale: `[CODE_ENFORCED] £${effectiveM < 0.01 ? (effectiveM * 1000).toFixed(0) + "k" : effectiveM.toFixed(1) + "m"}${hasStructuredImpact ? " (verified structured)" : " (degraded prose)"} is ${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV — below 1% materiality threshold (£${MATERIALITY_FLOOR_M.toFixed(1)}m).`,
+            materiality_rationale: `[CODE_ENFORCED] £${effectiveM < 0.01 ? (effectiveM * 1000).toFixed(0) + "k" : effectiveM.toFixed(1) + "m"} (verified structured) is ${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV — below 1% materiality threshold (£${MATERIALITY_FLOOR_M.toFixed(1)}m).`,
           });
         } else {
           survivingFindings.push({
             ...f,
             severity: "warning",
-            materiality_rationale: `[CODE_ENFORCED] £${effectiveM.toFixed(1)}m${hasStructuredImpact ? " (verified structured)" : " (degraded prose)"} (${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV) below critical threshold of £${MATERIALITY_FLOOR_M.toFixed(1)}m. Demoted from critical.`,
+            materiality_rationale: `[CODE_ENFORCED] £${effectiveM.toFixed(1)}m (verified structured) (${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV) below critical threshold of £${MATERIALITY_FLOOR_M.toFixed(1)}m. Demoted from critical.`,
           });
         }
       } else {
-        // No figure — safe degraded path: demote unless risk marker or cross-version
+        // No figure — Fix 18: safe degraded path (structured_impact_missing)
+        // Cannot escalate numerically without verified structured impact.
         if (!hasRiskMarker && !isCrossVersion) {
           demotedCount++;
           survivingFindings.push({
             ...f,
             severity: "warning",
-            materiality_rationale: `[CODE_ENFORCED] No verified structured impact and no quantifiable £ anchor. Safe degraded path — demoted from critical to warning (no escalation).`,
+            materiality_rationale: `[CODE_ENFORCED] structured_impact_missing — no verified structured impact available. Safe degraded path: demoted from critical to warning. Prose amounts are not permitted to drive severity.`,
           });
         } else {
           survivingFindings.push(f);
@@ -319,7 +312,7 @@ export function enforceMaterialityGate(
           ...f,
           severity: "info",
           category: "housekeeping",
-          materiality_rationale: `[CODE_ENFORCED] £${effectiveM < 0.01 ? (effectiveM * 1000).toFixed(0) + "k" : effectiveM.toFixed(1) + "m"}${hasStructuredImpact ? " (verified)" : " (prose)"} is ${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(3)}% of EV — sub-materiality for £${DEAL_EV_MILLIONS}m transaction.`,
+          materiality_rationale: `[CODE_ENFORCED] £${effectiveM < 0.01 ? (effectiveM * 1000).toFixed(0) + "k" : effectiveM.toFixed(1) + "m"} (verified structured) is ${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(3)}% of EV — sub-materiality for £${DEAL_EV_MILLIONS}m transaction.`,
         });
       } else {
         survivingFindings.push(f);
