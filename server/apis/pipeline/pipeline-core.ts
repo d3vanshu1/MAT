@@ -3968,25 +3968,46 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
 
           // RC11: Coverage verification — ensure every input finding ID survived the merge
           // If coverage is incomplete AND response was truncated, carry forward missing findings unchanged
+          // Fix 14: Also carry forward on non-truncated responses when loss exceeds conservation threshold
           if (inputFindingIds.length > 0) {
             const outputFindingIds = new Set(
-              [...findings, ...housekeepingFindings].flatMap(f =>
-                (f as any).merged_from_finding_ids ?? []
-              )
+              [...findings, ...housekeepingFindings].flatMap(f => {
+                const fAny = f as any;
+                // A finding "accounts for" its own ID plus any it merged from
+                const ids: string[] = [];
+                if (fAny.finding_id) ids.push(fAny.finding_id);
+                if (Array.isArray(fAny.merged_from_finding_ids)) ids.push(...fAny.merged_from_finding_ids);
+                return ids;
+              })
             );
             const missingIds = inputFindingIds.filter(id => !outputFindingIds.has(id));
             if (missingIds.length > 0) {
+              const lossFraction = missingIds.length / inputFindingIds.length;
+              // Fix 14: Conservation threshold — if >30% of findings are unaccounted for
+              // in a non-truncated response, treat it as a truncation-equivalent (model dropped findings).
+              // This prevents silent data loss from LLM consolidation that forgets to reference inputs.
+              const CONSERVATION_THRESHOLD = 0.30;
+              const shouldCarryForward = truncated || lossFraction > CONSERVATION_THRESHOLD;
+              const reason = truncated
+                ? "response truncated"
+                : `non-truncated but ${(lossFraction * 100).toFixed(0)}% loss exceeds ${(CONSERVATION_THRESHOLD * 100).toFixed(0)}% conservation threshold`;
+
               console.warn(
-                `[Merge][RC11] Coverage gap: ${missingIds.length}/${inputFindingIds.length} input findings not accounted for in R${currentRound}:G${group.idx}` +
-                (truncated ? " (response truncated — carrying forward)" : " (complete response — findings may have been consolidated)")
+                `[Merge][Fix14] Coverage gap: ${missingIds.length}/${inputFindingIds.length} input findings not accounted for in R${currentRound}:G${group.idx} (${reason})`
               );
-              if (truncated) {
+
+              if (shouldCarryForward) {
                 // Carry forward missing findings unchanged from input members
                 const allInputFindings = group.members.flatMap(m => m.findings ?? []);
                 const missingSet = new Set(missingIds);
                 const carriedForward = allInputFindings.filter(f => missingSet.has(f.finding_id));
                 findings.push(...carriedForward);
-                console.log(`[Merge][RC11] Carried forward ${carriedForward.length} unmerged findings from truncated response`);
+                console.log(`[Merge][Fix14] Carried forward ${carriedForward.length} unmerged findings (${reason})`);
+              } else {
+                // Below threshold — acceptable consolidation, log for diagnostics only
+                console.log(
+                  `[Merge][Fix14] ${missingIds.length} findings consolidated (${(lossFraction * 100).toFixed(0)}% ≤ ${(CONSERVATION_THRESHOLD * 100).toFixed(0)}% threshold) — accepted as intentional merge`
+                );
               }
             }
           }
