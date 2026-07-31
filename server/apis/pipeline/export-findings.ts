@@ -65,6 +65,7 @@ export default api({
     findings: z.array(CanonicalFindingSchema),
     summary: SummarySchema.describe("Always computed from the FULL unfiltered set"),
     filtered: z.boolean(),
+    corruptionDetected: z.boolean().describe("true if persisted findings failed strict validation — distinguishes corruption from a genuinely empty run"),
     idManifest: z.object({
       generatedAt: z.string(),
       totalCount: z.number(),
@@ -164,6 +165,7 @@ export default api({
           fromCanonicalArtifact: false,
         },
         filtered: false,
+        corruptionDetected: false,
       };
     }
 
@@ -192,6 +194,7 @@ export default api({
           fromCanonicalArtifact: row.from_canonical,
         },
         filtered: false,
+        corruptionDetected: true,
       };
     }
 
@@ -236,6 +239,7 @@ export default api({
         findings: [],
         summary,
         filtered: false,
+        corruptionDetected: false,
         idManifest: {
           generatedAt: new Date().toISOString(),
           totalCount: allFindings.length,
@@ -269,6 +273,7 @@ export default api({
       findings: pageFindings,
       summary,
       filtered: !!severityFilter,
+      corruptionDetected: false,
     };
   },
 });

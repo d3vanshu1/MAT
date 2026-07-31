@@ -1735,6 +1735,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
             // Reconstruct housekeeping findings from checkpoint merged_json if available
             let fastPathHousekeeping: MergedFinding[] = [];
+            let fastPathHousekeepingAbort = false;
             {
               try {
                 const [cpRow] = await ctx.integrations.db.query(
@@ -1749,19 +1750,29 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                     mode: "reload",
                     source: `fast-path checkpoint L${topCheckpoint.tree_level}:N0 housekeepingFindings`,
                   });
-                  // RC3: Fail closed on housekeeping identity corruption too
+                  // RC3-corrective: Fail closed — corrupt housekeeping ABORTS the fast path.
+                  // Do NOT zero out and continue — that produces a completed report with
+                  // housekeeping silently erased, violating the fail-closed invariant.
                   if (hkReloadResult.malformed_count > 0 || hkReloadResult.invalid.length > 0) {
-                    console.error(`[pipeline:fast-path] Housekeeping findings have corruption (${hkReloadResult.invalid.length} invalid, ${hkReloadResult.malformed_count} malformed) — discarding all housekeeping to prevent partial data`);
-                    fastPathHousekeeping = [];
+                    console.error(`[pipeline:fast-path] ABORT: housekeeping findings have corruption (${hkReloadResult.invalid.length} invalid, ${hkReloadResult.malformed_count} malformed) — cannot produce valid output with housekeeping silently removed. Falling through to normal merge path.`);
+                    fastPathHousekeepingAbort = true;
                   } else {
                     fastPathHousekeeping = hkReloadResult.findings;
                   }
                 }
               } catch (hkErr: any) {
-                console.error(`[pipeline:fast-path] Failed to load housekeeping: ${hkErr.message}`);
-                fastPathHousekeeping = [];
+                // Load failure (DB error, unexpected shape) — also abort fast path.
+                // A missing housekeeping column (cpRow.hk is null) does NOT reach here
+                // because it's handled by the if-guard above; this catches genuine errors.
+                console.error(`[pipeline:fast-path] ABORT: failed to load housekeeping (${hkErr.message}) — cannot verify housekeeping integrity. Falling through to normal merge path.`);
+                fastPathHousekeepingAbort = true;
               }
             }
+
+            // If housekeeping is corrupt or unloadable, abort fast path entirely
+            if (fastPathHousekeepingAbort) {
+              // Fall through to normal merge path — do not format or persist
+            } else {
 
             const finalNode = {
               text: buildMergedText(topCheckpoint.executive_header, findings),
@@ -1942,6 +1953,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               truncatedMerges: 0,
               firstError: null,
             };
+            } // end else (fast-path housekeeping valid)
             } // end else (fast-path findings valid)
           }
         }

@@ -29,7 +29,17 @@ export function strictReloadFindings(
   raw: unknown,
   source: string
 ): StrictReloadResult {
-  const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  // Wrap JSON.parse so invalid JSON produces the same contextual error style
+  // as canonical validation failures (not a bare SyntaxError).
+  let parsed: unknown;
+  try {
+    parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (parseErr) {
+    throw new Error(
+      `[${source}] Corrupt persisted findings — fail closed: invalid JSON (${parseErr instanceof Error ? parseErr.message : String(parseErr)})`
+    );
+  }
+
   const result = parseCanonicalFindings(parsed, {
     mode: "reload",
     source,
