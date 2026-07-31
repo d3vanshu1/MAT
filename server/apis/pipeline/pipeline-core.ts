@@ -122,6 +122,18 @@ const WEB_RESEARCH_MODULES = new Set(["external_risk_overlay", "social_reputatio
 interface AppendReconResult {
   finalFindings: MergedFinding[];
   housekeepingFindings: MergedFinding[];
+  /** Fix 11: Structured diagnostics from ID-scoped replacement */
+  diagnostics: ReconReplacementDiagnostic[];
+}
+
+/** Fix 11: Structured diagnostic for reconciliation replacement operations */
+export interface ReconReplacementDiagnostic {
+  type: "unknown_target_id" | "replacement_applied" | "idempotent_skip";
+  finding_id: string;
+  message: string;
+  target_ids?: string[];
+  removed_ids?: string[];
+  unknown_ids?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -320,93 +332,149 @@ function enforceMaterialityGate(
   return { findings: survivingFindings, housekeepingFindings, demotedCount };
 }
 
-function appendReconciliationFindings(
+export function appendReconciliationFindings(
   finalFindings: MergedFinding[],
   housekeepingFindings: MergedFinding[],
   claimsReconciliation: ReconciliationResult | null,
 ): AppendReconResult {
-  // --- Append code-verified reconciliation principal findings ---
-  if (claimsReconciliation && claimsReconciliation.findings.length > 0) {
-    const existingKeys = new Set<string>();
-    for (const f of finalFindings) {
-      const key = (f.title || "").toLowerCase().trim().replace(/\s+/g, " ");
-      if (key) existingKeys.add(key);
-    }
+  const diagnostics: ReconReplacementDiagnostic[] = [];
 
-    const codeVerifiedFindings: MergedFinding[] = ensureFindingIds(claimsReconciliation.findings
-      .filter(rf => rf.finding_kind === "data_divergence" || rf.finding_kind === "cross_version")
-      .map(rf => ({
-        finding_id: "", // ensureFindingIds replaces empty strings with UUIDs
-        title: rf.title,
-        severity: rf.severity,
-        detail: rf.detail,
-        full_analysis: rf.full_analysis,
-        source_docs: rf.source_docs,
-        category: "principal_finding" as const,
-        numeric_unverified: false,
-        finding_kind: rf.finding_kind as MergedFinding["finding_kind"],
-        severity_anchor: rf.severity_anchor != null
-          ? (rf.severity_anchor >= 1_000_000 ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : `£${(rf.severity_anchor / 1_000).toFixed(0)}k`)
-          : undefined,
-      })));
+  if (!claimsReconciliation || claimsReconciliation.findings.length === 0) {
+    return { finalFindings, housekeepingFindings, diagnostics };
+  }
 
-    // Remove LLM paraphrases: if code-verified finding has ≥2 £-amounts,
-    // drop any existing finding that mentions the same set of amounts.
-    let llmDropped = 0;
-    for (const cvf of codeVerifiedFindings) {
-      const cvKey = (cvf.title || "").toLowerCase().trim().replace(/\s+/g, " ");
-      const cvAmounts = cvf.detail.match(/£[\d,.]+m/g) ?? [];
-      if (cvAmounts.length >= 2) {
-        const beforeLen = finalFindings.length;
-        finalFindings = finalFindings.filter(f => {
-          const fText = `${f.title} ${f.detail}`;
-          return !cvAmounts.every(amt => fText.includes(amt));
+  // --- Build existing finding ID index for idempotency and ID-scoped removal ---
+  const existingById = new Map<string, MergedFinding>();
+  for (const f of finalFindings) {
+    if (f.finding_id) existingById.set(f.finding_id, f);
+  }
+
+  // --- Process principal reconciliation findings (data_divergence, cross_version) ---
+  const principalReconFindings = claimsReconciliation.findings
+    .filter(rf => rf.finding_kind === "data_divergence" || rf.finding_kind === "cross_version");
+
+  for (const rf of principalReconFindings) {
+    const supersedes = rf.supersedes_finding_ids ?? [];
+    const removedIds: string[] = [];
+    const unknownIds: string[] = [];
+
+    // Fix 11: ID-scoped removal — remove ONLY findings whose exact ID is in supersedes
+    if (supersedes.length > 0) {
+      for (const targetId of supersedes) {
+        if (existingById.has(targetId)) {
+          removedIds.push(targetId);
+        } else {
+          unknownIds.push(targetId);
+        }
+      }
+
+      if (unknownIds.length > 0) {
+        // Unknown target IDs: preserve ALL existing findings, emit diagnostic, do NOT fall back
+        diagnostics.push({
+          type: "unknown_target_id",
+          finding_id: rf.title, // will be replaced with actual UUID below
+          message: `Reconciliation finding "${rf.title}" references ${unknownIds.length} unknown target ID(s). No findings removed.`,
+          target_ids: supersedes,
+          unknown_ids: unknownIds,
         });
-        llmDropped += beforeLen - finalFindings.length;
+        // Preserve all — no removal when any target is unknown
+        removedIds.length = 0;
       }
-      if (!existingKeys.has(cvKey)) {
-        finalFindings.push(cvf);
-        existingKeys.add(cvKey);
+
+      // Remove the explicitly identified findings
+      if (removedIds.length > 0) {
+        const removeSet = new Set(removedIds);
+        finalFindings = finalFindings.filter(f => !removeSet.has(f.finding_id));
+        for (const id of removedIds) existingById.delete(id);
       }
     }
 
-    if (llmDropped > 0) {
-      console.log(`[pipeline] Replaced ${llmDropped} LLM-paraphrased finding(s) with code-verified versions`);
-    }
-    console.log(`[pipeline] Appended ${codeVerifiedFindings.length} code-verified reconciliation finding(s) to final report`);
+    // Build the replacement finding
+    const replacementFinding: MergedFinding = {
+      finding_id: "", // ensureFindingIds will assign a stable UUID
+      title: rf.title,
+      severity: rf.severity,
+      detail: rf.detail,
+      full_analysis: rf.full_analysis,
+      source_docs: rf.source_docs,
+      category: "principal_finding" as const,
+      numeric_unverified: false,
+      finding_kind: rf.finding_kind as MergedFinding["finding_kind"],
+      severity_anchor: rf.severity_anchor != null
+        ? (rf.severity_anchor >= 1_000_000 ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : `£${(rf.severity_anchor / 1_000).toFixed(0)}k`)
+        : undefined,
+      // Fix 11: Record exactly which IDs were actually superseded
+      merged_from_finding_ids: removedIds.length > 0 ? removedIds : undefined,
+    };
 
-    // --- Append reconciliation housekeeping (scope_mismatch, unreconcilable) ---
-    const reconHousekeeping: MergedFinding[] = ensureFindingIds(claimsReconciliation.findings
-      .filter(rf => rf.finding_kind === "scope_mismatch" || rf.finding_kind === "unreconcilable")
-      .map(rf => ({
-        finding_id: "", // ensureFindingIds assigns a fresh UUID
-        title: rf.title,
-        severity: rf.severity,
-        detail: rf.detail,
-        full_analysis: rf.full_analysis,
-        source_docs: rf.source_docs,
-        category: "housekeeping" as const,
-        numeric_unverified: false,
-        finding_kind: rf.finding_kind as MergedFinding["finding_kind"],
-        severity_anchor: rf.severity_anchor != null
-          ? (rf.severity_anchor >= 1_000_000 ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : `£${(rf.severity_anchor / 1_000).toFixed(0)}k`)
-          : undefined,
-      })));
+    // Assign stable ID
+    const [withId] = ensureFindingIds([replacementFinding]);
 
-    if (reconHousekeeping.length > 0) {
-      housekeepingFindings = [...housekeepingFindings, ...reconHousekeeping];
-      const seen = new Set<string>();
-      housekeepingFindings = housekeepingFindings.filter(f => {
-        const key = (f.title || "").toLowerCase().trim().replace(/\s+/g, " ");
-        if (!key || seen.has(key)) return false;
-        seen.add(key);
-        return true;
+    // Idempotency: if this exact finding is already present (by title dedup), skip append
+    const titleKey = (withId.title || "").toLowerCase().trim().replace(/\s+/g, " ");
+    const alreadyPresent = finalFindings.some(f =>
+      f.finding_id === withId.finding_id ||
+      (f.title || "").toLowerCase().trim().replace(/\s+/g, " ") === titleKey
+    );
+
+    if (alreadyPresent) {
+      diagnostics.push({
+        type: "idempotent_skip",
+        finding_id: withId.finding_id,
+        message: `Reconciliation finding "${rf.title}" already present — skipped (idempotent).`,
       });
-      console.log(`[pipeline] Appended ${reconHousekeeping.length} reconciliation housekeeping finding(s)`);
+    } else {
+      finalFindings.push(withId);
+      existingById.set(withId.finding_id, withId);
+
+      if (removedIds.length > 0) {
+        diagnostics.push({
+          type: "replacement_applied",
+          finding_id: withId.finding_id,
+          message: `Replaced ${removedIds.length} finding(s) with code-verified "${rf.title}".`,
+          target_ids: supersedes,
+          removed_ids: removedIds,
+        });
+      }
     }
   }
 
-  return { finalFindings, housekeepingFindings };
+  console.log(`[pipeline] Reconciliation: ${principalReconFindings.length} code-verified finding(s) processed (ID-scoped)`);
+  if (diagnostics.length > 0) {
+    console.log(`[pipeline] Reconciliation diagnostics: ${JSON.stringify(diagnostics)}`);
+  }
+
+  // --- Append reconciliation housekeeping (scope_mismatch, unreconcilable) ---
+  const reconHousekeeping: MergedFinding[] = ensureFindingIds(claimsReconciliation.findings
+    .filter(rf => rf.finding_kind === "scope_mismatch" || rf.finding_kind === "unreconcilable")
+    .map(rf => ({
+      finding_id: "",
+      title: rf.title,
+      severity: rf.severity,
+      detail: rf.detail,
+      full_analysis: rf.full_analysis,
+      source_docs: rf.source_docs,
+      category: "housekeeping" as const,
+      numeric_unverified: false,
+      finding_kind: rf.finding_kind as MergedFinding["finding_kind"],
+      severity_anchor: rf.severity_anchor != null
+        ? (rf.severity_anchor >= 1_000_000 ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : `£${(rf.severity_anchor / 1_000).toFixed(0)}k`)
+        : undefined,
+    })));
+
+  if (reconHousekeeping.length > 0) {
+    housekeepingFindings = [...housekeepingFindings, ...reconHousekeeping];
+    const seen = new Set<string>();
+    housekeepingFindings = housekeepingFindings.filter(f => {
+      const key = (f.title || "").toLowerCase().trim().replace(/\s+/g, " ");
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    console.log(`[pipeline] Appended ${reconHousekeeping.length} reconciliation housekeeping finding(s)`);
+  }
+
+  return { finalFindings, housekeepingFindings, diagnostics };
 }
 
 // ---------------------------------------------------------------------------

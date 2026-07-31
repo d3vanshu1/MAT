@@ -45,6 +45,12 @@ export interface ReconciliationFinding {
   /** Computed delta (code-verified, never LLM-computed) */
   delta_abs: number | null;
   delta_pct: number | null;
+  /**
+   * Fix 11: Explicit IDs of canonical findings this reconciliation finding supersedes.
+   * Only these exact IDs may be removed from the canonical set. If absent or empty,
+   * the finding is append-only (no existing findings removed).
+   */
+  supersedes_finding_ids?: string[];
 }
 
 export interface ReconciliationResult {
