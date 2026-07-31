@@ -80,6 +80,7 @@ import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
+import { buildOriginMapFromRoutedArray, resolveProvenance } from "./claim-origin-map.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -2513,6 +2514,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     };
   }
 
+  // --- Step 1.1: Build Claim Origin Map (explicit provenance) ---
+  // Replaces the old approach of parsing "c{N}-{M}" into the routed array.
+  // The origin map resolves claim_ids to source documents deterministically.
+  const claimOriginMap = buildOriginMapFromRoutedArray(routed, idToFileName);
+
   // --- Step 1.5: Web Research Phase (for web research modules only) ---
   // Runs the iterative web search loop server-side with checkpointing.
   // If incomplete (budget exhausted), returns in_progress with phase "web_research".
@@ -3320,27 +3326,24 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           }
 
           // Fix #3: Code-derived source_docs from claim_id provenance.
-          // The LLM must not choose the source document — derive it deterministically
-          // from the claim_id's extraction origin. "c5-2" → routed[5].document_id → filename.
+          // Uses the explicit ClaimOriginMap for deterministic resolution.
+          // UNION with existing source_docs — never overwrite or narrow.
+          // Legacy IDs that cannot be resolved receive no fabricated provenance.
           for (const f of findings) {
             if (!f.claim_ids || f.claim_ids.length === 0) continue;
-            const derivedSources = new Set<string>();
-            for (const cid of f.claim_ids) {
-              const match = String(cid).match(/^c(\d+)-/);
-              if (!match) continue;
-              const chunkIdx = parseInt(match[1], 10);
-              if (chunkIdx >= 0 && chunkIdx < routed.length) {
-                const docId = routed[chunkIdx].document_id;
-                const fileName = idToFileName.get(docId);
-                if (fileName) derivedSources.add(fileName);
+            const resolution = resolveProvenance(f.claim_ids, claimOriginMap);
+            if (resolution.derivedSources.size > 0) {
+              const existingSources = new Set(f.source_docs ?? []);
+              for (const src of resolution.derivedSources) existingSources.add(src);
+              const merged = Array.from(existingSources);
+              const original = f.source_docs?.join(", ") ?? "(none)";
+              (f as any).source_docs = merged;
+              if (original !== merged.join(", ")) {
+                console.log(`[Merge][Provenance] "${f.title}" source_docs updated: ${original} → ${merged.join(", ")}`);
               }
             }
-            if (derivedSources.size > 0) {
-              const original = f.source_docs?.join(", ") ?? "(none)";
-              (f as any).source_docs = Array.from(derivedSources);
-              if (original !== (f as any).source_docs.join(", ")) {
-                console.log(`[Merge][Fix3-Provenance] "${f.title}" source_docs overridden: ${original} → ${(f as any).source_docs.join(", ")}`);
-              }
+            if (resolution.unresolvedLegacy.length > 0) {
+              console.warn(`[Merge][Provenance] "${f.title}" has ${resolution.unresolvedLegacy.length} unresolved legacy claim ID(s): ${resolution.unresolvedLegacy.join(", ")} — no fabricated provenance applied`);
             }
           }
 
@@ -3401,23 +3404,15 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             } catch { /* non-fatal */ }
           }
 
-          // Fix #3: Provenance override for housekeeping findings (same as principal)
+          // Fix #3: Provenance for housekeeping findings (same origin-map approach)
           for (const f of housekeepingFindings) {
             const hkClaimIds = (f as any).claim_ids as string[] | undefined;
             if (!hkClaimIds || hkClaimIds.length === 0) continue;
-            const derivedSources = new Set<string>();
-            for (const cid of hkClaimIds) {
-              const match = String(cid).match(/^c(\d+)-/);
-              if (!match) continue;
-              const chunkIdx = parseInt(match[1], 10);
-              if (chunkIdx >= 0 && chunkIdx < routed.length) {
-                const docId = routed[chunkIdx].document_id;
-                const fileName = idToFileName.get(docId);
-                if (fileName) derivedSources.add(fileName);
-              }
-            }
-            if (derivedSources.size > 0) {
-              (f as any).source_docs = Array.from(derivedSources);
+            const resolution = resolveProvenance(hkClaimIds, claimOriginMap);
+            if (resolution.derivedSources.size > 0) {
+              const existingSources = new Set((f as any).source_docs ?? []);
+              for (const src of resolution.derivedSources) existingSources.add(src);
+              (f as any).source_docs = Array.from(existingSources);
             }
           }
 

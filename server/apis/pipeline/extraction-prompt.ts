@@ -108,12 +108,20 @@ Required top-level keys:
 // ---------------------------------------------------------------------------
 
 /**
- * Inject stable claim IDs into the extraction JSON.
- * Format: "c{chunkIndex}-{claimIndex}" (0-based).
+ * Inject stable, globally unique claim IDs into the extraction JSON.
+ *
+ * NEW FORMAT: "{documentId}:{chunkIndex}:{claimIndex}" (0-based).
+ * This is deterministic (based only on stable document identity + position)
+ * and collision-free across documents.
+ *
+ * LEGACY FORMAT (deprecated): "c{globalChunkIndex}-{claimIndex}" — produced
+ * document-local IDs that collided across documents and caused incorrect
+ * provenance when decoded against the global routed array.
+ *
  * This happens post-extraction so IDs are deterministic and don't depend on
  * the model remembering to output them.
  */
-export function injectClaimIds(rawJson: string, chunkIndex: number): string {
+export function injectClaimIds(rawJson: string, chunkIndex: number, documentId?: string): string {
   try {
     let jsonStr = rawJson.trim();
     const fenceMatch = jsonStr.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
@@ -128,7 +136,9 @@ export function injectClaimIds(rawJson: string, chunkIndex: number): string {
       parsed.key_claims = parsed.key_claims.map(
         (claim: Record<string, unknown>, idx: number) => ({
           ...claim,
-          id: `c${chunkIndex}-${idx}`,
+          id: documentId
+            ? `${documentId}:${chunkIndex}:${idx}`
+            : `c${chunkIndex}-${idx}`, // fallback for legacy callers without documentId
         })
       );
     }

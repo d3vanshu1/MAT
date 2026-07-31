@@ -448,7 +448,7 @@ export async function runExtractionPhase(
             return { success: false, error: `Truncated (max_tokens): ${chunk.label}` };
           }
 
-          const idTaggedText = injectClaimIds(rawText, chunk.chunkIndex);
+          const idTaggedText = injectClaimIds(rawText, chunk.chunkIndex, chunk.documentId);
           const tag = tagByDocId[chunk.documentId] ?? "other";
 
           const extractionJson = {
@@ -457,6 +457,7 @@ export async function runExtractionPhase(
             chunkIndex: chunk.chunkIndex,
             sourceFile: sanitizeBraces(chunk.sourceFile),
             documentTag: tag,
+            documentId: chunk.documentId,
           };
 
           // Save immediately to DB (checkpoint)
@@ -716,13 +717,14 @@ export async function runExtractionPhase(
           escalationFailed++;
         } else {
           // Success — save the extraction
-          const idTaggedText = injectClaimIds(rawText, chunk.chunkIndex);
+          const idTaggedText = injectClaimIds(rawText, chunk.chunkIndex, chunk.documentId);
           const extractionJson = {
             label: sanitizeBraces(chunk.label),
             extraction: `### Universal Extraction from: ${sanitizeBraces(chunk.label)}\n\n${sanitizeBraces(idTaggedText)}`,
             chunkIndex: chunk.chunkIndex,
             sourceFile: sanitizeBraces(chunk.sourceFile),
             documentTag: tag,
+            documentId: chunk.documentId,
           };
           await ctx.integrations.db.execute(
             `INSERT INTO universal_extractions (deal_id, document_id, chunk_index, content_hash, extraction_json)
