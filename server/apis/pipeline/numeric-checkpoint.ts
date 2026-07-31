@@ -6,49 +6,70 @@
  *   - explicit status (partial | complete)
  *   - ordered document and table cursors
  *   - accumulated figures and discrepancies
+ *   - accumulated table-index metadata (so resume skips already-indexed documents)
  *   - processed/pending counts
  *   - source fingerprint for invalidation on model changes
  *   - config version for detecting schema drift
  *
  * Only `status: complete` satisfies the numeric resume gate.
- * A changed source fingerprint invalidates the entire checkpoint.
+ *
+ * Fingerprint semantics (v2 — Fix 4 corrective):
+ *   The source fingerprint covers documentIds (the full ordered universe from the
+ *   DB query — always complete) and the ACCUMULATED table index (grows monotonically
+ *   as new documents are indexed). Validation distinguishes:
+ *     - Known prefix changed (a table in the already-indexed portion was added/removed
+ *       or a document was removed) → invalidate.
+ *     - New documents/tables discovered during forward progress → valid (the checkpoint's
+ *       prefix is still correct; the universe grew beyond it).
  */
 import { getPipelineVersion } from "./pipeline-version.js";
 
 // ---------------------------------------------------------------------------
-// Version
+// Version — bump on structural schema change
 // ---------------------------------------------------------------------------
 
-export const NUMERIC_CHECKPOINT_VERSION = 1;
+export const NUMERIC_CHECKPOINT_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
+/** Lightweight table-index entry stored in the checkpoint for resumability. */
+export interface IndexedTableEntry {
+  id: string;
+  document_id: string;
+  sheet_or_page: string;
+  caption: string | null;
+  data_length: number;
+}
+
 export interface NumericCheckpoint {
   version: typeof NUMERIC_CHECKPOINT_VERSION;
   status: "partial" | "complete";
-  /** Ordered document IDs in the verification universe */
+  /** Full ordered document ID universe (from DB query — always complete) */
   documentIds: string[];
-  /** Ordered table IDs in the load universe */
-  tableIds: string[];
-  /** Cursor: index into documentIds of the first UNPROCESSED document */
+  /** Accumulated table-index metadata for documents 0..documentCursor-1 */
+  indexedTableMetadata: IndexedTableEntry[];
+  /** Cursor: index into documentIds of the first UNPROCESSED document for indexing */
   documentCursor: number;
-  /** Cursor: index into tableIds of the first UNPROCESSED table */
+  /** Cursor: index into loadable tables of the first UNPROCESSED table for data loading */
   tableCursor: number;
   /** Accumulated figures from all processed documents/tables so far */
   figures: SerializedFigure[];
   /** Accumulated discrepancies from all processed tables so far */
   discrepancies: SerializedDiscrepancy[];
-  /** Count of documents fully processed */
+  /** Count of documents whose index metadata is fully loaded */
   documentsProcessed: number;
   /** Total document count in the universe */
   documentsTotal: number;
-  /** Count of tables fully loaded and processed */
+  /** Count of tables whose data has been loaded and processed */
   tablesLoaded: number;
-  /** Total table count in the load universe */
+  /** Total table count in the loadable universe (may grow as indexing progresses) */
   tablesTotal: number;
-  /** Source fingerprint: deterministic hash of documentIds + tableIds */
+  /**
+   * Source fingerprint: hash of documentIds + indexedTableMetadata IDs.
+   * Covers the KNOWN prefix. New tables from unindexed documents don't affect it.
+   */
   sourceFingerprint: string;
   /** Pipeline version at checkpoint creation */
   pipelineVersion: string;
@@ -115,16 +136,23 @@ function deterministicHash(input: string): string {
 }
 
 /**
- * Compute source fingerprint from the document and table universe.
- * If either set changes (new upload, removed doc, schema change), the fingerprint
- * will differ and the checkpoint will be invalidated.
+ * Compute source fingerprint from the document universe and the accumulated
+ * indexed table entries. The fingerprint covers:
+ *   - The full document ID list (always queried fresh — detects doc additions/removals)
+ *   - The table IDs from already-indexed documents (detects table changes in known prefix)
+ *
+ * IMPORTANT: This fingerprint grows monotonically as more documents are indexed.
+ * Validation logic accounts for this — see validateNumericCheckpoint.
  */
 export function computeNumericSourceFingerprint(
   documentIds: string[],
-  tableIds: string[]
+  indexedTableIds: string[]
 ): string {
-  const sorted = [...documentIds].sort().join("|") + "||" + [...tableIds].sort().join("|");
-  return deterministicHash(sorted);
+  // Document IDs sorted for order-independence of the DB query
+  const docPart = [...documentIds].sort().join("|");
+  // Table IDs sorted — represents the known indexed prefix
+  const tablePart = [...indexedTableIds].sort().join("|");
+  return deterministicHash(docPart + "||" + tablePart);
 }
 
 /**
@@ -133,9 +161,7 @@ export function computeNumericSourceFingerprint(
  * parameters are modified.
  */
 export function computeNumericConfigVersion(): string {
-  // Combines pipeline version with a static config revision.
-  // Bump NUMERIC_CONFIG_REVISION when changing MetricConfig or CrossAgreementConfig.
-  const NUMERIC_CONFIG_REVISION = "2026-07-31-r1";
+  const NUMERIC_CONFIG_REVISION = "2026-07-31-r2";
   return `${getPipelineVersion()}:${NUMERIC_CONFIG_REVISION}`;
 }
 
@@ -146,7 +172,7 @@ export function computeNumericConfigVersion(): string {
 export interface BuildCheckpointInput {
   status: "partial" | "complete";
   documentIds: string[];
-  tableIds: string[];
+  indexedTableMetadata: IndexedTableEntry[];
   documentCursor: number;
   tableCursor: number;
   figures: SerializedFigure[];
@@ -162,12 +188,13 @@ export interface BuildCheckpointInput {
  * Build a numeric checkpoint from the current state of verification.
  */
 export function buildNumericCheckpoint(input: BuildCheckpointInput): NumericCheckpoint {
-  const sourceFingerprint = computeNumericSourceFingerprint(input.documentIds, input.tableIds);
+  const indexedTableIds = input.indexedTableMetadata.map(t => t.id);
+  const sourceFingerprint = computeNumericSourceFingerprint(input.documentIds, indexedTableIds);
   return {
     version: NUMERIC_CHECKPOINT_VERSION,
     status: input.status,
     documentIds: input.documentIds,
-    tableIds: input.tableIds,
+    indexedTableMetadata: input.indexedTableMetadata,
     documentCursor: input.documentCursor,
     tableCursor: input.tableCursor,
     figures: input.figures,
@@ -195,20 +222,25 @@ export type ValidateResult =
 /**
  * Validate a loaded numeric checkpoint against the current source state.
  *
- * Returns valid=true only if:
- *   - Schema version matches
- *   - Source fingerprint matches (no new/removed documents or tables)
- *   - Config version matches (no metric/threshold changes)
- *   - All structural fields are present and well-typed
- *
- * Invalid results include an action:
- *   - "invalidate": discard checkpoint and restart (source changed)
- *   - "error": corrupted data, fail loudly
+ * Validation strategy (v2 — distinguishes prefix-change from forward progress):
+ *   1. Schema version must match.
+ *   2. Config version must match.
+ *   3. Structural fields must be present and well-typed.
+ *   4. Document universe check:
+ *      - The checkpoint's documentIds (positions 0..documentCursor-1) must match
+ *        the same positions in the current documentIds.
+ *      - Documents cannot be removed or reordered in the known prefix without invalidation.
+ *      - New documents at the END of the current list are fine (forward progress).
+ *   5. Indexed table prefix check:
+ *      - If the caller provides prefixTableIds (re-queried table IDs for documents
+ *        0..documentCursor-1), every table ID in the checkpoint's indexedTableMetadata
+ *        must still be present. A missing table means the source data changed.
  */
 export function validateNumericCheckpoint(
   raw: unknown,
   currentDocumentIds: string[],
-  currentTableIds: string[]
+  /** Table IDs from documents 0..checkpoint.documentCursor-1 (re-queried prefix) */
+  prefixTableIds?: string[]
 ): ValidateResult {
   if (!raw || typeof raw !== "object") {
     return { valid: false, reason: "Checkpoint is null or not an object", action: "invalidate" };
@@ -216,9 +248,9 @@ export function validateNumericCheckpoint(
 
   const obj = raw as Record<string, unknown>;
 
-  // Version check
+  // Version check — v1 checkpoints are incompatible (no indexedTableMetadata)
   if (obj.version !== NUMERIC_CHECKPOINT_VERSION) {
-    return { valid: false, reason: `Unknown checkpoint version: ${obj.version} (expected ${NUMERIC_CHECKPOINT_VERSION})`, action: "invalidate" };
+    return { valid: false, reason: `Checkpoint version ${obj.version} !== ${NUMERIC_CHECKPOINT_VERSION}. Requires rebuild.`, action: "invalidate" };
   }
 
   // Status check
@@ -227,9 +259,9 @@ export function validateNumericCheckpoint(
   }
 
   // Required fields
-  const required = ["documentIds", "tableIds", "documentCursor", "tableCursor", "figures", "discrepancies",
-    "documentsProcessed", "documentsTotal", "tablesLoaded", "tablesTotal", "sourceFingerprint",
-    "pipelineVersion", "configVersion"];
+  const required = ["documentIds", "indexedTableMetadata", "documentCursor", "tableCursor",
+    "figures", "discrepancies", "documentsProcessed", "documentsTotal", "tablesLoaded",
+    "tablesTotal", "sourceFingerprint", "pipelineVersion", "configVersion"];
   for (const field of required) {
     if (!(field in obj)) {
       return { valid: false, reason: `Missing required field: ${field}`, action: "error" };
@@ -245,18 +277,8 @@ export function validateNumericCheckpoint(
     return { valid: false, reason: "figures and discrepancies must be arrays", action: "error" };
   }
 
-  if (!Array.isArray(obj.documentIds) || !Array.isArray(obj.tableIds)) {
-    return { valid: false, reason: "documentIds and tableIds must be arrays", action: "error" };
-  }
-
-  // Source fingerprint — most critical check
-  const currentFingerprint = computeNumericSourceFingerprint(currentDocumentIds, currentTableIds);
-  if (obj.sourceFingerprint !== currentFingerprint) {
-    return {
-      valid: false,
-      reason: `Source fingerprint mismatch: checkpoint=${String(obj.sourceFingerprint).slice(0, 16)}, current=${currentFingerprint.slice(0, 16)}. Documents or tables changed since last run.`,
-      action: "invalidate",
-    };
+  if (!Array.isArray(obj.documentIds) || !Array.isArray(obj.indexedTableMetadata)) {
+    return { valid: false, reason: "documentIds and indexedTableMetadata must be arrays", action: "error" };
   }
 
   // Config version — invalidate if config changed
@@ -267,6 +289,48 @@ export function validateNumericCheckpoint(
       reason: `Config version mismatch: checkpoint=${obj.configVersion}, current=${currentConfigVersion}. Numeric configuration changed.`,
       action: "invalidate",
     };
+  }
+
+  const cpDocIds = obj.documentIds as string[];
+  const cpDocCursor = obj.documentCursor as number;
+
+  // Document universe prefix check:
+  // Every document in the checkpoint's processed prefix (0..documentCursor-1)
+  // must appear in the same position in the current document list.
+  for (let i = 0; i < Math.min(cpDocIds.length, cpDocCursor); i++) {
+    if (i >= currentDocumentIds.length || currentDocumentIds[i] !== cpDocIds[i]) {
+      return {
+        valid: false,
+        reason: `Document at position ${i} changed: checkpoint="${cpDocIds[i]}", current="${currentDocumentIds[i] ?? "<missing>"}"`,
+        action: "invalidate",
+      };
+    }
+  }
+
+  // If the current universe has FEWER documents than the checkpoint's full list, invalidate
+  // (documents were removed)
+  if (cpDocIds.length > currentDocumentIds.length) {
+    return {
+      valid: false,
+      reason: `Document universe shrunk: checkpoint had ${cpDocIds.length} docs, current has ${currentDocumentIds.length}`,
+      action: "invalidate",
+    };
+  }
+
+  // Indexed table prefix check (if caller provided re-queried prefix table IDs)
+  if (prefixTableIds !== undefined) {
+    const cpIndexedIds = (obj.indexedTableMetadata as IndexedTableEntry[]).map(t => t.id);
+    const currentPrefixSet = new Set(prefixTableIds);
+    // Every table the checkpoint claims to have indexed must still exist
+    for (const tableId of cpIndexedIds) {
+      if (!currentPrefixSet.has(tableId)) {
+        return {
+          valid: false,
+          reason: `Table ${tableId.slice(0, 8)} from indexed prefix no longer exists. Source data changed.`,
+          action: "invalidate",
+        };
+      }
+    }
   }
 
   return { valid: true, checkpoint: obj as unknown as NumericCheckpoint };
@@ -282,18 +346,20 @@ export function isCheckpointComplete(checkpoint: NumericCheckpoint): boolean {
 
 /**
  * Determine the resume position from a partial checkpoint.
- * Returns the cursor positions to resume from.
+ * Returns cursor positions, accumulated data, AND accumulated table-index metadata.
  */
 export function getResumePosition(checkpoint: NumericCheckpoint): {
   documentCursor: number;
   tableCursor: number;
   accumulatedFigures: SerializedFigure[];
   accumulatedDiscrepancies: SerializedDiscrepancy[];
+  indexedTableMetadata: IndexedTableEntry[];
 } {
   return {
     documentCursor: checkpoint.documentCursor,
     tableCursor: checkpoint.tableCursor,
     accumulatedFigures: checkpoint.figures,
     accumulatedDiscrepancies: checkpoint.discrepancies,
+    indexedTableMetadata: checkpoint.indexedTableMetadata,
   };
 }

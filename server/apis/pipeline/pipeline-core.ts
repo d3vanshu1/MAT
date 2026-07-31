@@ -2308,6 +2308,8 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
           // Persist checkpoint regardless of status (partial OR complete)
           // so the next resume invocation can pick up where this one left off.
+          // FIX 4 CORRECTIVE: A failed partial-checkpoint write MUST NOT allow
+          // processing to continue as though the cursor were durable.
           if (inlineResult.checkpoint) {
             const cpStatus = inlineResult.partial ? "partial" : "complete";
             try {
@@ -2321,8 +2323,20 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 { label: `Persist numeric checkpoint (${cpStatus})` }
               );
               console.log(`[NumericInline] Persisted ${cpStatus} checkpoint`);
-            } catch {
-              // pipeline_checkpoints table may not exist yet — non-fatal
+            } catch (cpErr) {
+              if (inlineResult.partial) {
+                // FAIL-LOUD: partial checkpoint write failure means the cursor is NOT durable.
+                // If we return in_progress without persisting, the next invocation will redo
+                // the same work (livelock). Throw so the caller sees the failure.
+                const cpMsg = cpErr instanceof Error ? cpErr.message : String(cpErr);
+                throw new Error(
+                  `[NumericInline] FATAL: Failed to persist partial numeric checkpoint. ` +
+                  `Cursor is not durable — cannot guarantee forward progress. ` +
+                  `Underlying error: ${cpMsg}`
+                );
+              }
+              // For complete results, non-fatal — the result is still usable this invocation
+              console.warn(`[NumericInline] Failed to persist complete checkpoint (non-fatal): ${cpErr instanceof Error ? cpErr.message : String(cpErr)}`);
             }
           }
 

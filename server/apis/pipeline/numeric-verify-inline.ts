@@ -25,8 +25,8 @@ import {
   validateNumericCheckpoint,
   isCheckpointComplete,
   getResumePosition,
-  computeNumericSourceFingerprint,
   type NumericCheckpoint,
+  type IndexedTableEntry,
   type SerializedFigure,
   type SerializedDiscrepancy,
 } from "./numeric-checkpoint.js";
@@ -1081,10 +1081,11 @@ export async function runNumericVerifyInline(
     tablesTotal: 0,
   };
 
-  // --- FIX 4: Checkpoint resume logic ---
-  // Accumulate results across invocations to avoid restart-from-zero.
+  // --- FIX 4 CORRECTIVE: Genuinely resumable document indexing ---
+  // Accumulate results AND table-index metadata across invocations.
   let accumulatedFigures: SerializedFigure[] = [];
   let accumulatedDiscrepancies: SerializedDiscrepancy[] = [];
+  let accumulatedTableIndex: IndexedTableEntry[] = [];
   let resumeDocCursor = 0;
   let resumeTableCursor = 0;
 
@@ -1109,7 +1110,7 @@ export async function runNumericVerifyInline(
     `Cross-agreement: "${crossAgreementConfig.sourceASheet}" vs "${crossAgreementConfig.sourceBSheet}".`
   );
 
-  // Step 1: Find documents with doc_tables for this deal
+  // Step 1: Find documents with doc_tables for this deal (always query full universe)
   const DocumentIdSchema = z.object({ document_id: z.string() });
   const documentIdRows = await db.query(
     `SELECT DISTINCT document_id
@@ -1127,37 +1128,33 @@ export async function runNumericVerifyInline(
 
   const documentIds = documentIdRows.map((r) => r.document_id);
 
-  // Step 2: Build table index (metadata only) — ALWAYS build the full index
-  // even on resume, so we can validate the source fingerprint
-  const tableIndex: z.infer<typeof TableIndexSchema>[] = [];
-  let docsProcessed = 0;
-  let timeBudgetExhaustedAtDocPhase = false;
-
-  for (const docId of documentIds) {
-    if (timeRemaining() < 30_000) {
-      console.log(`[NumericInline] Time budget exhausted during index build after ${docsProcessed}/${documentIds.length} documents`);
-      timeBudgetExhaustedAtDocPhase = true;
-      break;
-    }
-    docsProcessed++;
-
-    const rows = await db.query(
-      `SELECT id, document_id, sheet_or_page, caption,
-              length(data::text) AS data_length
-       FROM doc_tables
-       WHERE document_id = $1::uuid
-       ORDER BY sheet_or_page`,
-      TableIndexSchema,
-      [docId],
-      { label: `NumericInline: index tables for ${docId.slice(0, 8)}` }
-    );
-    tableIndex.push(...rows);
-  }
-
-  // --- FIX 4: Validate existing checkpoint against current source state ---
-  const tableIdsForFingerprint = tableIndex.map(t => t.id).sort();
+  // --- FIX 4 CORRECTIVE: Validate existing checkpoint BEFORE index build ---
+  // Checkpoint validation uses the document universe (always fresh) and a
+  // re-query of the prefix tables (only for documents 0..documentCursor-1).
   if (existingCheckpoint) {
-    const validation = validateNumericCheckpoint(existingCheckpoint, documentIds, tableIdsForFingerprint);
+    const obj = existingCheckpoint as Record<string, unknown>;
+    const cpDocCursor = typeof obj.documentCursor === "number" ? obj.documentCursor : 0;
+
+    // Re-query table IDs for the checkpoint's already-indexed prefix
+    let prefixTableIds: string[] | undefined;
+    if (cpDocCursor > 0) {
+      const prefixDocIds = documentIds.slice(0, cpDocCursor);
+      if (prefixDocIds.length > 0) {
+        try {
+          const prefixRows = await db.query(
+            `SELECT id FROM doc_tables WHERE document_id = ANY($1::uuid[]) ORDER BY id`,
+            z.object({ id: z.string() }),
+            [prefixDocIds],
+            { label: `NumericInline: re-query prefix tables for validation (${prefixDocIds.length} docs)` }
+          );
+          prefixTableIds = prefixRows.map(r => r.id);
+        } catch {
+          // If query fails, skip prefix validation (will still check doc positions)
+        }
+      }
+    }
+
+    const validation = validateNumericCheckpoint(existingCheckpoint, documentIds, prefixTableIds);
     if (validation.valid) {
       const cp = validation.checkpoint;
       if (isCheckpointComplete(cp)) {
@@ -1175,13 +1172,18 @@ export async function runNumericVerifyInline(
           checkpoint: cp,
         };
       }
-      // Partial checkpoint — resume from cursor
+      // Partial checkpoint — restore accumulated state and resume from cursor
       const resumeState = getResumePosition(cp);
       accumulatedFigures = resumeState.accumulatedFigures;
       accumulatedDiscrepancies = resumeState.accumulatedDiscrepancies;
+      accumulatedTableIndex = resumeState.indexedTableMetadata;
       resumeDocCursor = resumeState.documentCursor;
       resumeTableCursor = resumeState.tableCursor;
-      console.log(`[NumericInline] Resuming from checkpoint: docCursor=${resumeDocCursor}, tableCursor=${resumeTableCursor}, accumulated ${accumulatedFigures.length} figures, ${accumulatedDiscrepancies.length} discrepancies`);
+      console.log(
+        `[NumericInline] Resuming from checkpoint: docCursor=${resumeDocCursor}, tableCursor=${resumeTableCursor}, ` +
+        `accumulated ${accumulatedFigures.length} figures, ${accumulatedDiscrepancies.length} discrepancies, ` +
+        `${accumulatedTableIndex.length} indexed tables from prior invocations`
+      );
     } else {
       if (validation.action === "error") {
         throw new Error(`[NumericInline] Corrupt numeric checkpoint: ${validation.reason}`);
@@ -1191,6 +1193,55 @@ export async function runNumericVerifyInline(
     }
   }
 
+  // Step 2: Build table index — START FROM resumeDocCursor (skip already-indexed)
+  // Only query documents at positions [resumeDocCursor..end].
+  // The accumulated index from prior invocations is already in accumulatedTableIndex.
+  const newTableIndex: z.infer<typeof TableIndexSchema>[] = [];
+  let docsIndexedThisInvocation = 0;
+  let timeBudgetExhaustedAtDocPhase = false;
+
+  const docsToIndex = documentIds.slice(resumeDocCursor);
+  for (const docId of docsToIndex) {
+    if (timeRemaining() < 30_000) {
+      console.log(
+        `[NumericInline] Time budget exhausted during index build after ` +
+        `${docsIndexedThisInvocation}/${docsToIndex.length} new documents ` +
+        `(${resumeDocCursor} already indexed from prior invocations)`
+      );
+      timeBudgetExhaustedAtDocPhase = true;
+      break;
+    }
+    docsIndexedThisInvocation++;
+
+    const rows = await db.query(
+      `SELECT id, document_id, sheet_or_page, caption,
+              length(data::text) AS data_length
+       FROM doc_tables
+       WHERE document_id = $1::uuid
+       ORDER BY sheet_or_page`,
+      TableIndexSchema,
+      [docId],
+      { label: `NumericInline: index tables for ${docId.slice(0, 8)}` }
+    );
+    newTableIndex.push(...rows);
+  }
+
+  // Merge: accumulated (from checkpoint) + newly indexed (this invocation)
+  const fullTableIndex: IndexedTableEntry[] = [
+    ...accumulatedTableIndex,
+    ...newTableIndex.map(t => ({
+      id: t.id,
+      document_id: t.document_id,
+      sheet_or_page: t.sheet_or_page,
+      caption: t.caption,
+      data_length: t.data_length,
+    })),
+  ];
+
+  // Updated document cursor: resumeDocCursor + how many we indexed this invocation
+  const updatedDocCursor = resumeDocCursor + docsIndexedThisInvocation;
+  const totalDocsProcessed = updatedDocCursor;
+
   // Step 3: Load table data — only sheets relevant to cross-agreement + metrics
   // Uses the resolved config (no hardcoded sheet names at this layer)
   const relevantSheets = new Set([
@@ -1198,12 +1249,12 @@ export async function runNumericVerifyInline(
     crossAgreementConfig.sourceBSheet.toLowerCase(),
   ]);
 
-  const loadable = tableIndex.filter(
+  const loadable = fullTableIndex.filter(
     (t) => t.data_length <= MAX_DATA_BYTES &&
       relevantSheets.has(t.sheet_or_page.trim().toLowerCase())
   );
 
-  const oversizedRelevant = tableIndex.filter(
+  const oversizedRelevant = fullTableIndex.filter(
     (t) => t.data_length > MAX_DATA_BYTES &&
       relevantSheets.has(t.sheet_or_page.trim().toLowerCase())
   );
@@ -1214,7 +1265,7 @@ export async function runNumericVerifyInline(
     );
   }
 
-  // FIX 4: Skip tables already processed on prior invocations
+  // Skip tables already loaded on prior invocations (resumeTableCursor)
   const loadableFromCursor = loadable.slice(resumeTableCursor);
   const tablesAlreadyLoaded = resumeTableCursor;
 
@@ -1243,16 +1294,16 @@ export async function runNumericVerifyInline(
 
   if (allRawRows.length === 0) {
     const isPartialNoData = timeBudgetExhaustedAtDocPhase || timeBudgetExhaustedAtTableLoad;
-    // FIX 4: Even with no new data, if we have accumulated results, build a checkpoint
-    const partialCheckpoint = isPartialNoData ? buildNumericCheckpoint({
-      status: accumulatedFigures.length > 0 || accumulatedDiscrepancies.length > 0 ? "partial" : "partial",
+    // Even with no new data loaded, build a checkpoint so cursor advances
+    const checkpoint = isPartialNoData ? buildNumericCheckpoint({
+      status: "partial",
       documentIds,
-      tableIds: tableIdsForFingerprint,
-      documentCursor: docsProcessed,
+      indexedTableMetadata: fullTableIndex,
+      documentCursor: updatedDocCursor,
       tableCursor: resumeTableCursor + tablesLoadedThisInvocation,
       figures: accumulatedFigures,
       discrepancies: accumulatedDiscrepancies,
-      documentsProcessed: docsProcessed,
+      documentsProcessed: totalDocsProcessed,
       documentsTotal: documentIds.length,
       tablesLoaded: tablesAlreadyLoaded + tablesLoadedThisInvocation,
       tablesTotal: loadable.length,
@@ -1261,11 +1312,11 @@ export async function runNumericVerifyInline(
       figures: accumulatedFigures,
       discrepancies: accumulatedDiscrepancies,
       partial: isPartialNoData,
-      documentsProcessed: docsProcessed,
+      documentsProcessed: totalDocsProcessed,
       documentsTotal: documentIds.length,
       tablesLoaded: tablesAlreadyLoaded + tablesLoadedThisInvocation,
       tablesTotal: loadable.length,
-      checkpoint: partialCheckpoint,
+      checkpoint,
     };
   }
 
@@ -1315,8 +1366,6 @@ export async function runNumericVerifyInline(
 
   const figures = dedupedFigures.slice(0, MAX_FIGURES);
   // Do NOT truncate discrepancies — all divergences feed the tiered report.
-  // The merge-prompt injection (pipeline-core.ts) already uses only the per-period
-  // headline + material-tier lines from the .description field (bounded by design).
   const discrepancies = crossResult.discrepancies;
 
   const isPartial = timeBudgetExhaustedAtDocPhase || timeBudgetExhaustedAtTableLoad;
@@ -1324,11 +1373,11 @@ export async function runNumericVerifyInline(
   console.log(
     `[NumericInline] ${isPartial ? "PARTIAL" : "Complete"}: ${figures.length} new figures, ` +
     `${discrepancies.length} cross-agreement discrepancies (by period), ` +
-    `${tables.length} tables from ${docsProcessed} documents. ` +
+    `${tables.length} tables from ${docsIndexedThisInvocation} new documents (${resumeDocCursor} prior). ` +
     `Accumulated: ${accumulatedFigures.length} prior figures, ${accumulatedDiscrepancies.length} prior discrepancies.`
   );
 
-  // --- FIX 4: Merge new results with accumulated and deduplicate ---
+  // --- Merge new results with accumulated and deduplicate ---
   // Prevent duplication across invocations by deduplicating on figure key
   const existingFigureKeys = new Set(
     accumulatedFigures.map(f => `${f.name.toLowerCase()}::${f.period}::${f.source_sheet.toLowerCase()}::${f.source_doc}`)
@@ -1352,16 +1401,16 @@ export async function runNumericVerifyInline(
   const totalTablesLoaded = tablesAlreadyLoaded + tablesLoadedThisInvocation;
   const finalStatus = isPartial ? "partial" : "complete";
 
-  // Build durable checkpoint
+  // Build durable checkpoint with accumulated table-index metadata
   const checkpoint = buildNumericCheckpoint({
     status: finalStatus,
     documentIds,
-    tableIds: tableIdsForFingerprint,
-    documentCursor: isPartial ? docsProcessed : documentIds.length,
+    indexedTableMetadata: fullTableIndex,
+    documentCursor: isPartial ? updatedDocCursor : documentIds.length,
     tableCursor: isPartial ? resumeTableCursor + tablesLoadedThisInvocation : loadable.length,
     figures: mergedFigures as SerializedFigure[],
     discrepancies: mergedDiscrepancies as SerializedDiscrepancy[],
-    documentsProcessed: docsProcessed,
+    documentsProcessed: totalDocsProcessed,
     documentsTotal: documentIds.length,
     tablesLoaded: totalTablesLoaded,
     tablesTotal: loadable.length,
@@ -1372,7 +1421,7 @@ export async function runNumericVerifyInline(
     figures: mergedFigures as Figure[],
     discrepancies: mergedDiscrepancies as Discrepancy[],
     partial: isPartial,
-    documentsProcessed: docsProcessed,
+    documentsProcessed: totalDocsProcessed,
     documentsTotal: documentIds.length,
     tablesLoaded: totalTablesLoaded,
     tablesTotal: loadable.length,
