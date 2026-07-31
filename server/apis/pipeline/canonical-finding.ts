@@ -64,7 +64,8 @@ function randomUUID(): string {
 // ---------------------------------------------------------------------------
 
 /** Structured evidence entry. The `metric` and `period` fields enable coordinate-
- *  based resolution in Layer-1 numeric validation (Defect 5). */
+ *  based resolution in Layer-1 numeric validation (Defect 5).
+ *  Fix 9D: Full coordinate fields enable tiered resolution in cited-value-resolver. */
 export const EvidenceItemSchema = z.object({
   figure: z.string(),
   source_doc: z.string(),
@@ -74,6 +75,28 @@ export const EvidenceItemSchema = z.object({
   metric: z.string().optional(),
   /** Period (e.g. "FY2024", "H1 2025") — enables coordinate resolution */
   period: z.string().optional(),
+
+  // --- Fix 9D: Full coordinate fields for cited-value resolution ---
+  /** Source document UUID — enables document-level tier matching */
+  document_id: z.string().optional(),
+  /** Source filename (human-readable) */
+  source_filename: z.string().optional(),
+  /** Document role (e.g. "ic_memo", "financial_model", "cim") */
+  document_role: z.string().optional(),
+  /** Sheet or page identifier (e.g. "P&L", "Sheet1", "Page 3") */
+  sheet_or_page: z.string().optional(),
+  /** Cell or table coordinate (e.g. "B12", "row:Revenue/col:FY2026") */
+  cell_coordinate: z.string().optional(),
+  /** Scope (e.g. "group", "UK", "segment_A") */
+  scope: z.string().optional(),
+  /** Unit descriptor (e.g. "GBP_millions", "percentage", "basis_points") */
+  unit: z.string().optional(),
+  /** Currency code (e.g. "GBP", "USD", "EUR") */
+  currency: z.string().optional(),
+  /** Accounting basis (e.g. "actual", "forecast", "budget") */
+  accounting_basis: z.string().optional(),
+  /** Actual vs. forecast classification */
+  actual_or_forecast: z.string().optional(),
 });
 
 export type EvidenceItem = z.infer<typeof EvidenceItemSchema>;
@@ -479,6 +502,17 @@ function parseEvidenceArray(
     };
     if (typeof obj.metric === "string" && obj.metric) item.metric = obj.metric;
     if (typeof obj.period === "string" && obj.period) item.period = obj.period;
+    // Fix 9D: Preserve full coordinate fields through canonical parse
+    if (typeof obj.document_id === "string" && obj.document_id) item.document_id = obj.document_id;
+    if (typeof obj.source_filename === "string" && obj.source_filename) item.source_filename = obj.source_filename;
+    if (typeof obj.document_role === "string" && obj.document_role) item.document_role = obj.document_role;
+    if (typeof obj.sheet_or_page === "string" && obj.sheet_or_page) item.sheet_or_page = obj.sheet_or_page;
+    if (typeof obj.cell_coordinate === "string" && obj.cell_coordinate) item.cell_coordinate = obj.cell_coordinate;
+    if (typeof obj.scope === "string" && obj.scope) item.scope = obj.scope;
+    if (typeof obj.unit === "string" && obj.unit) item.unit = obj.unit;
+    if (typeof obj.currency === "string" && obj.currency) item.currency = obj.currency;
+    if (typeof obj.accounting_basis === "string" && obj.accounting_basis) item.accounting_basis = obj.accounting_basis;
+    if (typeof obj.actual_or_forecast === "string" && obj.actual_or_forecast) item.actual_or_forecast = obj.actual_or_forecast;
     result.push(item);
   }
   return result.length > 0 ? result : undefined;

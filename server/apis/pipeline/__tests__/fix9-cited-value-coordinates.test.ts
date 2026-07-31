@@ -86,7 +86,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f1",
     evidence: [{
       figure: "£191.2m",
+      source_doc: "",
       verbatim_snippet: "Revenue of £191.2m per the memo",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: MEMO_DOC_ID,
@@ -109,7 +111,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f2",
     evidence: [{
       figure: "£184.4m",
+      source_doc: "",
       verbatim_snippet: "Model shows Revenue of £184.4m",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: MODEL_DOC_ID,
@@ -131,8 +135,8 @@ const figures: VerifiedFigure[] = [
   const results = resolveCitedValues([{
     finding_id: "f3",
     evidence: [
-      { figure: "£191.2m", verbatim_snippet: "Memo: £191.2m", metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID, sheet_or_page: "P&L Summary" },
-      { figure: "£184.4m", verbatim_snippet: "Model: £184.4m", metric: "Revenue", period: "FY2026", document_id: MODEL_DOC_ID, sheet_or_page: "Model Output" },
+      { figure: "£191.2m", source_doc: "", verbatim_snippet: "Memo: £191.2m", verified: false, metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID, sheet_or_page: "P&L Summary" },
+      { figure: "£184.4m", source_doc: "", verbatim_snippet: "Model: £184.4m", verified: false, metric: "Revenue", period: "FY2026", document_id: MODEL_DOC_ID, sheet_or_page: "Model Output" },
     ],
   }], figures);
 
@@ -148,7 +152,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f4",
     evidence: [{
       figure: "£999m",
+      source_doc: "",
       verbatim_snippet: "Revenue of £999m",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: MEMO_DOC_ID,
@@ -170,7 +176,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f5",
     evidence: [{
       figure: "£191.2m",
+      source_doc: "",
       verbatim_snippet: "Model Revenue £191.2m",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: MODEL_DOC_ID, // Wrong doc!
@@ -191,7 +199,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f6",
     evidence: [{
       figure: "£191.2m",
+      source_doc: "",
       verbatim_snippet: "Revenue FY26: £191.2m",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       // No document_id — global match
@@ -212,7 +222,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f7",
     evidence: [{
       figure: "£184.4m",
+      source_doc: "",
       verbatim_snippet: "Cell B12: £184.4m",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: MODEL_DOC_ID,
@@ -235,7 +247,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f8",
     evidence: [{
       figure: "£47.5m",
+      source_doc: "",
       verbatim_snippet: "Revenue of £47.5m",
+      verified: false,
       metric: "Revenue", // Claims Revenue, but value is EBITDA
       period: "FY2026",
       document_id: MEMO_DOC_ID,
@@ -257,7 +271,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f9",
     evidence: [{
       figure: "£184.4m",
+      source_doc: "",
       verbatim_snippet: "FY25 Revenue £184.4m",
+      verified: false,
       metric: "Revenue",
       period: "FY2025",
       document_id: MODEL_DOC_ID,
@@ -279,7 +295,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f10",
     evidence: [{
       figure: "£240m",
+      source_doc: "",
       verbatim_snippet: "Group Revenue £240m",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: "us-doc-003",
@@ -300,7 +318,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "f11",
     evidence: [{
       figure: "25%",
+      source_doc: "",
       verbatim_snippet: "Margin of 25%",
+      verified: false,
       metric: "EBITDA Margin",
       period: "FY2026",
     }],
@@ -318,8 +338,8 @@ const figures: VerifiedFigure[] = [
   const results = resolveCitedValues([{
     finding_id: "f12",
     evidence: [
-      { figure: "£191.2m", verbatim_snippet: "Memo Rev £191.2m", metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID },
-      { figure: "£500m", verbatim_snippet: "Revenue £500m fabricated", metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID },
+      { figure: "£191.2m", source_doc: "", verbatim_snippet: "Memo Rev £191.2m", verified: false, metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID },
+      { figure: "£500m", source_doc: "", verbatim_snippet: "Revenue £500m fabricated", verified: false, metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID },
     ],
   }], figures);
 
@@ -337,14 +357,14 @@ const figures: VerifiedFigure[] = [
   const results = resolveCitedValues([{
     finding_id: "saint-rev",
     evidence: [
-      { figure: "£191.2m", verbatim_snippet: "Memo: £191.2m", metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID },
-      { figure: "£184.4m", verbatim_snippet: "Model: £184.4m", metric: "Revenue", period: "FY2026", document_id: MODEL_DOC_ID },
+      { figure: "£191.2m", source_doc: "", verbatim_snippet: "Memo: £191.2m", verified: false, metric: "Revenue", period: "FY2026", document_id: MEMO_DOC_ID },
+      { figure: "£184.4m", source_doc: "", verbatim_snippet: "Model: £184.4m", verified: false, metric: "Revenue", period: "FY2026", document_id: MODEL_DOC_ID },
     ],
   }, {
     finding_id: "saint-ebitda",
     evidence: [
-      { figure: "£47.5m", verbatim_snippet: "Memo EBITDA: £47.5m", metric: "EBITDA", period: "FY2026", document_id: MEMO_DOC_ID },
-      { figure: "£44.1m", verbatim_snippet: "Model EBITDA: £44.1m", metric: "EBITDA", period: "FY2026", document_id: MODEL_DOC_ID },
+      { figure: "£47.5m", source_doc: "", verbatim_snippet: "Memo EBITDA: £47.5m", verified: false, metric: "EBITDA", period: "FY2026", document_id: MEMO_DOC_ID },
+      { figure: "£44.1m", source_doc: "", verbatim_snippet: "Model EBITDA: £44.1m", verified: false, metric: "EBITDA", period: "FY2026", document_id: MODEL_DOC_ID },
     ],
   }], figures);
 
@@ -362,7 +382,9 @@ const figures: VerifiedFigure[] = [
     finding_id: "false-div",
     evidence: [{
       figure: "£19.5m",
+      source_doc: "",
       verbatim_snippet: "FY26 Revenue £19.5m per IC memo",
+      verified: false,
       metric: "Revenue",
       period: "FY2026",
       document_id: MEMO_DOC_ID,

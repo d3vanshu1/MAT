@@ -30,7 +30,10 @@
  *   v1: Initial cited-value verification (Fix 6 — Commit 2)
  *   v2: Corrective B — tighter flagging (MIN_CITATIONS=1, MISMATCHED_THRESHOLD=0)
  *   v3: Fix 9 — Full coordinate resolution with evidence metadata preservation
+ *   v3.1: Fix 9D — Consume canonical EvidenceItem type directly (schema closure)
  */
+
+import type { EvidenceItem } from "./canonical-finding.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -415,23 +418,8 @@ function findCandidatesByCoordinate(
 // Finding-Level Resolution
 // ---------------------------------------------------------------------------
 
-/** Evidence item type with full coordinates (Fix 9) */
-interface EvidenceItem {
-  figure: string;
-  verbatim_snippet: string;
-  metric?: string;
-  period?: string;
-  // Fix 9 coordinate fields
-  document_id?: string;
-  source_filename?: string;
-  document_role?: string;
-  sheet_or_page?: string;
-  cell_coordinate?: string;
-  scope?: string;
-  unit?: string;
-  currency?: string;
-  accounting_basis?: string;
-}
+// Fix 9D: EvidenceItem is now imported from canonical-finding.ts — fields survive
+// the full pipeline (raw → parse → checkpoint → reload → here) without stripping.
 
 /**
  * Extract all cited numeric values from a finding's fields.

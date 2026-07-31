@@ -138,7 +138,7 @@ console.log("\nTest 7: No matching figure returns unresolved");
 {
   const findings = [{
     finding_id: "test-001",
-    evidence: [{ figure: "£999m", verbatim_snippet: "Total of £999m", verified: false }],
+    evidence: [{ figure: "£999m", source_doc: "", verbatim_snippet: "Total of £999m", verified: false }],
   }];
   const results = resolveCitedValues(findings, FIGURES);
   assertEqual(results[0].citations[0].status, "unresolved", "Unmatched value is unresolved");
@@ -158,6 +158,7 @@ console.log("\nTest 8: Multiple conflicting matches return ambiguous");
     finding_id: "test-002",
     evidence: [{
       figure: "£190m",
+      source_doc: "",
       verbatim_snippet: "Revenue of £190m",
       verified: false,
       metric: "revenue", // matches both "Revenue" figures
@@ -177,6 +178,7 @@ console.log("\nTest 9: Coordinate matching resolves via metric+period");
     finding_id: "test-003",
     evidence: [{
       figure: "£184.4m",
+      source_doc: "",
       verbatim_snippet: "Revenue FY2024: £184.4m",
       verified: false,
       metric: "revenue",
@@ -196,9 +198,9 @@ console.log("\nTest 10: Findings with >50% unresolved citations are flagged");
   const findings = [{
     finding_id: "test-004",
     evidence: [
-      { figure: "£999m", verbatim_snippet: "Unresolvable 1", verified: false },
-      { figure: "£888m", verbatim_snippet: "Unresolvable 2", verified: false },
-      { figure: "£184.4m", verbatim_snippet: "This one resolves", verified: false, metric: "revenue", period: "FY2024" },
+      { figure: "£999m", source_doc: "", verbatim_snippet: "Unresolvable 1", verified: false },
+      { figure: "£888m", source_doc: "", verbatim_snippet: "Unresolvable 2", verified: false },
+      { figure: "£184.4m", source_doc: "", verbatim_snippet: "This one resolves", verified: false, metric: "revenue", period: "FY2024" },
     ],
   }];
   const results = resolveCitedValues(findings, FIGURES);
@@ -216,7 +218,7 @@ console.log("\nTest 11: Findings with <2 citations are not flagged");
   const findings = [{
     finding_id: "test-005",
     evidence: [
-      { figure: "£999m", verbatim_snippet: "Single unresolved", verified: false },
+      { figure: "£999m", source_doc: "", verbatim_snippet: "Single unresolved", verified: false },
     ],
   }];
   const results = resolveCitedValues(findings, FIGURES);
@@ -234,17 +236,17 @@ console.log("\nTest 12: applyVerificationToFindings sets numeric_unverified");
       finding_id: "test-006",
       numeric_unverified: undefined as boolean | undefined,
       evidence: [
-        { figure: "£999m", verbatim_snippet: "x", verified: false },
-        { figure: "£888m", verbatim_snippet: "y", verified: false },
-        { figure: "£777m", verbatim_snippet: "z", verified: false },
+        { figure: "£999m", source_doc: "", verbatim_snippet: "x", verified: false },
+        { figure: "£888m", source_doc: "", verbatim_snippet: "y", verified: false },
+        { figure: "£777m", source_doc: "", verbatim_snippet: "z", verified: false },
       ],
     },
     {
       finding_id: "test-007",
       numeric_unverified: undefined as boolean | undefined,
       evidence: [
-        { figure: "£184.4m", verbatim_snippet: "revenue", verified: false, metric: "revenue", period: "FY2024" },
-        { figure: "£57m", verbatim_snippet: "ebitda", verified: false, metric: "ebitda", period: "FY2024" },
+        { figure: "£184.4m", source_doc: "", verbatim_snippet: "revenue", verified: false, metric: "revenue", period: "FY2024" },
+        { figure: "£57m", source_doc: "", verbatim_snippet: "ebitda", verified: false, metric: "ebitda", period: "FY2024" },
       ],
     },
   ];

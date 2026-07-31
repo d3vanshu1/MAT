@@ -46,7 +46,7 @@ console.log("Test 1: One fabricated Revenue FY26 citation is flagged");
 {
   const findings = [{
     finding_id: "f1",
-    evidence: [{ figure: "£999m", verbatim_snippet: "Revenue was £999m", metric: "Revenue", period: "FY2026" }],
+    evidence: [{ figure: "£999m", source_doc: "", verbatim_snippet: "Revenue was £999m", verified: false, metric: "Revenue", period: "FY2026" }],
   }];
 
   const results = resolveCitedValues(findings, SAINT_FIGURES);
@@ -62,7 +62,7 @@ console.log("Test 2: One correct £184.4m citation verifies");
 {
   const findings = [{
     finding_id: "f2",
-    evidence: [{ figure: "£184.4m", verbatim_snippet: "Revenue was £184.4m", metric: "Revenue", period: "FY2026" }],
+    evidence: [{ figure: "£184.4m", source_doc: "", verbatim_snippet: "Revenue was £184.4m", verified: false, metric: "Revenue", period: "FY2026" }],
   }];
 
   const results = resolveCitedValues(findings, SAINT_FIGURES);
@@ -80,7 +80,7 @@ console.log("Test 3: One ambiguous citation is flagged");
   // A citation that matches the metric+period will find both → ambiguous
   const findings = [{
     finding_id: "f3",
-    evidence: [{ figure: "£188m", verbatim_snippet: "Revenue was £188m", metric: "Revenue", period: "FY2026" }],
+    evidence: [{ figure: "£188m", source_doc: "", verbatim_snippet: "Revenue was £188m", verified: false, metric: "Revenue", period: "FY2026" }],
   }];
 
   const results = resolveCitedValues(findings, SAINT_FIGURES);
@@ -97,7 +97,7 @@ console.log("Test 4: Same value in another metric/period does not verify");
   // £184.4m exists for Revenue FY2026, but this citation says EBITDA FY2026
   const findings = [{
     finding_id: "f4",
-    evidence: [{ figure: "£184.4m", verbatim_snippet: "EBITDA was £184.4m", metric: "EBITDA", period: "FY2026" }],
+    evidence: [{ figure: "£184.4m", source_doc: "", verbatim_snippet: "EBITDA was £184.4m", verified: false, metric: "EBITDA", period: "FY2026" }],
   }];
 
   const results = resolveCitedValues(findings, SAINT_FIGURES);
@@ -120,7 +120,7 @@ console.log("Test 5: GBP does not verify against USD figure");
 
   const findings = [{
     finding_id: "f5",
-    evidence: [{ figure: "£184.4m", verbatim_snippet: "Revenue was £184.4m", metric: "Revenue", period: "FY2026" }],
+    evidence: [{ figure: "£184.4m", source_doc: "", verbatim_snippet: "Revenue was £184.4m", verified: false, metric: "Revenue", period: "FY2026" }],
   }];
 
   const results = resolveCitedValues(findings, usdFigures);
@@ -137,7 +137,7 @@ console.log("Test 6: Value-only global matching is not used");
   // Citation with no metric/period context — just a bare number
   const findings = [{
     finding_id: "f6",
-    evidence: [{ figure: "£42.1m", verbatim_snippet: "The amount was £42.1m", metric: undefined as any, period: undefined as any }],
+    evidence: [{ figure: "£42.1m", source_doc: "", verbatim_snippet: "The amount was £42.1m", verified: false, metric: undefined as any, period: undefined as any }],
   }];
 
   const results = resolveCitedValues(findings, SAINT_FIGURES);
@@ -165,7 +165,7 @@ console.log("Test 7: Known Saint divergences remain verified as genuine discrepa
 
   const findings = [{
     finding_id: "f7",
-    evidence: [{ figure: "£191.2m", verbatim_snippet: "Memo states Revenue £191.2m", metric: "Revenue", period: "FY2026" }],
+    evidence: [{ figure: "£191.2m", source_doc: "", verbatim_snippet: "Memo states Revenue £191.2m", verified: false, metric: "Revenue", period: "FY2026" }],
   }];
 
   const results = resolveCitedValues(findings, singleSourceFigures);
