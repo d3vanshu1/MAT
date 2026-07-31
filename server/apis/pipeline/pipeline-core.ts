@@ -602,7 +602,10 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
     console.log(`[pipeline:postMerge] Suppressed ${suppressedCount} fabricated arithmetic finding(s)`);
   }
 
-  // === Stage 2: Layer-1 Numeric Divergence Validation (Defect 5) ===
+  // === Stage 2: Layer-1 Numeric Divergence Diagnostics (Fix 22/24 closure) ===
+  // DEMOTED to diagnostics-only: this stage may FLAG findings with a diagnostic marker
+  // but must NOT approve citations, alter severity, or change category.
+  // The cited-value resolver (Stage 2.5) is the sole numeric verification authority.
   if (numericReport && numericReport.figures.length > 0) {
     const verifiedFigureLookup = new Map<string, string>();
     for (const fig of numericReport.figures as Array<Record<string, unknown>>) {
@@ -624,7 +627,7 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       return patterns ? [...new Set(patterns)] : [];
     };
 
-    let numDivDemotedCount = 0;
+    let numDivDiagnosticCount = 0;
     findings = findings.map(f => {
       if (f.finding_kind !== "data_divergence") return f;
       if (f.numeric_unverified === false) return f;
@@ -646,8 +649,6 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
 
       let resolvedCount = 0;
       let unresolvedCount = 0;
-      const resolvedPeriods: string[] = [];
-      const resolvedMetrics: string[] = [];
 
       for (const cited of citedFigures) {
         let matched = false;
@@ -655,9 +656,6 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         if (cited.metric && cited.period) {
           const coordKey = `${cited.metric.toLowerCase().trim()}|||${cited.period.toLowerCase().trim()}`;
           if (verifiedFigureLookup.has(coordKey)) {
-            const [metric, period] = coordKey.split("|||");
-            resolvedMetrics.push(metric);
-            resolvedPeriods.push(period);
             matched = true;
             resolvedCount++;
           }
@@ -668,16 +666,13 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         const normalizedCited = normalizeNumericForLookup(cited.value);
         if (!normalizedCited) { unresolvedCount++; continue; }
 
-        for (const [key, verifiedValue] of verifiedFigureLookup.entries()) {
+        for (const [, verifiedValue] of verifiedFigureLookup.entries()) {
           const normalizedVerified = normalizeNumericForLookup(verifiedValue);
           if (!normalizedVerified) continue;
 
           if (normalizedCited === normalizedVerified ||
               normalizedCited.replace(/[MmBb]$/, "000000").replace(/[Kk]$/, "000") ===
               normalizedVerified.replace(/[MmBb]$/, "000000").replace(/[Kk]$/, "000")) {
-            const [metric, period] = key.split("|||");
-            resolvedMetrics.push(metric);
-            resolvedPeriods.push(period);
             matched = true;
             resolvedCount++;
             break;
@@ -686,37 +681,21 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         if (!matched) unresolvedCount++;
       }
 
+      // Fix 22/24 closure: DIAGNOSTIC ONLY — do not alter severity or category.
+      // Attach a diagnostic marker for downstream auditing but leave the finding intact.
       if (resolvedCount === 0) {
-        numDivDemotedCount++;
+        numDivDiagnosticCount++;
         return {
           ...f,
-          numeric_unverified: true,
-          severity: "info" as const,
-          category: "housekeeping" as const,
-          full_analysis: `[UNVERIFIED_DIVERGENCE] ${f.full_analysis}`,
+          _stage2_diagnostic: "unresolved_divergence" as const,
         };
-      }
-
-      if (resolvedCount >= 2) {
-        const uniqueMetrics = [...new Set(resolvedMetrics)];
-        const uniquePeriods = [...new Set(resolvedPeriods)];
-        if (uniqueMetrics.length === 1 && uniquePeriods.length > 1) {
-          numDivDemotedCount++;
-          return {
-            ...f,
-            numeric_unverified: true,
-            severity: "info" as const,
-            category: "housekeeping" as const,
-            full_analysis: `[PERIOD_MISMATCH] ${f.full_analysis}`,
-          };
-        }
       }
 
       return f;
     });
 
-    if (numDivDemotedCount > 0) {
-      console.log(`[pipeline:postMerge] Numeric divergence validation: demoted ${numDivDemotedCount} finding(s)`);
+    if (numDivDiagnosticCount > 0) {
+      console.log(`[pipeline:postMerge] Stage 2 diagnostic: ${numDivDiagnosticCount} finding(s) flagged (no authority change)`);
     }
   }
 
@@ -2651,21 +2630,29 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               { label: "Fast-path: mark run completed" }
             );
 
-            // Post-completion audit (non-blocking)
+            // Post-completion audit (Fix 22/24: post-quality text, bounded timeout)
             try {
-              runPostCompletionAudit({
-                runId,
-                moduleId,
-                reportText: finalNode.text,
-                findings: finalFindings,
-              });
+              const auditResult = await Promise.race([
+                Promise.resolve(runPostCompletionAudit({
+                  runId,
+                  moduleId,
+                  reportText: fullReport,
+                  findings: finalFindings,
+                })),
+                new Promise<{ flagged: boolean; warnings: string[] }>((resolve) =>
+                  setTimeout(() => resolve({ flagged: false, warnings: [] }), 10_000)
+                ),
+              ]);
+              if (auditResult.flagged) {
+                console.warn(`[pipeline:fast-path] Post-completion audit flagged ${auditResult.warnings.length} pattern(s)`);
+              }
             } catch (auditErr) {
               console.warn(`[pipeline:fast-path] Post-completion audit failed (non-fatal):`, auditErr);
             }
 
-            // Cap mergedText for response
+            // Fix 22/24: mergedText from post-quality fullReport
             const MAX_MERGED_TEXT_CHARS = 150_000;
-            let mergedText = finalNode.text;
+            let mergedText = fullReport;
             if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
               mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport]";
             }
@@ -4927,22 +4914,32 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     { label: "Mark run completed (guarded)" }
   );
 
-  // Post-completion framing audit (non-blocking, logs warnings)
+  // Post-completion framing audit (Fix 22/24: receives post-quality text, awaited with bounded timeout)
   try {
-    runPostCompletionAudit({
-      runId,
-      moduleId,
-      reportText: finalNode.text,
-      findings: finalFindings,
-    });
+    const auditResult = await Promise.race([
+      Promise.resolve(runPostCompletionAudit({
+        runId,
+        moduleId,
+        reportText: fullReport,
+        findings: finalFindings,
+      })),
+    new Promise<{ flagged: boolean; warnings: string[] }>((resolve) =>
+      setTimeout(() => resolve({ flagged: false, warnings: [] }), 10_000)
+    ),
+  ]);
+  if (auditResult.flagged) {
+    console.warn(`[pipeline] Post-completion audit flagged ${auditResult.warnings.length} pattern(s)`);
+    }
   } catch (auditErr) {
     console.warn(`[pipeline] Post-completion audit failed (non-fatal):`, auditErr);
   }
 
-  // Cap mergedText to prevent response payload from exceeding platform limits.
-  // FormatReport truncates to its own context window anyway.
+  // Fix 22/24 closure: mergedText is derived from the post-quality fullReport,
+  // NOT from finalNode.text (which is pre-quality raw merge output).
+  // This ensures returned text excludes findings removed by quality stages
+  // and includes reconciliation/absence-verification revisions.
   const MAX_MERGED_TEXT_CHARS = 150_000;
-  let mergedText = finalNode.text;
+  let mergedText = fullReport;
   if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
     console.warn(`[pipeline] mergedText ${mergedText.length} chars exceeds ${MAX_MERGED_TEXT_CHARS} cap — truncating`);
     mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport — full content available in DB checkpoints]";
