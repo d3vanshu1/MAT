@@ -1715,29 +1715,53 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               mode: "reload",
               source: `fast-path checkpoint L${topCheckpoint.tree_level}:N0 findings_json`,
             });
-            if (fpParseResult.malformed_count > 0) {
-              console.error(`[pipeline:fast-path] ${fpParseResult.malformed_count} malformed findings in checkpoint — run may produce incomplete output`);
-            }
+
+            // RC3: Fail closed — do NOT proceed to formatting/persistence with a reduced set.
+            // If any persisted finding has identity corruption (malformed or invalid), abort
+            // the fast path and let the pipeline fall through to the normal merge path.
+            if (fpParseResult.malformed_count > 0 || fpParseResult.invalid.length > 0) {
+              const malformedMsg = fpParseResult.malformed_count > 0
+                ? `${fpParseResult.malformed_count} malformed`
+                : "";
+              const invalidMsg = fpParseResult.invalid.length > 0
+                ? `${fpParseResult.invalid.length} identity-invalid`
+                : "";
+              const detail = [malformedMsg, invalidMsg].filter(Boolean).join(", ");
+              console.error(`[pipeline:fast-path] ABORT: checkpoint findings have corruption (${detail}) — cannot produce valid output from reduced set. Falling through to normal merge path.`);
+              // Fall through — do NOT use the corrupt checkpoint.
+              // The code below this if-block won't execute; we skip to normal pipeline.
+            } else {
             const findings = fpParseResult.findings;
 
             // Reconstruct housekeeping findings from checkpoint merged_json if available
             let fastPathHousekeeping: MergedFinding[] = [];
-            try {
-              const [cpRow] = await ctx.integrations.db.query(
-                `SELECT merged_json->'housekeepingFindings' AS hk FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index = 0 LIMIT 1`,
-                z.object({ hk: z.any().nullable() }),
-                [runId, topCheckpoint.tree_level],
-                { label: "Fast-path: load housekeeping from checkpoint" }
-              );
-              if (cpRow?.hk && Array.isArray(cpRow.hk)) {
-                // RC1: canonical parser for housekeeping reload
-                const hkReloadResult = parseCanonicalFindings(cpRow.hk, {
-                  mode: "reload",
-                  source: `fast-path checkpoint L${topCheckpoint.tree_level}:N0 housekeepingFindings`,
-                });
-                fastPathHousekeeping = hkReloadResult.findings;
+            {
+              try {
+                const [cpRow] = await ctx.integrations.db.query(
+                  `SELECT merged_json->'housekeepingFindings' AS hk FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index = 0 LIMIT 1`,
+                  z.object({ hk: z.any().nullable() }),
+                  [runId, topCheckpoint.tree_level],
+                  { label: "Fast-path: load housekeeping from checkpoint" }
+                );
+                if (cpRow?.hk && Array.isArray(cpRow.hk)) {
+                  // RC1: canonical parser for housekeeping reload
+                  const hkReloadResult = parseCanonicalFindings(cpRow.hk, {
+                    mode: "reload",
+                    source: `fast-path checkpoint L${topCheckpoint.tree_level}:N0 housekeepingFindings`,
+                  });
+                  // RC3: Fail closed on housekeeping identity corruption too
+                  if (hkReloadResult.malformed_count > 0 || hkReloadResult.invalid.length > 0) {
+                    console.error(`[pipeline:fast-path] Housekeeping findings have corruption (${hkReloadResult.invalid.length} invalid, ${hkReloadResult.malformed_count} malformed) — discarding all housekeeping to prevent partial data`);
+                    fastPathHousekeeping = [];
+                  } else {
+                    fastPathHousekeeping = hkReloadResult.findings;
+                  }
+                }
+              } catch (hkErr: any) {
+                console.error(`[pipeline:fast-path] Failed to load housekeeping: ${hkErr.message}`);
+                fastPathHousekeeping = [];
               }
-            } catch { /* non-fatal — proceed without housekeeping */ }
+            }
 
             const finalNode = {
               text: buildMergedText(topCheckpoint.executive_header, findings),
@@ -1918,6 +1942,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               truncatedMerges: 0,
               firstError: null,
             };
+            } // end else (fast-path findings valid)
           }
         }
       }
