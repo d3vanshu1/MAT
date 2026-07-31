@@ -81,6 +81,7 @@ import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from ".
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
+import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -1672,29 +1673,44 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     if (topCheckpoint) {
       // Only fast-path if: (a) it's a real success node (not error), (b) it's the
       // sole node at its level (node_index=0 and no siblings), (c) no output saved yet
-      // RC10: Also check for a round manifest with finalRootId confirming this is genuinely final
+      // FIX 2: Require an explicit, validated root-completion manifest. The singleton
+      // sibling-count heuristic is removed — it cannot prove all branches reached root.
       if (!topCheckpoint.has_error && topCheckpoint.node_index === 0) {
-        // Verify via manifest first (preferred), fall back to sibling-count heuristic
+        // Load the root-completion manifest (node_index = -2, distinguished from round manifests at -1)
         let isFinalNode = false;
-        const [manifest] = await ctx.integrations.db.query(
-          `SELECT merged_json FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index = -1 AND status = 'manifest' LIMIT 1`,
+        const [rootManifestRow] = await ctx.integrations.db.query(
+          `SELECT merged_json FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index = -2 AND status = 'root_manifest' LIMIT 1`,
           z.object({ merged_json: z.any() }),
           [runId, topCheckpoint.tree_level],
-          { label: "Fast-path: check round manifest for final root" }
+          { label: "Fast-path: load root-completion manifest" }
         );
-        if (manifest?.merged_json) {
-          const m = typeof manifest.merged_json === "string" ? JSON.parse(manifest.merged_json) : manifest.merged_json;
-          isFinalNode = m.isFinalRound === true && m.finalRootId === `${topCheckpoint.tree_level}:0` && m.roundStatus !== "incomplete";
-        }
-        if (!isFinalNode) {
-          // Fallback: sibling count (legacy checkpoints without manifests)
-          const [siblingCount] = await ctx.integrations.db.query(
-            `SELECT COUNT(*)::int AS cnt FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index >= 0`,
-            z.object({ cnt: z.coerce.number() }),
-            [runId, topCheckpoint.tree_level],
-            { label: "Fast-path: verify single final node (fallback)" }
-          );
-          isFinalNode = siblingCount != null && siblingCount.cnt === 1;
+
+        if (rootManifestRow?.merged_json) {
+          const rawManifest = typeof rootManifestRow.merged_json === "string"
+            ? JSON.parse(rootManifestRow.merged_json)
+            : rootManifestRow.merged_json;
+          const manifest = deserializeManifest(rawManifest);
+          if (manifest) {
+            // Manifest found — validate root identity matches the checkpoint we're considering
+            if (manifest.rootCheckpointId === `${topCheckpoint.tree_level}:0` &&
+                manifest.pipelineVersion === getPipelineVersion()) {
+              isFinalNode = true;
+              console.log(`[pipeline:fast-path] Root manifest validated: ${manifest.expectedLeafCount} leaves, gen=${manifest.completionGeneration}`);
+            } else {
+              // Stale or mismatched manifest — do NOT engage fast path
+              console.warn(
+                `[pipeline:fast-path] Root manifest REJECTED: rootCheckpointId=${manifest.rootCheckpointId} vs expected=${topCheckpoint.tree_level}:0, ` +
+                `version=${manifest.pipelineVersion.slice(0, 8)} vs current=${getPipelineVersion().slice(0, 8)} — falling through to rebuild`
+              );
+            }
+          } else {
+            console.warn(`[pipeline:fast-path] Root manifest failed deserialization — falling through to rebuild`);
+          }
+        } else {
+          // No root-completion manifest: legacy checkpoint without manifest.
+          // FIX 2: Legacy checkpoints use recovery (resume/rebuild) rather than inferred completion.
+          // Do NOT fall back to sibling-count heuristic.
+          console.warn(`[pipeline:fast-path] No root-completion manifest found at level ${topCheckpoint.tree_level} — legacy checkpoint, falling through to recovery path`);
         }
 
         if (isFinalNode) {
@@ -3110,6 +3126,9 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   let accumulatedFindings: MergedFinding[] = [];
   let accumulatedHousekeeping: MergedFinding[] = [];
 
+  // FIX 2: Track round summaries for root-completion manifest
+  const mergeRoundSummaries: RoundSummary[] = [];
+
   // Build numeric block for merge
   // Architecture: figures = trustworthy cell values (flag where narrative disagrees);
   //               discrepancies = cross-agreement only (live vs frozen reference sheet).
@@ -3616,6 +3635,15 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     failedChunks += mergeFailedGroups;
     if (!firstError && mergeFirstError) firstError = mergeFirstError;
 
+    // FIX 2: Record round summary for root-completion manifest
+    mergeRoundSummaries.push({
+      round: currentRound,
+      inputNodes: nodes.length,
+      outputNodes: groups.length,
+      singletonCarries: groups.filter(g => g.members.length === 1).length,
+      failedGroups: mergeFailedGroups,
+    });
+
     // Persist merge-round manifest: records expected vs actual state for this round
     // so that resume/recovery can verify completeness without "highest node_index=0" heuristics
     const roundManifest = {
@@ -3641,6 +3669,55 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     );
 
     nodes = nextNodes;
+  }
+
+  // --- FIX 2: Persist root-completion manifest after merge tree fully reduces ---
+  // Only persisted when the tree reduced normally (nodes.length <= 1 after loop).
+  // Single-node trees (nodes.length === 1 before loop) get a trivial manifest.
+  if (nodes.length === 1 && analysisResults.length > 1) {
+    // Build leaf nodes from the analysis results that fed the merge tree
+    // Map chunk_index → document_id from the routed array
+    const leafNodes = buildLeafNodes(analysisResults.map(a => ({
+      documentId: routed[a.chunkIndex]?.document_id ?? `unknown-${a.chunkIndex}`,
+      chunkIndex: a.chunkIndex,
+      extraction: a.extraction,
+    })));
+    const extractions = analysisResults.map(a => ({
+      documentId: routed[a.chunkIndex]?.document_id ?? `unknown-${a.chunkIndex}`,
+      chunkIndex: a.chunkIndex,
+    }));
+
+    // Determine completion generation (monotonically increasing per run)
+    let completionGeneration = 1;
+    try {
+      const [genRow] = await ctx.integrations.db.query(
+        `SELECT MAX((merged_json->>'completionGeneration')::int) AS gen
+         FROM merge_checkpoints
+         WHERE module_run_id = $1 AND node_index = -2 AND status = 'root_manifest'`,
+        z.object({ gen: z.coerce.number().nullable() }),
+        [runId],
+        { label: "Load max completionGeneration for root manifest" }
+      );
+      if (genRow?.gen) completionGeneration = genRow.gen + 1;
+    } catch { /* table may not have existing manifests — use 1 */ }
+
+    const rootManifest = buildMergeRootManifest({
+      leafNodes,
+      extractions,
+      rootLevel: currentRound,
+      rootNodeIndex: 0,
+      completionGeneration,
+      roundSummary: mergeRoundSummaries,
+    });
+
+    await ctx.integrations.db.execute(
+      `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
+       VALUES ($1, $2, -2, $3::jsonb, 'manifest', $4, 'root_manifest')
+       ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $3::jsonb, prompt_version = $4, status = 'root_manifest'`,
+      [runId, currentRound, JSON.stringify(rootManifest), currentVersion],
+      { label: `Persist root-completion manifest (gen=${completionGeneration}, leaves=${leafNodes.length})` }
+    );
+    console.log(`[pipeline] Root-completion manifest persisted: ${leafNodes.length} leaves, round=${currentRound}, gen=${completionGeneration}`);
   }
 
   // --- Step 5: Complete ---
