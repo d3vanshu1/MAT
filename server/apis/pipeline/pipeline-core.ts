@@ -3154,8 +3154,13 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     }
 
     if (!reconCheckpointLoaded) {
-      const claimsTimeBudget = Math.min(120_000, Math.max(0, timeRemaining() - 120_000));
-      if (claimsTimeBudget >= 60_000) {
+      // FIX: Reduced headroom from 120s to 45s to prevent permanent livelock.
+      // With 200s total budget, Steps 0.4–0.7 consume 40-60s before reaching here.
+      // Old formula: min(120k, max(0, remaining-120k)) — required 180s remaining (impossible).
+      // New formula: min(120k, max(0, remaining-45k)) — requires 75s remaining (achievable).
+      // Claims extraction is checkpoint-resumable, so partial results are safe.
+      const claimsTimeBudget = Math.min(120_000, Math.max(0, timeRemaining() - 45_000));
+      if (claimsTimeBudget >= 30_000) {
         try {
           // Check for persisted claims ledger from prior invocation
           let claimsLedger: ClaimsLedger | null = null;
@@ -3209,26 +3214,27 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               // pipeline_checkpoints table may not exist yet — non-fatal
             }
 
-            // If ledger is incomplete, return in_progress — do NOT proceed to reconciliation
+            // FIX: Incomplete ledger was previously a hard block (returned in_progress),
+            // causing a permanent livelock when claims extraction cannot finish within
+            // the time budget. Claims are a quality enrichment — skip and proceed to
+            // analysis rather than blocking the entire pipeline indefinitely.
             if (!claimsLedger.complete || claimsLedger.extraction_metadata.pending > 0) {
               console.log(
-                `[ClaimsExtraction] Incomplete ledger (${claimsLedger.extraction_metadata.pending} pending) — returning in_progress`
+                `[ClaimsExtraction] Incomplete ledger (${claimsLedger.extraction_metadata.pending} pending) — skipping claims (non-blocking)`
               );
-              return {
-                status: "in_progress",
-                runId,
-                phase: "claims_extraction",
-                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                result: null,
-              };
+              // Reset ledger so downstream reconciliation is skipped cleanly
+              claimsLedger = { complete: false, claims: [], extraction_metadata: { pending: 0, completed: 0, total: 0 } } as any;
             }
           }
 
           // Step 0.8b: Reconcile claims against verified figures
           // Only proceed if ledger is genuinely complete
-          if (claimsLedger.complete && claimsLedger.claims.length > 0 && numericReport) {
-            const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 90_000));
-            if (reconTimeBudget >= 45_000) {
+          if (claimsLedger && claimsLedger.complete && claimsLedger.claims.length > 0 && numericReport) {
+            // FIX: Reduced headroom from 90s to 30s and min threshold from 45s to 20s.
+            // Same livelock pattern as outer gate: reconciliation is a quality enrichment
+            // that should not block the entire pipeline.
+            const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 30_000));
+            if (reconTimeBudget >= 20_000) {
               // Corrective E2: Prior-run DB query removed. Supersession is now
               // performed against current-run findings in runPostMergePipeline() Stage 3.5,
               // where current finding IDs are available as deletion targets.
@@ -3259,26 +3265,13 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 // pipeline_checkpoints table may not exist yet — non-fatal
               }
             } else {
-              // Budget exhausted before reconciliation could start — return in_progress
-              console.log(`[ClaimsReconciliation] Insufficient time for reconciliation (${reconTimeBudget}ms) — returning in_progress`);
-              return {
-                status: "in_progress",
-                runId: runId!,
-                phase: "reconciliation",
-                progress: {
-                  analysisTotal: 0,
-                  analysisCompleted: 0,
-                  mergeRound: 0,
-                  mergeTotal: 0,
-                },
-                result: null,
-                failedChunks: 0,
-                truncatedChunks: 0,
-                truncatedMerges: 0,
-                firstError: null,
-              };
+              // Budget exhausted before reconciliation could start.
+              // FIX: Skip reconciliation rather than blocking the pipeline.
+              // The claims ledger is persisted; reconciliation can be run on the next
+              // invocation if it resumes, or the pipeline proceeds without it.
+              console.log(`[ClaimsReconciliation] Insufficient time for reconciliation (${reconTimeBudget}ms) — SKIPPING (non-blocking)`);
             }
-          } else if (claimsLedger.claims.length === 0) {
+          } else if (claimsLedger && claimsLedger.claims.length === 0) {
             console.log(`[ClaimsReconciliation] No claims extracted — skipping reconciliation`);
           } else {
             console.log(`[ClaimsReconciliation] No numeric report available — skipping reconciliation`);
@@ -3288,24 +3281,13 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           console.warn(`[ClaimsReconciliation] Failed (non-fatal): ${msg}`);
         }
       } else {
-        // Budget exhausted before claims extraction could start — return in_progress
-        console.log(`[ClaimsReconciliation] Insufficient time budget (${claimsTimeBudget}ms) — returning in_progress`);
-        return {
-          status: "in_progress",
-          runId: runId!,
-          phase: "reconciliation",
-          progress: {
-            analysisTotal: 0,
-            analysisCompleted: 0,
-            mergeRound: 0,
-            mergeTotal: 0,
-          },
-          result: null,
-          failedChunks: 0,
-          truncatedChunks: 0,
-          truncatedMerges: 0,
-          firstError: null,
-        };
+        // Budget exhausted before claims extraction could start.
+        // FIX: Do NOT return in_progress here — skip claims and proceed to analysis.
+        // Claims reconciliation is a quality enrichment, not a prerequisite for the
+        // contradiction_check module's core analysis. Blocking the entire pipeline
+        // on claims causes a permanent livelock when prior steps consume the budget.
+        // The reconciliation result will be null, and the merge prompt proceeds without it.
+        console.log(`[ClaimsReconciliation] Insufficient time budget (${claimsTimeBudget}ms) — SKIPPING claims (non-blocking) and proceeding to analysis`);
       }
     }
   }
