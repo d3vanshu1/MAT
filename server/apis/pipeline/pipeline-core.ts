@@ -68,7 +68,7 @@ import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
 import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
-import { runReconciliation, type ReconciliationResult, type ReconciliationFinding, type SupersessionCandidate } from "./claims-reconciliation.js";
+import { runReconciliation, validateSupersessionProof, type ReconciliationResult, type ReconciliationFinding, type SupersessionCandidate } from "./claims-reconciliation.js";
 import { runCleanParsedTextPhase } from "./clean-parsed-text.js";
 import { runWebResearchPhase } from "./web-research-phase.js";
 import { upsertModuleOutput } from "../modules/upsert-module-output.js";
@@ -1123,6 +1123,86 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       for (const d of consolidationDiagnostics) {
         console.log(`  [rejected] ${d.claim_id_or_issue_key}: "${d.finding_a_title}" vs "${d.finding_b_title}" — ${d.reason}`);
       }
+    }
+  }
+
+  // === Stage 3.5: Current-Run Supersession Proof (Corrective E2) ===
+  // Build candidates from the CURRENT findings array so that supersedes_finding_ids
+  // contains only IDs that exist in the current run. Prior-run IDs are never used
+  // as deletion targets since finding IDs are not stable across independent runs.
+  if (claimsReconciliation && claimsReconciliation.findings.length > 0) {
+    let supersessionDiagnosticsCount = 0;
+
+    // Build SupersessionCandidate[] from current findings using ALL evidence entries
+    const currentCandidates: SupersessionCandidate[] = [];
+    for (const f of findings) {
+      if (!f.finding_id || !f.evidence || f.evidence.length === 0) continue;
+
+      // Create one candidate per evidence entry × source_doc combination
+      // This evaluates ALL coordinates, not just evidence[0]
+      const sourceDocs = f.source_docs && f.source_docs.length > 0 ? f.source_docs : [""];
+      for (const ev of f.evidence) {
+        const metric = ev.metric ?? "";
+        const scope = ev.scope ?? "";
+        const period = ev.period ?? "";
+        // Skip entries with no useful coordinate data
+        if (!metric && !scope && !period) continue;
+        for (const doc of sourceDocs) {
+          currentCandidates.push({
+            canonical_id: f.finding_id,
+            claim_metric: metric,
+            claim_scope: scope,
+            claim_period: period,
+            claim_source_doc: doc,
+          });
+        }
+      }
+    }
+
+    if (currentCandidates.length > 0) {
+      console.log(`[pipeline:postMerge:Supersession] Built ${currentCandidates.length} candidates from ${findings.length} current-run findings`);
+
+      for (const rf of claimsReconciliation.findings) {
+        // Only data_divergence and cross_version findings are eligible
+        if (rf.finding_kind !== "data_divergence" && rf.finding_kind !== "cross_version") continue;
+
+        // Skip findings without a claim (cross_version from discrepancies lack claims)
+        if (!rf.claim) continue;
+
+        // Filter candidates from same source doc — the validator applies strict coordinate gates
+        const eligibleCandidates = currentCandidates.filter(c =>
+          c.claim_source_doc === rf.claim.source_doc
+        );
+
+        if (eligibleCandidates.length === 0) continue;
+
+        // Invoke deterministic proof validator
+        const proofResult = validateSupersessionProof(
+          { claim: rf.claim, finding_kind: rf.finding_kind },
+          eligibleCandidates,
+        );
+
+        // Always attach diagnostic when candidates were considered
+        if (proofResult.diagnostic) {
+          rf._supersession_diagnostic = proofResult.diagnostic;
+          supersessionDiagnosticsCount++;
+        }
+
+        // Populate supersedes_finding_ids ONLY when proof is entirely proven
+        if (proofResult.proven_ids.length > 0 && proofResult.ambiguous_ids.length === 0) {
+          rf.supersedes_finding_ids = proofResult.proven_ids;
+          console.log(
+            `[pipeline:postMerge:Supersession] Finding "${rf.title}" PROVES supersession of ${proofResult.proven_ids.length} current finding(s): [${proofResult.proven_ids.join(", ")}]`
+          );
+        } else if (proofResult.ambiguous_ids.length > 0) {
+          // Append-only: no supersession IDs assigned — fail-closed on ambiguity
+          console.log(
+            `[pipeline:postMerge:Supersession] Finding "${rf.title}" has AMBIGUOUS candidates (${proofResult.ambiguous_ids.length}) — append-only`
+          );
+        }
+      }
+
+      console.log(`[pipeline:postMerge:Supersession] Complete: ${supersessionDiagnosticsCount} diagnostic(s) emitted`);
     }
   }
 
@@ -3165,58 +3245,9 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           if (claimsLedger.complete && claimsLedger.claims.length > 0 && numericReport) {
             const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 90_000));
             if (reconTimeBudget >= 45_000) {
-              // Corrective E: Load prior canonical findings for supersession validation.
-              // Query the most recent completed run's canonical findings for this deal+module.
-              let priorCandidates: SupersessionCandidate[] = [];
-              try {
-                const priorRows = await ctx.integrations.db.query(
-                  `SELECT mo.findings
-                   FROM module_outputs mo
-                   JOIN module_runs mr ON mr.id = mo.module_run_id
-                   WHERE mr.deal_id = $1
-                     AND mr.module_id = $2
-                     AND mr.id != $3
-                     AND mr.status = 'completed'
-                   ORDER BY mr.completed_at DESC NULLS LAST
-                   LIMIT 1`,
-                  z.object({ findings: z.any() }),
-                  [dealId, moduleId, runId],
-                  { label: "Load prior canonical findings for supersession" }
-                );
-                if (priorRows.length > 0 && Array.isArray(priorRows[0].findings)) {
-                  priorCandidates = (priorRows[0].findings as any[])
-                    .filter((f: any) => f.finding_id && f.claim_ids && f.claim_ids.length > 0)
-                    .flatMap((f: any) => {
-                      // Extract claim coordinates from evidence or top-level fields
-                      const metric = f.evidence?.[0]?.metric ?? (f as any).metric ?? "";
-                      const scope = f.evidence?.[0]?.scope ?? (f as any).scope ?? "";
-                      const period = f.evidence?.[0]?.period ?? (f as any).period ?? "";
-                      const sourceDocs = f.source_docs ?? [];
-                      // Create one candidate per source doc for this finding
-                      if (sourceDocs.length === 0) {
-                        return [{
-                          canonical_id: f.finding_id,
-                          claim_metric: metric,
-                          claim_scope: scope,
-                          claim_period: period,
-                          claim_source_doc: "",
-                        }];
-                      }
-                      return sourceDocs.map((doc: string) => ({
-                        canonical_id: f.finding_id,
-                        claim_metric: metric,
-                        claim_scope: scope,
-                        claim_period: period,
-                        claim_source_doc: doc,
-                      }));
-                    });
-                  console.log(`[ClaimsReconciliation:Supersession] Built ${priorCandidates.length} candidates from prior run`);
-                }
-              } catch {
-                // module_outputs or module_runs table may not exist yet — non-fatal
-                console.log(`[ClaimsReconciliation:Supersession] Could not load prior findings — skipping supersession`);
-              }
-
+              // Corrective E2: Prior-run DB query removed. Supersession is now
+              // performed against current-run findings in runPostMergePipeline() Stage 3.5,
+              // where current finding IDs are available as deletion targets.
               claimsReconciliation = await runReconciliation(
                 ctx,
                 claimsLedger,
@@ -3224,7 +3255,6 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 numericReport.discrepancies ?? [],
                 startTime,
                 reconTimeBudget,
-                priorCandidates.length > 0 ? priorCandidates : undefined,
               );
               console.log(
                 `[ClaimsReconciliation] ${claimsReconciliation.findings.length} findings ` +

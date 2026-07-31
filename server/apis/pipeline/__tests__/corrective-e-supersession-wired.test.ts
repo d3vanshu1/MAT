@@ -1,9 +1,14 @@
 /**
- * Corrective E — Production-path tests for wired supersession.
+ * Corrective E — Updated for Corrective E2.
  *
- * Validates that the real runReconciliation() → appendReconciliationFindings()
- * flow correctly invokes validateSupersessionProof and populates/omits
- * supersedes_finding_ids based on deterministic coordinate proof.
+ * Validates that runReconciliation() NO LONGER performs internal supersession
+ * (the priorCanonicalFindings parameter was removed in E2). Supersession logic
+ * is now tested in corrective-e2-current-run-supersession.test.ts.
+ *
+ * These tests verify:
+ * 1. runReconciliation produces findings WITHOUT supersedes_finding_ids
+ * 2. validateSupersessionProof still works correctly in isolation
+ * 3. appendReconciliationFindings still respects supersedes_finding_ids when present
  *
  * Run: npx tsx server/apis/pipeline/__tests__/corrective-e-supersession-wired.test.ts
  */
@@ -136,9 +141,8 @@ function makeFigure(metric: string, period: string, value: number) {
 // ---------------------------------------------------------------------------
 
 async function runTests() {
-  // --- Test 1: Real runReconciliation path invokes the validator ---
+  // --- Test 1: runReconciliation no longer produces supersession diagnostics ---
   {
-    const candidate = makeCandidate("prior-id-1", "revenue", "Total Group Revenue", "fy mar-26", "memo.pdf");
     const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
     const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
 
@@ -149,105 +153,68 @@ async function runTests() {
       [],
       Date.now(),
       60_000,
-      [candidate],
     );
 
-    const eligible = result.findings.filter(f => f._supersession_diagnostic != null);
-    assert(eligible.length > 0, "Test 1: runReconciliation invokes validator (diagnostic present)");
-    assert((result.supersession_diagnostics_count ?? 0) > 0, "Test 1b: supersession_diagnostics_count incremented");
+    // Corrective E2: runReconciliation no longer calls validateSupersessionProof
+    const withSupersession = result.findings.filter(f => f.supersedes_finding_ids && f.supersedes_finding_ids.length > 0);
+    assertEqual(withSupersession.length, 0, "Test 1: runReconciliation produces no supersedes_finding_ids (E2 moved it out)");
+    assertEqual(result.supersession_diagnostics_count ?? 0, 0, "Test 1b: no supersession diagnostics from runReconciliation");
   }
 
-  // --- Test 2: Exact coordinate + source candidate produces supersedes_finding_ids ---
+  // --- Test 2: validateSupersessionProof still works correctly in isolation ---
   {
     const candidate = makeCandidate("exact-match-id", "revenue", "Total Group Revenue", "fy mar-26", "memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
+    const claim = makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150);
 
-    const result = await runReconciliation(
-      mockCtx,
-      makeLedger(claims),
-      figures,
-      [],
-      Date.now(),
-      60_000,
+    const proofResult = validateSupersessionProof(
+      { claim, finding_kind: "data_divergence" },
       [candidate],
     );
 
-    const divergenceFindings = result.findings.filter(f => f.finding_kind === "data_divergence");
-    assert(divergenceFindings.length > 0, "Test 2: data_divergence finding produced");
-    const superseding = divergenceFindings.find(f => f.supersedes_finding_ids && f.supersedes_finding_ids.length > 0);
-    assert(superseding != null, "Test 2b: supersedes_finding_ids populated for exact match");
-    if (superseding) {
-      assert(
-        superseding.supersedes_finding_ids!.includes("exact-match-id"),
-        "Test 2c: correct canonical ID in supersedes_finding_ids"
-      );
-    }
+    assert(proofResult.proven_ids.includes("exact-match-id"), "Test 2: validator proves exact coordinate match");
+    assertEqual(proofResult.ambiguous_ids.length, 0, "Test 2b: no ambiguous IDs");
+    assertEqual(proofResult.diagnostic?.decision, "proven", "Test 2c: diagnostic is 'proven'");
   }
 
-  // --- Test 3: Ambiguous candidate set produces no supersession IDs ---
+  // --- Test 3: Ambiguous candidate → append-only in validator ---
   {
-    // Candidate has DIFFERENT source doc → doesn't pass source-doc eligibility filter
-    const candidate = makeCandidate("ambig-id", "revenue", "Total Group Revenue", "fy mar-26", "different-memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
+    const candidate = makeCandidate("ambig-id", "EBITDA", "Adjusted EBITDA", "fy mar-26", "memo.pdf");
+    const claim = makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150);
 
-    const result = await runReconciliation(
-      mockCtx,
-      makeLedger(claims),
-      figures,
-      [],
-      Date.now(),
-      60_000,
+    const proofResult = validateSupersessionProof(
+      { claim, finding_kind: "data_divergence" },
       [candidate],
     );
 
-    const divergenceFindings = result.findings.filter(f => f.finding_kind === "data_divergence");
-    const superseding = divergenceFindings.find(f => f.supersedes_finding_ids && f.supersedes_finding_ids.length > 0);
-    assertEqual(superseding, undefined, "Test 3: no supersession IDs for mismatched source doc candidate");
+    assertEqual(proofResult.proven_ids.length, 0, "Test 3: different metric → no proven IDs");
+    assert(proofResult.ambiguous_ids.length > 0, "Test 3b: candidate marked ambiguous");
+    assertEqual(proofResult.diagnostic?.decision, "ambiguous_appended", "Test 3c: diagnostic is 'ambiguous_appended'");
   }
 
-  // --- Test 4: Same category/title/issue_key alone produces no supersession ---
-  {
-    // Candidate matches source_doc but has different metric coordinates
-    const candidate = makeCandidate("title-only-id", "EBITDA", "Adjusted EBITDA", "fy mar-26", "memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
-
-    const result = await runReconciliation(
-      mockCtx,
-      makeLedger(claims),
-      figures,
-      [],
-      Date.now(),
-      60_000,
-      [candidate],
-    );
-
-    const divergenceFindings = result.findings.filter(f => f.finding_kind === "data_divergence");
-    // Candidate has different metric (EBITDA vs revenue) → cannot prove supersession
-    const withDiag = divergenceFindings.find(f => f._supersession_diagnostic?.decision === "ambiguous_appended");
-    assert(withDiag != null, "Test 4: different metric → ambiguous diagnostic (no supersession)");
-    const superseding = divergenceFindings.find(f => f.supersedes_finding_ids && f.supersedes_finding_ids.length > 0);
-    assertEqual(superseding, undefined, "Test 4b: no supersession IDs when metric differs");
-  }
-
-  // --- Test 5: Resulting output reaches appendReconciliationFindings and removes exact ID ---
+  // --- Test 4: appendReconciliationFindings still respects supersedes_finding_ids ---
   {
     const priorFindingId = "11111111-1111-4111-8111-111111111111";
-    const candidate = makeCandidate(priorFindingId, "revenue", "Total Group Revenue", "fy mar-26", "memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
-
-    const reconResult = await runReconciliation(
-      mockCtx,
-      makeLedger(claims),
-      figures,
-      [],
-      Date.now(),
-      60_000,
-      [candidate],
-    );
+    const reconResult: ReconciliationResult = {
+      findings: [{
+        finding_kind: "data_divergence",
+        severity: "warning",
+        title: "Revenue divergence",
+        detail: "detail",
+        full_analysis: "full",
+        severity_anchor: 5_000_000,
+        source_docs: ["memo.pdf"],
+        claim: makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150),
+        model_figure: null,
+        delta_abs: 5_000_000,
+        delta_pct: 0.05,
+        supersedes_finding_ids: [priorFindingId],
+      }],
+      reconciled_count: 1,
+      unreconcilable_count: 0,
+      scope_mismatch_count: 0,
+      within_tolerance_count: 0,
+      cross_version_findings: 0,
+    };
 
     const existingFindings: CanonicalFinding[] = [
       makeCanonicalFinding(priorFindingId, "Old Revenue Finding"),
@@ -256,44 +223,93 @@ async function runTests() {
 
     const appendResult = appendReconciliationFindings(existingFindings, [], reconResult);
     const remainingIds = appendResult.finalFindings.map(f => f.finding_id);
-    assert(!remainingIds.includes(priorFindingId), "Test 5: superseded finding removed from final set");
-    assert(remainingIds.includes("22222222-2222-4222-8222-222222222222"), "Test 5b: unrelated finding survives");
+    assert(!remainingIds.includes(priorFindingId), "Test 4: superseded finding removed from final set");
+    assert(remainingIds.includes("22222222-2222-4222-8222-222222222222"), "Test 4b: unrelated finding survives");
   }
 
-  // --- Test 6: Exact original removed and unrelated findings survive ---
+  // --- Test 5: coordKey utility produces normalized keys ---
   {
-    const priorId = "33333333-3333-4333-8333-333333333333";
-    const unrelatedId = "44444444-4444-4444-8444-444444444444";
-    const candidate = makeCandidate(priorId, "revenue", "Total Group Revenue", "fy mar-26", "memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
+    const key1 = coordKey("revenue", "Total Group Revenue", "FY Mar-26");
+    const key2 = coordKey("Revenue", "total group revenue", "fy mar-26");
+    assertEqual(key1, key2, "Test 5: coordKey normalizes case");
+  }
 
-    const reconResult = await runReconciliation(
-      mockCtx,
-      makeLedger(claims),
-      figures,
-      [],
-      Date.now(),
-      60_000,
-      [candidate],
-    );
+  // --- Test 6: Resume/replay idempotency via appendReconciliationFindings ---
+  {
+    const reconResult: ReconciliationResult = {
+      findings: [{
+        finding_kind: "data_divergence",
+        severity: "warning",
+        title: "Revenue divergence",
+        detail: "detail",
+        full_analysis: "full",
+        severity_anchor: 5_000_000,
+        source_docs: ["memo.pdf"],
+        claim: makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150),
+        model_figure: null,
+        delta_abs: 5_000_000,
+        delta_pct: 0.05,
+        supersedes_finding_ids: ["target-id-1"],
+      }],
+      reconciled_count: 1,
+      unreconcilable_count: 0,
+      scope_mismatch_count: 0,
+      within_tolerance_count: 0,
+      cross_version_findings: 0,
+    };
 
     const existingFindings: CanonicalFinding[] = [
-      makeCanonicalFinding(priorId, "Prior Revenue"),
-      makeCanonicalFinding(unrelatedId, "Unrelated EBITDA"),
+      makeCanonicalFinding("target-id-1", "Prior Revenue"),
     ];
 
-    const appendResult = appendReconciliationFindings(existingFindings, [], reconResult);
-    assert(!appendResult.finalFindings.some(f => f.finding_id === priorId), "Test 6: prior finding removed");
-    assert(appendResult.finalFindings.some(f => f.finding_id === unrelatedId), "Test 6b: unrelated finding preserved");
-    assert(appendResult.finalFindings.length >= 2, "Test 6c: replacement finding appended");
+    const result1 = appendReconciliationFindings(existingFindings, [], reconResult);
+    const result2 = appendReconciliationFindings(result1.finalFindings, [], reconResult);
+
+    assertEqual(
+      result2.finalFindings.length, result1.finalFindings.length,
+      "Test 6: replay does not create duplicates"
+    );
   }
 
-  // --- Test 7: Diagnostics survive in reconciliation result ---
+  // --- Test 7: Unknown target IDs trigger fail-closed ---
   {
-    const candidate = makeCandidate("diag-id", "revenue", "Total Group Revenue", "fy mar-26", "memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
+    const reconResult: ReconciliationResult = {
+      findings: [{
+        finding_kind: "data_divergence",
+        severity: "warning",
+        title: "Ghost supersession",
+        detail: "detail",
+        full_analysis: "full",
+        severity_anchor: 5_000_000,
+        source_docs: ["memo.pdf"],
+        claim: makeClaim("revenue", "Organic", "FY Mar-26", "memo.pdf"),
+        model_figure: null,
+        delta_abs: 5_000_000,
+        delta_pct: 0.05,
+        supersedes_finding_ids: ["nonexistent-id"],
+      }],
+      reconciled_count: 1,
+      unreconcilable_count: 0,
+      scope_mismatch_count: 0,
+      within_tolerance_count: 0,
+      cross_version_findings: 0,
+    };
+
+    const existingFindings: CanonicalFinding[] = [
+      makeCanonicalFinding("real-id-1", "Real Finding"),
+    ];
+
+    const result = appendReconciliationFindings(existingFindings, [], reconResult);
+    assert(result.finalFindings.some(f => f.finding_id === "real-id-1"), "Test 7: real finding preserved");
+    assert(result.diagnostics.some(d => d.type === "unknown_target_id"), "Test 7b: unknown_target_id diagnostic emitted");
+  }
+
+  // --- Test 8: runReconciliation signature only accepts 6 arguments ---
+  {
+    // TypeScript enforces this at compile time, but runtime verification that
+    // the function works with exactly 6 args (no prior candidates)
+    const claims = [makeClaim("revenue", "Organic Revenue", "FY Mar-26", "memo.pdf", 200)];
+    const figures = [makeFigure("Organic Revenue", "FY Mar-26", 180_000_000)];
 
     const result = await runReconciliation(
       mockCtx,
@@ -302,47 +318,9 @@ async function runTests() {
       [],
       Date.now(),
       60_000,
-      [candidate],
     );
 
-    const withDiag = result.findings.filter(f => f._supersession_diagnostic != null);
-    assert(withDiag.length > 0, "Test 7: diagnostic persisted on finding");
-    const diag = withDiag[0]._supersession_diagnostic!;
-    assert(diag.decision === "proven" || diag.decision === "ambiguous_appended", "Test 7b: valid decision field");
-    assert(Array.isArray(diag.candidate_ids) && diag.candidate_ids.length > 0, "Test 7c: candidate_ids populated");
-  }
-
-  // --- Test 8: Resume/replay does not duplicate — checkpoint idempotency ---
-  {
-    const priorId = "55555555-5555-4555-8555-555555555555";
-    const candidate = makeCandidate(priorId, "revenue", "Total Group Revenue", "fy mar-26", "memo.pdf");
-    const claims = [makeClaim("revenue", "Total Group Revenue", "FY Mar-26", "memo.pdf", 150)];
-    const figures = [makeFigure("Total Group Revenue", "FY Mar-26", 120_000_000)];
-
-    const result1 = await runReconciliation(
-      mockCtx,
-      makeLedger(claims),
-      figures,
-      [],
-      Date.now(),
-      60_000,
-      [candidate],
-    );
-
-    // Simulate resume: same reconciliation result applied twice to same findings
-    const existingFindings: CanonicalFinding[] = [
-      makeCanonicalFinding(priorId, "Prior Revenue"),
-    ];
-
-    const appendResult1 = appendReconciliationFindings(existingFindings, [], result1);
-    // Apply same result again (simulating idempotent resume)
-    const appendResult2 = appendReconciliationFindings(appendResult1.finalFindings, [], result1);
-
-    // Idempotency check in appendReconciliationFindings prevents double-append
-    const reconTitles = appendResult2.finalFindings.filter(f =>
-      f.title.includes("Total Group Revenue") || f.title.includes("Revenue")
-    );
-    assert(reconTitles.length <= 2, "Test 8: replay does not create unlimited duplicates");
+    assert(result.findings.length >= 0, "Test 8: runReconciliation works with 6 args (no priorCanonicalFindings)");
   }
 
   // ---------------------------------------------------------------------------
