@@ -246,6 +246,105 @@ interface MaterialityResult {
   demotedCount: number;
 }
 
+// ---------------------------------------------------------------------------
+// Corrective F: Exported structured identity utilities for testing
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract deterministic identity from a finding's evidence and structured_impact.
+ * Exported for unit testing — production code uses the inline closure version.
+ */
+export function extractFindingIdentity(finding: any): Map<string, Set<string>> {
+  const identity = new Map<string, Set<string>>();
+
+  const addValue = (key: string, value: string | undefined | null) => {
+    if (!value || typeof value !== "string") return;
+    const normalized = value.toLowerCase().trim();
+    if (!normalized) return;
+    if (!identity.has(key)) identity.set(key, new Set());
+    identity.get(key)!.add(normalized);
+  };
+
+  addValue("metric", finding.metric);
+  addValue("period", finding.period);
+  addValue("scope", finding.scope);
+  addValue("entity", finding.entity);
+  addValue("currency", finding.currency);
+  addValue("accounting_basis", finding.accounting_basis);
+  addValue("actual_vs_forecast", finding.actual_vs_forecast);
+  addValue("legal_clause", finding.legal_clause);
+  addValue("legal_consequence", finding.legal_consequence);
+  addValue("impact_type", finding.impact_type);
+  addValue("contract_provision", finding.contract_provision);
+
+  const evidence = finding.evidence;
+  if (Array.isArray(evidence)) {
+    for (const ev of evidence) {
+      if (!ev || typeof ev !== "object") continue;
+      addValue("metric", ev.metric);
+      addValue("period", ev.period);
+      addValue("scope", ev.scope);
+      addValue("entity", ev.entity);
+      addValue("currency", ev.currency);
+      addValue("accounting_basis", ev.accounting_basis);
+      addValue("actual_vs_forecast", ev.actual_or_forecast);
+      addValue("sheet_or_page", ev.sheet_or_page);
+      addValue("cell_coordinate", ev.cell_coordinate);
+      addValue("source_doc", ev.source_doc);
+      addValue("unit", ev.unit);
+    }
+  }
+
+  const impacts = finding.structured_impact;
+  if (Array.isArray(impacts)) {
+    for (const imp of impacts) {
+      if (!imp || typeof imp !== "object") continue;
+      addValue("impact_type", imp.role);
+      addValue("currency", imp.currency);
+      addValue("source_doc", imp.source_doc);
+      addValue("source_coordinate", imp.source_coordinate);
+    }
+  }
+
+  addValue("finding_kind", finding.finding_kind);
+  return identity;
+}
+
+/**
+ * Check if two structured identities are compatible.
+ * Exported for unit testing.
+ */
+export function findingIdentitiesAreCompatible(
+  idA: Map<string, Set<string>>,
+  idB: Map<string, Set<string>>,
+): boolean {
+  const allDims = new Set([...idA.keys(), ...idB.keys()]);
+  const discriminatingDims = new Set([
+    "metric", "period", "scope", "entity", "sheet_or_page",
+    "cell_coordinate", "legal_clause", "legal_consequence",
+    "contract_provision", "accounting_basis", "actual_vs_forecast",
+  ]);
+
+  for (const dim of allDims) {
+    const setA = idA.get(dim);
+    const setB = idB.get(dim);
+    if ((!setA || setA.size === 0) && (!setB || setB.size === 0)) continue;
+    if (setA && setA.size > 0 && setB && setB.size > 0) {
+      let hasOverlap = false;
+      for (const v of setA) {
+        if (setB.has(v)) { hasOverlap = true; break; }
+      }
+      if (!hasOverlap) return false;
+      continue;
+    }
+    if (discriminatingDims.has(dim)) {
+      const populatedSet = setA && setA.size > 0 ? setA : setB;
+      if (populatedSet && populatedSet.size > 0) return false;
+    }
+  }
+  return true;
+}
+
 export function enforceMaterialityGate(
   findings: MergedFinding[],
   housekeepingFindings: MergedFinding[]
@@ -651,15 +750,150 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       if (ra !== rb) parent[ra] = rb;
     }
 
-    // Fix 17: Compatibility gate — two findings may only merge when they share
-    // a claim_id or issue_key AND have no material conflict in structured identity fields.
-    // A material conflict in any gate field blocks consolidation.
+    // Fix 17 + Corrective F: Compatibility gate — two findings may only merge when
+    // they share a claim_id or issue_key AND have no material conflict in structured
+    // identity fields. Corrective F extends this to derive identity from evidence[]
+    // and structured_impact[] arrays when top-level fields are absent.
+
+    /**
+     * Extract deterministic identity from evidence and structured_impact arrays.
+     * Returns a map of identity dimension → Set of canonical values.
+     * Absence of a dimension returns an empty set (neutral — not blocking).
+     */
+    function extractStructuredIdentity(finding: any): Map<string, Set<string>> {
+      const identity = new Map<string, Set<string>>();
+
+      const addValue = (key: string, value: string | undefined | null) => {
+        if (!value || typeof value !== "string") return;
+        const normalized = value.toLowerCase().trim();
+        if (!normalized) return;
+        if (!identity.has(key)) identity.set(key, new Set());
+        identity.get(key)!.add(normalized);
+      };
+
+      // Top-level fields (already checked by gate fields but also contributed to identity)
+      addValue("metric", finding.metric);
+      addValue("period", finding.period);
+      addValue("scope", finding.scope);
+      addValue("entity", finding.entity);
+      addValue("currency", finding.currency);
+      addValue("accounting_basis", finding.accounting_basis);
+      addValue("actual_vs_forecast", finding.actual_vs_forecast);
+      addValue("legal_clause", finding.legal_clause);
+      addValue("legal_consequence", finding.legal_consequence);
+      addValue("impact_type", finding.impact_type);
+      addValue("contract_provision", finding.contract_provision);
+
+      // Evidence array: extract metric, period, scope, sheet, cell, unit, currency, accounting_basis
+      const evidence = finding.evidence;
+      if (Array.isArray(evidence)) {
+        for (const ev of evidence) {
+          if (!ev || typeof ev !== "object") continue;
+          addValue("metric", ev.metric);
+          addValue("period", ev.period);
+          addValue("scope", ev.scope);
+          addValue("entity", ev.entity);
+          addValue("currency", ev.currency);
+          addValue("accounting_basis", ev.accounting_basis);
+          addValue("actual_vs_forecast", ev.actual_or_forecast);
+          addValue("sheet_or_page", ev.sheet_or_page);
+          addValue("cell_coordinate", ev.cell_coordinate);
+          addValue("source_doc", ev.source_doc);
+          addValue("unit", ev.unit);
+        }
+      }
+
+      // Structured impact array: extract type, currency, source coordinates
+      const impacts = finding.structured_impact;
+      if (Array.isArray(impacts)) {
+        for (const imp of impacts) {
+          if (!imp || typeof imp !== "object") continue;
+          addValue("impact_type", imp.role);
+          addValue("currency", imp.currency);
+          addValue("source_doc", imp.source_doc);
+          addValue("source_coordinate", imp.source_coordinate);
+        }
+      }
+
+      // Finding kind is always top-level
+      addValue("finding_kind", finding.finding_kind);
+
+      return identity;
+    }
+
+    /**
+     * Corrective F: Check if two structured identities are compatible.
+     *
+     * Rules:
+     * - If BOTH identities have values for a dimension and those value-sets
+     *   have NO overlap, they conflict → incompatible.
+     * - If only ONE identity has values for a dimension (asymmetric), and
+     *   the other finding has NO structured identity for that dimension at all,
+     *   that finding's absence is NOT proof of compatibility when the populated
+     *   identity has discriminating content. This prevents bridge merges.
+     * - Absence on BOTH sides is neutral (compatible).
+     */
+    function identitiesAreCompatible(idA: Map<string, Set<string>>, idB: Map<string, Set<string>>): boolean {
+      // Check all dimensions present in either identity
+      const allDims = new Set([...idA.keys(), ...idB.keys()]);
+
+      // Discriminating dimensions — fields that carry enough specificity to block merge
+      const discriminatingDims = new Set([
+        "metric", "period", "scope", "entity", "sheet_or_page",
+        "cell_coordinate", "legal_clause", "legal_consequence",
+        "contract_provision", "accounting_basis", "actual_vs_forecast",
+      ]);
+
+      for (const dim of allDims) {
+        const setA = idA.get(dim);
+        const setB = idB.get(dim);
+
+        // Both absent → neutral
+        if ((!setA || setA.size === 0) && (!setB || setB.size === 0)) continue;
+
+        // Both present → check overlap
+        if (setA && setA.size > 0 && setB && setB.size > 0) {
+          // If there's ANY overlap, they're compatible on this dimension
+          let hasOverlap = false;
+          for (const v of setA) {
+            if (setB.has(v)) { hasOverlap = true; break; }
+          }
+          if (!hasOverlap) return false; // Material conflict
+          continue;
+        }
+
+        // Asymmetric: one has values, the other doesn't.
+        // For discriminating dimensions, asymmetry with a populated identity
+        // on one side is NOT compatible — prevents bridge merges where one
+        // finding has specific coordinates and the other is generic.
+        if (discriminatingDims.has(dim)) {
+          const populatedSet = setA && setA.size > 0 ? setA : setB;
+          // Only block if the populated set has genuinely discriminating content
+          // (not a single generic value that everything would match)
+          if (populatedSet && populatedSet.size > 0) {
+            return false;
+          }
+        }
+        // Non-discriminating dimensions (finding_kind, currency, unit, source_doc, etc.)
+        // remain neutral on asymmetry
+      }
+
+      return true;
+    }
+
+    /** Consolidation incompatibility diagnostics (Corrective F) */
+    const consolidationDiagnostics: Array<{
+      claim_id_or_issue_key: string;
+      finding_a_title: string;
+      finding_b_title: string;
+      reason: string;
+    }> = [];
+
     function areCompatibleForMerge(idxA: number, idxB: number): boolean {
       const a = findings[idxA] as any;
       const b = findings[idxB] as any;
 
-      // Gate fields: if BOTH findings have a non-empty value for a field,
-      // and those values differ materially, they are incompatible.
+      // Gate 1: Original top-level gate fields (Fix 17)
       const gateFields: Array<{ key: string; normalize?: (v: string) => string }> = [
         { key: "finding_kind" },
         { key: "metric", normalize: (v: string) => v.toLowerCase().trim() },
@@ -688,6 +922,15 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         if (normA !== normB) return false; // Material conflict → incompatible
       }
 
+      // Gate 2 (Corrective F): Derive identity from evidence/structured_impact
+      // and check for structural incompatibility even when top-level fields are absent.
+      const idA = extractStructuredIdentity(a);
+      const idB = extractStructuredIdentity(b);
+
+      if (!identitiesAreCompatible(idA, idB)) {
+        return false;
+      }
+
       return true; // No material conflicts → compatible
     }
 
@@ -701,11 +944,35 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
         if (existing) { existing.push(i); } else { claimToIndices.set(normalized, [i]); }
       }
     }
-    for (const indices of claimToIndices.values()) {
+
+    // Corrective F: Helper to check compatibility against all members of a cluster.
+    // Prevents transitive bridge merges where A-B and B-C are compatible but A-C conflict.
+    function isCompatibleWithEntireCluster(candidateIdx: number, clusterRoot: number): boolean {
+      // Find all members currently in this cluster
+      for (let j = 0; j < findings.length; j++) {
+        if (find(j) === clusterRoot) {
+          if (!areCompatibleForMerge(candidateIdx, j)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    for (const [claimId, indices] of claimToIndices.entries()) {
       for (let k = 1; k < indices.length; k++) {
-        // Fix 17: Only union if compatible
-        if (areCompatibleForMerge(indices[0], indices[k])) {
+        // Corrective F: Validate against ALL existing cluster members (not just indices[0])
+        const targetRoot = find(indices[0]);
+        if (isCompatibleWithEntireCluster(indices[k], targetRoot)) {
           union(indices[0], indices[k]);
+        } else {
+          // Emit diagnostic: shared claim_id rejected due to structural incompatibility
+          consolidationDiagnostics.push({
+            claim_id_or_issue_key: `claim_id:${claimId}`,
+            finding_a_title: (findings[indices[0]] as any).title ?? "unknown",
+            finding_b_title: (findings[indices[k]] as any).title ?? "unknown",
+            reason: "Shared claim_id rejected: structured identity conflict detected in evidence/structured_impact",
+          });
         }
       }
     }
@@ -719,11 +986,20 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
       const existing = issueKeyToIndices.get(normalized);
       if (existing) { existing.push(i); } else { issueKeyToIndices.set(normalized, [i]); }
     }
-    for (const indices of issueKeyToIndices.values()) {
+    for (const [issueKey, indices] of issueKeyToIndices.entries()) {
       for (let k = 1; k < indices.length; k++) {
-        // Fix 17: Only union if compatible
-        if (areCompatibleForMerge(indices[0], indices[k])) {
+        // Corrective F: Validate against ALL existing cluster members
+        const targetRoot = find(indices[0]);
+        if (isCompatibleWithEntireCluster(indices[k], targetRoot)) {
           union(indices[0], indices[k]);
+        } else {
+          // Emit diagnostic: shared issue_key rejected due to structural incompatibility
+          consolidationDiagnostics.push({
+            claim_id_or_issue_key: `issue_key:${issueKey}`,
+            finding_a_title: (findings[indices[0]] as any).title ?? "unknown",
+            finding_b_title: (findings[indices[k]] as any).title ?? "unknown",
+            reason: "Shared issue_key rejected: structured identity conflict detected in evidence/structured_impact",
+          });
         }
       }
     }
@@ -840,6 +1116,13 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
     const consolidatedCount = preConsolidationCount - findings.length;
     if (consolidatedCount > 0) {
       console.log(`[pipeline:postMerge] Global consolidation: ${preConsolidationCount} → ${findings.length} findings (collapsed ${consolidatedCount} duplicates)`);
+    }
+    // Corrective F: Log diagnostics when claim_id or issue_key sharing was rejected
+    if (consolidationDiagnostics.length > 0) {
+      console.log(`[pipeline:postMerge] Consolidation rejected ${consolidationDiagnostics.length} shared key(s) due to structured identity conflict`);
+      for (const d of consolidationDiagnostics) {
+        console.log(`  [rejected] ${d.claim_id_or_issue_key}: "${d.finding_a_title}" vs "${d.finding_b_title}" — ${d.reason}`);
+      }
     }
   }
 
