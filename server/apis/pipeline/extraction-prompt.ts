@@ -114,8 +114,9 @@ Required top-level keys:
  * This is deterministic (based only on stable document identity + position)
  * and collision-free across documents.
  *
- * @param documentId REQUIRED in production paths. Must be a non-empty UUID.
+ * @param documentId REQUIRED in production paths. Must be a non-empty canonical UUID.
  * @throws Error if documentId is missing (production must not generate legacy IDs)
+ * @throws Error if the extraction cannot be parsed as JSON (fail-closed: never return unparsed text)
  *
  * This happens post-extraction so IDs are deterministic and don't depend on
  * the model remembering to output them.
@@ -127,28 +128,36 @@ export function injectClaimIds(rawJson: string, chunkIndex: number, documentId: 
       "Use injectClaimIdsLegacy() for backward-compatible legacy format."
     );
   }
-  try {
-    let jsonStr = rawJson.trim();
-    const fenceMatch = jsonStr.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
-    if (fenceMatch) {
-      jsonStr = fenceMatch[1].trim();
-    } else if (jsonStr.startsWith("```")) {
-      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, "");
-    }
 
-    const parsed = JSON.parse(jsonStr);
-    if (Array.isArray(parsed.key_claims)) {
-      parsed.key_claims = parsed.key_claims.map(
-        (claim: Record<string, unknown>, idx: number) => ({
-          ...claim,
-          id: `${documentId}:${chunkIndex}:${idx}`,
-        })
-      );
-    }
-    return JSON.stringify(parsed);
-  } catch {
-    return rawJson;
+  let jsonStr = rawJson.trim();
+  const fenceMatch = jsonStr.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
+  if (fenceMatch) {
+    jsonStr = fenceMatch[1].trim();
+  } else if (jsonStr.startsWith("```")) {
+    jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, "");
   }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (parseErr) {
+    throw new Error(
+      `[injectClaimIds] Failed to parse extraction JSON for chunk ${chunkIndex} ` +
+      `(documentId: ${documentId}). The model returned unparseable output. ` +
+      `Parse error: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}. ` +
+      `First 200 chars: "${rawJson.slice(0, 200)}"`
+    );
+  }
+
+  if (Array.isArray(parsed.key_claims)) {
+    parsed.key_claims = (parsed.key_claims as Record<string, unknown>[]).map(
+      (claim, idx) => ({
+        ...claim,
+        id: `${documentId}:${chunkIndex}:${idx}`,
+      })
+    );
+  }
+  return JSON.stringify(parsed);
 }
 
 /**

@@ -767,6 +767,7 @@ export default function DealDashboardPage() {
                 totalChunks: chunks.length,
                 chunk,
                 model: EXTRACTION_MODEL,
+                documentId: docId,
               }),
               `extract-chunk-${i}`
             );

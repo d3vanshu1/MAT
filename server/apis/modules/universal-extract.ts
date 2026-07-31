@@ -3,7 +3,6 @@ import {
   EXTRACTION_MODEL,
   UNIVERSAL_EXTRACTION_PROMPT,
   injectClaimIds,
-  injectClaimIdsLegacy,
   sanitizeBraces,
 } from "../pipeline/extraction-prompt.js";
 
@@ -109,8 +108,8 @@ export default api({
     totalChunks: z.number(),
     chunk: ChunkSchema,
     model: z.string().nullable().optional(),
-    /** Document ID for globally unique claim IDs. If absent, falls back to legacy format. */
-    documentId: z.string().nullable().optional(),
+    /** Document ID for globally unique claim IDs. REQUIRED — must be a canonical UUID. */
+    documentId: z.string(),
   }),
 
   output: z.object({
@@ -153,11 +152,9 @@ export default api({
       throw new Error(`No text content in Anthropic response for chunk ${chunkIndex}`);
     }
 
-    // Inject stable claim IDs before wrapping in markdown
+    // Inject stable claim IDs — throws on parse failure (fail-closed)
     const rawText = textBlock.text.trim();
-    const idTaggedText = documentId
-      ? injectClaimIds(rawText, chunkIndex, documentId)
-      : injectClaimIdsLegacy(rawText, chunkIndex);
+    const idTaggedText = injectClaimIds(rawText, chunkIndex, documentId);
 
     const extraction = `### Universal Extraction from: ${sanitizeBraces(chunk.label)}\n\n${sanitizeBraces(idTaggedText)}`;
 

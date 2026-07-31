@@ -37,7 +37,14 @@ export interface ClaimOriginMap {
 }
 
 /** Current schema version for serialized origin maps */
-export const CLAIM_ORIGIN_MAP_VERSION = 2;
+export const CLAIM_ORIGIN_MAP_VERSION = 3;
+
+/**
+ * Canonical UUID pattern — the authoritative definition.
+ * Must be lowercase hex with dashes: 8-4-4-4-12.
+ * Used both for generation validation and parsing.
+ */
+export const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // ---------------------------------------------------------------------------
 // Claim ID format
@@ -53,14 +60,20 @@ const LEGACY_CLAIM_ID_PATTERN = /^c(\d+)-(\d+)$/;
  * Generate a deterministic, globally unique claim ID.
  * Format: "{documentId}:{chunkIndex}:{claimIndex}"
  *
- * PRODUCTION ONLY — requires a valid documentId. Use `injectClaimIdsLegacy`
- * for backward-compatible legacy format generation in tests.
+ * PRODUCTION ONLY — requires a valid canonical UUID as documentId.
+ * Use `injectClaimIdsLegacy` for backward-compatible legacy format in tests.
  *
- * @throws Error if documentId is empty/missing
+ * @throws Error if documentId is empty/missing or not a canonical UUID
  */
 export function generateClaimId(documentId: string, chunkIndex: number, claimIndex: number): string {
   if (!documentId) {
     throw new Error("[ClaimOriginMap] generateClaimId requires a non-empty documentId");
+  }
+  if (!CANONICAL_UUID_PATTERN.test(documentId)) {
+    throw new Error(
+      `[ClaimOriginMap] generateClaimId requires a canonical lowercase UUID as documentId. ` +
+      `Received: "${documentId.slice(0, 60)}"${documentId.length > 60 ? "..." : ""}`
+    );
   }
   return `${documentId}:${chunkIndex}:${claimIndex}`;
 }
@@ -394,17 +407,87 @@ export function resolveProvenance(
 // Serialization (for checkpoint persistence)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Source Fingerprint — ties the map to the extraction generation that produced it
+// ---------------------------------------------------------------------------
+
+export interface OriginMapFingerprint {
+  /** Sorted list of document IDs in the routed array */
+  documentIds: string[];
+  /** Total number of chunks (length of routed array) */
+  chunkCount: number;
+  /** Pipeline version hash when the map was built */
+  pipelineVersion: string;
+  /** Schema version of the origin map */
+  schemaVersion: number;
+}
+
+/**
+ * Compute a fingerprint for the current extraction generation.
+ * Used to detect stale persisted maps after re-extraction.
+ */
+export function computeOriginMapFingerprint(
+  routed: Array<{ document_id: string; chunk_index: number }>,
+  pipelineVersion: string,
+): OriginMapFingerprint {
+  const docIds = [...new Set(routed.map((r) => r.document_id))].sort();
+  return {
+    documentIds: docIds,
+    chunkCount: routed.length,
+    pipelineVersion,
+    schemaVersion: CLAIM_ORIGIN_MAP_VERSION,
+  };
+}
+
+/**
+ * Compare two fingerprints. Returns null if they match,
+ * or a human-readable mismatch description.
+ */
+export function compareFingerprints(
+  expected: OriginMapFingerprint,
+  actual: OriginMapFingerprint,
+): string | null {
+  if (expected.schemaVersion !== actual.schemaVersion) {
+    return `schemaVersion mismatch: expected ${expected.schemaVersion}, got ${actual.schemaVersion}`;
+  }
+  if (expected.pipelineVersion !== actual.pipelineVersion) {
+    return `pipelineVersion mismatch: expected "${expected.pipelineVersion}", got "${actual.pipelineVersion}"`;
+  }
+  if (expected.chunkCount !== actual.chunkCount) {
+    return `chunkCount mismatch: expected ${expected.chunkCount}, got ${actual.chunkCount}`;
+  }
+  if (expected.documentIds.length !== actual.documentIds.length) {
+    return `documentIds count mismatch: expected ${expected.documentIds.length}, got ${actual.documentIds.length}`;
+  }
+  for (let i = 0; i < expected.documentIds.length; i++) {
+    if (expected.documentIds[i] !== actual.documentIds[i]) {
+      return `documentIds diverge at index ${i}: expected "${expected.documentIds[i]}", got "${actual.documentIds[i]}"`;
+    }
+  }
+  return null;
+}
+
 export interface SerializedClaimOriginMap {
   version: number;
   entries: ClaimOriginEntry[];
   ambiguousLegacyIds: string[];
+  /** Source fingerprint — ties the map to the extraction generation */
+  fingerprint: OriginMapFingerprint | null;
 }
 
-export function serializeOriginMap(originMap: ClaimOriginMap): SerializedClaimOriginMap {
+/**
+ * Serialize an origin map for checkpoint persistence.
+ * @param fingerprint The source fingerprint to embed (from computeOriginMapFingerprint)
+ */
+export function serializeOriginMap(
+  originMap: ClaimOriginMap,
+  fingerprint?: OriginMapFingerprint,
+): SerializedClaimOriginMap {
   return {
     version: originMap.version,
     entries: [...originMap.entries.values()],
     ambiguousLegacyIds: [...originMap.ambiguousLegacyIds],
+    fingerprint: fingerprint ?? null,
   };
 }
 
@@ -416,10 +499,16 @@ export function serializeOriginMap(originMap: ClaimOriginMap): SerializedClaimOr
  *   - Rejects duplicate global IDs
  *   - Rejects global ID coordinate mismatches
  *   - Preserves ambiguous legacy ID set
+ *   - Optionally verifies source fingerprint
  *
- * @throws Error on any validation failure
+ * @param payload The raw JSON-parsed checkpoint payload
+ * @param expectedFingerprint If provided, the stored fingerprint must match or an error is thrown
+ * @throws Error on any validation failure (corrupt payload, stale fingerprint, etc.)
  */
-export function deserializeOriginMap(payload: unknown): ClaimOriginMap {
+export function deserializeOriginMap(
+  payload: unknown,
+  expectedFingerprint?: OriginMapFingerprint,
+): ClaimOriginMap {
   if (!payload || typeof payload !== "object") {
     throw new Error("[ClaimOriginMap] Cannot deserialize: payload is not an object");
   }
@@ -459,6 +548,24 @@ export function deserializeOriginMap(payload: unknown): ClaimOriginMap {
     }
     if (typeof e.claim_index !== "number") {
       throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: missing claim_index`);
+    }
+  }
+
+  // Fingerprint verification (if expected fingerprint is provided)
+  if (expectedFingerprint) {
+    const storedFingerprint = (obj as Record<string, unknown>).fingerprint as OriginMapFingerprint | null | undefined;
+    if (!storedFingerprint) {
+      throw new Error(
+        `[ClaimOriginMap] Stale checkpoint: persisted map has no fingerprint but current extraction requires one. ` +
+        `The map must be rebuilt from the current extraction generation.`
+      );
+    }
+    const mismatch = compareFingerprints(expectedFingerprint, storedFingerprint);
+    if (mismatch) {
+      throw new Error(
+        `[ClaimOriginMap] Stale checkpoint: fingerprint mismatch (${mismatch}). ` +
+        `The persisted map belongs to a different extraction generation and cannot be reused.`
+      );
     }
   }
 

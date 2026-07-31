@@ -80,7 +80,7 @@ import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
-import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap } from "./claim-origin-map.js";
+import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -2517,42 +2517,58 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // --- Step 1.1: Load or Build Claim Origin Map (explicit provenance) ---
   // Replaces the old approach of parsing "c{N}-{M}" into the routed array.
   // The origin map resolves claim_ids to source documents deterministically.
-  // On resume, load the persisted map; only rebuild as a legacy fallback.
+  //
+  // CHECKPOINT HANDLING (fail-closed):
+  //   - No row → first-run: build from routed array and persist.
+  //   - Row found, valid + fingerprint matches → use it (resume path).
+  //   - Row found, corrupt/parse failure → HARD ERROR (do not rebuild silently).
+  //   - Row found, fingerprint mismatch → HARD ERROR (stale map from different extraction).
   let claimOriginMap;
   let originMapPersistedThisRun = false;
 
+  // Compute current fingerprint BEFORE attempting load — this is the authoritative
+  // description of what the map SHOULD contain.
+  const currentFingerprint = computeOriginMapFingerprint(routed, getPipelineVersion());
+
   // Try loading persisted origin map first
-  try {
-    const cpResult = await ctx.integrations.db.query(
-      `SELECT payload FROM pipeline_checkpoints
-       WHERE module_run_id = $1 AND checkpoint_key = 'claim_origin_map' AND status = 'complete'
-       LIMIT 1`,
-      z.object({ payload: z.any() }),
-      [runId],
-      { label: "Load persisted claim origin map" }
-    );
-    if (cpResult.length > 0) {
-      const raw = typeof cpResult[0].payload === "string"
+  const cpResult = await ctx.integrations.db.query(
+    `SELECT payload FROM pipeline_checkpoints
+     WHERE module_run_id = $1 AND checkpoint_key = 'claim_origin_map' AND status = 'complete'
+     LIMIT 1`,
+    z.object({ payload: z.any() }),
+    [runId],
+    { label: "Load persisted claim origin map" }
+  );
+
+  if (cpResult.length > 0) {
+    // Row exists — parse and validate. ANY failure here is a hard error.
+    let rawPayload: unknown;
+    try {
+      rawPayload = typeof cpResult[0].payload === "string"
         ? JSON.parse(cpResult[0].payload)
         : cpResult[0].payload;
-      claimOriginMap = deserializeOriginMap(raw);
-      originMapPersistedThisRun = true;
-      console.log(`[ClaimOriginMap] Loaded persisted map (${claimOriginMap.entries.size} entries, ${claimOriginMap.ambiguousLegacyIds.size} ambiguous)`);
+    } catch (jsonErr) {
+      throw new Error(
+        `[ClaimOriginMap] CORRUPT checkpoint: payload is not valid JSON. ` +
+        `This indicates data corruption in pipeline_checkpoints. ` +
+        `Parse error: ${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)}`
+      );
     }
-  } catch (loadErr) {
-    // pipeline_checkpoints may not exist or payload may be corrupt
-    console.warn(`[ClaimOriginMap] Failed to load persisted map: ${loadErr instanceof Error ? loadErr.message : loadErr}`);
-    // Continue to rebuild — this is the legacy/recovery path
+
+    // Deserialize with fingerprint verification — throws on mismatch or schema issues
+    claimOriginMap = deserializeOriginMap(rawPayload, currentFingerprint);
+    originMapPersistedThisRun = true;
+    console.log(`[ClaimOriginMap] Loaded persisted map (${claimOriginMap.entries.size} entries, ${claimOriginMap.ambiguousLegacyIds.size} ambiguous)`);
   }
 
   if (!claimOriginMap) {
-    // Build from routed array (legacy path or first-time construction)
+    // No checkpoint row — first-time construction from routed array
     claimOriginMap = buildOriginMapFromRoutedArray(routed, idToFileName);
     console.log(`[ClaimOriginMap] Built from routed array (${claimOriginMap.entries.size} entries, ${claimOriginMap.ambiguousLegacyIds.size} ambiguous)`);
 
-    // Persist the origin map for future resume
+    // Persist the origin map for future resume (with fingerprint)
     try {
-      const serialized = serializeOriginMap(claimOriginMap);
+      const serialized = serializeOriginMap(claimOriginMap, currentFingerprint);
       await ctx.integrations.db.execute(
         `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
          VALUES ($1, 'claim_origin_map', $2::jsonb, 'complete', $3)
