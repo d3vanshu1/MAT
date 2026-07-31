@@ -194,16 +194,38 @@ function hasMaterialRiskMarker(f: MergedFinding): boolean {
   return MATERIAL_RISK_MARKERS.some(pat => pat.test(text));
 }
 
-/** Check if finding is a cross-version data_divergence (material regardless of £ floor) */
+/** Check if finding is a cross-version data_divergence (material regardless of £ floor).
+ *
+ * CORRECTIVE C: Source-document count is NO LONGER a cross-version signal.
+ * A memo-versus-model finding (e.g., "Model shows X but IC Memo says Y") is
+ * NOT cross-version — it's an ordinary data_divergence.
+ *
+ * Cross-version is identified ONLY by:
+ *   1. Explicit finding_kind === "cross_version" (from reconciliation)
+ *   2. Deterministic textual evidence that two memo versions of the same subject
+ *      are being compared (e.g., "[CROSS_VERSION]" marker, or regex detecting
+ *      "v1 vs v2", "draft vs final", "earlier memo vs later memo" patterns)
+ */
 function isCrossVersionDivergence(f: MergedFinding): boolean {
-  // Explicit cross_version finding_kind (from reconciliation Fix 7)
+  // 1. Explicit cross_version finding_kind (authoritative, from reconciliation)
   if (f.finding_kind === "cross_version") return true;
+
+  // Only data_divergence can be legacy cross-version
   if (f.finding_kind !== "data_divergence") return false;
-  // Cross-version findings compare two versions of the same metric from different documents
-  // They're material because the concern is which-version-underwrites-valuation, not £ magnitude
+
+  // 2. Deterministic textual evidence of memo-version comparison
+  // This requires explicit markers — NOT mere presence of multiple source documents.
   const text = `${f.title} ${f.detail} ${f.full_analysis}`;
-  return /cross.?version|version.?mismatch|model.?vs.?narrative|narrative.?vs.?data/i.test(text)
-    || (f.source_docs?.length ?? 0) >= 2; // Two+ source docs for a data_divergence implies cross-source
+
+  // Explicit marker (injected by reconciliation or analysis when version comparison is certain)
+  if (/\[CROSS_VERSION\]/i.test(text)) return true;
+
+  // Deterministic patterns indicating two MEMO versions (not model-vs-memo):
+  // Must reference version identifiers on BOTH sides of a comparison.
+  const hasMemoVersionComparison =
+    /(?:v\d+|version\s*\d+|draft|final|earlier\s+memo|later\s+memo|updated\s+memo)\s*(?:vs\.?|versus|compared\s+(?:to|with))\s*(?:v\d+|version\s*\d+|draft|final|earlier\s+memo|later\s+memo|updated\s+memo)/i.test(text);
+
+  return hasMemoVersionComparison;
 }
 
 interface MaterialityResult {
