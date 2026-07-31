@@ -73,6 +73,9 @@ export default api({
         -- UNIQUE constraint ensures changed identity produces new work.
         work_identity     TEXT NOT NULL,
 
+        -- Generation: identifies the expected identity set for this run
+        generation_id     TEXT NOT NULL,
+
         -- State machine
         status            TEXT NOT NULL DEFAULT 'pending'
                           CHECK (status IN ('pending','claimed','complete','failed_retryable','failed_permanent')),
@@ -80,6 +83,9 @@ export default api({
         claimed_at        TIMESTAMPTZ,
         lease_expires     TIMESTAMPTZ,
         attempt_count     INT NOT NULL DEFAULT 0,
+
+        -- Fencing token: generated on claim, must match for completion
+        fence_token       TEXT,
 
         -- Result tracking
         completed_at      TIMESTAMPTZ,
@@ -97,6 +103,24 @@ export default api({
       { label: "Create analysis_work_items table" }
     );
     steps.push("Created analysis_work_items table");
+
+    // 2b. Ensure columns added in C1.1 exist (idempotent for tables created by C1)
+    await ctx.integrations.db.execute(
+      `ALTER TABLE analysis_work_items ADD COLUMN IF NOT EXISTS generation_id TEXT NOT NULL DEFAULT ''`,
+      [],
+      { label: "Ensure generation_id column exists" }
+    );
+    await ctx.integrations.db.execute(
+      `ALTER TABLE analysis_work_items ADD COLUMN IF NOT EXISTS fence_token TEXT`,
+      [],
+      { label: "Ensure fence_token column exists" }
+    );
+    await ctx.integrations.db.execute(
+      `ALTER TABLE analysis_work_items ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`,
+      [],
+      { label: "Ensure claimed_at column exists" }
+    );
+    steps.push("Ensured C1.1 columns exist (generation_id, fence_token, claimed_at)");
 
     // 3. Index: find claimable items efficiently
     await ctx.integrations.db.execute(
@@ -118,10 +142,10 @@ export default api({
     );
     steps.push("Created idx_awi_expired_leases index");
 
-    // 5. Index: progress counts by status (current identity only)
+    // 5. Index: progress counts by status (current generation only)
     await ctx.integrations.db.execute(
       `CREATE INDEX IF NOT EXISTS idx_awi_status_counts
-       ON analysis_work_items (run_id, analysis_version, status)`,
+       ON analysis_work_items (run_id, generation_id, status)`,
       [],
       { label: "Create status counts index" }
     );
@@ -130,7 +154,7 @@ export default api({
     // 6. Index: lookup by run_id + chunk_index for reconciliation
     await ctx.integrations.db.execute(
       `CREATE INDEX IF NOT EXISTS idx_awi_run_chunk
-       ON analysis_work_items (run_id, chunk_index, analysis_version)`,
+       ON analysis_work_items (run_id, chunk_index, generation_id)`,
       [],
       { label: "Create run+chunk lookup index" }
     );

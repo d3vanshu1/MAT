@@ -80,7 +80,7 @@ import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
-import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isPopulated, isAnalysisComplete, detectMismatches, isWorkerEnabledForRun, WORKER_BATCH_SIZE } from "./analysis-worker.js";
+import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isAnalysisComplete, detectMismatches, isWorkerEnabledForRun, WORKER_BATCH_SIZE } from "./analysis-worker.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
 import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
@@ -3800,18 +3800,30 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   if (useWorkerPath) {
     enterPhase("analysis_worker");
 
-    // Populate work items on first entry (idempotent)
-    if (!(await isPopulated(ctx, runId!))) {
-      const routedForWorker = routed.map((row, idx) => ({
-        document_id: String(row.document_id ?? ""),
-        chunk_index: idx,
-        content_hash: String(row.content_hash ?? ""),
-      }));
-      const popResult = await populateWorkItems(ctx, runId!, routedForWorker);
-      console.log(
-        `[analysis-worker] Populated ${popResult.inserted} work items ` +
-        `(${popResult.skippedDuplicate} skipped, ${popResult.seededFromExisting} seeded from existing, ${popResult.total} total)`
-      );
+    // Population: every invocation reconciles the full expected identity set (resumable)
+    const routedForWorker = routed.map((row, idx) => ({
+      document_id: String(row.document_id ?? ""),
+      chunk_index: idx,
+      content_hash: String(row.content_hash ?? ""),
+    }));
+    const analysisVersion = getPipelineVersion();
+    const popResult = await populateWorkItems(ctx, runId!, routedForWorker, analysisVersion);
+    console.log(
+      `[analysis-worker] Population: ${popResult.inserted} inserted, ` +
+      `${popResult.skippedDuplicate} skipped, ${popResult.seededFromExisting} seeded, ` +
+      `${popResult.presentCount}/${popResult.expectedCount} present (missing: ${popResult.missingCount})`
+    );
+    const generationId = popResult.generationId;
+
+    // If population is incomplete, return in_progress to retry next invocation
+    if (popResult.missingCount > 0) {
+      logReturn("in_progress", "analysis", "population_incomplete", {
+        present: popResult.presentCount,
+        expected: popResult.expectedCount,
+        missing: popResult.missingCount,
+      });
+      exitPhase("analysis_worker");
+      return returnInProgress("analysis");
     }
 
     // Budget gate: need at least 130s for a meaningful analysis batch
@@ -3826,10 +3838,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       return returnInProgress("analysis");
     }
 
-    // Claim a bounded batch
+    // Claim a bounded batch (fenced)
     const workerInvocationId = `worker_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const batchSize = Math.min(ANALYSIS_WORKER_BATCH_SIZE, WORKER_BATCH_SIZE);
-    const { claimed, recovered } = await claimBatch(ctx, runId!, workerInvocationId, batchSize);
+    const { claimed, recovered } = await claimBatch(ctx, runId!, workerInvocationId, batchSize, generationId);
 
     if (recovered > 0) {
       console.log(`[analysis-worker] Recovered ${recovered} expired lease(s)`);
@@ -3837,15 +3849,15 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
     if (claimed.length === 0) {
       // No claimable items — either all complete or all permanently failed
-      const counts = await getAnalysisCounts(ctx, runId!);
+      const counts = await getAnalysisCounts(ctx, runId!, generationId, popResult.expectedCount);
       console.log(
         `[analysis-worker] No claimable items: ` +
         `complete=${counts.complete}, failed_permanent=${counts.failed_permanent}, ` +
-        `pending=${counts.pending}, claimed=${counts.claimed}`
+        `pending=${counts.pending}, claimed=${counts.claimed}, missing=${counts.missingFromQueue}`
       );
 
       // Check for dual-write mismatches (diagnostic visibility)
-      const mismatches = await detectMismatches(ctx, runId!);
+      const { mismatches } = await detectMismatches(ctx, runId!, generationId);
       if (mismatches.length > 0) {
         console.warn(
           `[analysis-worker] ⚠️  ${mismatches.length} dual-write mismatch(es) detected:`,
@@ -3853,7 +3865,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         );
       }
 
-      if (await isAnalysisComplete(ctx, runId!)) {
+      if (await isAnalysisComplete(ctx, runId!, generationId, popResult.expectedCount)) {
         // All work items are terminal — analysis phase complete
         analysisCompleted = counts.complete;
         failedChunks = counts.failed_permanent;
@@ -3902,11 +3914,14 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           const extraction = `### Extraction from: ${chunkLabel}\n\n${textBlock?.text ?? ""}`;
           const truncated = result.stop_reason === "max_tokens";
 
-          // Content identity for Fix 8A validation
-          const dbContentHash = row.content_hash ?? "";
-          const contentIdentity = `${row.document_id}:${item.chunk_index}:${dbContentHash}`;
+          // Content identity as JSON object (not string) per Corrective C1.1 requirement
+          const contentIdentity = {
+            document_id: String(row.document_id ?? ""),
+            chunk_index: item.chunk_index,
+            chunk_hash: String(row.content_hash ?? ""),
+          };
 
-          // Dual-write: pipeline_analysis + mark work item complete (lease-guarded)
+          // Fenced dual-write: pipeline_analysis + mark work item complete
           const { accepted } = await completeItem(ctx, item, {
             label: chunkLabel,
             extraction,
@@ -3915,24 +3930,24 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             content_identity: contentIdentity,
           }, getModuleModel(moduleId), workerInvocationId);
 
-          if (!accepted) {
-            console.warn(`[analysis-worker] Chunk ${item.chunk_index} completion rejected (stale worker)`);
-          }
-
-          return { label: chunkLabel, chunkIndex: item.chunk_index, truncated };
+          return { label: chunkLabel, chunkIndex: item.chunk_index, truncated, accepted };
         })
       );
 
-      // Process results — track successes and failures
+      // Process results — derive durable progress from queue counts (not promises)
       for (let i = 0; i < workerResults.length; i++) {
         const r = workerResults[i];
         if (r.status === "fulfilled") {
-          analysisCompleted++;
+          // Only count as progress if the completion was accepted
+          if (r.value.accepted) {
+            // Durable progress — will be confirmed by queue counts below
+          } else {
+            console.warn(`[analysis-worker] Chunk ${r.value.chunkIndex} completion rejected (stale worker)`);
+          }
           if (r.value.truncated) truncatedChunks++;
         } else {
-          // Mark item as failed in the work queue
+          // Mark item as failed in the work queue (fenced)
           await failItem(ctx, claimed[i], r.reason, workerInvocationId);
-          failedChunks++;
           const errMsg = r.reason?.message ?? String(r.reason ?? "Unknown error");
           console.error(`[analysis-worker] Chunk ${claimed[i].chunk_index} failed: ${errMsg.slice(0, 200)}`);
           if (!firstError) firstError = errMsg;
@@ -3952,16 +3967,17 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         return cancelledResult(runId!, "analysis_worker_batch");
       }
 
+      // Derive durable progress from queue counts (not from fulfilled promise count)
+      const postBatchCounts = await getAnalysisCounts(ctx, runId!, generationId, popResult.expectedCount);
+      analysisCompleted = postBatchCounts.complete;
+      failedChunks = postBatchCounts.failed_permanent;
+
       // Check if more work remains
-      if (!(await isAnalysisComplete(ctx, runId!))) {
+      if (!(await isAnalysisComplete(ctx, runId!, generationId, popResult.expectedCount))) {
         exitPhase("analysis_worker");
         return returnInProgress("analysis");
       }
 
-      // All complete — update counts for progress reporting
-      const finalCounts = await getAnalysisCounts(ctx, runId!);
-      analysisCompleted = finalCounts.complete;
-      failedChunks = finalCounts.failed_permanent;
       exitPhase("analysis_worker");
       // Fall through to merge phase
     }
