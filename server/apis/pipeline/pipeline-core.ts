@@ -533,6 +533,19 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
     }
   }
 
+  // === Stage 2.5: Cited-Value Verification (Fix 6) ===
+  // For ALL findings (not just data_divergence), verify cited £ values against
+  // the verified figure set. Findings with high unresolved/mismatched ratios
+  // get the numeric_unverified flag. This catches LLM hallucinations that cite
+  // specific numbers not traceable to source documents.
+  if (numericReport && numericReport.figures.length > 0) {
+    const { resolveCitedValues, applyVerificationToFindings, formatVerificationDiagnostic } = await import("./cited-value-resolver.js");
+    const verificationResults = resolveCitedValues(findings, numericReport.figures);
+    findings = applyVerificationToFindings(findings, verificationResults);
+    const diagnostic = formatVerificationDiagnostic(verificationResults);
+    console.log(`[pipeline:postMerge] ${diagnostic}`);
+  }
+
   // === Stage 3: Global Semantic Consolidation (Defect 1) ===
   {
     const preConsolidationCount = findings.length;
