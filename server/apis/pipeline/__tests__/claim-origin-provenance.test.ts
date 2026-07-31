@@ -16,7 +16,7 @@
  * Expected: FAIL on parent (claim-origin-map.ts does not exist), PASS after fix.
  */
 
-import { injectClaimIds } from "../extraction-prompt.js";
+import { injectClaimIds, injectClaimIdsLegacy } from "../extraction-prompt.js";
 import {
   generateClaimId,
   parseClaimId,
@@ -104,8 +104,8 @@ section("Test 1: Two documents' first claims receive different IDs");
 
   // Show the before/after:
   // BEFORE: both would be "c0-0" (COLLISION)
-  const oldA = JSON.parse(injectClaimIds(rawA, 0)); // no documentId = legacy
-  const oldB = JSON.parse(injectClaimIds(rawB, 0));
+  const oldA = JSON.parse(injectClaimIdsLegacy(rawA, 0)); // no documentId = legacy
+  const oldB = JSON.parse(injectClaimIdsLegacy(rawB, 0));
   assert(oldA.key_claims[0].id === "c0-0", `Legacy A should be c0-0`);
   assert(oldB.key_claims[0].id === "c0-0", `Legacy B should be c0-0`);
   assert(oldA.key_claims[0].id === oldB.key_claims[0].id, `Legacy IDs collide (expected behavior under old format)`);

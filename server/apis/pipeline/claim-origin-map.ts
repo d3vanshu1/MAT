@@ -7,6 +7,10 @@
  *
  * The origin map resolves a claim_id to its source document without
  * depending on array position, promise completion order, or filename alone.
+ *
+ * AMBIGUITY RULE: Legacy IDs that appear in more than one document are
+ * tracked in `ambiguousLegacyIds` and receive NO provenance resolution.
+ * They are never "first occurrence wins."
  */
 
 // ---------------------------------------------------------------------------
@@ -24,14 +28,16 @@ export interface ClaimOrigin {
 }
 
 export interface ClaimOriginMap {
-  /** Map from claim_id → ClaimOrigin (fast lookup) */
+  /** Map from claim_id → ClaimOrigin (fast lookup) — only unambiguous entries */
   entries: Map<string, ClaimOrigin>;
-  /** Build metadata */
+  /** Legacy IDs observed against multiple distinct documents — unresolvable */
+  ambiguousLegacyIds: Set<string>;
+  /** Schema version */
   version: number;
 }
 
 /** Current schema version for serialized origin maps */
-export const CLAIM_ORIGIN_MAP_VERSION = 1;
+export const CLAIM_ORIGIN_MAP_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Claim ID format
@@ -46,8 +52,16 @@ const LEGACY_CLAIM_ID_PATTERN = /^c(\d+)-(\d+)$/;
 /**
  * Generate a deterministic, globally unique claim ID.
  * Format: "{documentId}:{chunkIndex}:{claimIndex}"
+ *
+ * PRODUCTION ONLY — requires a valid documentId. Use `injectClaimIdsLegacy`
+ * for backward-compatible legacy format generation in tests.
+ *
+ * @throws Error if documentId is empty/missing
  */
 export function generateClaimId(documentId: string, chunkIndex: number, claimIndex: number): string {
+  if (!documentId) {
+    throw new Error("[ClaimOriginMap] generateClaimId requires a non-empty documentId");
+  }
   return `${documentId}:${chunkIndex}:${claimIndex}`;
 }
 
@@ -108,24 +122,80 @@ export interface ClaimOriginEntry {
 }
 
 /**
+ * Validate that a global claim ID's embedded coordinates agree with its entry.
+ * @throws Error on coordinate mismatch
+ */
+function validateGlobalIdCoordinates(entry: ClaimOriginEntry): void {
+  const parsed = parseClaimId(entry.claim_id);
+  if (!parsed || parsed.format !== "global") return; // only validate global IDs
+
+  if (parsed.document_id !== entry.document_id) {
+    throw new Error(
+      `[ClaimOriginMap] Global ID coordinate mismatch: ID "${entry.claim_id}" embeds ` +
+      `document_id "${parsed.document_id}" but entry has document_id "${entry.document_id}"`
+    );
+  }
+  if (parsed.chunk_index !== entry.chunk_index) {
+    throw new Error(
+      `[ClaimOriginMap] Global ID coordinate mismatch: ID "${entry.claim_id}" embeds ` +
+      `chunk_index ${parsed.chunk_index} but entry has chunk_index ${entry.chunk_index}`
+    );
+  }
+  if (parsed.claim_index !== entry.claim_index) {
+    throw new Error(
+      `[ClaimOriginMap] Global ID coordinate mismatch: ID "${entry.claim_id}" embeds ` +
+      `claim_index ${parsed.claim_index} but entry has claim_index ${entry.claim_index}`
+    );
+  }
+}
+
+/**
  * Build a ClaimOriginMap from a list of entries.
- * Fails closed on duplicate IDs — this means the extraction produced
- * non-deterministic output (a bug at the extraction layer).
+ * - Global ID duplicates: fail closed (hard error).
+ * - Legacy ID duplicates from DIFFERENT documents: marked ambiguous, removed from resolvable entries.
+ * - Legacy ID duplicates from the SAME document: deduplicated (same origin, no conflict).
+ * - All global IDs are coordinate-validated.
  *
- * @throws Error if duplicate claim_ids are detected
+ * @throws Error if duplicate global claim_ids are detected or coordinates mismatch
  */
 export function buildClaimOriginMap(entries: ClaimOriginEntry[]): ClaimOriginMap {
   const map = new Map<string, ClaimOrigin>();
+  const ambiguousLegacyIds = new Set<string>();
+
   for (const entry of entries) {
+    // Validate global ID coordinates
+    if (isGlobalClaimId(entry.claim_id)) {
+      validateGlobalIdCoordinates(entry);
+    }
+
     if (map.has(entry.claim_id)) {
       const existing = map.get(entry.claim_id)!;
-      throw new Error(
-        `[ClaimOriginMap] DUPLICATE claim_id detected: "${entry.claim_id}" ` +
-        `— first from doc "${existing.filename}" chunk ${existing.chunk_index}, ` +
-        `duplicate from doc "${entry.filename}" chunk ${entry.chunk_index}. ` +
-        `This indicates a non-deterministic extraction bug.`
-      );
+
+      if (isGlobalClaimId(entry.claim_id)) {
+        // Global ID collision → hard error (non-deterministic extraction)
+        throw new Error(
+          `[ClaimOriginMap] DUPLICATE global claim_id detected: "${entry.claim_id}" ` +
+          `— first from doc "${existing.filename}" chunk ${existing.chunk_index}, ` +
+          `duplicate from doc "${entry.filename}" chunk ${entry.chunk_index}. ` +
+          `This indicates a non-deterministic extraction bug.`
+        );
+      }
+
+      // Legacy ID collision
+      if (existing.document_id !== entry.document_id) {
+        // Different documents → AMBIGUOUS. Remove from resolvable, track as ambiguous.
+        map.delete(entry.claim_id);
+        ambiguousLegacyIds.add(entry.claim_id);
+      }
+      // Same document → harmless dedup, skip
+      continue;
     }
+
+    // If this ID was previously marked ambiguous, don't re-add it
+    if (ambiguousLegacyIds.has(entry.claim_id)) {
+      continue;
+    }
+
     map.set(entry.claim_id, {
       claim_id: entry.claim_id,
       document_id: entry.document_id,
@@ -135,12 +205,13 @@ export function buildClaimOriginMap(entries: ClaimOriginEntry[]): ClaimOriginMap
       source_page: entry.source_page,
     });
   }
-  return { entries: map, version: CLAIM_ORIGIN_MAP_VERSION };
+
+  return { entries: map, ambiguousLegacyIds, version: CLAIM_ORIGIN_MAP_VERSION };
 }
 
 /**
  * Build a ClaimOriginMap from the universal_extractions routed array.
- * Scans each extraction's text for claim IDs and maps them to their source document.
+ * Scans each extraction's key_claims structurally, falling back to regex for legacy text.
  *
  * @param routed Array of extraction rows (document_id, chunk_index, extraction_json)
  * @param idToFileName Map from document_id → filename
@@ -156,92 +227,118 @@ export function buildOriginMapFromRoutedArray(
       ? JSON.parse(row.extraction_json)
       : row.extraction_json;
 
-    // The extraction text contains claim IDs injected by injectClaimIds.
-    // Parse the key_claims or scan for IDs in the extraction text.
-    const extractionText = ext.extraction ?? "";
     const documentId = ext.documentId ?? row.document_id;
     const filename = idToFileName.get(documentId) ?? ext.sourceFile ?? "unknown";
 
-    // Scan for new-format IDs: {uuid}:{chunkIdx}:{claimIdx}
-    const globalMatches = extractionText.matchAll(
-      /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(\d+):(\d+)/g
-    );
-    for (const m of globalMatches) {
-      const claimId = m[0];
-      const chunkIdx = parseInt(m[2], 10);
-      const claimIdx = parseInt(m[3], 10);
-      // Only add if this matches OUR document (avoid false positives from UUIDs in text)
-      if (m[1] === documentId) {
-        entries.push({
-          claim_id: claimId,
-          document_id: documentId,
-          filename,
-          chunk_index: chunkIdx,
-          claim_index: claimIdx,
-          source_page: null,
-        });
+    // --- Structural parse: prefer key_claims array when available ---
+    let structurallyParsed = false;
+    const extractionText = ext.extraction ?? "";
+
+    // Try parsing the extraction as JSON (it may be wrapped in markdown headers)
+    try {
+      // The extraction field often starts with "### Universal Extraction from: ...\n\n"
+      // followed by the JSON body. Strip the prefix.
+      const jsonStart = extractionText.indexOf("{");
+      if (jsonStart >= 0) {
+        const jsonBody = extractionText.substring(jsonStart);
+        const parsed = JSON.parse(jsonBody);
+        if (Array.isArray(parsed.key_claims)) {
+          for (let i = 0; i < parsed.key_claims.length; i++) {
+            const claim = parsed.key_claims[i];
+            const claimId = claim.id;
+            if (!claimId || typeof claimId !== "string") continue;
+
+            const location = typeof claim.location === "string" ? claim.location : null;
+
+            if (isGlobalClaimId(claimId)) {
+              const parsedId = parseClaimId(claimId)!;
+              // Only add if document matches (avoid cross-doc false positives)
+              if (parsedId.document_id === documentId) {
+                entries.push({
+                  claim_id: claimId,
+                  document_id: documentId,
+                  filename,
+                  chunk_index: parsedId.chunk_index,
+                  claim_index: parsedId.claim_index,
+                  source_page: location,
+                });
+              }
+            } else if (isLegacyClaimId(claimId)) {
+              const parsedLegacy = parseClaimId(claimId)!;
+              // Legacy IDs: register with this row's document_id
+              if (parsedLegacy.chunk_index === row.chunk_index) {
+                entries.push({
+                  claim_id: claimId,
+                  document_id: documentId,
+                  filename,
+                  chunk_index: parsedLegacy.chunk_index,
+                  claim_index: parsedLegacy.claim_index,
+                  source_page: location,
+                });
+              }
+            }
+          }
+          structurallyParsed = true;
+        }
       }
+    } catch {
+      // JSON parse failed — fall through to regex scanning
     }
 
-    // Also scan for legacy format IDs: c{N}-{M}
-    // These are mapped to the routed row's document_id
-    const legacyMatches = extractionText.matchAll(/\bid["']?\s*:\s*["']c(\d+)-(\d+)["']/g);
-    for (const m of legacyMatches) {
-      const chunkIdx = parseInt(m[1], 10);
-      const claimIdx = parseInt(m[2], 10);
-      const legacyId = `c${chunkIdx}-${claimIdx}`;
-      // Legacy IDs use document-local chunk index — only register if it matches this row
-      if (chunkIdx === row.chunk_index) {
-        entries.push({
-          claim_id: legacyId,
-          document_id: documentId,
-          filename,
-          chunk_index: chunkIdx,
-          claim_index: claimIdx,
-          source_page: null,
-        });
+    // --- Regex fallback: only if structural parse didn't succeed ---
+    if (!structurallyParsed) {
+      // Scan for new-format IDs: {uuid}:{chunkIdx}:{claimIdx}
+      const globalMatches = extractionText.matchAll(
+        /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(\d+):(\d+)/g
+      );
+      for (const m of globalMatches) {
+        const claimId = m[0];
+        const chunkIdx = parseInt(m[2], 10);
+        const claimIdx = parseInt(m[3], 10);
+        if (m[1] === documentId) {
+          entries.push({
+            claim_id: claimId,
+            document_id: documentId,
+            filename,
+            chunk_index: chunkIdx,
+            claim_index: claimIdx,
+            source_page: null,
+          });
+        }
+      }
+
+      // Scan for legacy format IDs: c{N}-{M}
+      const legacyMatches = extractionText.matchAll(/\bid["']?\s*:\s*["']c(\d+)-(\d+)["']/g);
+      for (const m of legacyMatches) {
+        const chunkIdx = parseInt(m[1], 10);
+        const claimIdx = parseInt(m[2], 10);
+        const legacyId = `c${chunkIdx}-${claimIdx}`;
+        if (chunkIdx === row.chunk_index) {
+          entries.push({
+            claim_id: legacyId,
+            document_id: documentId,
+            filename,
+            chunk_index: chunkIdx,
+            claim_index: claimIdx,
+            source_page: null,
+          });
+        }
       }
     }
   }
 
-  // Build the map — Note: for legacy IDs that collide across documents,
-  // the first occurrence wins. This is intentional: legacy provenance is
-  // ambiguous and should not receive fabricated attribution.
-  const map = new Map<string, ClaimOrigin>();
-  const collisions: string[] = [];
-  for (const entry of entries) {
-    if (map.has(entry.claim_id)) {
-      // For new-format IDs, collision is a hard error
-      if (isGlobalClaimId(entry.claim_id)) {
-        const existing = map.get(entry.claim_id)!;
-        throw new Error(
-          `[ClaimOriginMap] DUPLICATE global claim_id: "${entry.claim_id}" ` +
-          `from docs "${existing.filename}" and "${entry.filename}"`
-        );
-      }
-      // For legacy IDs, log the collision but don't throw (ambiguity surfaced)
-      collisions.push(entry.claim_id);
-      continue; // first occurrence wins
-    }
-    map.set(entry.claim_id, {
-      claim_id: entry.claim_id,
-      document_id: entry.document_id,
-      filename: entry.filename,
-      chunk_index: entry.chunk_index,
-      claim_index: entry.claim_index,
-      source_page: entry.source_page,
-    });
-  }
+  const result = buildClaimOriginMap(entries);
 
-  if (collisions.length > 0) {
+  if (result.ambiguousLegacyIds.size > 0) {
+    const ids = [...result.ambiguousLegacyIds].slice(0, 5);
     console.warn(
-      `[ClaimOriginMap] ${collisions.length} legacy claim ID collision(s) detected ` +
-      `(ambiguous provenance — not resolved): ${collisions.slice(0, 5).join(", ")}` +
-      (collisions.length > 5 ? ` and ${collisions.length - 5} more` : "")
+      `[ClaimOriginMap] ${result.ambiguousLegacyIds.size} legacy claim ID(s) are ambiguous ` +
+      `(observed in multiple documents — no provenance derived): ${ids.join(", ")}` +
+      (result.ambiguousLegacyIds.size > 5 ? ` and ${result.ambiguousLegacyIds.size - 5} more` : "")
     );
   }
 
-  return { entries: map, version: CLAIM_ORIGIN_MAP_VERSION };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +348,7 @@ export function buildOriginMapFromRoutedArray(
 export interface ProvenanceResolution {
   /** Filenames derived from claim_ids via the origin map */
   derivedSources: Set<string>;
-  /** Legacy IDs that could not be resolved (ambiguous, no entry in map) */
+  /** Legacy IDs that could not be resolved (ambiguous or no entry in map) */
   unresolvedLegacy: string[];
 }
 
@@ -259,8 +356,9 @@ export interface ProvenanceResolution {
  * Resolve claim_ids to source documents via the origin map.
  *
  * - Global IDs are resolved deterministically from the map.
- * - Legacy IDs are attempted against the map; failures are logged but DO NOT
- *   receive fabricated provenance (no fallback to routed-array position decode).
+ * - Legacy IDs in the ambiguous set are returned as unresolved.
+ * - Legacy IDs not in the map are returned as unresolved.
+ * - Legacy IDs uniquely resolvable (one document) are resolved as a compatibility behavior.
  *
  * The caller should UNION the derived sources with existing source_docs,
  * never OVERWRITE.
@@ -273,11 +371,17 @@ export function resolveProvenance(
   const unresolvedLegacy: string[] = [];
 
   for (const cid of claimIds) {
+    // Ambiguous legacy IDs are NEVER resolved
+    if (originMap.ambiguousLegacyIds.has(cid)) {
+      unresolvedLegacy.push(cid);
+      continue;
+    }
+
     const origin = originMap.entries.get(cid);
     if (origin) {
       derivedSources.add(origin.filename);
     } else if (isLegacyClaimId(cid)) {
-      // Legacy ID with no origin entry — ambiguous, do NOT fabricate provenance
+      // Legacy ID with no origin entry — unresolved
       unresolvedLegacy.push(cid);
     }
     // Non-matching IDs (neither global nor legacy format) are ignored
@@ -293,29 +397,85 @@ export function resolveProvenance(
 export interface SerializedClaimOriginMap {
   version: number;
   entries: ClaimOriginEntry[];
+  ambiguousLegacyIds: string[];
 }
 
 export function serializeOriginMap(originMap: ClaimOriginMap): SerializedClaimOriginMap {
   return {
     version: originMap.version,
     entries: [...originMap.entries.values()],
+    ambiguousLegacyIds: [...originMap.ambiguousLegacyIds],
   };
 }
 
 /**
  * Deserialize an origin map from a checkpoint payload.
- * Fails closed on duplicate IDs (same rule as build).
+ * Fail-closed validation:
+ *   - Rejects unsupported versions
+ *   - Rejects malformed structure
+ *   - Rejects duplicate global IDs
+ *   - Rejects global ID coordinate mismatches
+ *   - Preserves ambiguous legacy ID set
  *
- * @throws Error if duplicate claim_ids are detected in persisted data
+ * @throws Error on any validation failure
  */
 export function deserializeOriginMap(payload: unknown): ClaimOriginMap {
   if (!payload || typeof payload !== "object") {
     throw new Error("[ClaimOriginMap] Cannot deserialize: payload is not an object");
   }
   const obj = payload as Record<string, unknown>;
+
+  // Version check
+  const version = obj.version;
+  if (typeof version !== "number" || version < 1 || version > CLAIM_ORIGIN_MAP_VERSION) {
+    throw new Error(
+      `[ClaimOriginMap] Unsupported origin map version: ${version} ` +
+      `(supported: 1-${CLAIM_ORIGIN_MAP_VERSION})`
+    );
+  }
+
   if (!Array.isArray(obj.entries)) {
     throw new Error("[ClaimOriginMap] Cannot deserialize: entries is not an array");
   }
+
+  // Validate each entry has required fields
   const entries = obj.entries as ClaimOriginEntry[];
-  return buildClaimOriginMap(entries);
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (!e || typeof e !== "object") {
+      throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: not an object`);
+    }
+    if (typeof e.claim_id !== "string" || !e.claim_id) {
+      throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: missing claim_id`);
+    }
+    if (typeof e.document_id !== "string" || !e.document_id) {
+      throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: missing document_id`);
+    }
+    if (typeof e.filename !== "string") {
+      throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: missing filename`);
+    }
+    if (typeof e.chunk_index !== "number") {
+      throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: missing chunk_index`);
+    }
+    if (typeof e.claim_index !== "number") {
+      throw new Error(`[ClaimOriginMap] Malformed entry at index ${i}: missing claim_index`);
+    }
+  }
+
+  // Restore ambiguous legacy IDs
+  const ambiguousArr = Array.isArray(obj.ambiguousLegacyIds)
+    ? (obj.ambiguousLegacyIds as string[])
+    : [];
+
+  // Build the map (validates duplicates + coordinates)
+  const map = buildClaimOriginMap(entries);
+
+  // Merge the persisted ambiguous set into the rebuilt one
+  for (const aid of ambiguousArr) {
+    map.ambiguousLegacyIds.add(aid);
+    // Ensure ambiguous IDs are NOT in entries
+    map.entries.delete(aid);
+  }
+
+  return map;
 }

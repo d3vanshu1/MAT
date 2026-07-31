@@ -80,7 +80,7 @@ import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
-import { buildOriginMapFromRoutedArray, resolveProvenance } from "./claim-origin-map.js";
+import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap } from "./claim-origin-map.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -2514,10 +2514,58 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     };
   }
 
-  // --- Step 1.1: Build Claim Origin Map (explicit provenance) ---
+  // --- Step 1.1: Load or Build Claim Origin Map (explicit provenance) ---
   // Replaces the old approach of parsing "c{N}-{M}" into the routed array.
   // The origin map resolves claim_ids to source documents deterministically.
-  const claimOriginMap = buildOriginMapFromRoutedArray(routed, idToFileName);
+  // On resume, load the persisted map; only rebuild as a legacy fallback.
+  let claimOriginMap;
+  let originMapPersistedThisRun = false;
+
+  // Try loading persisted origin map first
+  try {
+    const cpResult = await ctx.integrations.db.query(
+      `SELECT payload FROM pipeline_checkpoints
+       WHERE module_run_id = $1 AND checkpoint_key = 'claim_origin_map' AND status = 'complete'
+       LIMIT 1`,
+      z.object({ payload: z.any() }),
+      [runId],
+      { label: "Load persisted claim origin map" }
+    );
+    if (cpResult.length > 0) {
+      const raw = typeof cpResult[0].payload === "string"
+        ? JSON.parse(cpResult[0].payload)
+        : cpResult[0].payload;
+      claimOriginMap = deserializeOriginMap(raw);
+      originMapPersistedThisRun = true;
+      console.log(`[ClaimOriginMap] Loaded persisted map (${claimOriginMap.entries.size} entries, ${claimOriginMap.ambiguousLegacyIds.size} ambiguous)`);
+    }
+  } catch (loadErr) {
+    // pipeline_checkpoints may not exist or payload may be corrupt
+    console.warn(`[ClaimOriginMap] Failed to load persisted map: ${loadErr instanceof Error ? loadErr.message : loadErr}`);
+    // Continue to rebuild — this is the legacy/recovery path
+  }
+
+  if (!claimOriginMap) {
+    // Build from routed array (legacy path or first-time construction)
+    claimOriginMap = buildOriginMapFromRoutedArray(routed, idToFileName);
+    console.log(`[ClaimOriginMap] Built from routed array (${claimOriginMap.entries.size} entries, ${claimOriginMap.ambiguousLegacyIds.size} ambiguous)`);
+
+    // Persist the origin map for future resume
+    try {
+      const serialized = serializeOriginMap(claimOriginMap);
+      await ctx.integrations.db.execute(
+        `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+         VALUES ($1, 'claim_origin_map', $2::jsonb, 'complete', $3)
+         ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
+        [runId, JSON.stringify(serialized), getPipelineVersion()],
+        { label: "Persist claim origin map checkpoint" }
+      );
+      originMapPersistedThisRun = true;
+    } catch (persistErr) {
+      // Non-fatal: pipeline_checkpoints table may not exist yet
+      console.warn(`[ClaimOriginMap] Failed to persist origin map: ${persistErr instanceof Error ? persistErr.message : persistErr}`);
+    }
+  }
 
   // --- Step 1.5: Web Research Phase (for web research modules only) ---
   // Runs the iterative web search loop server-side with checkpointing.

@@ -110,18 +110,23 @@ Required top-level keys:
 /**
  * Inject stable, globally unique claim IDs into the extraction JSON.
  *
- * NEW FORMAT: "{documentId}:{chunkIndex}:{claimIndex}" (0-based).
+ * PRODUCTION FORMAT: "{documentId}:{chunkIndex}:{claimIndex}" (0-based).
  * This is deterministic (based only on stable document identity + position)
  * and collision-free across documents.
  *
- * LEGACY FORMAT (deprecated): "c{globalChunkIndex}-{claimIndex}" — produced
- * document-local IDs that collided across documents and caused incorrect
- * provenance when decoded against the global routed array.
+ * @param documentId REQUIRED in production paths. Must be a non-empty UUID.
+ * @throws Error if documentId is missing (production must not generate legacy IDs)
  *
  * This happens post-extraction so IDs are deterministic and don't depend on
  * the model remembering to output them.
  */
-export function injectClaimIds(rawJson: string, chunkIndex: number, documentId?: string): string {
+export function injectClaimIds(rawJson: string, chunkIndex: number, documentId: string): string {
+  if (!documentId) {
+    throw new Error(
+      "[injectClaimIds] documentId is REQUIRED for production claim ID generation. " +
+      "Use injectClaimIdsLegacy() for backward-compatible legacy format."
+    );
+  }
   try {
     let jsonStr = rawJson.trim();
     const fenceMatch = jsonStr.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
@@ -136,9 +141,41 @@ export function injectClaimIds(rawJson: string, chunkIndex: number, documentId?:
       parsed.key_claims = parsed.key_claims.map(
         (claim: Record<string, unknown>, idx: number) => ({
           ...claim,
-          id: documentId
-            ? `${documentId}:${chunkIndex}:${idx}`
-            : `c${chunkIndex}-${idx}`, // fallback for legacy callers without documentId
+          id: `${documentId}:${chunkIndex}:${idx}`,
+        })
+      );
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return rawJson;
+  }
+}
+
+/**
+ * LEGACY COMPATIBILITY HELPER — generates document-local IDs (c{N}-{M}).
+ *
+ * DEPRECATED: Produces IDs that collide across documents and cause incorrect
+ * provenance when decoded against the global routed array.
+ *
+ * Only use in test utilities that explicitly exercise legacy behavior.
+ * Production extraction paths MUST use injectClaimIds() with a documentId.
+ */
+export function injectClaimIdsLegacy(rawJson: string, chunkIndex: number): string {
+  try {
+    let jsonStr = rawJson.trim();
+    const fenceMatch = jsonStr.match(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/);
+    if (fenceMatch) {
+      jsonStr = fenceMatch[1].trim();
+    } else if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, "");
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    if (Array.isArray(parsed.key_claims)) {
+      parsed.key_claims = parsed.key_claims.map(
+        (claim: Record<string, unknown>, idx: number) => ({
+          ...claim,
+          id: `c${chunkIndex}-${idx}`,
         })
       );
     }
