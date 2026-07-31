@@ -269,6 +269,7 @@ async function resolveLiveModelDocId(
      JOIN doc_tables dt ON dt.document_id = d.id
      WHERE d.deal_id = $1
        AND d.document_tag = 'financial_model'
+       AND dt.sheet_or_page != '__generation_manifest__'
      GROUP BY d.id, d.file_name
      HAVING
        BOOL_OR(LOWER(TRIM(dt.sheet_or_page)) = LOWER($2)) = TRUE
@@ -1111,12 +1112,15 @@ export async function runNumericVerifyInline(
   );
 
   // Step 1: Find documents with doc_tables for this deal (always query full universe)
+  // Fix 8C: Exclude __generation_manifest__ rows so manifest rows don't pollute
+  // document-level inventories or table counts used by numeric verification.
   const DocumentIdSchema = z.object({ document_id: z.string() });
   const documentIdRows = await db.query(
     `SELECT DISTINCT document_id
      FROM doc_tables dt
      JOIN documents d ON d.id = dt.document_id
      WHERE d.deal_id = $1
+       AND dt.sheet_or_page != '__generation_manifest__'
      ORDER BY document_id
      LIMIT 100`,
     DocumentIdSchema,
@@ -1142,7 +1146,7 @@ export async function runNumericVerifyInline(
       if (prefixDocIds.length > 0) {
         try {
           const prefixRows = await db.query(
-            `SELECT id FROM doc_tables WHERE document_id = ANY($1::uuid[]) ORDER BY id`,
+            `SELECT id FROM doc_tables WHERE document_id = ANY($1::uuid[]) AND sheet_or_page != '__generation_manifest__' ORDER BY id`,
             z.object({ id: z.string() }),
             [prefixDocIds],
             { label: `NumericInline: re-query prefix tables for validation (${prefixDocIds.length} docs)` }
@@ -1218,6 +1222,7 @@ export async function runNumericVerifyInline(
               length(data::text) AS data_length
        FROM doc_tables
        WHERE document_id = $1::uuid
+         AND sheet_or_page != '__generation_manifest__'
        ORDER BY sheet_or_page`,
       TableIndexSchema,
       [docId],

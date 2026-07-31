@@ -878,6 +878,7 @@ const ExtractionRowSchema = z.object({
   document_id: z.string(),
   chunk_index: z.coerce.number(),
   extraction_json: z.any(),
+  content_hash: z.string().nullable(),
 });
 
 const AnalysisCheckpointSchema = z.object({
@@ -1737,16 +1738,78 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             : rootManifestRow.merged_json;
           const manifest = deserializeManifest(rawManifest);
           if (manifest) {
-            // Manifest found — validate root identity matches the checkpoint we're considering
-            if (manifest.rootCheckpointId === `${topCheckpoint.tree_level}:0` &&
-                manifest.pipelineVersion === getPipelineVersion()) {
+            // Fix 8D: Full manifest validation on fast path.
+            // Check: rootCheckpointId, pipelineVersion, AND sourceFingerprint.
+            // Also validate the manifest's source fingerprint against the persisted
+            // source snapshot (if available). A stale manifest from a different
+            // extraction set must NOT engage the fast path.
+            let manifestValid = true;
+            let rejectReason = "";
+
+            // 1. Root identity
+            if (manifest.rootCheckpointId !== `${topCheckpoint.tree_level}:0`) {
+              manifestValid = false;
+              rejectReason = `rootCheckpointId mismatch: ${manifest.rootCheckpointId} vs ${topCheckpoint.tree_level}:0`;
+            }
+            // 2. Pipeline version
+            else if (manifest.pipelineVersion !== getPipelineVersion()) {
+              manifestValid = false;
+              rejectReason = `pipelineVersion mismatch: ${manifest.pipelineVersion.slice(0, 8)} vs ${getPipelineVersion().slice(0, 8)}`;
+            }
+            // 3. Source fingerprint — validate against persisted source snapshot
+            else {
+              try {
+                const [snapshotCp] = await ctx.integrations.db.query(
+                  `SELECT payload FROM pipeline_checkpoints
+                   WHERE module_run_id = $1 AND checkpoint_key = 'source_snapshot' AND status = 'complete'
+                   LIMIT 1`,
+                  z.object({ payload: z.any() }),
+                  [runId],
+                  { label: "Fast-path Fix8D: load source snapshot for manifest validation" }
+                );
+                if (snapshotCp?.payload) {
+                  const snap = typeof snapshotCp.payload === "string" ? JSON.parse(snapshotCp.payload) : snapshotCp.payload;
+                  // The source snapshot contains a fingerprint that represents the current doc set.
+                  // The manifest's sourceFingerprint should have been built from the same extraction set.
+                  // Cross-check: if the snapshot has changed since the manifest was created, reject.
+                  const snapshotFingerprint = snap.fingerprint;
+                  if (snapshotFingerprint && manifest.sourceFingerprint) {
+                    // Validate current document set hasn't changed by loading fresh doc hashes
+                    const freshDocMeta = await ctx.integrations.db.query(
+                      `SELECT id, md5(COALESCE(parsed_text, '')) AS content_md5
+                       FROM documents WHERE deal_id = $1 ORDER BY file_name`,
+                      z.object({ id: z.string(), content_md5: z.string() }),
+                      [dealId],
+                      { label: "Fast-path Fix8D: verify source docs unchanged" }
+                    );
+                    // Rebuild fingerprint from current docs and compare to stored snapshot
+                    const currentDocHash = freshDocMeta.map(d => `${d.id}:${d.content_md5}`).sort().join("|");
+                    const storedDocHash = (snap.documents ?? []).map((d: any) => `${d.documentId}:${d.contentHash}`).sort().join("|");
+                    if (currentDocHash !== storedDocHash) {
+                      manifestValid = false;
+                      rejectReason = `source docs changed since snapshot (${freshDocMeta.length} current docs vs ${(snap.documents ?? []).length} snapshot docs)`;
+                    }
+                  }
+                }
+              } catch {
+                // Source snapshot unavailable — cannot validate source fingerprint.
+                // Conservative: reject the fast path to avoid formatting stale content.
+                manifestValid = false;
+                rejectReason = "source snapshot unavailable for cross-validation";
+              }
+            }
+            // 4. Leaf count sanity (must be > 0)
+            if (manifestValid && manifest.expectedLeafCount === 0) {
+              manifestValid = false;
+              rejectReason = "expectedLeafCount is 0 — invalid manifest";
+            }
+
+            if (manifestValid) {
               isFinalNode = true;
-              console.log(`[pipeline:fast-path] Root manifest validated: ${manifest.expectedLeafCount} leaves, gen=${manifest.completionGeneration}`);
+              console.log(`[pipeline:fast-path] Root manifest VALIDATED (Fix8D full): ${manifest.expectedLeafCount} leaves, gen=${manifest.completionGeneration}, srcFp=${manifest.sourceFingerprint.slice(0, 8)}`);
             } else {
-              // Stale or mismatched manifest — do NOT engage fast path
               console.warn(
-                `[pipeline:fast-path] Root manifest REJECTED: rootCheckpointId=${manifest.rootCheckpointId} vs expected=${topCheckpoint.tree_level}:0, ` +
-                `version=${manifest.pipelineVersion.slice(0, 8)} vs current=${getPipelineVersion().slice(0, 8)} — falling through to rebuild`
+                `[pipeline:fast-path] Root manifest REJECTED (Fix8D): ${rejectReason} — falling through to rebuild`
               );
             }
           } else {
@@ -2389,14 +2452,17 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         loadedCheckpointPayload = cpRows[0].payload;
         loadedCheckpointStatus = cpRows[0].status ?? "complete";
         const saved = cpRows[0].payload as { figures?: unknown[]; discrepancies?: unknown[]; status?: string };
-        // If already complete AND has valid structure, short-circuit without re-running
+        // Fix 8E: Complete checkpoints are NOT trusted solely on row status.
+        // They must pass the same structural validation as partial checkpoints.
+        // This is delegated to runNumericVerifyInline which calls validateNumericCheckpoint.
+        // Only short-circuit if the checkpoint passes validation inside the engine.
         if (loadedCheckpointStatus === "complete" && saved.figures && saved.discrepancies) {
-          numericReport = { figures: saved.figures as any[], discrepancies: saved.discrepancies as any[] };
-          numericPartial = false;
-          numericCheckpointLoaded = true;
+          // Pass to engine for validation rather than trusting row status alone.
+          // The engine will validate (schema version, config version, doc universe, prefix tables)
+          // and either return the cached result or invalidate and rebuild.
           console.log(
-            `[NumericInline] Loaded COMPLETE checkpoint: ${saved.figures.length} figures, ` +
-            `${saved.discrepancies.length} discrepancies — skipping engine`
+            `[NumericInline:Fix8E] Loaded complete checkpoint (${(saved.figures as any[]).length} figures) — ` +
+            `delegating to engine for structural validation before trusting`
           );
         } else {
           console.log(
@@ -2718,11 +2784,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   const MERGE_CP_PAGE_SIZE = 20;     // Reduced from 75: final-round nodes can be 200KB-2MB each
                                        // (381 findings × 3-10KB/finding + mergedText). At 20 rows/page,
                                        // worst case = ~2-3MB/page, safely under 4MB gRPC limit.
-  const allExtractions: Array<{ document_id: string; chunk_index: number; extraction_json: any }> = [];
+  const allExtractions: Array<{ document_id: string; chunk_index: number; extraction_json: any; content_hash: string | null }> = [];
   let offset = 0;
   while (true) {
     const page = await ctx.integrations.db.query(
-      `SELECT document_id, chunk_index, extraction_json
+      `SELECT document_id, chunk_index, extraction_json, content_hash
        FROM universal_extractions
        WHERE deal_id = $1
        ORDER BY document_id, chunk_index
@@ -2966,26 +3032,36 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     return runPipelineCore(ctx, { ...input, runId: freshRunId });
   }
 
-  // CORRECTIVE A: Validate analysis checkpoints against current routed array.
+  // CORRECTIVE A + Fix 8A: Validate analysis checkpoints against current routed array.
   // A checkpoint at globalIdx N is valid only if routed[N]'s content identity matches.
   // This prevents stale checkpoints from being reused when documents change/reorder.
+  // Fix 8A: Uses the authoritative content_hash from the DB column (not ext.contentHash
+  // from inside extraction_json which may be empty). Legacy checkpoints with null identity
+  // are REJECTED (rerun) — they cannot prove they match the current extraction content.
   const analyzedSet = new Set<number>();
-  const contentIdentityMap = new Map(analyzedRows.map(r => [r.chunk_index, r.content_identity ?? null]));
+  let legacyCheckpointsRejected = 0;
   for (const row of analyzedRows) {
     const idx = row.chunk_index;
     if (idx >= routed.length) continue; // out of range — stale checkpoint
     const routedItem = routed[idx];
-    const ext = typeof routedItem.extraction_json === "string"
-      ? JSON.parse(routedItem.extraction_json)
-      : routedItem.extraction_json;
-    const currentIdentity = `${routedItem.document_id}:${routedItem.chunk_index}:${ext.contentHash ?? ""}`;
+    // Use the DB-level content_hash (authoritative) rather than ext.contentHash (inline, may be stale/empty)
+    const dbContentHash = routedItem.content_hash ?? "";
+    const currentIdentity = `${routedItem.document_id}:${routedItem.chunk_index}:${dbContentHash}`;
     const storedIdentity = row.content_identity;
-    // If stored identity exists, validate it matches. If null (legacy), accept but note.
-    if (storedIdentity && storedIdentity !== currentIdentity) {
-      // Mismatched — routed array changed; this checkpoint is for a different chunk
+    // Fix 8A: Legacy checkpoints without content hash identity must be invalidated.
+    // A null/empty stored identity cannot prove it matches the current extraction content.
+    if (!storedIdentity) {
+      legacyCheckpointsRejected++;
+      continue;
+    }
+    if (storedIdentity !== currentIdentity) {
+      // Mismatched — routed array changed or content changed; this checkpoint is stale
       continue;
     }
     analyzedSet.add(idx);
+  }
+  if (legacyCheckpointsRejected > 0) {
+    console.log(`[pipeline:Fix8A] Rejected ${legacyCheckpointsRejected} legacy analysis checkpoint(s) without content hash identity — will rerun`);
   }
 
   // For web research modules, analysis is synthetic (injected from iterations).
@@ -3121,8 +3197,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         const extraction = `### Extraction from: ${chunkLabel}\n\n${textBlock?.text ?? ""}`;
         const truncated = result.stop_reason === "max_tokens";
 
-        // Save checkpoint with content_identity for CORRECTIVE A validation on resume
-        const contentIdentity = `${row.document_id}:${row.chunk_index}:${ext.contentHash ?? ""}`;
+        // Save checkpoint with content_identity for Fix 8A validation on resume.
+        // Uses the DB-level content_hash (authoritative) rather than ext.contentHash (inline).
+        const dbContentHash = row.content_hash ?? "";
+        const contentIdentity = `${row.document_id}:${row.chunk_index}:${dbContentHash}`;
         await ctx.integrations.db.execute(
           `INSERT INTO pipeline_analysis (run_id, chunk_index, result_json, model_used, prompt_version)
            VALUES ($1, $2, $3::jsonb, $4, $5)

@@ -390,6 +390,39 @@ export async function runExtractionPhase(
     return aPri - bPri;
   });
 
+  // --- Step C.5 (Fix 8B): Remove stale trailing extraction rows after rechunking ---
+  // When a document is re-parsed and produces fewer chunks than before, trailing
+  // extraction rows (chunk_index >= current expected count) must be invalidated.
+  // Without this, stale rows enter routing, analysis, and claim-origin construction.
+  {
+    let staleDeletions = 0;
+    for (const doc of docMetas) {
+      const expectedChunks = Math.ceil(doc.text_length / CHUNK_CHARS);
+      // Find any existing rows for this doc with chunk_index >= expectedChunks
+      const staleForDoc = existingRows.filter(
+        r => r.document_id === doc.id && r.chunk_index >= expectedChunks
+      );
+      if (staleForDoc.length > 0) {
+        await ctx.integrations.db.execute(
+          `DELETE FROM universal_extractions
+           WHERE deal_id = $1 AND document_id = $2 AND chunk_index >= $3`,
+          [dealId, doc.id, expectedChunks],
+          { label: `Fix8B: Remove ${staleForDoc.length} stale trailing extraction(s) for ${doc.file_name}` }
+        );
+        staleDeletions += staleForDoc.length;
+        // Also remove from local tracking sets
+        for (const stale of staleForDoc) {
+          const key = `${stale.document_id}:${stale.chunk_index}`;
+          extractedSet.delete(key);
+          extractedContentHash.delete(key);
+        }
+      }
+    }
+    if (staleDeletions > 0) {
+      console.log(`[extraction:Fix8B] Removed ${staleDeletions} stale trailing extraction row(s) that exceeded current chunk counts`);
+    }
+  }
+
   const successfulCount = extractedSet.size;
   const totalChunks = allChunks.length + successfulCount; // total = pending + already done
   if (allChunks.length === 0) {
