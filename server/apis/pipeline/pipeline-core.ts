@@ -137,50 +137,71 @@ export interface ReconReplacementDiagnostic {
 }
 
 // ---------------------------------------------------------------------------
-// Defect 2: Materiality Enforcement (shared helper — used in main + fast path)
 // ---------------------------------------------------------------------------
-// Code-based enforcement of the IC-chair materiality standard. The LLM proposes
-// severity; this pass verifies against the 1%-of-EV floor.
+// Fix 12: Typed Materiality Enforcement (shared helper — main + fast path)
+// ---------------------------------------------------------------------------
+// Severity is determined by verified structured_impact (preferred), with prose
+// £-amount parsing only as a degraded fallback. Prose amounts NEVER escalate;
+// they can only confirm or demote. numeric_unverified findings get no uplift.
 //
-// Rules:
-//   - critical keeps ONLY if: (a) parseable £ anchor ≥ MATERIALITY_FLOOR_M, OR
-//     (b) source-stated material-risk marker, OR (c) data_divergence (cross-version).
-//   - If critical has £ anchor BELOW floor AND no marker → demote to "warning".
-//   - If quantified anchor provably below floor → category = "housekeeping".
-//   - Qualitative findings with NO £ figure and a risk marker survive unchanged.
+// Priority chain:
+//   1. structured_impact (role ∈ {delta, exposure, annual_impact}, verified=true)
+//   2. Legal/regulatory risk markers (criminal, licence-to-operate, etc.)
+//   3. Cross-version with verified delta
+//   4. DEGRADED: severity_anchor/detail parsed £-amounts (not numeric_unverified)
+//   5. No data → safe degraded path (demote critical → warning, never escalate)
 // ---------------------------------------------------------------------------
 
 const DEAL_EV_MILLIONS = 655;
 const MATERIALITY_FLOOR_M = DEAL_EV_MILLIONS * 0.01; // £6.55m
 
-/** Extract £-figures from text, returning values in millions */
+/** Roles whose verified amounts drive the materiality threshold */
+const MATERIALITY_DRIVING_ROLES = new Set(["delta", "exposure", "annual_impact"]);
+
+/**
+ * Fix 12: Extract canonical materiality figure (£millions) from structured_impact.
+ * Only verified entries with a driving role are considered.
+ * Returns null when no qualifying entry exists.
+ */
+function getStructuredMaterialityM(f: MergedFinding): number | null {
+  const impacts = f.structured_impact;
+  if (!impacts || impacts.length === 0) return null;
+
+  let maxM: number | null = null;
+  for (const imp of impacts) {
+    if (!imp.verified) continue;
+    if (!MATERIALITY_DRIVING_ROLES.has(imp.role)) continue;
+    const multiplier = imp.unit_multiplier ?? 1;
+    const amountM = Math.abs(imp.amount) * multiplier / 1_000_000;
+    if (amountM === 0) continue; // Zero cannot drive threshold
+    if (maxM === null || amountM > maxM) maxM = amountM;
+  }
+  return maxM;
+}
+
+/** Extract £-figures from text, returning values in millions.
+ *  Fix 12: DEGRADED fallback — only used when structured_impact is absent. */
 function parsePoundFiguresMillions(text: string): number[] {
   if (!text) return [];
   const results: number[] = [];
-  // Match patterns like £6.5m, £19k, £1.8m, £655m, £118,000, £19,000
   const patterns = [
-    /£([\d,.]+)\s*m(?:illion|n)?/gi,        // £6.5m, £1.8million
-    /£([\d,.]+)\s*bn?/gi,                    // £1.2bn
-    /£([\d,.]+)\s*k/gi,                      // £19k → divide by 1000
-    /£([\d,]+(?:\.\d+)?)\b(?!\s*[mkb])/gi,   // £118,000 (raw number, no suffix)
+    /£([\d,.]+)\s*m(?:illion|n)?/gi,
+    /£([\d,.]+)\s*bn?/gi,
+    /£([\d,.]+)\s*k/gi,
+    /£([\d,]+(?:\.\d+)?)\b(?!\s*[mkb])/gi,
   ];
-
-  // Millions
   for (const m of text.matchAll(patterns[0])) {
     const val = parseFloat(m[1].replace(/,/g, ""));
     if (!isNaN(val)) results.push(val);
   }
-  // Billions
   for (const m of text.matchAll(patterns[1])) {
     const val = parseFloat(m[1].replace(/,/g, "")) * 1000;
     if (!isNaN(val)) results.push(val);
   }
-  // Thousands
   for (const m of text.matchAll(patterns[2])) {
     const val = parseFloat(m[1].replace(/,/g, "")) / 1000;
     if (!isNaN(val)) results.push(val);
   }
-  // Raw numbers (assume in £ — convert to millions)
   for (const m of text.matchAll(patterns[3])) {
     const val = parseFloat(m[1].replace(/,/g, ""));
     if (!isNaN(val) && val >= 1000) results.push(val / 1_000_000);
@@ -188,56 +209,35 @@ function parsePoundFiguresMillions(text: string): number[] {
   return results;
 }
 
-/** Detect source-stated material-risk markers in finding text */
+/** Fix 12: Legal/regulatory consequence markers that drive severity
+ *  independently of £ amount (criminal, licence-to-operate, completion blocker). */
 const MATERIAL_RISK_MARKERS = [
-  /criminal\s+offen[cs]e/i,
+  /criminal\s+(?:offen[cs]e|exposure|liability|prosecution)/i,
   /regulatory\s+breach/i,
   /going\s+concern/i,
   /unlimited[\s/]+uncapped\s+liabilit/i,
   /uncapped\s+(material\s+)?liabilit/i,
   /unlimited\s+liabilit/i,
+  /licence.to.operate/i,
+  /completion.?block/i,
+  /business.?continuity/i,
+  /section\s+19/i,  // FCA section 19 — criminal exposure
 ];
 
 function hasMaterialRiskMarker(f: MergedFinding): boolean {
-  // Source-stated risk with critical severity (explicit risk in DD docs)
   if (f.finding_kind === "source_stated_risk" && f.severity === "critical") return true;
-  // Scan text for explicit material-risk language
   const text = `${f.title} ${f.detail} ${f.full_analysis} ${f.severity_anchor ?? ""}`;
   return MATERIAL_RISK_MARKERS.some(pat => pat.test(text));
 }
 
-/** Check if finding is a cross-version data_divergence (material regardless of £ floor).
- *
- * CORRECTIVE C: Source-document count is NO LONGER a cross-version signal.
- * A memo-versus-model finding (e.g., "Model shows X but IC Memo says Y") is
- * NOT cross-version — it's an ordinary data_divergence.
- *
- * Cross-version is identified ONLY by:
- *   1. Explicit finding_kind === "cross_version" (from reconciliation)
- *   2. Deterministic textual evidence that two memo versions of the same subject
- *      are being compared (e.g., "[CROSS_VERSION]" marker, or regex detecting
- *      "v1 vs v2", "draft vs final", "earlier memo vs later memo" patterns)
- */
+/** Check if finding is a cross-version data_divergence.
+ *  Corrective C: source-document count is NOT a cross-version signal. */
 function isCrossVersionDivergence(f: MergedFinding): boolean {
-  // 1. Explicit cross_version finding_kind (authoritative, from reconciliation)
   if (f.finding_kind === "cross_version") return true;
-
-  // Only data_divergence can be legacy cross-version
   if (f.finding_kind !== "data_divergence") return false;
-
-  // 2. Deterministic textual evidence of memo-version comparison
-  // This requires explicit markers — NOT mere presence of multiple source documents.
   const text = `${f.title} ${f.detail} ${f.full_analysis}`;
-
-  // Explicit marker (injected by reconciliation or analysis when version comparison is certain)
   if (/\[CROSS_VERSION\]/i.test(text)) return true;
-
-  // Deterministic patterns indicating two MEMO versions (not model-vs-memo):
-  // Must reference version identifiers on BOTH sides of a comparison.
-  const hasMemoVersionComparison =
-    /(?:v\d+|version\s*\d+|draft|final|earlier\s+memo|later\s+memo|updated\s+memo)\s*(?:vs\.?|versus|compared\s+(?:to|with))\s*(?:v\d+|version\s*\d+|draft|final|earlier\s+memo|later\s+memo|updated\s+memo)/i.test(text);
-
-  return hasMemoVersionComparison;
+  return /(?:v\d+|version\s*\d+|draft|final|earlier\s+memo|later\s+memo|updated\s+memo)\s*(?:vs\.?|versus|compared\s+(?:to|with))\s*(?:v\d+|version\s*\d+|draft|final|earlier\s+memo|later\s+memo|updated\s+memo)/i.test(text);
 }
 
 interface MaterialityResult {
@@ -246,7 +246,7 @@ interface MaterialityResult {
   demotedCount: number;
 }
 
-function enforceMaterialityGate(
+export function enforceMaterialityGate(
   findings: MergedFinding[],
   housekeepingFindings: MergedFinding[]
 ): MaterialityResult {
@@ -254,70 +254,72 @@ function enforceMaterialityGate(
   const survivingFindings: MergedFinding[] = [];
 
   for (const f of findings) {
-    // Parse £ figures from severity_anchor (primary) and evidence/detail (fallback)
-    const anchorText = f.severity_anchor ?? "";
-    const evidenceText = (f.evidence ?? []).map(e => e.verbatim_snippet).join(" ");
-    const allText = `${anchorText} ${f.detail} ${f.full_analysis}`;
+    // --- Fix 12: Structured impact path (preferred) ---
+    const structuredM = getStructuredMaterialityM(f);
+    const hasStructuredImpact = structuredM !== null;
 
-    const anchorFigures = parsePoundFiguresMillions(anchorText);
-    const allFigures = anchorFigures.length > 0 ? anchorFigures : parsePoundFiguresMillions(allText);
+    // --- Degraded fallback: prose £-amounts (only when no structured impact) ---
+    let degradedMaxM: number | null = null;
+    if (!hasStructuredImpact) {
+      const anchorText = f.severity_anchor ?? "";
+      const allText = `${anchorText} ${f.detail}`;
+      const anchorFigures = parsePoundFiguresMillions(anchorText);
+      const allFigures = anchorFigures.length > 0 ? anchorFigures : parsePoundFiguresMillions(allText);
+      degradedMaxM = allFigures.length > 0 ? Math.max(...allFigures) : null;
 
-    const maxFigure = allFigures.length > 0 ? Math.max(...allFigures) : null;
+      // Fix 12: numeric_unverified findings cannot receive numeric uplift
+      if (f.numeric_unverified && degradedMaxM !== null) {
+        degradedMaxM = null;
+      }
+    }
+
+    const effectiveM = hasStructuredImpact ? structuredM : degradedMaxM;
     const hasRiskMarker = hasMaterialRiskMarker(f);
     const isCrossVersion = isCrossVersionDivergence(f);
 
     if (f.severity === "critical") {
-      // Critical keeps only if: (a) £ anchor ≥ floor, (b) risk marker, or (c) cross-version
-      const hasAdequateAnchor = maxFigure !== null && maxFigure >= MATERIALITY_FLOOR_M;
+      const hasAdequateAnchor = effectiveM !== null && effectiveM >= MATERIALITY_FLOOR_M;
 
       if (hasAdequateAnchor || hasRiskMarker || isCrossVersion) {
-        // Survives as critical
         survivingFindings.push(f);
-      } else if (maxFigure !== null && maxFigure < MATERIALITY_FLOOR_M) {
-        // Has a £ figure but it's below threshold → demote
+      } else if (effectiveM !== null && effectiveM < MATERIALITY_FLOOR_M) {
         demotedCount++;
-        if (maxFigure < 0.5) {
-          // Trivially sub-threshold (< £500k) → housekeeping
+        if (effectiveM < 0.5) {
           housekeepingFindings.push({
             ...f,
             severity: "info",
             category: "housekeeping",
-            materiality_rationale: `[CODE_ENFORCED] £${maxFigure < 0.01 ? (maxFigure * 1000).toFixed(0) + "k" : maxFigure.toFixed(1) + "m"} is ${((maxFigure / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV — below 1% materiality threshold (£${MATERIALITY_FLOOR_M.toFixed(1)}m).`,
+            materiality_rationale: `[CODE_ENFORCED] £${effectiveM < 0.01 ? (effectiveM * 1000).toFixed(0) + "k" : effectiveM.toFixed(1) + "m"}${hasStructuredImpact ? " (verified structured)" : " (degraded prose)"} is ${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV — below 1% materiality threshold (£${MATERIALITY_FLOOR_M.toFixed(1)}m).`,
           });
         } else {
-          // Below critical floor but not trivial → warning
           survivingFindings.push({
             ...f,
             severity: "warning",
-            materiality_rationale: `[CODE_ENFORCED] £${maxFigure.toFixed(1)}m anchor (${((maxFigure / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV) below critical threshold of £${MATERIALITY_FLOOR_M.toFixed(1)}m. Demoted from critical.`,
+            materiality_rationale: `[CODE_ENFORCED] £${effectiveM.toFixed(1)}m${hasStructuredImpact ? " (verified structured)" : " (degraded prose)"} (${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(2)}% of EV) below critical threshold of £${MATERIALITY_FLOOR_M.toFixed(1)}m. Demoted from critical.`,
           });
         }
       } else {
-        // No £ figure at all — qualitative finding:
-        // If no risk marker AND not cross-version → demote to warning (unanchored critical)
-        // But DON'T demote to housekeeping — it's still potentially material, just unquantified
+        // No figure — safe degraded path: demote unless risk marker or cross-version
         if (!hasRiskMarker && !isCrossVersion) {
           demotedCount++;
           survivingFindings.push({
             ...f,
             severity: "warning",
-            materiality_rationale: `[CODE_ENFORCED] No quantifiable £ anchor and no source-stated material-risk marker. Demoted from critical to warning.`,
+            materiality_rationale: `[CODE_ENFORCED] No verified structured impact and no quantifiable £ anchor. Safe degraded path — demoted from critical to warning (no escalation).`,
           });
         } else {
-          // Qualitative with risk marker → survives unchanged
           survivingFindings.push(f);
         }
       }
     } else {
-      // Non-critical: check if provably sub-threshold → housekeeping
-      if (maxFigure !== null && maxFigure < 0.5 && f.category !== "housekeeping") {
-        // £ figure is trivially sub-threshold and not already housekeeping
+      // Non-critical: sub-threshold → housekeeping
+      if (effectiveM !== null && effectiveM < 0.5 && f.category !== "housekeeping") {
         demotedCount++;
         housekeepingFindings.push({
           ...f,
           severity: "info",
           category: "housekeeping",
-          materiality_rationale: `[CODE_ENFORCED] £${maxFigure < 0.01 ? (maxFigure * 1000).toFixed(0) + "k" : maxFigure.toFixed(1) + "m"} is ${((maxFigure / DEAL_EV_MILLIONS) * 100).toFixed(3)}% of EV — sub-materiality for £${DEAL_EV_MILLIONS}m transaction.`,
+          materiality_rationale: `[CODE_ENFORCED] £${effectiveM < 0.01 ? (effectiveM * 1000).toFixed(0) + "k" : effectiveM.toFixed(1) + "m"}${hasStructuredImpact ? " (verified)" : " (prose)"} is ${((effectiveM / DEAL_EV_MILLIONS) * 100).toFixed(3)}% of EV — sub-materiality for £${DEAL_EV_MILLIONS}m transaction.`,
         });
       } else {
         survivingFindings.push(f);
