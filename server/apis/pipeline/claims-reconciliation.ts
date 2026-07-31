@@ -46,11 +46,34 @@ export interface ReconciliationFinding {
   delta_abs: number | null;
   delta_pct: number | null;
   /**
-   * Fix 11: Explicit IDs of canonical findings this reconciliation finding supersedes.
+   * Fix 11 + Fix 20: Explicit IDs of canonical findings this reconciliation finding supersedes.
    * Only these exact IDs may be removed from the canonical set. If absent or empty,
    * the finding is append-only (no existing findings removed).
+   *
+   * Fix 20 RULE: supersedes_finding_ids MUST be populated ONLY when the reconciliation
+   * engine can prove exact canonical ID replacement — meaning the new finding is a
+   * strictly more-accurate version of the same underlying claim/divergence.
+   * Category, title, issue_key, or text similarity are NOT sufficient proof.
+   * Ambiguous relationships MUST remain append-only with a diagnostic.
    */
   supersedes_finding_ids?: string[];
+  /**
+   * Fix 20: Diagnostic emitted when supersession was considered but rejected
+   * as ambiguous. Records the candidate IDs and reason for append-only decision.
+   */
+  _supersession_diagnostic?: SupersessionDiagnostic;
+}
+
+/**
+ * Fix 20: Diagnostic metadata for supersession decisions.
+ * Persisted in the finding so auditors can trace why IDs were/weren't removed.
+ */
+export interface SupersessionDiagnostic {
+  decision: "proven" | "ambiguous_appended";
+  candidate_ids: string[];
+  proven_ids: string[];
+  ambiguous_ids: string[];
+  reason: string;
 }
 
 export interface ReconciliationResult {
@@ -62,6 +85,8 @@ export interface ReconciliationResult {
   cross_version_findings: number;
   /** Internal error from LLM matching step (null if LLM succeeded or wasn't attempted) */
   matching_error?: string | null;
+  /** Fix 20: Total supersession diagnostics emitted during this reconciliation */
+  supersession_diagnostics_count?: number;
 }
 
 /** LLM match proposal for a single claim */
@@ -624,6 +649,89 @@ Return a JSON array with one object per claim (same order as input):
 ]
 
 Return ONLY the JSON array. No markdown fences, no commentary.`;
+}
+
+// ---------------------------------------------------------------------------
+// Fix 20: Deterministic supersession validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Candidate finding for supersession consideration.
+ * Only used when reconciliation has prior-run findings available.
+ */
+interface SupersessionCandidate {
+  canonical_id: string;
+  claim_metric: string;
+  claim_scope: string;
+  claim_period: string;
+  claim_source_doc: string;
+}
+
+/**
+ * Fix 20: Validate supersession proof — deterministic ID replacement.
+ *
+ * RULES (non-negotiable):
+ *   1. Exact canonical ID match required — the candidate must be a known prior finding
+ *   2. The candidate must share the SAME claim coordinate triple (metric + scope + period)
+ *   3. The candidate must originate from the same source document
+ *   4. Category, title, issue_key, and text similarity are NOT sufficient proof
+ *   5. Any ambiguity → append-only with diagnostic
+ *
+ * @param newFinding The new reconciliation finding being produced
+ * @param candidates Prior-run findings that share similar coordinates
+ * @returns Validated supersession result with diagnostics
+ */
+export function validateSupersessionProof(
+  newFinding: { claim: Claim; finding_kind: string },
+  candidates: SupersessionCandidate[],
+): { proven_ids: string[]; ambiguous_ids: string[]; diagnostic: SupersessionDiagnostic | null } {
+  if (!candidates || candidates.length === 0) {
+    return { proven_ids: [], ambiguous_ids: [], diagnostic: null };
+  }
+
+  const proven: string[] = [];
+  const ambiguous: string[] = [];
+  const claim = newFinding.claim;
+
+  for (const candidate of candidates) {
+    // Gate 1: Exact coordinate match (metric + scope + period)
+    const metricMatch = coordKey(claim.metric, claim.scope_qualifier, claim.period) ===
+                        coordKey(candidate.claim_metric, candidate.claim_scope, candidate.claim_period);
+
+    // Gate 2: Same source document
+    const sourceMatch = claim.source_doc === candidate.claim_source_doc;
+
+    if (metricMatch && sourceMatch) {
+      // Deterministic proof: same claim coordinate from same document → proven supersession
+      proven.push(candidate.canonical_id);
+    } else {
+      // Cannot prove replacement — mark as ambiguous
+      ambiguous.push(candidate.canonical_id);
+    }
+  }
+
+  // Build diagnostic
+  let diagnostic: SupersessionDiagnostic | null = null;
+  if (proven.length > 0 || ambiguous.length > 0) {
+    const allCandidateIds = candidates.map(c => c.canonical_id);
+    diagnostic = {
+      decision: ambiguous.length === 0 ? "proven" : "ambiguous_appended",
+      candidate_ids: allCandidateIds,
+      proven_ids: proven,
+      ambiguous_ids: ambiguous,
+      reason: ambiguous.length === 0
+        ? `All ${proven.length} candidate(s) proven via exact coordinate + source_doc match`
+        : `${ambiguous.length} candidate(s) failed proof gates (coordinate or source_doc mismatch). Append-only: no findings removed.`,
+    };
+  }
+
+  // Fix 20 CRITICAL: If ANY candidate is ambiguous, the entire set is treated as append-only.
+  // We never partially supersede — it's all-proven or all-appended.
+  if (ambiguous.length > 0) {
+    return { proven_ids: [], ambiguous_ids: [...proven, ...ambiguous], diagnostic };
+  }
+
+  return { proven_ids: proven, ambiguous_ids: [], diagnostic };
 }
 
 // ---------------------------------------------------------------------------
