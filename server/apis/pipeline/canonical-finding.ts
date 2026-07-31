@@ -256,10 +256,28 @@ export function parseCanonicalFindings(
         itemIssues.push(`finding_id was present but invalid ("${obj.finding_id}") — replaced with new UUID`);
       }
     } else {
-      // Reload from checkpoint — missing/invalid finding_id is an error
-      itemIssues.push(`finding_id missing or invalid in checkpoint (source=${itemSource}) — assigned new UUID`);
-      isValid = false;
-      finding_id = randomUUID();
+      // Reload from checkpoint — missing/invalid finding_id is an IDENTITY FAILURE.
+      // Persisted findings MUST retain stable identity; generating a new UUID
+      // would silently corrupt provenance chains and checkpoint references.
+      // Exclude from usable findings — report as identity failure.
+      const placeholder_id = `__identity_lost_${i}__`;
+      const identityIssue = obj.finding_id
+        ? `finding_id present but invalid ("${obj.finding_id}") in persisted data — identity lost`
+        : `finding_id missing in persisted data — identity lost`;
+      console.error(`[canonical-finding] IDENTITY FAILURE at ${itemSource}: ${identityIssue}`);
+
+      // Build a minimal finding for the invalid diagnostics collection
+      const title = typeof obj.title === "string" && obj.title.trim() ? obj.title.trim() : "[MISSING TITLE]";
+      const lostFinding: CanonicalFinding = {
+        finding_id: placeholder_id,
+        severity: "info",
+        title,
+        detail: typeof obj.detail === "string" ? obj.detail : "",
+        full_analysis: typeof obj.full_analysis === "string" ? obj.full_analysis : "",
+        source_docs: Array.isArray(obj.source_docs) ? obj.source_docs.map(String) : [],
+      };
+      invalid.push({ finding: lostFinding, valid: false, issues: [identityIssue] });
+      continue; // Do NOT add to findings — identity is irrecoverable
     }
 
     // --- severity ---
@@ -400,6 +418,9 @@ export function parseCanonicalFindings(
       }
     }
 
+    // In reload mode, findings with validation failures (isValid=false) are still
+    // included — only identity failures (handled above with `continue`) are excluded.
+    // This preserves coercion semantics for non-identity fields (severity, source_docs, etc.)
     findings.push(finding);
   }
 
@@ -570,9 +591,15 @@ export function validateFindingsFromDB(raw: unknown): { ok: true; findings: Cano
   if (!Array.isArray(raw)) {
     return { ok: false, errors: [`Expected array, got ${typeof raw}`] };
   }
-  const result = parseCanonicalFindings(raw, { mode: "reload", source: "db" });
+  const result = parseCanonicalFindings(raw, { mode: "reload", source: "db-validate" });
   if (result.malformed_count > 0) {
     return { ok: false, errors: [`${result.malformed_count} malformed items`] };
+  }
+  // Any persisted finding with validation issues (including identity failures)
+  // means the data is not in a canonical-compliant state.
+  if (result.invalid.length > 0) {
+    const errorMsgs = result.invalid.map(inv => `"${inv.finding.title}": ${inv.issues.join("; ")}`);
+    return { ok: false, errors: errorMsgs.slice(0, 10) };
   }
   if (result.findings.length === 0 && raw.length > 0) {
     return { ok: false, errors: ["All items failed to parse"] };
