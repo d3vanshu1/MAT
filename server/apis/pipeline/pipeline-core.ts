@@ -78,8 +78,9 @@ import { runAbsenceVerificationPhase } from "./absence-verification-phase.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
-import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS } from "./pipeline-config.js";
+import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
+import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isPopulated, isAnalysisComplete, detectMismatches, WORKER_BATCH_SIZE } from "./analysis-worker.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
 import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
@@ -94,6 +95,7 @@ const ANALYSIS_CONCURRENCY = 15;
 const MERGE_CONCURRENCY = 5;
 const MERGE_GROUP_SIZE = 4;
 const MAX_MERGE_GROUP_FAILURES = 5; // Skip (use fallback) after this many error checkpoints across invocations
+const MAX_PARTIAL_RETRIES = 2; // Accept truncated merge checkpoints after this many re-merges still truncate
 const MERGE_NODE_TEXT_CAP = 3000; // Max chars per node's text in merge input — prevents token overflow
 // TIME_BUDGET_MS is imported from pipeline-config.ts (derived from EFFECTIVE_CAP_MS - 100s, floor 120s)
 
@@ -3788,6 +3790,185 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   });
 
   // Process pending chunks with dynamic batch sizing
+  // ─── WORKER PATH (Commit 1): bounded, lease-based analysis ───────────────
+  // Uses analysis_work_items for coordination; dual-writes to pipeline_analysis.
+  // Gated by: ANALYSIS_WORKER_ENABLED flag AND per-run analysis_worker_enabled column.
+  // Legacy path below remains for existing in-progress runs.
+  const runMetaRows = await ctx.integrations.db.query(
+    `SELECT analysis_worker_enabled FROM module_runs WHERE id = $1 LIMIT 1`,
+    z.object({ analysis_worker_enabled: z.boolean().nullable() }),
+    [runId],
+    { label: "Load run meta for worker-path gate" }
+  );
+  const runMeta = runMetaRows[0] ?? null;
+  const useWorkerPath = ANALYSIS_WORKER_ENABLED && runMeta?.analysis_worker_enabled === true;
+
+  if (useWorkerPath) {
+    enterPhase("analysis_worker");
+
+    // Populate work items on first entry (idempotent)
+    if (!(await isPopulated(ctx, runId!))) {
+      const routedForWorker = routed.map((row, idx) => ({
+        document_id: String(row.document_id ?? ""),
+        chunk_index: idx,
+        content_hash: String(row.content_hash ?? ""),
+      }));
+      const popResult = await populateWorkItems(ctx, runId!, routedForWorker);
+      console.log(
+        `[analysis-worker] Populated ${popResult.inserted} work items ` +
+        `(${popResult.skipped} skipped, ${popResult.total} total)`
+      );
+    }
+
+    // Budget gate: need at least 130s for a meaningful analysis batch
+    const WORKER_BUDGET_GATE_MS = 130_000;
+    const workerBudgetRemaining = EFFECTIVE_CAP_MS - (Date.now() - startTime);
+    if (workerBudgetRemaining < WORKER_BUDGET_GATE_MS) {
+      logReturn("in_progress", "analysis", "worker_budget_insufficient", {
+        remaining_ms: Math.round(workerBudgetRemaining),
+        gate_ms: WORKER_BUDGET_GATE_MS,
+      });
+      exitPhase("analysis_worker");
+      return returnInProgress("analysis");
+    }
+
+    // Claim a bounded batch
+    const workerInvocationId = `worker_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const batchSize = Math.min(ANALYSIS_WORKER_BATCH_SIZE, WORKER_BATCH_SIZE);
+    const { claimed, recovered } = await claimBatch(ctx, runId!, workerInvocationId, batchSize);
+
+    if (recovered > 0) {
+      console.log(`[analysis-worker] Recovered ${recovered} expired lease(s)`);
+    }
+
+    if (claimed.length === 0) {
+      // No claimable items — either all complete or all permanently failed
+      const counts = await getAnalysisCounts(ctx, runId!);
+      console.log(
+        `[analysis-worker] No claimable items: ` +
+        `complete=${counts.complete}, failed_permanent=${counts.failed_permanent}, ` +
+        `pending=${counts.pending}, claimed=${counts.claimed}`
+      );
+
+      // Check for dual-write mismatches (diagnostic visibility)
+      const mismatches = await detectMismatches(ctx, runId!);
+      if (mismatches.length > 0) {
+        console.warn(
+          `[analysis-worker] ⚠️  ${mismatches.length} dual-write mismatch(es) detected:`,
+          JSON.stringify(mismatches)
+        );
+      }
+
+      if (await isAnalysisComplete(ctx, runId!)) {
+        // All work items are terminal — analysis phase complete
+        analysisCompleted = counts.complete;
+        failedChunks = counts.failed_permanent;
+        exitPhase("analysis_worker");
+        // Fall through to merge phase below
+      } else {
+        // Items are claimed by other workers — wait for them
+        exitPhase("analysis_worker");
+        return returnInProgress("analysis");
+      }
+    } else {
+      // Process claimed items
+      console.log(`[analysis-worker] Claimed ${claimed.length} item(s) for processing`);
+
+      const workerResults = await Promise.allSettled(
+        claimed.map(async (item) => {
+          const row = routed[item.chunk_index];
+          if (!row) {
+            throw new Error(`Work item chunk_index ${item.chunk_index} exceeds routed array length ${routed.length}`);
+          }
+
+          const ext = typeof row.extraction_json === "string"
+            ? JSON.parse(row.extraction_json)
+            : row.extraction_json;
+
+          const chunkText = String(ext.extraction ?? ext.text ?? "");
+          const chunkLabel = String(ext.label ?? `Chunk ${item.chunk_index}`);
+
+          const userContent = `--- Extracted text from "${chunkLabel}" ---\n\n${chunkText}\n\nAnalyze this chunk now.${coverageMapBlock}`;
+
+          const result = await callAnthropic(
+            ctx,
+            {
+              model: getModuleModel(moduleId),
+              max_tokens: SUB_AGENT_MAX_TOKENS,
+              system: [{ type: "text", text: subAgentPrompt, cache_control: { type: "ephemeral" } }],
+              messages: [{ role: "user", content: userContent }],
+            },
+            `Worker: ${chunkLabel} (${item.chunk_index + 1}/${routed.length})`,
+            3,
+            120_000,
+            startTime
+          );
+
+          const textBlock = result.content.find((c: { type: string }) => c.type === "text");
+          const extraction = `### Extraction from: ${chunkLabel}\n\n${textBlock?.text ?? ""}`;
+          const truncated = result.stop_reason === "max_tokens";
+
+          // Content identity for Fix 8A validation
+          const dbContentHash = row.content_hash ?? "";
+          const contentIdentity = `${row.document_id}:${item.chunk_index}:${dbContentHash}`;
+
+          // Dual-write: pipeline_analysis + mark work item complete
+          await completeItem(ctx, item, {
+            label: chunkLabel,
+            extraction,
+            chunkIndex: item.chunk_index,
+            truncated,
+            content_identity: contentIdentity,
+          }, getModuleModel(moduleId));
+
+          return { label: chunkLabel, chunkIndex: item.chunk_index, truncated };
+        })
+      );
+
+      // Process results — track successes and failures
+      for (let i = 0; i < workerResults.length; i++) {
+        const r = workerResults[i];
+        if (r.status === "fulfilled") {
+          analysisCompleted++;
+          if (r.value.truncated) truncatedChunks++;
+        } else {
+          // Mark item as failed in the work queue
+          await failItem(ctx, claimed[i], r.reason);
+          failedChunks++;
+          const errMsg = r.reason?.message ?? String(r.reason ?? "Unknown error");
+          console.error(`[analysis-worker] Chunk ${claimed[i].chunk_index} failed: ${errMsg.slice(0, 200)}`);
+          if (!firstError) firstError = errMsg;
+        }
+      }
+
+      // Heartbeat
+      await ctx.integrations.db.execute(
+        `UPDATE module_runs SET triggered_at = now() WHERE id = $1`,
+        [runId],
+        { label: "Refresh triggered_at (worker heartbeat)" }
+      );
+
+      // Cancel gate
+      if (await checkCancelled(ctx, runId, "analysis_worker_batch")) {
+        exitPhase("analysis_worker");
+        return cancelledResult(runId!, "analysis_worker_batch");
+      }
+
+      // Check if more work remains
+      if (!(await isAnalysisComplete(ctx, runId!))) {
+        exitPhase("analysis_worker");
+        return returnInProgress("analysis");
+      }
+
+      // All complete — update counts for progress reporting
+      const finalCounts = await getAnalysisCounts(ctx, runId!);
+      analysisCompleted = finalCounts.complete;
+      failedChunks = finalCounts.failed_permanent;
+      exitPhase("analysis_worker");
+      // Fall through to merge phase
+    }
+  } else {
+  // ─── LEGACY PATH: inline analysis loop ─────────────────────────────────────
   for (let bStart = 0; bStart < pendingChunks.length; ) {
     // Batch-aware graceful exit: don't launch if the real platform clock can't
     // accommodate worst-case batch (1 full attempt + checkpoint I/O reserve).
@@ -3896,6 +4077,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       return returnInProgress("analysis");
     }
   }
+  } // end else: legacy analysis path
 
   // --- Chunk Coverage Log (per-document in vs. processed) ---
   {
@@ -4025,6 +4207,9 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // itself (not row count, since ON CONFLICT DO UPDATE means only 1 row exists per group).
   const errorCountMap = new Map<string, number>();
   const errorMessageMap = new Map<string, string>(); // Preserves last error for diagnostics
+  // Tracks truncation retries for partial checkpoints — prevents livelock when
+  // round 2+ inputs exceed max_tokens and ALWAYS produce truncated responses.
+  const truncationCountMap = new Map<string, number>();
   for (const cp of mergeCheckpoints) {
     const data = typeof cp.merged_json === "string" ? JSON.parse(cp.merged_json) : cp.merged_json;
     const cpKey = `${cp.tree_level}:${cp.node_index}`;
@@ -4049,9 +4234,36 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     });
 
     if (!validation.reusable) {
+      // FIX: Partial checkpoints that have been retried MAX_PARTIAL_RETRIES times
+      // should be accepted as-is. The findings are preserved (Fix 16 ensures no
+      // data loss via carry-forward), only the narrative text may be incomplete.
+      // Without this, truncated responses at higher merge rounds cause infinite
+      // livelock: partial → retry → truncate again → partial → retry → ...
+      if (cpStatus === "partial" && data.truncated) {
+        const truncCount = typeof data.truncation_count === "number" ? data.truncation_count : 1;
+        truncationCountMap.set(cpKey, truncCount);
+
+        if (truncCount >= MAX_PARTIAL_RETRIES) {
+          // Accept partial checkpoint — findings are intact, narrative may be cut short
+          console.log(
+            `[pipeline:RC12] Accepting partial checkpoint ${cpKey} after ${truncCount} truncation(s) ` +
+            `(MAX_PARTIAL_RETRIES=${MAX_PARTIAL_RETRIES}). Findings count: ${(data.findings ?? []).length}`
+          );
+          const findings = (data.findings ?? []) as MergedFinding[];
+          const executiveHeader = String(data.executiveHeader ?? "");
+          checkpointMap.set(cpKey, {
+            text: data.text ? String(data.text) : buildMergedText(executiveHeader, findings),
+            executiveHeader,
+            findings,
+            truncated: true,
+          });
+          continue;
+        }
+      }
+
       // Partial or invalid checkpoint — treat as needing retry
       if (validation.suggestedAction === "retry") {
-        console.log(`[pipeline:RC12] Checkpoint ${cpKey} not reusable: ${validation.reason} — will retry`);
+        console.log(`[pipeline:RC12] Checkpoint ${cpKey} not reusable: ${validation.reason} — will retry (truncation_count=${truncationCountMap.get(cpKey) ?? 0}/${MAX_PARTIAL_RETRIES})`);
         continue; // Skip this checkpoint, group will be re-merged
       }
       if (validation.suggestedAction === "fail") {
@@ -4577,6 +4789,14 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           // RC11: Truncated responses are marked 'partial' — they should not be treated
           // as authoritative in recovery/export paths without re-merge
           const cpStatus = node.truncated ? "partial" : "complete";
+          // Track truncation count: increment if this group was previously truncated too
+          const successCpKey = `${currentRound}:${group.idx}`;
+          const priorTruncCount = truncationCountMap.get(successCpKey) ?? 0;
+          const newTruncCount = node.truncated ? priorTruncCount + 1 : 0;
+          if (node.truncated) {
+            truncationCountMap.set(successCpKey, newTruncCount);
+          }
+
           await ctx.integrations.db.execute(
             `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
              VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
@@ -4587,6 +4807,8 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
               findings: node.findings,
               housekeepingFindings: node.housekeepingFindings,
               truncated: node.truncated ?? false,
+              // Livelock prevention: persist truncation count so resume knows when to accept partial
+              truncation_count: node.truncated ? newTruncCount : undefined,
               // Fix 16: Persist accounting metadata for resume/recovery verification
               _accounting: {
                 inputFindingCount: group.members.reduce((sum, m) => sum + (m.findings?.length ?? 0), 0),

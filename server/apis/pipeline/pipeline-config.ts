@@ -92,6 +92,22 @@ export const RESUME_JOB_TIME_BUDGET_MS = EFFECTIVE_CAP_MS - PLATFORM_HEADROOM_MS
 export const STALENESS_THRESHOLD_MINUTES = Math.ceil(EFFECTIVE_CAP_MS / 60_000) + 2; // 7 at 300s cap
 
 // ===========================================================================
+// Feature Flags (Stabilization Batch)
+// ===========================================================================
+
+/** Enable durable analysis workers (Commit 1).
+ *  When true, new runs use lease-based work items instead of inline analysis loop.
+ *  Existing in-progress runs without analysis_worker_enabled=true on their module_runs
+ *  row continue on the legacy inline path. */
+export const ANALYSIS_WORKER_ENABLED = true;
+
+/** Worker batch size: chunks per invocation.
+ *  Priority-weighted budget (Q2): analysis gets 130-140s, each call ~120s worst case.
+ *  With ANALYSIS_CONCURRENCY=15 in legacy path, worker uses a bounded 8 to stay
+ *  within lease timeout and allow concurrent workers. */
+export const ANALYSIS_WORKER_BATCH_SIZE = 8;
+
+// ===========================================================================
 // Types (shared across pipeline files — lives here to avoid circular imports)
 // ===========================================================================
 
