@@ -70,10 +70,30 @@ export const ClaimSchema = z.object({
 
 export type Claim = z.infer<typeof ClaimSchema>;
 
+// ---------------------------------------------------------------------------
+// Terminal Result — one record per input memo
+// ---------------------------------------------------------------------------
+
+export type TerminalStatus = "success" | "failed" | "timed_out" | "partial" | "pending";
+
+export interface TerminalResult {
+  memo_id: string;
+  file_name: string;
+  status: TerminalStatus;
+  claims_count: number;
+  error?: string;
+}
+
 export interface ClaimsLedger {
   claims: Claim[];
+  /** true only when every input memo has a terminal result and pending = 0 */
+  complete: boolean;
+  terminal_results: TerminalResult[];
   extraction_metadata: {
+    /** Number of memos with a non-pending terminal result */
     docs_processed: number;
+    /** Number of memos not yet processed (budget expired before launch) */
+    pending: number;
     total_claims: number;
     operating_metric_claims: number;
     deal_mechanics_claims: number;
@@ -83,6 +103,97 @@ export interface ClaimsLedger {
     extraction_model: string;
     extraction_timestamp: string;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Bounded Worker Pool — exported for direct testing
+// ---------------------------------------------------------------------------
+
+export interface WorkerPoolJob<T> {
+  id: string;
+  label: string;
+  execute: () => Promise<T>;
+}
+
+export interface WorkerPoolOptions {
+  concurrency: number;
+  /**
+   * Called before launching each new job. Return false to stop launching
+   * further work (budget expired). Already-launched jobs will still settle.
+   */
+  canLaunch?: () => boolean;
+}
+
+export interface WorkerPoolResult<T> {
+  results: Array<{
+    job: WorkerPoolJob<T>;
+    index: number;
+    status: "fulfilled" | "rejected";
+    value?: T;
+    reason?: unknown;
+  }>;
+  /** Jobs that were never launched (budget expired or queue not reached) */
+  pending: Array<{ job: WorkerPoolJob<T>; index: number }>;
+}
+
+/**
+ * Bounded concurrency worker pool that:
+ * - Launches at most `concurrency` jobs simultaneously
+ * - Awaits ALL launched promises before returning (no leaked promises)
+ * - Preserves original job order in results
+ * - Supports a budget predicate (canLaunch) to stop launching new work
+ * - Never returns while a launched promise remains unsettled
+ */
+export async function runWorkerPool<T>(
+  jobs: WorkerPoolJob<T>[],
+  options: WorkerPoolOptions,
+): Promise<WorkerPoolResult<T>> {
+  const { concurrency, canLaunch } = options;
+
+  const results: WorkerPoolResult<T>["results"] = [];
+  const pending: WorkerPoolResult<T>["pending"] = [];
+  const inFlight = new Set<Promise<void>>();
+  let nextIndex = 0;
+
+  while (nextIndex < jobs.length) {
+    // Budget gate: stop launching if predicate returns false
+    if (canLaunch && !canLaunch()) {
+      for (let i = nextIndex; i < jobs.length; i++) {
+        pending.push({ job: jobs[i], index: i });
+      }
+      break;
+    }
+
+    // Wait for a slot if at capacity
+    if (inFlight.size >= concurrency) {
+      await Promise.race([...inFlight]);
+    }
+
+    // Launch the next job
+    const idx = nextIndex;
+    const job = jobs[idx];
+    nextIndex++;
+
+    const tracked = (async () => {
+      try {
+        const value = await job.execute();
+        results.push({ job, index: idx, status: "fulfilled", value });
+      } catch (reason) {
+        results.push({ job, index: idx, status: "rejected", reason });
+      }
+    })().then(() => { inFlight.delete(tracked); });
+    inFlight.add(tracked);
+  }
+
+  // Await ALL remaining in-flight work — no leaked promises
+  while (inFlight.size > 0) {
+    await Promise.race([...inFlight]);
+  }
+
+  // Sort by original index for deterministic ordering
+  results.sort((a, b) => a.index - b.index);
+
+  return { results, pending };
 }
 
 // ---------------------------------------------------------------------------
@@ -292,8 +403,11 @@ export async function runClaimsExtraction(
     console.log(`[ClaimsExtraction] No IC memos found for deal — skipping`);
     return {
       claims: [],
+      complete: true,
+      terminal_results: [],
       extraction_metadata: {
         docs_processed: 0,
+        pending: 0,
         total_claims: 0,
         operating_metric_claims: 0,
         deal_mechanics_claims: 0,
@@ -308,15 +422,16 @@ export async function runClaimsExtraction(
 
   console.log(`[ClaimsExtraction] Found ${memos.length} IC memo(s): ${memos.map(m => m.file_name).join(", ")}`);
 
-  const allClaims: Claim[] = [];
-
   // Prepare memo extraction tasks
   const validMemos = memos.filter(m => m.parsed_text && m.parsed_text.trim().length > 0);
 
-  // Process memos in parallel (2 concurrent) for time efficiency
+  // Concurrency limit (2 for pipeline, 4 for bypass/diagnostics)
   const CONCURRENCY = options?.bypassHeadroom ? 4 : 2;
 
-  const extractMemo = async (memo: { id: string; file_name: string; parsed_text: string | null }) => {
+  // Time-budget reserve: stop launching new work when less than this remains
+  const BUDGET_RESERVE_MS = 30_000;
+
+  const extractMemo = async (memo: { id: string; file_name: string; parsed_text: string | null }): Promise<Claim[]> => {
     // Truncate very long memos to fit in context window (Sonnet: ~200K tokens)
     // 150K chars ≈ 37K tokens, leaving plenty for prompt + output
     const rawText = memo.parsed_text ?? "";
@@ -371,41 +486,75 @@ export async function runClaimsExtraction(
     return claims;
   };
 
-  // Run with bounded concurrency
-  const results = await Promise.allSettled(
-    (() => {
-      const queue = [...validMemos];
-      const inFlight: Promise<Claim[]>[] = [];
-      const allPromises: Promise<Claim[]>[] = [];
+  // Build job list for the worker pool
+  const jobs: WorkerPoolJob<Claim[]>[] = validMemos.map((memo) => ({
+    id: memo.id,
+    label: memo.file_name,
+    execute: () => extractMemo(memo),
+  }));
 
-      function launchNext(): void {
-        while (inFlight.length < CONCURRENCY && queue.length > 0) {
-          const memo = queue.shift()!;
-          const p = extractMemo(memo).finally(() => {
-            inFlight.splice(inFlight.indexOf(p), 1);
-            launchNext();
-          });
-          inFlight.push(p);
-          allPromises.push(p);
-        }
-      }
-      launchNext();
-      return allPromises;
-    })()
-  );
+  // Budget predicate: stop launching when remaining time < reserve
+  const canLaunch = (): boolean => {
+    const elapsed = Date.now() - phaseStart;
+    return elapsed + BUDGET_RESERVE_MS < timeBudgetMs;
+  };
 
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      allClaims.push(...result.value);
+  // Run with bounded concurrency + budget gating
+  const poolResult = await runWorkerPool(jobs, {
+    concurrency: CONCURRENCY,
+    canLaunch: options?.bypassHeadroom ? undefined : canLaunch,
+  });
+
+  // Build terminal results and collect claims
+  const allClaims: Claim[] = [];
+  const terminalResults: TerminalResult[] = [];
+
+  for (const r of poolResult.results) {
+    if (r.status === "fulfilled") {
+      const claims = r.value!;
+      allClaims.push(...claims);
+      terminalResults.push({
+        memo_id: r.job.id,
+        file_name: r.job.label,
+        status: "success",
+        claims_count: claims.length,
+      });
     } else {
-      console.warn(`[ClaimsExtraction] One memo failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+      const errMsg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+      // Detect timeout vs generic failure
+      const isTimeout = errMsg.toLowerCase().includes("timeout") || errMsg.toLowerCase().includes("timed out");
+      console.warn(`[ClaimsExtraction] Memo "${r.job.label}" ${isTimeout ? "timed out" : "failed"}: ${errMsg}`);
+      terminalResults.push({
+        memo_id: r.job.id,
+        file_name: r.job.label,
+        status: isTimeout ? "timed_out" : "failed",
+        claims_count: 0,
+        error: errMsg,
+      });
     }
   }
 
+  // Record pending memos (never launched due to budget)
+  for (const p of poolResult.pending) {
+    terminalResults.push({
+      memo_id: p.job.id,
+      file_name: p.job.label,
+      status: "pending",
+      claims_count: 0,
+    });
+  }
+
+  const docsProcessed = terminalResults.filter(r => r.status !== "pending").length;
+  const pendingCount = terminalResults.filter(r => r.status === "pending").length;
+  const isComplete = pendingCount === 0;
+
   const ledger: ClaimsLedger = {
     claims: allClaims,
+    complete: isComplete,
+    terminal_results: terminalResults,
     extraction_metadata: {
-      docs_processed: memos.length,
+      docs_processed: docsProcessed,
+      pending: pendingCount,
       total_claims: allClaims.length,
       operating_metric_claims: allClaims.filter(c => c.claim_category === "operating_metric").length,
       deal_mechanics_claims: allClaims.filter(c => c.claim_category === "deal_mechanics").length,
@@ -418,7 +567,9 @@ export async function runClaimsExtraction(
   };
 
   console.log(
-    `[ClaimsExtraction] Complete: ${allClaims.length} total claims from ${memos.length} memo(s). ` +
+    `[ClaimsExtraction] ${isComplete ? "Complete" : "Incomplete (budget expired)"}: ` +
+    `${allClaims.length} claims from ${docsProcessed}/${validMemos.length} memo(s)` +
+    `${pendingCount > 0 ? `, ${pendingCount} pending` : ""}. ` +
     `Elapsed: ${Math.round((Date.now() - phaseStart) / 1000)}s`
   );
 
