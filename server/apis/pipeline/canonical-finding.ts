@@ -142,6 +142,7 @@ export const CanonicalFindingSchema = z.object({
   /** Specific finding kind — required for numeric validation, reconciliation, materiality */
   finding_kind: z.enum([
     "data_divergence",
+    "cross_version",
     "source_stated_risk",
     "absence_claim",
     "process_observation",

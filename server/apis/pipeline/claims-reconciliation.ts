@@ -488,7 +488,27 @@ function processMatch(
   const modelVal = modelFig.value;
 
   const deltaAbs = Math.abs(claimVal - modelVal);
-  const deltaPct = modelVal !== 0 ? deltaAbs / Math.abs(modelVal) : (deltaAbs > 0 ? 1 : 0);
+
+  // FIX 7: Zero/near-zero denominator handling.
+  // When modelVal is zero or near-zero (< £1k), percentage computation is undefined.
+  // Instead of synthesizing an arbitrary 100%, classify by absolute delta alone.
+  // De minimis: if BOTH values are near-zero (< £10k), treat as within tolerance.
+  const DE_MINIMIS_THRESHOLD = 10_000; // £10k — below this, both values are negligible
+  const NEAR_ZERO_THRESHOLD = 1_000;   // £1k — denominator too small for meaningful %
+
+  if (Math.abs(modelVal) < NEAR_ZERO_THRESHOLD && Math.abs(claimVal) < DE_MINIMIS_THRESHOLD) {
+    // Both values are trivially small — no meaningful divergence
+    return { kind: "within_tolerance", finding: null };
+  }
+
+  let deltaPct: number;
+  if (Math.abs(modelVal) < NEAR_ZERO_THRESHOLD) {
+    // Model is zero/near-zero but claim is non-trivial: use absolute delta only.
+    // Set deltaPct to null-equivalent (will not drive severity via percentage threshold).
+    deltaPct = 0; // Severity will be driven solely by deltaAbs
+  } else {
+    deltaPct = deltaAbs / Math.abs(modelVal);
+  }
 
   // ----- Materiality classification -----
   const belowMateriality = deltaAbs < MATERIALITY_ABS_FLOOR && deltaPct < MATERIALITY_REL_FLOOR;

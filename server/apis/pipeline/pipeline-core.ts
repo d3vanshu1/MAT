@@ -196,6 +196,8 @@ function hasMaterialRiskMarker(f: MergedFinding): boolean {
 
 /** Check if finding is a cross-version data_divergence (material regardless of £ floor) */
 function isCrossVersionDivergence(f: MergedFinding): boolean {
+  // Explicit cross_version finding_kind (from reconciliation Fix 7)
+  if (f.finding_kind === "cross_version") return true;
   if (f.finding_kind !== "data_divergence") return false;
   // Cross-version findings compare two versions of the same metric from different documents
   // They're material because the concern is which-version-underwrites-valuation, not £ magnitude
@@ -320,8 +322,10 @@ function appendReconciliationFindings(
         source_docs: rf.source_docs,
         category: "principal_finding" as const,
         numeric_unverified: false,
-        finding_kind: (rf.finding_kind === "cross_version" ? "data_divergence" : rf.finding_kind) as MergedFinding["finding_kind"],
-        severity_anchor: rf.severity_anchor != null ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : undefined,
+        finding_kind: rf.finding_kind as MergedFinding["finding_kind"],
+        severity_anchor: rf.severity_anchor != null
+          ? (rf.severity_anchor >= 1_000_000 ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : `£${(rf.severity_anchor / 1_000).toFixed(0)}k`)
+          : undefined,
       })));
 
     // Remove LLM paraphrases: if code-verified finding has ≥2 £-amounts,
@@ -362,7 +366,9 @@ function appendReconciliationFindings(
         category: "housekeeping" as const,
         numeric_unverified: false,
         finding_kind: rf.finding_kind as MergedFinding["finding_kind"],
-        severity_anchor: rf.severity_anchor != null ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : undefined,
+        severity_anchor: rf.severity_anchor != null
+          ? (rf.severity_anchor >= 1_000_000 ? `£${(rf.severity_anchor / 1_000_000).toFixed(1)}m` : `£${(rf.severity_anchor / 1_000).toFixed(0)}k`)
+          : undefined,
       })));
 
     if (reconHousekeeping.length > 0) {

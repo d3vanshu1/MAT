@@ -45,7 +45,7 @@ type MergeNode = {
     claim_ids?: string[];
     merged_from_finding_ids?: string[];
     category?: "principal_finding" | "housekeeping" | "human_review_flag";
-    finding_kind?: "data_divergence" | "source_stated_risk" | "absence_claim" | "process_observation";
+    finding_kind?: "data_divergence" | "cross_version" | "source_stated_risk" | "absence_claim" | "process_observation";
     issue_key?: string;
     severity_anchor?: string;
     structured_impact?: Array<{ amount: number; currency: "GBP" | "USD" | "EUR" | "other"; unit_multiplier: number; role: "delta" | "exposure" | "annual_impact" | "deal_value" | "threshold" | "context"; verified: boolean; source_doc?: string; source_coordinate?: string }>;
