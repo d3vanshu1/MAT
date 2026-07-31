@@ -15,7 +15,7 @@
  * Summary block always reflects the full unfiltered set.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { CanonicalFindingSchema } from "./canonical-finding.js";
+import { CanonicalFindingSchema, FINDING_SCHEMA_VERSION } from "./canonical-finding.js";
 import { strictReloadFindings } from "../modules/strict-reload-findings.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -36,6 +36,8 @@ const SummarySchema = z.object({
   treeLevel: z.number(),
   /** true = findings came from post-quality module_outputs; false = fell back to raw merge checkpoint */
   fromCanonicalArtifact: z.boolean(),
+  /** Schema version of the persisted artifact (null if pre-Fix 13 data). Current = FINDING_SCHEMA_VERSION. */
+  schemaVersion: z.number().nullable(),
 });
 
 export default api({
@@ -66,6 +68,7 @@ export default api({
     summary: SummarySchema.describe("Always computed from the FULL unfiltered set"),
     filtered: z.boolean(),
     corruptionDetected: z.boolean().describe("true if persisted findings failed strict validation — distinguishes corruption from a genuinely empty run"),
+    staleSchema: z.boolean().describe("true if persisted schema_version does not match current FINDING_SCHEMA_VERSION — indicates a pre-migration artifact that may lack newer fields"),
     idManifest: z.object({
       generatedAt: z.string(),
       totalCount: z.number(),
@@ -87,6 +90,7 @@ export default api({
       findings_bytes: z.coerce.number(),
       from_canonical: z.literal(true),
       tree_level: z.literal(-1),
+      schema_version: z.coerce.number().nullable(),
     });
 
     const FallbackRow = z.object({
@@ -101,6 +105,7 @@ export default api({
       findings_bytes: number;
       from_canonical: boolean;
       tree_level: number;
+      schema_version: number | null;
     };
 
     let row: ExportRow | null = null;
@@ -111,7 +116,8 @@ export default api({
         `SELECT mo.findings,
                 octet_length(mo.findings::text) AS findings_bytes,
                 true AS from_canonical,
-                -1 AS tree_level
+                -1 AS tree_level,
+                mo.schema_version
          FROM module_outputs mo
          WHERE mo.module_run_id = $1
          LIMIT 1`,
@@ -121,7 +127,7 @@ export default api({
       );
       if (canonRows.length > 0) {
         const cr = canonRows[0];
-        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, from_canonical: true, tree_level: -1 };
+        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, from_canonical: true, tree_level: -1, schema_version: cr.schema_version ?? null };
       }
     } catch {
       // module_outputs may not have a row — fall through to checkpoint fallback
@@ -144,7 +150,7 @@ export default api({
       );
       if (cpRows.length > 0) {
         const cr = cpRows[0];
-        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, from_canonical: false, tree_level: cr.tree_level };
+        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, from_canonical: false, tree_level: cr.tree_level, schema_version: null };
       }
     }
 
@@ -163,10 +169,18 @@ export default api({
           byGapType: { diligence_gap: 0, memo_omission: 0, unclassified: 0 },
           treeLevel: -1,
           fromCanonicalArtifact: false,
+          schemaVersion: null,
         },
         filtered: false,
         corruptionDetected: false,
+        staleSchema: false,
       };
+    }
+
+    // Determine if artifact is from a stale schema version
+    const isStaleSchema = row.schema_version != null && row.schema_version !== FINDING_SCHEMA_VERSION;
+    if (isStaleSchema) {
+      console.warn(`[ExportFindings] Stale schema detected: persisted v${row.schema_version}, current v${FINDING_SCHEMA_VERSION} (run=${runId})`);
     }
 
     // RC1 + Fix 3: strict reload — fail closed on any corruption
@@ -192,9 +206,11 @@ export default api({
           byGapType: { diligence_gap: 0, memo_omission: 0, unclassified: 0 },
           treeLevel: row.tree_level,
           fromCanonicalArtifact: row.from_canonical,
+          schemaVersion: row.schema_version,
         },
         filtered: false,
         corruptionDetected: true,
+        staleSchema: isStaleSchema,
       };
     }
 
@@ -217,6 +233,7 @@ export default api({
       byGapType,
       treeLevel: row.tree_level,
       fromCanonicalArtifact: row.from_canonical,
+      schemaVersion: row.schema_version,
     };
 
     // --- mode: "ids" ---
@@ -240,6 +257,7 @@ export default api({
         summary,
         filtered: false,
         corruptionDetected: false,
+        staleSchema: isStaleSchema,
         idManifest: {
           generatedAt: new Date().toISOString(),
           totalCount: allFindings.length,
@@ -274,6 +292,7 @@ export default api({
       summary,
       filtered: !!severityFilter,
       corruptionDetected: false,
+      staleSchema: isStaleSchema,
     };
   },
 });

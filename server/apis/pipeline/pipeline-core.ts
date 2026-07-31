@@ -858,7 +858,7 @@ interface CanonicalFinalizeResult {
   };
 }
 
-async function canonicalFinalize(input: CanonicalFinalizeInput): Promise<CanonicalFinalizeResult> {
+export async function canonicalFinalize(input: CanonicalFinalizeInput): Promise<CanonicalFinalizeResult> {
   const { ctx, runId, moduleId, executiveHeader, numericReport, claimsReconciliation, fileTagMap, useOpus, startTime } = input;
   const verificationPhaseErrored = input.verificationPhaseErrored ?? false;
   const mergeGroupsFallenBack = input.mergeGroupsFallenBack ?? 0;
