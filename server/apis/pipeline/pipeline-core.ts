@@ -4000,14 +4000,14 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             findings = group.members.flatMap(m => m.findings ?? []);
           }
 
-          // RC11: Coverage verification — ensure every input finding ID survived the merge
-          // If coverage is incomplete AND response was truncated, carry forward missing findings unchanged
-          // Fix 14: Also carry forward on non-truncated responses when loss exceeds conservation threshold
+          // Fix 16: Zero-tolerance merge accounting — every input finding ID must be
+          // accounted for by exactly one of: (1) retained as output finding_id,
+          // (2) referenced in output merged_from_finding_ids, (3) carried forward with
+          // failure metadata. Zero unaccounted findings are permitted.
           if (inputFindingIds.length > 0) {
             const outputFindingIds = new Set(
               [...findings, ...housekeepingFindings].flatMap(f => {
                 const fAny = f as any;
-                // A finding "accounts for" its own ID plus any it merged from
                 const ids: string[] = [];
                 if (fAny.finding_id) ids.push(fAny.finding_id);
                 if (Array.isArray(fAny.merged_from_finding_ids)) ids.push(...fAny.merged_from_finding_ids);
@@ -4016,33 +4016,32 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             );
             const missingIds = inputFindingIds.filter(id => !outputFindingIds.has(id));
             if (missingIds.length > 0) {
-              const lossFraction = missingIds.length / inputFindingIds.length;
-              // Fix 14: Conservation threshold — if >30% of findings are unaccounted for
-              // in a non-truncated response, treat it as a truncation-equivalent (model dropped findings).
-              // This prevents silent data loss from LLM consolidation that forgets to reference inputs.
-              const CONSERVATION_THRESHOLD = 0.30;
-              const shouldCarryForward = truncated || lossFraction > CONSERVATION_THRESHOLD;
               const reason = truncated
                 ? "response truncated"
-                : `non-truncated but ${(lossFraction * 100).toFixed(0)}% loss exceeds ${(CONSERVATION_THRESHOLD * 100).toFixed(0)}% conservation threshold`;
+                : `model omitted ${missingIds.length}/${inputFindingIds.length} input findings without provenance`;
 
               console.warn(
-                `[Merge][Fix14] Coverage gap: ${missingIds.length}/${inputFindingIds.length} input findings not accounted for in R${currentRound}:G${group.idx} (${reason})`
+                `[Merge][Fix16] Zero-tolerance accounting failure: ${missingIds.length} unaccounted input(s) in R${currentRound}:G${group.idx} (${reason})`
               );
 
-              if (shouldCarryForward) {
-                // Carry forward missing findings unchanged from input members
-                const allInputFindings = group.members.flatMap(m => m.findings ?? []);
-                const missingSet = new Set(missingIds);
-                const carriedForward = allInputFindings.filter(f => missingSet.has(f.finding_id));
-                findings.push(...carriedForward);
-                console.log(`[Merge][Fix14] Carried forward ${carriedForward.length} unmerged findings (${reason})`);
-              } else {
-                // Below threshold — acceptable consolidation, log for diagnostics only
-                console.log(
-                  `[Merge][Fix14] ${missingIds.length} findings consolidated (${(lossFraction * 100).toFixed(0)}% ≤ ${(CONSERVATION_THRESHOLD * 100).toFixed(0)}% threshold) — accepted as intentional merge`
-                );
+              // Always carry forward — no tolerance for unaccounted findings
+              const allInputFindings = group.members.flatMap(m => m.findings ?? []);
+              const missingSet = new Set(missingIds);
+              const carriedForward = allInputFindings.filter(f => missingSet.has(f.finding_id));
+
+              // Tag carried-forward findings with accounting metadata
+              for (const cf of carriedForward) {
+                (cf as any)._merge_accounting = {
+                  status: "carried_forward",
+                  reason,
+                  round: currentRound,
+                  group_idx: group.idx,
+                  timestamp: new Date().toISOString(),
+                };
               }
+
+              findings.push(...carriedForward);
+              console.log(`[Merge][Fix16] Carried forward ${carriedForward.length} unaccounted findings with failure metadata`);
             }
           }
 
@@ -4082,7 +4081,19 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
              VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
              ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = $7`,
-            [runId, currentRound, group.idx, JSON.stringify({ text: cpText, executiveHeader: node.executiveHeader, findings: node.findings, housekeepingFindings: node.housekeepingFindings, truncated: node.truncated ?? false }), getModuleModel(moduleId, useOpus), currentVersion, cpStatus],
+            [runId, currentRound, group.idx, JSON.stringify({
+              text: cpText,
+              executiveHeader: node.executiveHeader,
+              findings: node.findings,
+              housekeepingFindings: node.housekeepingFindings,
+              truncated: node.truncated ?? false,
+              // Fix 16: Persist accounting metadata for resume/recovery verification
+              _accounting: {
+                inputFindingCount: group.members.reduce((sum, m) => sum + (m.findings?.length ?? 0), 0),
+                outputFindingCount: node.findings.length,
+                carriedForwardCount: node.findings.filter((f: any) => f._merge_accounting?.status === "carried_forward").length,
+              },
+            }), getModuleModel(moduleId, useOpus), currentVersion, cpStatus],
             { label: `Save merge checkpoint R${currentRound}:G${group.idx} (status=${cpStatus})` }
           );
         } else {
