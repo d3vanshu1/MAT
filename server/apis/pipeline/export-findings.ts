@@ -6,9 +6,11 @@
  * evidence, verification, etc.
  *
  * RC audit item #10 (§10 "persist one canonical post-quality artifact"):
- * Primary source is module_outputs.findings (post-quality-pass canonical artifact).
- * Falls back to merge_checkpoints only when module_outputs has no row (run incomplete).
- * The fallback source is clearly flagged as pre-quality in the response.
+ * ONLY source is module_outputs.findings (post-quality-pass canonical artifact).
+ *
+ * Fix 19: Canonical-only — merge_checkpoints fallback REMOVED.
+ * Missing canonical artifact = explicit "incomplete" status in response.
+ * Consumers MUST NOT silently degrade to pre-quality checkpoint data.
  *
  * Pagination: `offset` + `limit` params let callers page through findings.
  * `severityFilter` applies BEFORE pagination (filter → slice).
@@ -34,7 +36,7 @@ const SummarySchema = z.object({
     unclassified: z.number(),
   }),
   treeLevel: z.number(),
-  /** true = findings came from post-quality module_outputs; false = fell back to raw merge checkpoint */
+  /** Fix 19: Now always true — merge_checkpoints fallback removed. Kept for backward-compat. */
   fromCanonicalArtifact: z.boolean(),
   /** Schema version of the persisted artifact (null if pre-Fix 13 data). Current = FINDING_SCHEMA_VERSION. */
   schemaVersion: z.number().nullable(),
@@ -69,6 +71,8 @@ export default api({
     filtered: z.boolean(),
     corruptionDetected: z.boolean().describe("true if persisted findings failed strict validation — distinguishes corruption from a genuinely empty run"),
     staleSchema: z.boolean().describe("true if persisted schema_version does not match current FINDING_SCHEMA_VERSION — indicates a pre-migration artifact that may lack newer fields"),
+    /** Fix 19: explicit incomplete state when canonical artifact is missing */
+    artifactStatus: z.enum(["canonical", "incomplete"]).describe("'canonical' = from module_outputs (post-quality). 'incomplete' = no canonical artifact exists for this run."),
     idManifest: z.object({
       generatedAt: z.string(),
       totalCount: z.number(),
@@ -84,76 +88,40 @@ export default api({
     const mode = rawMode ?? "full";
     const offset = rawOffset ?? 0;
 
-    // --- RC1/RC10: Primary source = module_outputs (canonical post-quality artifact) ---
+    // --- Fix 19: Canonical-only — ONLY source is module_outputs ---
+    // merge_checkpoints fallback REMOVED. Missing canonical = explicit "incomplete".
     const CanonicalOutputRow = z.object({
       findings: z.any(),
       findings_bytes: z.coerce.number(),
-      from_canonical: z.literal(true),
-      tree_level: z.literal(-1),
       schema_version: z.coerce.number().nullable(),
-    });
-
-    const FallbackRow = z.object({
-      findings: z.any(),
-      findings_bytes: z.coerce.number(),
-      from_canonical: z.literal(false),
-      tree_level: z.coerce.number(),
     });
 
     type ExportRow = {
       findings: unknown;
       findings_bytes: number;
-      from_canonical: boolean;
-      tree_level: number;
       schema_version: number | null;
     };
 
     let row: ExportRow | null = null;
 
-    // Try canonical artifact first
-    try {
-      const canonRows = await ctx.integrations.db.query(
-        `SELECT mo.findings,
-                octet_length(mo.findings::text) AS findings_bytes,
-                true AS from_canonical,
-                -1 AS tree_level,
-                mo.schema_version
-         FROM module_outputs mo
-         WHERE mo.module_run_id = $1
-         LIMIT 1`,
-        CanonicalOutputRow,
-        [runId],
-        { label: "ExportFindings: fetch canonical artifact from module_outputs" }
-      );
-      if (canonRows.length > 0) {
-        const cr = canonRows[0];
-        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, from_canonical: true, tree_level: -1, schema_version: cr.schema_version ?? null };
-      }
-    } catch {
-      // module_outputs may not have a row — fall through to checkpoint fallback
+    // Fetch canonical artifact — the ONLY source
+    const canonRows = await ctx.integrations.db.query(
+      `SELECT mo.findings,
+              octet_length(mo.findings::text) AS findings_bytes,
+              mo.schema_version
+       FROM module_outputs mo
+       WHERE mo.module_run_id = $1
+       LIMIT 1`,
+      CanonicalOutputRow,
+      [runId],
+      { label: "ExportFindings: fetch canonical artifact from module_outputs" }
+    );
+    if (canonRows.length > 0) {
+      const cr = canonRows[0];
+      row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: cr.schema_version ?? null };
     }
 
-    // Fallback: pre-quality merge checkpoint (flagged in response)
-    if (!row) {
-      const cpRows = await ctx.integrations.db.query(
-        `SELECT COALESCE(merged_json->'findings', '[]'::jsonb) AS findings,
-                octet_length(COALESCE(merged_json->'findings', '[]'::jsonb)::text) AS findings_bytes,
-                false AS from_canonical,
-                tree_level
-         FROM merge_checkpoints
-         WHERE module_run_id = $1
-         ORDER BY tree_level DESC, node_index ASC
-         LIMIT 1`,
-        FallbackRow,
-        [runId],
-        { label: "ExportFindings: fallback to merge checkpoint" }
-      );
-      if (cpRows.length > 0) {
-        const cr = cpRows[0];
-        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, from_canonical: false, tree_level: cr.tree_level, schema_version: null };
-      }
-    }
-
+    // Fix 19: No fallback — missing canonical = incomplete
     if (!row) {
       return {
         runId,
@@ -174,6 +142,7 @@ export default api({
         filtered: false,
         corruptionDetected: false,
         staleSchema: false,
+        artifactStatus: "incomplete" as const,
       };
     }
 
@@ -188,7 +157,7 @@ export default api({
     try {
       allFindings = strictReloadFindings(
         row.findings,
-        `ExportFindings run_id=${runId} canonical=${row.from_canonical}`
+        `ExportFindings run_id=${runId} canonical=true`
       ).findings;
     } catch (err) {
       console.error(`[ExportFindings] Fail-closed:`, err instanceof Error ? err.message : err);
@@ -204,13 +173,14 @@ export default api({
           byteSize: row.findings_bytes,
           bySeverity: { critical: 0, warning: 0, info: 0 },
           byGapType: { diligence_gap: 0, memo_omission: 0, unclassified: 0 },
-          treeLevel: row.tree_level,
-          fromCanonicalArtifact: row.from_canonical,
+          treeLevel: -1,
+          fromCanonicalArtifact: true,
           schemaVersion: row.schema_version,
         },
         filtered: false,
         corruptionDetected: true,
         staleSchema: isStaleSchema,
+        artifactStatus: "canonical" as const,
       };
     }
 
@@ -231,8 +201,8 @@ export default api({
       byteSize: row.findings_bytes,
       bySeverity,
       byGapType,
-      treeLevel: row.tree_level,
-      fromCanonicalArtifact: row.from_canonical,
+      treeLevel: -1,
+      fromCanonicalArtifact: true,
       schemaVersion: row.schema_version,
     };
 
@@ -258,6 +228,7 @@ export default api({
         filtered: false,
         corruptionDetected: false,
         staleSchema: isStaleSchema,
+        artifactStatus: "canonical" as const,
         idManifest: {
           generatedAt: new Date().toISOString(),
           totalCount: allFindings.length,
@@ -293,6 +264,7 @@ export default api({
       filtered: !!severityFilter,
       corruptionDetected: false,
       staleSchema: isStaleSchema,
+      artifactStatus: "canonical" as const,
     };
   },
 });

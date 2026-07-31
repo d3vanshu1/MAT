@@ -82,7 +82,7 @@ function baseFinding(overrides: Record<string, unknown> = {}): any {
   assertEqual(findings.length, 1, "Test 2: finding should survive");
   assertEqual(findings[0].severity, "warning", "Test 2: must be demoted to warning (not critical)");
   assert(
-    findings[0].materiality_rationale?.includes("structured_impact_missing"),
+    !!findings[0].materiality_rationale?.includes("structured_impact_missing"),
     "Test 2: rationale must indicate structured_impact_missing"
   );
   console.log("PASS: Test 2 — Large prose amount cannot cause critical severity");
@@ -101,11 +101,11 @@ function baseFinding(overrides: Record<string, unknown> = {}): any {
   assertEqual(findings.length, 1, "Test 3: finding should survive as warning");
   assertEqual(findings[0].severity, "warning", "Test 3: demoted to warning");
   assert(
-    findings[0].materiality_rationale?.includes("structured_impact_missing"),
+    !!findings[0].materiality_rationale?.includes("structured_impact_missing"),
     "Test 3: rationale must cite structured_impact_missing"
   );
   assert(
-    findings[0].materiality_rationale?.includes("Prose amounts are not permitted"),
+    !!findings[0].materiality_rationale?.includes("Prose amounts are not permitted"),
     "Test 3: rationale must state prose amounts are not permitted"
   );
   console.log("PASS: Test 3 — Missing structured impact records structured_impact_missing");
@@ -128,7 +128,7 @@ function baseFinding(overrides: Record<string, unknown> = {}): any {
   assertEqual(findings.length, 1, "Test 4: finding should survive in findings");
   assertEqual(findings[0].severity, "warning", "Test 4: demoted to warning (£2.7m < £6.55m threshold)");
   assert(
-    findings[0].materiality_rationale?.includes("verified structured"),
+    !!findings[0].materiality_rationale?.includes("verified structured"),
     "Test 4: rationale confirms verified structured path"
   );
   console.log("PASS: Test 4 — Verified £2.7m structured correctly evaluated via structured path");
@@ -150,7 +150,7 @@ function baseFinding(overrides: Record<string, unknown> = {}): any {
   assertEqual(findings.length, 1, "Test 5: finding should survive");
   assertEqual(findings[0].severity, "warning", "Test 5: unverified produces no uplift → warning");
   assert(
-    findings[0].materiality_rationale?.includes("structured_impact_missing"),
+    !!findings[0].materiality_rationale?.includes("structured_impact_missing"),
     "Test 5: rationale must indicate structured_impact_missing (none verified)"
   );
   console.log("PASS: Test 5 — £999m numeric_unverified produces no uplift");
