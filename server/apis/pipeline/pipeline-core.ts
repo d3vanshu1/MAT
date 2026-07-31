@@ -68,7 +68,7 @@ import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
 import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
-import { runReconciliation, type ReconciliationResult, type ReconciliationFinding } from "./claims-reconciliation.js";
+import { runReconciliation, type ReconciliationResult, type ReconciliationFinding, type SupersessionCandidate } from "./claims-reconciliation.js";
 import { runCleanParsedTextPhase } from "./clean-parsed-text.js";
 import { runWebResearchPhase } from "./web-research-phase.js";
 import { upsertModuleOutput } from "../modules/upsert-module-output.js";
@@ -2882,6 +2882,58 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           if (claimsLedger.complete && claimsLedger.claims.length > 0 && numericReport) {
             const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 90_000));
             if (reconTimeBudget >= 45_000) {
+              // Corrective E: Load prior canonical findings for supersession validation.
+              // Query the most recent completed run's canonical findings for this deal+module.
+              let priorCandidates: SupersessionCandidate[] = [];
+              try {
+                const priorRows = await ctx.integrations.db.query(
+                  `SELECT mo.findings
+                   FROM module_outputs mo
+                   JOIN module_runs mr ON mr.id = mo.module_run_id
+                   WHERE mr.deal_id = $1
+                     AND mr.module_id = $2
+                     AND mr.id != $3
+                     AND mr.status = 'completed'
+                   ORDER BY mr.completed_at DESC NULLS LAST
+                   LIMIT 1`,
+                  z.object({ findings: z.any() }),
+                  [dealId, moduleId, runId],
+                  { label: "Load prior canonical findings for supersession" }
+                );
+                if (priorRows.length > 0 && Array.isArray(priorRows[0].findings)) {
+                  priorCandidates = (priorRows[0].findings as any[])
+                    .filter((f: any) => f.finding_id && f.claim_ids && f.claim_ids.length > 0)
+                    .flatMap((f: any) => {
+                      // Extract claim coordinates from evidence or top-level fields
+                      const metric = f.evidence?.[0]?.metric ?? (f as any).metric ?? "";
+                      const scope = f.evidence?.[0]?.scope ?? (f as any).scope ?? "";
+                      const period = f.evidence?.[0]?.period ?? (f as any).period ?? "";
+                      const sourceDocs = f.source_docs ?? [];
+                      // Create one candidate per source doc for this finding
+                      if (sourceDocs.length === 0) {
+                        return [{
+                          canonical_id: f.finding_id,
+                          claim_metric: metric,
+                          claim_scope: scope,
+                          claim_period: period,
+                          claim_source_doc: "",
+                        }];
+                      }
+                      return sourceDocs.map((doc: string) => ({
+                        canonical_id: f.finding_id,
+                        claim_metric: metric,
+                        claim_scope: scope,
+                        claim_period: period,
+                        claim_source_doc: doc,
+                      }));
+                    });
+                  console.log(`[ClaimsReconciliation:Supersession] Built ${priorCandidates.length} candidates from prior run`);
+                }
+              } catch {
+                // module_outputs or module_runs table may not exist yet — non-fatal
+                console.log(`[ClaimsReconciliation:Supersession] Could not load prior findings — skipping supersession`);
+              }
+
               claimsReconciliation = await runReconciliation(
                 ctx,
                 claimsLedger,
@@ -2889,6 +2941,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 numericReport.discrepancies ?? [],
                 startTime,
                 reconTimeBudget,
+                priorCandidates.length > 0 ? priorCandidates : undefined,
               );
               console.log(
                 `[ClaimsReconciliation] ${claimsReconciliation.findings.length} findings ` +

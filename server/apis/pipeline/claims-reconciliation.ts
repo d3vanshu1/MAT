@@ -659,7 +659,7 @@ Return ONLY the JSON array. No markdown fences, no commentary.`;
  * Candidate finding for supersession consideration.
  * Only used when reconciliation has prior-run findings available.
  */
-interface SupersessionCandidate {
+export interface SupersessionCandidate {
   canonical_id: string;
   claim_metric: string;
   claim_scope: string;
@@ -755,6 +755,7 @@ export async function runReconciliation(
   discrepancies: Discrepancy[],
   pipelineStartTime: number,
   timeBudgetMs: number,
+  priorCanonicalFindings?: SupersessionCandidate[],
 ): Promise<ReconciliationResult> {
   const phaseStart = Date.now();
   console.log(`[Reconciliation] Starting — ${ledger.claims.length} claims, ${figures.length} figures, budget ${Math.round(timeBudgetMs / 1000)}s`);
@@ -916,6 +917,60 @@ export async function runReconciliation(
     cross_version_findings++;
   }
 
+  // ----- Step 6: Deterministic Supersession (Corrective E) -----
+  // For each eligible finding (data_divergence, cross_version), invoke
+  // validateSupersessionProof() against prior canonical findings to determine
+  // whether it replaces a known prior finding by exact coordinate match.
+  let supersession_diagnostics_count = 0;
+
+  if (priorCanonicalFindings && priorCanonicalFindings.length > 0) {
+    console.log(`[Reconciliation:Supersession] Evaluating ${findings.length} findings against ${priorCanonicalFindings.length} prior canonical candidates`);
+
+    for (const rf of findings) {
+      // Only data_divergence and cross_version findings are eligible for supersession
+      if (rf.finding_kind !== "data_divergence" && rf.finding_kind !== "cross_version") continue;
+
+      // Skip findings without a claim (cross_version findings from discrepancies lack claims)
+      if (!rf.claim) continue;
+
+      // Find candidates that share ANY coordinate overlap with this finding's claim
+      // The validator itself applies the strict gates — we supply ALL prior findings
+      // from the same source document as candidates for proof validation.
+      const eligibleCandidates = priorCanonicalFindings.filter(c =>
+        c.claim_source_doc === rf.claim.source_doc
+      );
+
+      if (eligibleCandidates.length === 0) continue;
+
+      // Invoke the deterministic proof validator
+      const proofResult = validateSupersessionProof(
+        { claim: rf.claim, finding_kind: rf.finding_kind },
+        eligibleCandidates,
+      );
+
+      // Always attach diagnostic when candidates were considered
+      if (proofResult.diagnostic) {
+        rf._supersession_diagnostic = proofResult.diagnostic;
+        supersession_diagnostics_count++;
+      }
+
+      // Populate supersedes_finding_ids ONLY when proof is entirely proven
+      if (proofResult.proven_ids.length > 0 && proofResult.ambiguous_ids.length === 0) {
+        rf.supersedes_finding_ids = proofResult.proven_ids;
+        console.log(
+          `[Reconciliation:Supersession] Finding "${rf.title}" PROVES supersession of ${proofResult.proven_ids.length} prior finding(s)`
+        );
+      } else if (proofResult.ambiguous_ids.length > 0) {
+        // Append-only: no supersession IDs assigned
+        console.log(
+          `[Reconciliation:Supersession] Finding "${rf.title}" has AMBIGUOUS candidates (${proofResult.ambiguous_ids.length}) — append-only`
+        );
+      }
+    }
+
+    console.log(`[Reconciliation:Supersession] Complete: ${supersession_diagnostics_count} diagnostic(s) emitted`);
+  }
+
   console.log(
     `[Reconciliation] Complete: ${findings.length} findings ` +
     `(${reconciled_count} reconciled, ${within_tolerance_count} within tolerance, ` +
@@ -931,6 +986,7 @@ export async function runReconciliation(
     within_tolerance_count,
     cross_version_findings,
     matching_error,
+    supersession_diagnostics_count,
   };
 }
 
