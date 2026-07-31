@@ -1,5 +1,6 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { CanonicalFindingSchema, parseCanonicalFindings } from "../pipeline/canonical-finding.js";
+import { CanonicalFindingSchema } from "../pipeline/canonical-finding.js";
+import { strictReloadFindings } from "./strict-reload-findings.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -72,19 +73,28 @@ export default api({
 
     const row = rows[0];
 
-    // RC1: canonical parser — mode=reload (findings from DB already have finding_ids)
-    const findings = (() => {
-      if (!row.findings) return [];
-      const raw = typeof row.findings === "string" ? JSON.parse(row.findings) : row.findings;
-      const result = parseCanonicalFindings(raw, {
-        mode: "reload",
-        source: `GetRunOutput run_id=${runId}`,
-      });
-      if (result.malformed_count > 0) {
-        console.error(`[GetRunOutput] ${result.malformed_count} malformed findings for run ${runId}`);
-      }
-      return result.findings;
-    })();
+    // RC1 + Fix 3: strict reload — fail closed on any corruption
+    let findings;
+    try {
+      findings = row.findings
+        ? strictReloadFindings(row.findings, `GetRunOutput run_id=${runId}`).findings
+        : [];
+    } catch (err) {
+      console.error(`[GetRunOutput] Fail-closed:`, err instanceof Error ? err.message : err);
+      return {
+        run: {
+          id: row.run_id,
+          moduleId: row.module_id,
+          status: row.status,
+          triggeredAt: row.triggered_at,
+          completedAt: row.completed_at,
+          documentsIncluded: Array.isArray(row.documents_included)
+            ? row.documents_included.map(String)
+            : [],
+        },
+        output: null, // fail closed — do not serve corrupt findings
+      };
+    }
 
     const docsIncluded = Array.isArray(row.documents_included)
       ? row.documents_included.map(String)

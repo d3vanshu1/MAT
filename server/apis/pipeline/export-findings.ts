@@ -15,7 +15,8 @@
  * Summary block always reflects the full unfiltered set.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { CanonicalFindingSchema, parseCanonicalFindings } from "./canonical-finding.js";
+import { CanonicalFindingSchema } from "./canonical-finding.js";
+import { strictReloadFindings } from "../modules/strict-reload-findings.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -166,18 +167,33 @@ export default api({
       };
     }
 
-    // RC1: canonical parser
-    const rawFindings = typeof row.findings === "string"
-      ? JSON.parse(row.findings)
-      : row.findings;
-    const parseResult = parseCanonicalFindings(rawFindings, {
-      mode: "reload",
-      source: `ExportFindings run_id=${runId} canonical=${row.from_canonical}`,
-    });
-    if (parseResult.malformed_count > 0) {
-      console.error(`[ExportFindings] ${parseResult.malformed_count} malformed findings for run ${runId}`);
+    // RC1 + Fix 3: strict reload — fail closed on any corruption
+    let allFindings;
+    try {
+      allFindings = strictReloadFindings(
+        row.findings,
+        `ExportFindings run_id=${runId} canonical=${row.from_canonical}`
+      ).findings;
+    } catch (err) {
+      console.error(`[ExportFindings] Fail-closed:`, err instanceof Error ? err.message : err);
+      return {
+        runId,
+        totalCount: 0,
+        offset: 0,
+        returnedCount: 0,
+        byteLength: 2,
+        findings: [],
+        summary: {
+          totalCount: 0,
+          byteSize: row.findings_bytes,
+          bySeverity: { critical: 0, warning: 0, info: 0 },
+          byGapType: { diligence_gap: 0, memo_omission: 0, unclassified: 0 },
+          treeLevel: row.tree_level,
+          fromCanonicalArtifact: row.from_canonical,
+        },
+        filtered: false,
+      };
     }
-    const allFindings = parseResult.findings;
 
     // Compute summary from the FULL set (before filter)
     const bySeverity = { critical: 0, warning: 0, info: 0 };

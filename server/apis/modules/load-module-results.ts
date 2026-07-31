@@ -1,5 +1,6 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { CanonicalFindingSchema, parseCanonicalFindings } from "../pipeline/canonical-finding.js";
+import { CanonicalFindingSchema } from "../pipeline/canonical-finding.js";
+import { strictReloadFindings } from "./strict-reload-findings.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -97,19 +98,20 @@ export default api({
     }
 
     const modules = rows.map((row) => {
-      // RC1: canonical parser — mode=reload (findings from DB already have finding_ids)
-      const findings = (() => {
-        if (!row.findings) return [];
-        const raw = typeof row.findings === "string" ? JSON.parse(row.findings) : row.findings;
-        const result = parseCanonicalFindings(raw, {
-          mode: "reload",
-          source: `LoadModuleResults module_id=${row.module_id} run_id=${row.run_id}`,
-        });
-        if (result.malformed_count > 0) {
-          console.error(`[LoadModuleResults] ${result.malformed_count} malformed findings for run ${row.run_id}`);
+      // RC1 + Fix 3: strict reload — fail closed on any corruption
+      let findings: Array<z.infer<typeof CanonicalFindingSchema>> = [];
+      let outputCorrupt = false;
+      try {
+        if (row.findings) {
+          findings = strictReloadFindings(
+            row.findings,
+            `LoadModuleResults module_id=${row.module_id} run_id=${row.run_id}`
+          ).findings;
         }
-        return result.findings;
-      })();
+      } catch (err) {
+        console.error(`[LoadModuleResults] Fail-closed:`, err instanceof Error ? err.message : err);
+        outputCorrupt = true;
+      }
 
       return {
         moduleId: row.module_id,
@@ -121,14 +123,16 @@ export default api({
           completedAt: row.completed_at,
         },
         latestOutput:
-          row.full_report_markdown != null
-            ? {
-                executiveHeader: row.executive_header,
-                findings,
-                fullReport: row.full_report_markdown,
-                createdAt: row.output_created_at ?? row.completed_at ?? row.triggered_at,
-              }
-            : null,
+          outputCorrupt
+            ? null // fail closed — do not serve corrupt findings
+            : row.full_report_markdown != null
+              ? {
+                  executiveHeader: row.executive_header,
+                  findings,
+                  fullReport: row.full_report_markdown,
+                  createdAt: row.output_created_at ?? row.completed_at ?? row.triggered_at,
+                }
+              : null,
       };
     });
 
