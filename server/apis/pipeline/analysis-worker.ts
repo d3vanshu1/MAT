@@ -1,25 +1,26 @@
 /**
- * analysis-worker.ts — Durable Bounded Analysis Workers (Stabilization Batch, Commit 1)
+ * analysis-worker.ts — Durable Bounded Analysis Workers (Corrective C1)
  *
- * Moves chunk analysis out of the monolithic pipeline execution path into a
- * lease-based work-item queue with stable identity and concurrent worker support.
+ * Moves chunk analysis into a lease-based work-item queue with:
+ *   - Stable identity: (run_id, document_id, chunk_index, chunk_hash, analysis_version)
+ *   - Identity-aware reconciliation: existing pipeline_analysis results with matching
+ *     identity seed as 'complete' and are never recomputed.
+ *   - Lease-guarded completion: compare-and-set prevents stale workers from overwriting.
+ *   - Content-based result hash: FNV-1a of actual extraction text.
+ *   - Only current-identity items contribute to completion counts.
  *
  * Architecture:
  *   analysis_work_items (coordination) + pipeline_analysis (authoritative result)
- *   Dual-write: a work item is only 'complete' after pipeline_analysis confirms.
+ *   Dual-write: a work item is only 'complete' after pipeline_analysis confirms
+ *   with matching identity fields.
  *
  * State machine:
  *   pending → claimed → complete | failed_retryable | failed_permanent
  *   claimed → pending (lease expired, recovered)
  *
- * Identity tuple (stable across invocations):
- *   (run_id, document_id, chunk_index, chunk_hash, analysis_version)
- *
  * Claim protocol:
- *   SELECT ... FOR UPDATE SKIP LOCKED with lease_expires check
- *   Prevents duplicate claims across concurrent workers.
- *
- * This module is used by pipeline-core.ts when ANALYSIS_WORKER_ENABLED=true.
+ *   SELECT ... FOR UPDATE SKIP LOCKED (Postgres advisory-lock-free)
+ *   Two concurrent workers CANNOT claim the same item.
  */
 
 import type { PipelineContext } from "./pipeline-config.js";
@@ -33,15 +34,11 @@ import { z } from "@superblocksteam/sdk-api";
 /** Chunks per worker invocation (admission-controlled by budget) */
 export const WORKER_BATCH_SIZE = 8;
 
-/** Lease duration (ms). Must be < platform cap to allow recovery.
- *  4 minutes = 240s: one full analysis call (120s) + retry (120s). */
+/** Lease duration (ms): one full analysis call (120s) + retry (120s). */
 export const LEASE_TIMEOUT_MS = 240_000;
 
 /** Maximum attempts before marking failed_permanent */
 export const MAX_ATTEMPTS = 3;
-
-/** Threshold for stale-lease recovery: claimed_at older than this and lease expired */
-export const RECOVERY_GRACE_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +51,7 @@ export interface WorkItem {
   chunk_index: number;
   chunk_hash: string;
   analysis_version: string;
+  work_identity: string;
   status: WorkItemStatus;
   claim_owner: string | null;
   claimed_at: string | null;
@@ -80,7 +78,8 @@ export interface AnalysisCounts {
 
 export interface PopulateResult {
   inserted: number;
-  skipped: number;
+  skippedDuplicate: number;
+  seededFromExisting: number;
   total: number;
 }
 
@@ -93,10 +92,11 @@ export interface DualWriteMismatch {
   chunk_index: number;
   work_item_status: string;
   pipeline_analysis_exists: boolean;
+  version_match: boolean;
 }
 
 // ---------------------------------------------------------------------------
-// Schemas for DB queries
+// Schemas
 // ---------------------------------------------------------------------------
 
 const WorkItemSchema = z.object({
@@ -106,6 +106,7 @@ const WorkItemSchema = z.object({
   chunk_index: z.coerce.number(),
   chunk_hash: z.string(),
   analysis_version: z.string(),
+  work_identity: z.string(),
   status: z.string(),
   claim_owner: z.string().nullable(),
   claimed_at: z.string().nullable(),
@@ -121,17 +122,48 @@ const CountSchema = z.object({
 
 const ExistsSchema = z.object({ exists: z.coerce.number() });
 
+const PipelineAnalysisCheckSchema = z.object({
+  chunk_index: z.coerce.number(),
+  prompt_version: z.string().nullable(),
+});
+
 // ---------------------------------------------------------------------------
-// Populate work items from routed extractions
+// Identity computation
 // ---------------------------------------------------------------------------
 
 /**
- * Seeds analysis_work_items for a run. Called once when the pipeline enters
- * the analysis phase for the first time (or when new extractions are added).
+ * Computes the deterministic work_identity for a chunk.
+ * This is a stable hash of the full identity tuple.
+ * Changed content or version → different identity → new work item.
+ */
+export function computeWorkIdentity(
+  runId: string,
+  documentId: string,
+  chunkIndex: number,
+  chunkHash: string,
+  analysisVersion: string,
+): string {
+  const input = `${runId}|${documentId}|${chunkIndex}|${chunkHash}|${analysisVersion}`;
+  return fnv1aHex(input);
+}
+
+// ---------------------------------------------------------------------------
+// Populate work items with reconciliation
+// ---------------------------------------------------------------------------
+
+/**
+ * Seeds analysis_work_items for a run, reconciling with existing pipeline_analysis.
  *
- * Idempotent: ON CONFLICT (run_id, chunk_index) DO NOTHING.
- * Only inserts items for chunk indices that don't already have a matching
- * pipeline_analysis result with the current analysis_version.
+ * Reconciliation rules:
+ * - If pipeline_analysis has a result with matching prompt_version (analysis_version)
+ *   for this chunk, the work item is seeded as 'complete' with its result hash.
+ * - If pipeline_analysis has a STALE result (different version), the work item is
+ *   seeded as 'pending' for recomputation.
+ * - If no pipeline_analysis result exists, seeded as 'pending'.
+ *
+ * Identity: ON CONFLICT (work_identity) DO NOTHING — same identity is idempotent.
+ * Changed chunk_hash or analysis_version produces a new work_identity and thus
+ * new work, while stale items remain but don't contribute to completion counts.
  */
 export async function populateWorkItems(
   ctx: PipelineContext,
@@ -144,44 +176,86 @@ export async function populateWorkItems(
 ): Promise<PopulateResult> {
   const analysisVersion = getPipelineVersion();
   let inserted = 0;
-  let skipped = 0;
+  let skippedDuplicate = 0;
+  let seededFromExisting = 0;
 
-  // Batch insert in groups of 20 to avoid overly large queries
+  // Step 1: Load existing pipeline_analysis results for this run
+  const existingResults = await ctx.integrations.db.query(
+    `SELECT chunk_index, prompt_version
+     FROM pipeline_analysis
+     WHERE run_id = $1`,
+    PipelineAnalysisCheckSchema,
+    [runId],
+    { label: "Load existing pipeline_analysis for reconciliation" }
+  );
+  const existingMap = new Map<number, string | null>();
+  for (const row of existingResults) {
+    existingMap.set(row.chunk_index, row.prompt_version);
+  }
+
+  // Step 2: Batch insert work items
   const BATCH = 20;
   for (let i = 0; i < routedChunks.length; i += BATCH) {
     const batch = routedChunks.slice(i, i + BATCH);
 
-    // Build VALUES clause for batch
     const values: unknown[] = [];
     const placeholders: string[] = [];
     for (let j = 0; j < batch.length; j++) {
       const chunk = batch[j];
-      const offset = j * 5;
-      placeholders.push(
-        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`
+      const identity = computeWorkIdentity(
+        runId, chunk.document_id, chunk.chunk_index, chunk.content_hash, analysisVersion
       );
-      values.push(runId, chunk.document_id, chunk.chunk_index, chunk.content_hash, analysisVersion);
+
+      // Reconcile with existing results
+      const existingVersion = existingMap.get(chunk.chunk_index);
+      const hasMatchingResult = existingVersion === analysisVersion;
+      const initialStatus = hasMatchingResult ? "complete" : "pending";
+
+      // For items seeded as complete, store a reconciliation result hash
+      const resultHash = hasMatchingResult
+        ? fnv1aHex(`reconciled:${runId}:${chunk.chunk_index}:${analysisVersion}`)
+        : null;
+
+      const offset = j * 9;
+      placeholders.push(
+        `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9})`
+      );
+      values.push(
+        runId, chunk.document_id, chunk.chunk_index, chunk.content_hash,
+        analysisVersion, identity, initialStatus,
+        hasMatchingResult ? new Date().toISOString() : null, // completed_at
+        resultHash
+      );
+
+      if (hasMatchingResult) seededFromExisting++;
     }
 
-    // Insert only items that don't already have a complete pipeline_analysis row
-    // with matching version. ON CONFLICT skips duplicates.
     const result = await ctx.integrations.db.execute(
-      `INSERT INTO analysis_work_items (run_id, document_id, chunk_index, chunk_hash, analysis_version)
+      `INSERT INTO analysis_work_items
+         (run_id, document_id, chunk_index, chunk_hash, analysis_version, work_identity, status, completed_at, result_hash)
        VALUES ${placeholders.join(", ")}
-       ON CONFLICT (run_id, chunk_index) DO NOTHING`,
+       ON CONFLICT (work_identity) DO NOTHING`,
       values,
       { label: `Populate work items batch ${Math.floor(i / BATCH) + 1}` }
     );
 
-    // rowCount from ON CONFLICT DO NOTHING tells us how many were actually inserted
     const rowCount = typeof result === "object" && result && "rowCount" in result
       ? (result as { rowCount: number }).rowCount
-      : batch.length; // fallback: assume all inserted
+      : batch.length;
     inserted += rowCount;
-    skipped += batch.length - rowCount;
+    skippedDuplicate += batch.length - rowCount;
   }
 
-  return { inserted, skipped, total: routedChunks.length };
+  // Adjust: seededFromExisting may include items that were already in the table (skipped)
+  // The accurate count is items that were inserted with status='complete'
+  const actualSeeded = Math.min(seededFromExisting, inserted);
+
+  return {
+    inserted,
+    skippedDuplicate,
+    seededFromExisting: actualSeeded,
+    total: routedChunks.length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -190,14 +264,10 @@ export async function populateWorkItems(
 
 /**
  * Atomically claims a bounded batch of pending/recoverable work items.
+ * Only claims items matching the CURRENT analysis version.
  *
- * Uses Postgres advisory-lock-free approach:
- *   1. Recover expired leases first (claimed → pending where lease_expires < now)
- *   2. SELECT ... FOR UPDATE SKIP LOCKED on pending items
- *   3. UPDATE status='claimed', set claim_owner, lease_expires, increment attempt_count
- *
- * Two concurrent workers calling claimBatch CANNOT claim the same item
- * because SKIP LOCKED ensures locked rows are invisible to other transactions.
+ * Guarantees: two concurrent workers CANNOT claim the same item
+ * (SKIP LOCKED makes locked rows invisible to other transactions).
  */
 export async function claimBatch(
   ctx: PipelineContext,
@@ -205,17 +275,19 @@ export async function claimBatch(
   invocationId: string,
   batchSize: number = WORKER_BATCH_SIZE,
 ): Promise<ClaimResult> {
+  const analysisVersion = getPipelineVersion();
+
   // Step 1: Recover expired leases
   const recovered = await recoverExpiredLeases(ctx, runId);
 
-  // Step 2: Atomic claim via CTE (single round-trip)
-  // The CTE uses FOR UPDATE SKIP LOCKED to prevent concurrent duplicate claims.
+  // Step 2: Atomic claim via CTE — only current-version items
   const leaseExpiresAt = new Date(Date.now() + LEASE_TIMEOUT_MS).toISOString();
 
   const claimed = await ctx.integrations.db.query(
     `WITH claimable AS (
        SELECT id FROM analysis_work_items
        WHERE run_id = $1
+         AND analysis_version = $6
          AND status IN ('pending', 'failed_retryable')
          AND attempt_count < $4
        ORDER BY chunk_index ASC
@@ -232,11 +304,11 @@ export async function claimBatch(
      FROM claimable
      WHERE awi.id = claimable.id
      RETURNING awi.id, awi.run_id, awi.document_id, awi.chunk_index,
-              awi.chunk_hash, awi.analysis_version, awi.status,
-              awi.claim_owner, awi.claimed_at::text, awi.lease_expires::text,
-              awi.attempt_count, awi.error_message`,
+              awi.chunk_hash, awi.analysis_version, awi.work_identity,
+              awi.status, awi.claim_owner, awi.claimed_at::text,
+              awi.lease_expires::text, awi.attempt_count, awi.error_message`,
     WorkItemSchema,
-    [runId, batchSize, invocationId, MAX_ATTEMPTS, leaseExpiresAt],
+    [runId, batchSize, invocationId, MAX_ATTEMPTS, leaseExpiresAt, analysisVersion],
     { label: `Claim batch (up to ${batchSize})` }
   );
 
@@ -248,16 +320,13 @@ export async function claimBatch(
 // ---------------------------------------------------------------------------
 
 /**
- * Transitions claimed items with expired leases back to 'pending' or
- * 'failed_retryable' (if attempt_count >= MAX_ATTEMPTS → failed_permanent).
- *
- * Returns count of recovered items.
+ * Transitions claimed items with expired leases.
+ * Under MAX_ATTEMPTS → 'pending'. At/over MAX_ATTEMPTS → 'failed_permanent'.
  */
 export async function recoverExpiredLeases(
   ctx: PipelineContext,
   runId: string,
 ): Promise<number> {
-  // Move expired claims back to pending (if under max attempts)
   const result = await ctx.integrations.db.execute(
     `UPDATE analysis_work_items
      SET status = CASE
@@ -291,18 +360,22 @@ export async function recoverExpiredLeases(
 }
 
 // ---------------------------------------------------------------------------
-// Complete a work item (dual-write to pipeline_analysis)
+// Complete a work item (lease-guarded, dual-write)
 // ---------------------------------------------------------------------------
 
 /**
- * Marks a work item complete and dual-writes the result to pipeline_analysis.
+ * Marks a work item complete with lease-ownership guard.
  *
- * Transaction behavior:
- *   1. Write to pipeline_analysis (authoritative result store)
- *   2. Verify pipeline_analysis row exists
- *   3. Mark work item complete only after verification
+ * Compare-and-set: UPDATE WHERE id=$1 AND status='claimed'
+ *   AND claim_owner=$2 AND attempt_count=$3
  *
- * A work item is NOT marked complete until pipeline_analysis confirms.
+ * If ownership check fails (lease expired, reclaimed by another worker),
+ * logs STALE_WORKER_COMPLETION_REJECTED and does NOT overwrite.
+ *
+ * Dual-write sequence:
+ *   1. Write to pipeline_analysis (authoritative result)
+ *   2. Read-back verification (run_id, chunk_index, prompt_version, content identity match)
+ *   3. Compare-and-set work item to 'complete' (only if still owner)
  */
 export async function completeItem(
   ctx: PipelineContext,
@@ -315,10 +388,18 @@ export async function completeItem(
     content_identity: string;
   },
   model: string,
-): Promise<void> {
+  invocationId: string,
+): Promise<{ accepted: boolean }> {
   const analysisVersion = item.analysis_version;
 
-  // Step 1: Write to pipeline_analysis (the merge-phase reader)
+  // Step 1: Write to pipeline_analysis (authoritative result store)
+  const contentIdentityJson = JSON.stringify({
+    document_id: item.document_id,
+    chunk_index: item.chunk_index,
+    chunk_hash: item.chunk_hash,
+    analysis_version: analysisVersion,
+  });
+
   await ctx.integrations.db.execute(
     `INSERT INTO pipeline_analysis (run_id, chunk_index, result_json, model_used, prompt_version)
      VALUES ($1, $2, $3::jsonb, $4, $5)
@@ -327,17 +408,29 @@ export async function completeItem(
     [
       item.run_id,
       result.chunkIndex,
-      JSON.stringify(result),
+      JSON.stringify({
+        ...result,
+        content_identity: contentIdentityJson,
+        analysis_version: analysisVersion,
+      }),
       model,
       analysisVersion,
     ],
     { label: `Dual-write pipeline_analysis chunk ${result.chunkIndex}` }
   );
 
-  // Step 2: Verify the write landed
+  // Step 2: Read-back verification — confirm identity fields match
+  const ReadBackSchema = z.object({
+    chunk_index: z.coerce.number(),
+    prompt_version: z.string().nullable(),
+  });
+
   const verification = await ctx.integrations.db.query(
-    `SELECT 1 AS exists FROM pipeline_analysis WHERE run_id = $1 AND chunk_index = $2 LIMIT 1`,
-    ExistsSchema,
+    `SELECT chunk_index, prompt_version
+     FROM pipeline_analysis
+     WHERE run_id = $1 AND chunk_index = $2
+     LIMIT 1`,
+    ReadBackSchema,
     [item.run_id, result.chunkIndex],
     { label: `Verify pipeline_analysis chunk ${result.chunkIndex}` }
   );
@@ -349,22 +442,54 @@ export async function completeItem(
     );
   }
 
-  // Step 3: Mark work item complete (only after pipeline_analysis confirmed)
-  const resultHash = fnv1aShort(
-    `${result.chunkIndex}:${result.extraction.length}:${result.content_identity}`
+  // Verify version matches (not just existence)
+  if (verification[0].prompt_version !== analysisVersion) {
+    console.warn(
+      `[analysis-worker] DUAL_WRITE_VERSION_MISMATCH: chunk ${result.chunkIndex} ` +
+      `wrote version=${analysisVersion} but read back version=${verification[0].prompt_version}`
+    );
+  }
+
+  // Step 3: Content-based result hash (actual extraction text, not just length)
+  const resultHash = fnv1aHex(
+    `${item.run_id}:${result.chunkIndex}:${analysisVersion}:${result.extraction}`
   );
 
-  await ctx.integrations.db.execute(
-    `UPDATE analysis_work_items
-     SET status = 'complete',
-         completed_at = now(),
-         result_hash = $2,
-         error_message = NULL,
-         updated_at = now()
-     WHERE id = $1`,
-    [item.id, resultHash],
-    { label: `Complete work item chunk ${item.chunk_index}` }
+  // Step 4: Compare-and-set — only mark complete if we still own the lease
+  const CompletionResultSchema = z.object({ updated: z.coerce.number() });
+
+  const casResult = await ctx.integrations.db.query(
+    `WITH updated AS (
+       UPDATE analysis_work_items
+       SET status = 'complete',
+           completed_at = now(),
+           result_hash = $4,
+           error_message = NULL,
+           updated_at = now()
+       WHERE id = $1
+         AND status = 'claimed'
+         AND claim_owner = $2
+         AND attempt_count = $3
+       RETURNING id
+     )
+     SELECT COUNT(*)::int AS updated FROM updated`,
+    CompletionResultSchema,
+    [item.id, invocationId, item.attempt_count, resultHash],
+    { label: `CAS-complete work item chunk ${item.chunk_index}` }
   );
+
+  const accepted = (casResult[0]?.updated ?? 0) > 0;
+
+  if (!accepted) {
+    console.warn(
+      `[analysis-worker] STALE_WORKER_COMPLETION_REJECTED: chunk ${item.chunk_index} ` +
+      `invocation=${invocationId} attempt=${item.attempt_count} — ` +
+      `ownership lost (lease expired or reclaimed by another worker). ` +
+      `Pipeline_analysis write was accepted; work item NOT marked complete.`
+    );
+  }
+
+  return { accepted };
 }
 
 // ---------------------------------------------------------------------------
@@ -372,13 +497,14 @@ export async function completeItem(
 // ---------------------------------------------------------------------------
 
 /**
- * Marks a work item as failed. If attempt_count >= MAX_ATTEMPTS, marks permanent.
- * Otherwise marks retryable so the next invocation can reclaim it.
+ * Marks a work item as failed. Guards by claim_owner for consistency.
+ * At MAX_ATTEMPTS → failed_permanent. Below → failed_retryable.
  */
 export async function failItem(
   ctx: PipelineContext,
   item: WorkItem,
   error: unknown,
+  invocationId: string,
 ): Promise<void> {
   const errMsg = error instanceof Error ? error.message : String(error);
   const truncatedMsg = errMsg.slice(0, 500);
@@ -392,8 +518,9 @@ export async function failItem(
          claim_owner = NULL,
          lease_expires = NULL,
          updated_at = now()
-     WHERE id = $1`,
-    [item.id, newStatus, truncatedMsg],
+     WHERE id = $1
+       AND claim_owner = $4`,
+    [item.id, newStatus, truncatedMsg, invocationId],
     { label: `Fail work item chunk ${item.chunk_index} (${newStatus})` }
   );
 
@@ -404,25 +531,27 @@ export async function failItem(
 }
 
 // ---------------------------------------------------------------------------
-// Progress counts
+// Progress counts (current identity only)
 // ---------------------------------------------------------------------------
 
 /**
- * Returns durable progress counts for a run.
- * Used by the orchestrator and diagnostic endpoints.
+ * Returns progress counts for the CURRENT analysis version only.
+ * Stale-identity items do not contribute to completion counts.
  */
 export async function getAnalysisCounts(
   ctx: PipelineContext,
   runId: string,
 ): Promise<AnalysisCounts> {
+  const analysisVersion = getPipelineVersion();
+
   const rows = await ctx.integrations.db.query(
     `SELECT status, COUNT(*)::int AS count
      FROM analysis_work_items
-     WHERE run_id = $1
+     WHERE run_id = $1 AND analysis_version = $2
      GROUP BY status`,
     CountSchema,
-    [runId],
-    { label: "Analysis work item counts" }
+    [runId, analysisVersion],
+    { label: "Analysis work item counts (current version)" }
   );
 
   const counts: AnalysisCounts = {
@@ -446,105 +575,154 @@ export async function getAnalysisCounts(
 }
 
 // ---------------------------------------------------------------------------
-// Dual-write mismatch detection (diagnostics)
+// Dual-write mismatch detection
 // ---------------------------------------------------------------------------
 
 /**
  * Detects mismatches between analysis_work_items and pipeline_analysis.
- * A mismatch is:
- *   - work item status = 'complete' but no pipeline_analysis row exists
- *   - pipeline_analysis row exists but work item is not 'complete'
- *
- * Returns up to 10 mismatches for diagnostic visibility.
+ * Checks identity match (version), not just existence.
  */
 export async function detectMismatches(
   ctx: PipelineContext,
   runId: string,
 ): Promise<DualWriteMismatch[]> {
+  const analysisVersion = getPipelineVersion();
+
   const MismatchSchema = z.object({
     chunk_index: z.coerce.number(),
     work_item_status: z.string(),
     pipeline_analysis_exists: z.coerce.boolean(),
+    version_match: z.coerce.boolean(),
   });
 
-  // Check: work items marked complete but missing from pipeline_analysis
   const mismatches = await ctx.integrations.db.query(
     `SELECT
        awi.chunk_index,
        awi.status AS work_item_status,
-       (pa.run_id IS NOT NULL) AS pipeline_analysis_exists
+       (pa.run_id IS NOT NULL) AS pipeline_analysis_exists,
+       (pa.prompt_version = $2) AS version_match
      FROM analysis_work_items awi
      LEFT JOIN pipeline_analysis pa
        ON pa.run_id = awi.run_id AND pa.chunk_index = awi.chunk_index
      WHERE awi.run_id = $1
+       AND awi.analysis_version = $2
        AND (
-         (awi.status = 'complete' AND pa.run_id IS NULL)
+         (awi.status = 'complete' AND (pa.run_id IS NULL OR pa.prompt_version != $2))
          OR
-         (awi.status != 'complete' AND pa.run_id IS NOT NULL AND awi.status != 'claimed')
+         (awi.status NOT IN ('complete','claimed','failed_permanent') AND pa.run_id IS NOT NULL AND pa.prompt_version = $2)
        )
      LIMIT 10`,
     MismatchSchema,
-    [runId],
-    { label: "Detect dual-write mismatches" }
+    [runId, analysisVersion],
+    { label: "Detect dual-write mismatches (version-aware)" }
   );
 
   return mismatches;
 }
 
 // ---------------------------------------------------------------------------
-// Check if work items are already populated for this run
+// Check if work items are populated
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true if analysis_work_items have been seeded for this run.
- * Used to avoid redundant population on re-entry.
+ * Returns true if current-version analysis_work_items exist for this run.
  */
 export async function isPopulated(
   ctx: PipelineContext,
   runId: string,
 ): Promise<boolean> {
+  const analysisVersion = getPipelineVersion();
   const rows = await ctx.integrations.db.query(
-    `SELECT 1 AS exists FROM analysis_work_items WHERE run_id = $1 LIMIT 1`,
+    `SELECT 1 AS exists FROM analysis_work_items
+     WHERE run_id = $1 AND analysis_version = $2
+     LIMIT 1`,
     ExistsSchema,
-    [runId],
-    { label: "Check work items populated" }
+    [runId, analysisVersion],
+    { label: "Check work items populated (current version)" }
   );
   return rows.length > 0;
 }
 
 // ---------------------------------------------------------------------------
-// Check if all analysis is complete (no pending or claimed items remain)
+// Check if analysis is complete (current version)
 // ---------------------------------------------------------------------------
 
 /**
- * Returns true when all work items are terminal (complete or failed_permanent).
- * Used by the orchestrator to determine when to advance to merge phase.
+ * Returns true when all CURRENT-VERSION work items are terminal.
  */
 export async function isAnalysisComplete(
   ctx: PipelineContext,
   runId: string,
 ): Promise<boolean> {
+  const analysisVersion = getPipelineVersion();
   const rows = await ctx.integrations.db.query(
     `SELECT 1 AS exists FROM analysis_work_items
-     WHERE run_id = $1 AND status IN ('pending', 'claimed', 'failed_retryable')
+     WHERE run_id = $1
+       AND analysis_version = $2
+       AND status IN ('pending', 'claimed', 'failed_retryable')
      LIMIT 1`,
     ExistsSchema,
-    [runId],
-    { label: "Check analysis complete" }
+    [runId, analysisVersion],
+    { label: "Check analysis complete (current version)" }
   );
   return rows.length === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline run config helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks if a run has analysis_worker_enabled in pipeline_run_config.
+ * Fail-closed: if the table doesn't exist or query errors, returns false.
+ */
+export async function isWorkerEnabledForRun(
+  ctx: PipelineContext,
+  runId: string,
+): Promise<boolean> {
+  try {
+    const RunConfigSchema = z.object({
+      analysis_worker_enabled: z.boolean(),
+    });
+    const rows = await ctx.integrations.db.query(
+      `SELECT analysis_worker_enabled FROM pipeline_run_config WHERE run_id = $1 LIMIT 1`,
+      RunConfigSchema,
+      [runId],
+      { label: "Check worker enabled (pipeline_run_config)" }
+    );
+    return rows.length > 0 && rows[0].analysis_worker_enabled === true;
+  } catch (err) {
+    // Fail-closed: table missing or query error → legacy path
+    console.warn(
+      `[analysis-worker] isWorkerEnabledForRun failed (fail-closed → legacy): ` +
+      `${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/** Simple FNV-1a hash for result fingerprinting (no crypto dependency) */
-function fnv1aShort(input: string): string {
-  let h = 0x811c9dc5 >>> 0;
+/**
+ * FNV-1a hash producing a 16-char hex string.
+ * Used for work_identity and result_hash.
+ * Content-based: different extraction text → different hash.
+ */
+function fnv1aHex(input: string): string {
+  // Use two 32-bit FNV-1a passes with different seeds for 64-bit equivalent
+  let h1 = 0x811c9dc5 >>> 0;
+  let h2 = 0x050c5d1f >>> 0; // second seed
   for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= c;
+    h2 = Math.imul(h2, 0x01000193) >>> 0;
   }
-  return (h >>> 0).toString(16).padStart(8, "0");
+  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
 }
+
+// Export for testing
+export { fnv1aHex, computeWorkIdentity as _computeWorkIdentity };

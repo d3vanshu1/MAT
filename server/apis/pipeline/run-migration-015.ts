@@ -1,17 +1,21 @@
 /**
- * Migration 015 — Durable Analysis Workers (Stabilization Batch, Commit 1)
+ * Migration 015 — Durable Analysis Workers (Stabilization Batch, Commit 1 Corrective)
  *
- * Creates the `analysis_work_items` table that enables bounded, lease-based
- * chunk analysis with stable identity, concurrent workers, and failure recovery.
+ * Creates TWO application-owned tables (no ALTER on existing tables):
  *
- * This table coordinates work — `pipeline_analysis` remains the authoritative
- * result store consumed by the merge phase (dual-write pattern).
+ * 1. pipeline_run_config — per-run opt-in configuration (replaces the need to
+ *    ALTER module_runs). Stores analysis_worker_enabled and merge_strategy.
  *
- * Identity tuple: (run_id, document_id, chunk_index, chunk_hash, analysis_version)
+ * 2. analysis_work_items — bounded lease-based work coordination with stable
+ *    identity. Unique on the full identity tuple:
+ *      (run_id, document_id, chunk_index, chunk_hash, analysis_version)
+ *    A deterministic `work_identity` hash is stored and UNIQUE-constrained so
+ *    changed content or version produces new work without conflicting.
+ *
  * State machine: pending → claimed → complete | failed_retryable | failed_permanent
  *
- * Also adds a `merge_strategy` column to `module_runs` for per-run routing
- * (Q5: sticky merge strategy — legacy_tree vs canonical_group_v1).
+ * This migration is idempotent (IF NOT EXISTS on all DDL). Partial success
+ * is safe — rerun to complete any missing objects.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 
@@ -19,7 +23,7 @@ const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
 export default api({
   name: "RunMigration015",
-  description: "Creates analysis_work_items table for durable bounded analysis workers",
+  description: "Creates pipeline_run_config and analysis_work_items tables",
 
   integrations: {
     db: postgres(IC_DILIGENCE_DB),
@@ -36,88 +40,101 @@ export default api({
   async run(ctx) {
     const steps: string[] = [];
 
-    // 1. Create analysis_work_items table
+    // 1. pipeline_run_config — application-owned per-run settings
+    //    No ALTER on module_runs required.
+    await ctx.integrations.db.execute(
+      `CREATE TABLE IF NOT EXISTS pipeline_run_config (
+        run_id                  UUID PRIMARY KEY,
+        analysis_worker_enabled BOOLEAN NOT NULL DEFAULT false,
+        merge_strategy          TEXT CHECK (
+                                  merge_strategy IS NULL
+                                  OR merge_strategy IN ('legacy_tree', 'canonical_group_v1')
+                                ),
+        created_at              TIMESTAMPTZ DEFAULT now(),
+        updated_at              TIMESTAMPTZ DEFAULT now()
+      )`,
+      [],
+      { label: "Create pipeline_run_config table" }
+    );
+    steps.push("Created pipeline_run_config table");
+
+    // 2. analysis_work_items — coordination queue
+    //    Unique constraint on the FULL identity tuple via work_identity hash.
     await ctx.integrations.db.execute(
       `CREATE TABLE IF NOT EXISTS analysis_work_items (
-        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        run_id          UUID NOT NULL,
-        document_id     UUID NOT NULL,
-        chunk_index     INT NOT NULL,
-        chunk_hash      TEXT NOT NULL,
-        analysis_version TEXT NOT NULL,
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id            UUID NOT NULL,
+        document_id       TEXT NOT NULL,
+        chunk_index       INT NOT NULL,
+        chunk_hash        TEXT NOT NULL,
+        analysis_version  TEXT NOT NULL,
 
-        -- Claim/lease state
-        status          TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending','claimed','complete','failed_retryable','failed_permanent')),
-        claim_owner     TEXT,
-        claimed_at      TIMESTAMPTZ,
-        lease_expires   TIMESTAMPTZ,
-        attempt_count   INT NOT NULL DEFAULT 0,
+        -- Deterministic identity hash: md5(run_id || document_id || chunk_index || chunk_hash || analysis_version)
+        -- UNIQUE constraint ensures changed identity produces new work.
+        work_identity     TEXT NOT NULL,
 
-        -- Result tracking (lightweight — full result lives in pipeline_analysis)
-        completed_at    TIMESTAMPTZ,
-        error_message   TEXT,
-        result_hash     TEXT,
+        -- State machine
+        status            TEXT NOT NULL DEFAULT 'pending'
+                          CHECK (status IN ('pending','claimed','complete','failed_retryable','failed_permanent')),
+        claim_owner       TEXT,
+        claimed_at        TIMESTAMPTZ,
+        lease_expires     TIMESTAMPTZ,
+        attempt_count     INT NOT NULL DEFAULT 0,
+
+        -- Result tracking
+        completed_at      TIMESTAMPTZ,
+        error_message     TEXT,
+        result_hash       TEXT,
 
         -- Timestamps
-        created_at      TIMESTAMPTZ DEFAULT now(),
-        updated_at      TIMESTAMPTZ DEFAULT now(),
+        created_at        TIMESTAMPTZ DEFAULT now(),
+        updated_at        TIMESTAMPTZ DEFAULT now(),
 
-        -- Constraints
-        UNIQUE (run_id, chunk_index)
+        -- Identity uniqueness
+        UNIQUE (work_identity)
       )`,
       [],
       { label: "Create analysis_work_items table" }
     );
     steps.push("Created analysis_work_items table");
 
-    // 2. Index: find claimable items efficiently (pending + expired leases)
+    // 3. Index: find claimable items efficiently
     await ctx.integrations.db.execute(
       `CREATE INDEX IF NOT EXISTS idx_awi_claimable
-       ON analysis_work_items (run_id, status, lease_expires)
-       WHERE status IN ('pending', 'claimed')`,
+       ON analysis_work_items (run_id, status, chunk_index)
+       WHERE status IN ('pending', 'failed_retryable')`,
       [],
       { label: "Create claimable items index" }
     );
     steps.push("Created idx_awi_claimable index");
 
-    // 3. Index: expired lease recovery
+    // 4. Index: expired lease recovery
     await ctx.integrations.db.execute(
       `CREATE INDEX IF NOT EXISTS idx_awi_expired_leases
-       ON analysis_work_items (lease_expires)
+       ON analysis_work_items (run_id, lease_expires)
        WHERE status = 'claimed'`,
       [],
       { label: "Create expired leases index" }
     );
     steps.push("Created idx_awi_expired_leases index");
 
-    // 4. Index: progress counts by status
+    // 5. Index: progress counts by status (current identity only)
     await ctx.integrations.db.execute(
       `CREATE INDEX IF NOT EXISTS idx_awi_status_counts
-       ON analysis_work_items (run_id, status)`,
+       ON analysis_work_items (run_id, analysis_version, status)`,
       [],
       { label: "Create status counts index" }
     );
     steps.push("Created idx_awi_status_counts index");
 
-    // 5. Add merge_strategy column to module_runs (Q5: sticky per-run routing)
+    // 6. Index: lookup by run_id + chunk_index for reconciliation
     await ctx.integrations.db.execute(
-      `ALTER TABLE module_runs
-       ADD COLUMN IF NOT EXISTS merge_strategy TEXT
-       CHECK (merge_strategy IS NULL OR merge_strategy IN ('legacy_tree', 'canonical_group_v1'))`,
+      `CREATE INDEX IF NOT EXISTS idx_awi_run_chunk
+       ON analysis_work_items (run_id, chunk_index, analysis_version)`,
       [],
-      { label: "Add merge_strategy to module_runs" }
+      { label: "Create run+chunk lookup index" }
     );
-    steps.push("Added merge_strategy column to module_runs");
-
-    // 6. Add analysis_worker_enabled column to module_runs (per-run opt-in)
-    await ctx.integrations.db.execute(
-      `ALTER TABLE module_runs
-       ADD COLUMN IF NOT EXISTS analysis_worker_enabled BOOLEAN DEFAULT false`,
-      [],
-      { label: "Add analysis_worker_enabled to module_runs" }
-    );
-    steps.push("Added analysis_worker_enabled column to module_runs");
+    steps.push("Created idx_awi_run_chunk index");
 
     return {
       success: true,

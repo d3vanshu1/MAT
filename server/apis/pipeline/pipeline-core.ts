@@ -80,7 +80,7 @@ import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE } from "./pipeline-config.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
-import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isPopulated, isAnalysisComplete, detectMismatches, WORKER_BATCH_SIZE } from "./analysis-worker.js";
+import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isPopulated, isAnalysisComplete, detectMismatches, isWorkerEnabledForRun, WORKER_BATCH_SIZE } from "./analysis-worker.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
 import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
@@ -3792,16 +3792,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // Process pending chunks with dynamic batch sizing
   // ─── WORKER PATH (Commit 1): bounded, lease-based analysis ───────────────
   // Uses analysis_work_items for coordination; dual-writes to pipeline_analysis.
-  // Gated by: ANALYSIS_WORKER_ENABLED flag AND per-run analysis_worker_enabled column.
-  // Legacy path below remains for existing in-progress runs.
-  const runMetaRows = await ctx.integrations.db.query(
-    `SELECT analysis_worker_enabled FROM module_runs WHERE id = $1 LIMIT 1`,
-    z.object({ analysis_worker_enabled: z.boolean().nullable() }),
-    [runId],
-    { label: "Load run meta for worker-path gate" }
-  );
-  const runMeta = runMetaRows[0] ?? null;
-  const useWorkerPath = ANALYSIS_WORKER_ENABLED && runMeta?.analysis_worker_enabled === true;
+  // Gated by: ANALYSIS_WORKER_ENABLED flag AND per-run opt-in in pipeline_run_config.
+  // Legacy path below remains for existing in-progress runs (fail-closed: if
+  // pipeline_run_config is missing or errors, always falls through to legacy).
+  const useWorkerPath = ANALYSIS_WORKER_ENABLED && await isWorkerEnabledForRun(ctx, runId!);
 
   if (useWorkerPath) {
     enterPhase("analysis_worker");
@@ -3816,7 +3810,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       const popResult = await populateWorkItems(ctx, runId!, routedForWorker);
       console.log(
         `[analysis-worker] Populated ${popResult.inserted} work items ` +
-        `(${popResult.skipped} skipped, ${popResult.total} total)`
+        `(${popResult.skippedDuplicate} skipped, ${popResult.seededFromExisting} seeded from existing, ${popResult.total} total)`
       );
     }
 
@@ -3912,14 +3906,18 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           const dbContentHash = row.content_hash ?? "";
           const contentIdentity = `${row.document_id}:${item.chunk_index}:${dbContentHash}`;
 
-          // Dual-write: pipeline_analysis + mark work item complete
-          await completeItem(ctx, item, {
+          // Dual-write: pipeline_analysis + mark work item complete (lease-guarded)
+          const { accepted } = await completeItem(ctx, item, {
             label: chunkLabel,
             extraction,
             chunkIndex: item.chunk_index,
             truncated,
             content_identity: contentIdentity,
-          }, getModuleModel(moduleId));
+          }, getModuleModel(moduleId), workerInvocationId);
+
+          if (!accepted) {
+            console.warn(`[analysis-worker] Chunk ${item.chunk_index} completion rejected (stale worker)`);
+          }
 
           return { label: chunkLabel, chunkIndex: item.chunk_index, truncated };
         })
@@ -3933,7 +3931,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           if (r.value.truncated) truncatedChunks++;
         } else {
           // Mark item as failed in the work queue
-          await failItem(ctx, claimed[i], r.reason);
+          await failItem(ctx, claimed[i], r.reason, workerInvocationId);
           failedChunks++;
           const errMsg = r.reason?.message ?? String(r.reason ?? "Unknown error");
           console.error(`[analysis-worker] Chunk ${claimed[i].chunk_index} failed: ${errMsg.slice(0, 200)}`);
