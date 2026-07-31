@@ -1965,19 +1965,43 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             // --- FIX 3: Run absence verification on fast path (parity with main path) ---
             let fastPathVerificationErrored = false;
             if (CHECKLIST_MODULES.has(moduleId)) {
-              // Reconstruct subject IDs for fast-path (same logic as main path at line ~1990)
+              // Reconstruct subject IDs for fast-path
+              // Fix 10C: First try loading persisted canonical subject IDs from run checkpoint.
+              // Only fall back to document_tag derivation if no persisted set exists.
               let fpSubjectIds = input.subjectDocumentIds ?? [];
               if (fpSubjectIds.length === 0) {
                 try {
+                  // Fix 10C: Load persisted canonical subject document IDs
+                  const [subjectCp] = await ctx.integrations.db.query(
+                    `SELECT payload FROM pipeline_checkpoints
+                     WHERE module_run_id = $1 AND checkpoint_key = 'canonical_subject_ids' AND status = 'complete'
+                     LIMIT 1`,
+                    z.object({ payload: z.any() }),
+                    [runId],
+                    { label: "Fast-path Fix10C: load canonical subject IDs" }
+                  );
+                  if (subjectCp?.payload) {
+                    const savedIds = typeof subjectCp.payload === "string"
+                      ? JSON.parse(subjectCp.payload)
+                      : subjectCp.payload;
+                    if (Array.isArray(savedIds) && savedIds.length > 0) {
+                      fpSubjectIds = savedIds as string[];
+                      console.log(`[pipeline:fast-path:Fix10C] Loaded ${fpSubjectIds.length} persisted canonical subject ID(s)`);
+                    }
+                  }
+                } catch { /* checkpoint table may not exist — fall through to derivation */ }
+              }
+              if (fpSubjectIds.length === 0) {
+                try {
                   const icMemoRows = await ctx.integrations.db.query(
-                    `SELECT id FROM documents WHERE deal_id = $1 AND tag = 'ic_memo' ORDER BY created_at`,
+                    `SELECT id FROM documents WHERE deal_id = $1 AND document_tag = 'ic_memo' ORDER BY created_at`,
                     z.object({ id: z.string() }),
                     [dealId],
-                    { label: "Fast-path: reconstruct subjectIds from ic_memo docs" }
+                    { label: "Fast-path: reconstruct subjectIds from ic_memo docs (fallback)" }
                   );
                   fpSubjectIds = icMemoRows.map(r => r.id);
                   if (fpSubjectIds.length > 0) {
-                    console.log(`[pipeline:fast-path] Reconstructed subjectIds from ${icMemoRows.length} ic_memo doc(s)`);
+                    console.log(`[pipeline:fast-path] Reconstructed subjectIds from ${icMemoRows.length} ic_memo doc(s) (derivation fallback)`);
                   }
                 } catch { /* proceed with empty — absence verification will skip subject-self check */ }
               }
@@ -2061,7 +2085,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             // Sanity telemetry: shows the clamp arithmetic in the wild
             const perCallTimeoutPreview = Math.min(formatBudget - 10_000, 230_000);
             console.log(`[pipeline:fast-path] Formatting report — elapsed=${Math.round(elapsedMs / 1000)}s, formatBudget=${Math.round(formatBudget / 1000)}s, perCallTimeout=${Math.round(perCallTimeoutPreview / 1000)}s, findings=${finalFindings.length}`);
-            const fullReport = await formatReportInline(ctx, moduleId, finalNode.executiveHeader, finalFindings, formatBudget, startTime, fastPathHousekeeping, false);
+            const fullReport = await formatReportInline(ctx, moduleId, finalNode.executiveHeader, finalFindings, formatBudget, startTime, fastPathHousekeeping, fastPathVerificationErrored);
 
             if (!fullReport) {
               console.warn(`[pipeline:fast-path] formatReportInline returned null — will retry on next invocation`);
@@ -2260,6 +2284,22 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       truncatedMerges: 0,
       firstError: errMsg,
     };
+  }
+
+  // --- Fix 10C: Persist canonical subject IDs for resume ---
+  // After all guard logic and reconstruction, persist the final subject set so that
+  // the fast path (and future resume calls) can load it without re-deriving.
+  if (subjectIds.length > 0 && runId) {
+    try {
+      await ctx.integrations.db.execute(
+        `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+         VALUES ($1, 'canonical_subject_ids', $2::jsonb, 'complete', $3)
+         ON CONFLICT (module_run_id, checkpoint_key)
+         DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete'`,
+        [runId, JSON.stringify(subjectIds), getPipelineVersion()],
+        { label: "Fix10C: Persist canonical subject IDs" }
+      );
+    } catch { /* non-fatal — derivation fallback covers it */ }
   }
 
   // --- Step 0.4: Clean corrupted parsed_text (phantom columns from old parser) ---
