@@ -593,13 +593,10 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
   let { findings, housekeepingFindings } = input;
   const { numericReport, claimsReconciliation, fileTagMap } = input;
 
-  // === Stage 1: FABRICATED_ARITHMETIC suppression ===
-  const { FABRICATED_ARITHMETIC_PATTERNS } = await import("./fabricated-arithmetic-patterns.js");
+  // === Stage 1: FABRICATED_ARITHMETIC suppression (Fix 19 closure: context-guarded) ===
+  const { shouldSuppressArithmeticFinding } = await import("./fabricated-arithmetic-patterns.js");
   const preSuppressCount = findings.length;
-  findings = findings.filter(f => {
-    const text = `${f.title} ${f.detail} ${f.full_analysis}`;
-    return !FABRICATED_ARITHMETIC_PATTERNS.some(pat => pat.test(text));
-  });
+  findings = findings.filter(f => !shouldSuppressArithmeticFinding(f));
   const suppressedCount = preSuppressCount - findings.length;
   if (suppressedCount > 0) {
     console.log(`[pipeline:postMerge] Suppressed ${suppressedCount} fabricated arithmetic finding(s)`);
