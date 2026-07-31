@@ -31,12 +31,18 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface VerificationVerdict {
-  verdict: "REVISED" | "UPHELD";
+  verdict: "REVISED" | "UPHELD" | "VERIFICATION_ERROR";
   revisedDetail?: string;
+  /** Fix 20 closure: For REVISED, full_analysis revision to maintain consistency with detail */
+  revisedFullAnalysis?: string;
   evidenceQuoted?: string;
   evidenceSource?: string;
   reasoning: string;
   queriesRun: string[];
+  /** Fix 20 closure: Error classification for VERIFICATION_ERROR verdicts */
+  error_class?: "retrieval_failure" | "timeout" | "parse_failure" | "unknown";
+  /** Fix 20 closure: Whether this error is retryable within budget */
+  retryable?: boolean;
 }
 
 export interface VerificationLogEntry {
@@ -53,6 +59,24 @@ export interface AbsenceVerificationResult {
   verificationLog: VerificationLogEntry[];
   /** false if the phase broke early due to budget — caller should return in_progress */
   completed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Fix 20 closure: Error classification for VERIFICATION_ERROR verdicts
+// ---------------------------------------------------------------------------
+function classifyVerificationError(msg: string): "retrieval_failure" | "timeout" | "parse_failure" | "unknown" {
+  const lower = msg.toLowerCase();
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("deadline exceeded")) {
+    return "timeout";
+  }
+  if (lower.includes("parse") || lower.includes("json") || lower.includes("unexpected token") || lower.includes("invalid response")) {
+    return "parse_failure";
+  }
+  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("fetch failed") ||
+      lower.includes("network") || lower.includes("retrieval") || lower.includes("not found")) {
+    return "retrieval_failure";
+  }
+  return "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -467,11 +491,15 @@ export async function runAbsenceVerificationPhase(
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[absence-verify] Failed on finding ${index} "${finding.title.slice(0, 40)}": ${msg}`);
 
-      // On failure, UPHOLD the finding (conservative — don't drop findings due to infra errors)
+      // Fix 20 closure: Infrastructure failures are NOT approval (UPHELD).
+      // Classify the error and persist a distinct VERIFICATION_ERROR status.
+      const errorClass = classifyVerificationError(msg);
       const fallbackVerdict: VerificationVerdict = {
-        verdict: "UPHELD",
-        reasoning: `Verification failed due to error: ${msg.slice(0, 200)}. Conservatively upheld.`,
+        verdict: "VERIFICATION_ERROR",
+        reasoning: `Verification failed: ${msg.slice(0, 200)}. Finding retained with verification gap disclosed.`,
         queriesRun: [],
+        error_class: errorClass,
+        retryable: errorClass === "parse_failure" || errorClass === "timeout",
       };
 
       await ctx.integrations.db.execute(
@@ -504,9 +532,11 @@ export async function runAbsenceVerificationPhase(
 
     const v = logEntry.verdict;
     if (v.verdict === "REVISED") {
+      // Fix 20 closure: Update BOTH detail and full_analysis so they cannot contradict
       return {
         ...f,
         detail: v.revisedDetail || f.detail,
+        full_analysis: v.revisedFullAnalysis || v.revisedDetail || (f as any).full_analysis,
         verification: {
           status: "revised" as const,
           evidenceQuoted: v.evidenceQuoted,
@@ -514,7 +544,20 @@ export async function runAbsenceVerificationPhase(
           queriesRun: v.queriesRun,
         },
       };
+    } else if (v.verdict === "VERIFICATION_ERROR") {
+      // Fix 20 closure: Infrastructure failure — NOT an approval
+      return {
+        ...f,
+        verification: {
+          status: "verification_error" as const,
+          error_class: v.error_class ?? "unknown",
+          retryable: v.retryable ?? false,
+          reasoning: v.reasoning,
+          queriesRun: v.queriesRun,
+        },
+      };
     } else {
+      // UPHELD — genuine verification success
       return {
         ...f,
         verification: {
