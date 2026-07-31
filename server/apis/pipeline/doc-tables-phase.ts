@@ -11,6 +11,8 @@
  * is pure CPU work with no LLM calls — it completes in seconds even for large deals.
  */
 import { z } from "@superblocksteam/sdk-api";
+import { computeContentHash } from "./extraction-prompt.js";
+import { DOC_TABLES_PARSER_VERSION } from "./source-snapshot.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +33,23 @@ const SpreadsheetDocSchema = z.object({
 const DocTableCountSchema = z.object({
   document_id: z.string(),
   row_count: z.coerce.number(),
+});
+
+/** CORRECTIVE A: Generation manifest stored as a special row in doc_tables */
+const GENERATION_MANIFEST_MARKER = "__generation_manifest__";
+
+interface GenerationManifest {
+  documentId: string;
+  sourceHash: string;
+  parserVersion: string;
+  expectedTableCount: number;
+  actualTableCount: number;
+  status: "complete" | "partial" | "failed";
+}
+
+const ManifestRowSchema = z.object({
+  document_id: z.string(),
+  data: z.any(),
 });
 
 const TextSliceSchema = z.object({
@@ -271,19 +290,57 @@ export async function runDocTablesPhase(
     return { needed: false };
   }
 
-  // Step B: Check which docs already have doc_tables rows
-  const existingCounts = await ctx.integrations.db.query(
-    `SELECT document_id, COUNT(*)::int AS row_count
+  // Step B: Check which docs have a valid completed generation manifest
+  // CORRECTIVE A: Do not accept mere row presence — require a manifest with
+  // status=complete, matching source hash and parser version.
+  const manifestRows = await ctx.integrations.db.query(
+    `SELECT document_id, data
      FROM doc_tables
      WHERE document_id = ANY($1::uuid[])
-     GROUP BY document_id`,
-    DocTableCountSchema,
-    [spreadsheetDocs.map((d) => d.id)],
-    { label: "DocTablesPhase: check existing rows" }
+       AND sheet_or_page = $2`,
+    ManifestRowSchema,
+    [spreadsheetDocs.map((d) => d.id), GENERATION_MANIFEST_MARKER],
+    { label: "DocTablesPhase: load generation manifests" }
   );
 
-  const existingMap = new Map(existingCounts.map((r) => [r.document_id, r.row_count]));
-  const missingDocs = spreadsheetDocs.filter((d) => !existingMap.has(d.id) || existingMap.get(d.id)! === 0);
+  const manifestMap = new Map<string, GenerationManifest>();
+  for (const row of manifestRows) {
+    const data = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
+    if (data && data.status === "complete" && data.parserVersion === DOC_TABLES_PARSER_VERSION) {
+      manifestMap.set(row.document_id, data as GenerationManifest);
+    }
+  }
+
+  // A doc needs regeneration if: no manifest, parser version mismatch, or source hash changed.
+  // Source hash validation is deferred to Step C since it requires loading parsed_text.
+  // Here we only check for manifest existence and parser version.
+  const missingDocs: Array<{ id: string; file_name: string; text_length: number }> = [];
+  const docsNeedingHashValidation: Array<{ id: string; file_name: string; text_length: number; manifest: GenerationManifest }> = [];
+  for (const doc of spreadsheetDocs) {
+    const manifest = manifestMap.get(doc.id);
+    if (manifest) {
+      // Has a valid-version complete manifest — still need source hash validation
+      docsNeedingHashValidation.push({ ...doc, manifest });
+      continue;
+    }
+    missingDocs.push(doc);
+  }
+
+  // Step B.2: Validate source hashes for docs with existing manifests
+  // Load parsed_text hashes to verify source hasn't changed
+  for (const { id, file_name, text_length, manifest } of docsNeedingHashValidation) {
+    const parsedText = await loadParsedText(ctx.integrations.db, id, text_length);
+    if (!parsedText) {
+      missingDocs.push({ id, file_name, text_length });
+      continue;
+    }
+    const currentHash = computeContentHash(parsedText);
+    if (currentHash !== manifest.sourceHash) {
+      // Source changed — regeneration needed
+      missingDocs.push({ id, file_name, text_length });
+    }
+    // else: source unchanged + manifest complete + parser version matches → skip
+  }
 
   if (missingDocs.length === 0) {
     return { needed: false };
@@ -302,7 +359,17 @@ export async function runDocTablesPhase(
         continue;
       }
 
-      // Clear any stale partial rows
+      // CORRECTIVE A: Compute source hash for this document's text
+      const sourceHash = computeContentHash(parsedText);
+
+      // Check if a manifest exists with matching source hash (source hash validation for
+      // docs that had a manifest but parser version changed — handled above)
+      const existingManifest = manifestMap.get(doc.id);
+      if (existingManifest && existingManifest.sourceHash === sourceHash) {
+        // Source unchanged but manifest was filtered (parser version mismatch) — re-parse
+      }
+
+      // Clear ALL existing rows for this document (data + manifest) — atomic replacement
       await ctx.integrations.db.execute(
         `DELETE FROM doc_tables WHERE document_id = $1`,
         [doc.id],
@@ -310,12 +377,23 @@ export async function runDocTablesPhase(
       );
 
       const tables = parsedTextToTables(parsedText);
+      const expectedTableCount = tables.length;
 
       if (tables.length === 0) {
+        // Write a manifest recording "complete with 0 tables" so we don't re-scan
+        await ctx.integrations.db.execute(
+          `INSERT INTO doc_tables (document_id, sheet_or_page, caption, data)
+           VALUES ($1, $2, $3, $4)`,
+          [doc.id, GENERATION_MANIFEST_MARKER, "generation_manifest",
+           JSON.stringify({ documentId: doc.id, sourceHash, parserVersion: DOC_TABLES_PARSER_VERSION, expectedTableCount: 0, actualTableCount: 0, status: "complete" })],
+          { label: `DocTablesPhase: save empty manifest for ${doc.file_name}` }
+        );
         warnings.push(`${doc.file_name}: no parseable tables found in text`);
         continue;
       }
 
+      // Insert table rows one by one
+      let insertedCount = 0;
       for (const table of tables) {
         await ctx.integrations.db.execute(
           `INSERT INTO doc_tables (document_id, sheet_or_page, caption, data)
@@ -332,12 +410,29 @@ export async function runDocTablesPhase(
           ],
           { label: `DocTablesPhase: save ${doc.file_name} / ${table.sheetOrPage}` }
         );
+        insertedCount++;
       }
 
-      totalPopulated += tables.length;
+      // CORRECTIVE A: Only write manifest after ALL rows inserted successfully.
+      // Partial insertion (exception mid-loop) will NOT have a manifest → retry next run.
+      const manifestStatus: GenerationManifest["status"] = insertedCount === expectedTableCount ? "complete" : "partial";
+      await ctx.integrations.db.execute(
+        `INSERT INTO doc_tables (document_id, sheet_or_page, caption, data)
+         VALUES ($1, $2, $3, $4)`,
+        [doc.id, GENERATION_MANIFEST_MARKER, "generation_manifest",
+         JSON.stringify({ documentId: doc.id, sourceHash, parserVersion: DOC_TABLES_PARSER_VERSION, expectedTableCount, actualTableCount: insertedCount, status: manifestStatus })],
+        { label: `DocTablesPhase: save manifest for ${doc.file_name}` }
+      );
+
+      if (manifestStatus === "complete") {
+        totalPopulated += insertedCount;
+      } else {
+        warnings.push(`${doc.file_name}: partial insertion (${insertedCount}/${expectedTableCount})`);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       warnings.push(`${doc.file_name}: FAILED — ${msg}`);
+      // No manifest written → will retry on next invocation
     }
   }
 

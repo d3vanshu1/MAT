@@ -860,6 +860,7 @@ const ExtractionRowSchema = z.object({
 
 const AnalysisCheckpointSchema = z.object({
   chunk_index: z.coerce.number(),
+  content_identity: z.string().nullable().optional(),
 });
 
 const MergeCheckpointSchema = z.object({
@@ -2899,7 +2900,9 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // checkpoints above — this step will see them all as "already analyzed" and skip.
   const currentVersion = getPipelineVersion();
   const analyzedRows = await ctx.integrations.db.query(
-    `SELECT chunk_index FROM pipeline_analysis
+    `SELECT chunk_index,
+            result_json->>'content_identity' AS content_identity
+     FROM pipeline_analysis
      WHERE run_id = $1 AND prompt_version = $2
      ORDER BY chunk_index`,
     AnalysisCheckpointSchema,
@@ -2941,7 +2944,27 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     return runPipelineCore(ctx, { ...input, runId: freshRunId });
   }
 
-  const analyzedSet = new Set(analyzedRows.map(r => r.chunk_index));
+  // CORRECTIVE A: Validate analysis checkpoints against current routed array.
+  // A checkpoint at globalIdx N is valid only if routed[N]'s content identity matches.
+  // This prevents stale checkpoints from being reused when documents change/reorder.
+  const analyzedSet = new Set<number>();
+  const contentIdentityMap = new Map(analyzedRows.map(r => [r.chunk_index, r.content_identity ?? null]));
+  for (const row of analyzedRows) {
+    const idx = row.chunk_index;
+    if (idx >= routed.length) continue; // out of range — stale checkpoint
+    const routedItem = routed[idx];
+    const ext = typeof routedItem.extraction_json === "string"
+      ? JSON.parse(routedItem.extraction_json)
+      : routedItem.extraction_json;
+    const currentIdentity = `${routedItem.document_id}:${routedItem.chunk_index}:${ext.contentHash ?? ""}`;
+    const storedIdentity = row.content_identity;
+    // If stored identity exists, validate it matches. If null (legacy), accept but note.
+    if (storedIdentity && storedIdentity !== currentIdentity) {
+      // Mismatched — routed array changed; this checkpoint is for a different chunk
+      continue;
+    }
+    analyzedSet.add(idx);
+  }
 
   // For web research modules, analysis is synthetic (injected from iterations).
   // Skip the normal sub-agent loop entirely — pendingChunks is empty.
@@ -3076,12 +3099,13 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         const extraction = `### Extraction from: ${chunkLabel}\n\n${textBlock?.text ?? ""}`;
         const truncated = result.stop_reason === "max_tokens";
 
-        // Save checkpoint (flag truncated responses so thin findings are traceable)
+        // Save checkpoint with content_identity for CORRECTIVE A validation on resume
+        const contentIdentity = `${row.document_id}:${row.chunk_index}:${ext.contentHash ?? ""}`;
         await ctx.integrations.db.execute(
           `INSERT INTO pipeline_analysis (run_id, chunk_index, result_json, model_used, prompt_version)
            VALUES ($1, $2, $3::jsonb, $4, $5)
            ON CONFLICT (run_id, chunk_index) DO UPDATE SET result_json = $3::jsonb, model_used = $4, prompt_version = $5`,
-          [runId, globalIdx, JSON.stringify({ label: chunkLabel, extraction, chunkIndex: globalIdx, truncated }), getModuleModel(moduleId), currentVersion],
+          [runId, globalIdx, JSON.stringify({ label: chunkLabel, extraction, chunkIndex: globalIdx, truncated, content_identity: contentIdentity }), getModuleModel(moduleId), currentVersion],
           { label: `Save analysis checkpoint ${globalIdx}` }
         );
 

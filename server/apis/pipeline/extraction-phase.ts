@@ -112,6 +112,7 @@ const ExistingChunkSchema = z.object({
   is_failed: z.coerce.boolean(),
   is_truncated: z.coerce.boolean(),
   attempt_count: z.coerce.number(),
+  content_hash: z.string().nullable(),
 });
 
 const MessageResponseSchema = z.object({
@@ -269,12 +270,12 @@ export async function runExtractionPhase(
   // --- Step B: Load existing extraction keys (paginated) ---
   // Each row is small (~80 bytes: UUID + int + two bools), but row count can
   // grow unboundedly across re-processing cycles. Page to stay under 4MB gRPC cap.
-  const existingRows: Array<{ document_id: string; chunk_index: number; is_failed: boolean; is_truncated: boolean; attempt_count: number }> = [];
+  const existingRows: Array<{ document_id: string; chunk_index: number; is_failed: boolean; is_truncated: boolean; attempt_count: number; content_hash: string | null }> = [];
   let keysOffset = 0;
 
   while (true) {
     const page = await ctx.integrations.db.query(
-      `SELECT document_id, chunk_index,
+      `SELECT document_id, chunk_index, content_hash,
               COALESCE((extraction_json->>'failed')::boolean, false) AS is_failed,
               COALESCE((extraction_json->>'truncated')::boolean, false) AS is_truncated,
               COALESCE((extraction_json->>'attempt_count')::int,
@@ -293,14 +294,17 @@ export async function runExtractionPhase(
     keysOffset += EXTRACTION_KEYS_PAGE_SIZE;
   }
 
-  // Build a set of successfully-extracted (doc_id, chunk_index) pairs.
+  // Build a map of successfully-extracted (doc_id:chunk_index → content_hash) pairs.
   // Exclude failed AND truncated extractions — they need to be re-done.
+  // CORRECTIVE A: Also store content_hash so we can invalidate on content change.
   const extractedSet = new Set<string>();
+  const extractedContentHash = new Map<string, string | null>();
   // Track attempt counts for failed chunks (used by escalation logic).
   const failedChunkAttempts = new Map<string, number>();
   for (const row of existingRows) {
     if (!row.is_failed && !row.is_truncated) {
       extractedSet.add(`${row.document_id}:${row.chunk_index}`);
+      extractedContentHash.set(`${row.document_id}:${row.chunk_index}`, row.content_hash);
     }
     if (row.is_failed) {
       failedChunkAttempts.set(`${row.document_id}:${row.chunk_index}`, row.attempt_count);
@@ -351,11 +355,23 @@ export async function runExtractionPhase(
 
     tagByDocId[doc.id] = doc.document_tag ?? "other";
     const chunks = chunkDocument(doc.file_name, doc.id, parsedText);
-    // Only keep chunks that haven't been successfully extracted yet
-    // and haven't exhausted all retry attempts.
+    // Only keep chunks that haven't been successfully extracted yet,
+    // haven't exhausted all retry attempts, OR have a content-hash mismatch
+    // (CORRECTIVE A: changed text with same chunk count must re-extract).
     for (const chunk of chunks) {
       const key = `${doc.id}:${chunk.chunkIndex}`;
-      if (extractedSet.has(key)) continue; // already succeeded
+      if (extractedSet.has(key)) {
+        // Validate content hash: if the stored extraction was for different text, invalidate it
+        const storedHash = extractedContentHash.get(key);
+        if (storedHash && storedHash === chunk.contentHash) continue; // content unchanged, reuse
+        if (storedHash === null && chunk.contentHash) {
+          // Legacy row without content_hash — cannot validate, re-extract
+        } else if (!storedHash) {
+          continue; // no stored hash and no current hash — assume unchanged
+        }
+        // Content hash mismatch: this chunk's text has changed, re-extract
+        extractedSet.delete(key); // remove from "success" set so counts are accurate
+      }
       const attempts = failedChunkAttempts.get(key) ?? 0;
       if (attempts >= MAX_EXTRACTION_ATTEMPTS) continue; // permanently exhausted
       allChunks.push(chunk);
