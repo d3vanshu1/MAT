@@ -99,6 +99,9 @@ const MERGE_NODE_TEXT_CAP = 3000; // Max chars per node's text in merge input �
 // Report formatting config (inline, post-merge)
 const FORMAT_REPORT_MIN_BUDGET_MS = 100_000; // Need at least 100s to attempt report formatting
 
+// Modules that require checklist scan + absence verification
+const CHECKLIST_MODULES = new Set(["omission_audit", "blind_spot_scanner", "diligence_completeness"]);
+
 // Absence verification config (Step 5.5, between merge and format)
 const ABSENCE_VERIFICATION_MIN_BUDGET_MS = 120_000; // Need at least 120s — 2 LLM calls per finding
 const FORMAT_REPORT_MAX_TOKENS = 12000;
@@ -1853,6 +1856,82 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             finalFindings = postMergeResult.findings;
             fastPathHousekeeping = postMergeResult.housekeepingFindings;
 
+            // --- FIX 3: Run absence verification on fast path (parity with main path) ---
+            let fastPathVerificationErrored = false;
+            if (CHECKLIST_MODULES.has(moduleId)) {
+              // Reconstruct subject IDs for fast-path (same logic as main path at line ~1990)
+              let fpSubjectIds = input.subjectDocumentIds ?? [];
+              if (fpSubjectIds.length === 0) {
+                try {
+                  const icMemoRows = await ctx.integrations.db.query(
+                    `SELECT id FROM documents WHERE deal_id = $1 AND tag = 'ic_memo' ORDER BY created_at`,
+                    z.object({ id: z.string() }),
+                    [dealId],
+                    { label: "Fast-path: reconstruct subjectIds from ic_memo docs" }
+                  );
+                  fpSubjectIds = icMemoRows.map(r => r.id);
+                  if (fpSubjectIds.length > 0) {
+                    console.log(`[pipeline:fast-path] Reconstructed subjectIds from ${icMemoRows.length} ic_memo doc(s)`);
+                  }
+                } catch { /* proceed with empty — absence verification will skip subject-self check */ }
+              }
+
+              const verifyBudget = timeRemaining();
+              if (verifyBudget >= ABSENCE_VERIFICATION_MIN_BUDGET_MS) {
+                console.log(`[pipeline:fast-path] Running absence verification (${Math.round(verifyBudget / 1000)}s budget, findings=${finalFindings.length})`);
+                try {
+                  const verifyResult = await runAbsenceVerificationPhase(
+                    ctx,
+                    dealId,
+                    runId!,
+                    finalFindings,
+                    moduleId,
+                    useOpus,
+                    fpSubjectIds,
+                    timeRemaining,
+                    startTime
+                  );
+                  finalFindings = verifyResult.findings;
+                  const revised = verifyResult.verificationLog.filter(v => v.verdict.verdict === "REVISED").length;
+                  const upheld = verifyResult.verificationLog.filter(v => v.verdict.verdict === "UPHELD").length;
+                  console.log(`[pipeline:fast-path] Absence verification: ${revised} revised, ${upheld} upheld, completed=${verifyResult.completed}`);
+
+                  // If incomplete, return in_progress — do NOT format prematurely
+                  if (!verifyResult.completed) {
+                    return {
+                      status: "in_progress",
+                      runId: runId!,
+                      phase: "fast_path_absence_verification",
+                      progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                      result: null,
+                      failedChunks: 0,
+                      truncatedChunks: 0,
+                      truncatedMerges: 0,
+                      firstError: null,
+                    };
+                  }
+                } catch (verifyErr) {
+                  const msg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+                  console.error(`[pipeline:fast-path] Absence verification failed (non-fatal): ${msg}`);
+                  fastPathVerificationErrored = true;
+                }
+              } else {
+                // Insufficient budget — defer to next invocation
+                console.warn(`[pipeline:fast-path] Insufficient time for absence verification (${Math.round(verifyBudget / 1000)}s < ${ABSENCE_VERIFICATION_MIN_BUDGET_MS / 1000}s needed) — deferring`);
+                return {
+                  status: "in_progress",
+                  runId: runId!,
+                  phase: "fast_path_absence_verification",
+                  progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                  result: null,
+                  failedChunks: 0,
+                  truncatedChunks: 0,
+                  truncatedMerges: 0,
+                  firstError: null,
+                };
+              }
+            }
+
             // Fast-path format budget: derived from PLATFORM cap, not TIME_BUDGET.
             // The fast-path has no post-format phases (no extraction, no merge remaining) —
             // only a DB upsert after formatting. PLATFORM_HEADROOM_MS (30s) covers that.
@@ -2751,13 +2830,12 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // --- Checklist Coverage Scan (runs once, before analysis) ---
   // Exhaustive full-text search across ALL document chunks for each
   // diligence checklist category. Produces authoritative coverage map
-  // that prevents sub-agents AND the merge layer from fabricating absence claims.
-  const CHECKLIST_MODULES = new Set(["omission_audit", "blind_spot_scanner", "diligence_completeness"]);
+  // Modules with checklist-based analysis use a coverage map to prevent fabrication
   let coverageMapBlock = "";
   let dealProcessContextBlock = "";
   if (CHECKLIST_MODULES.has(moduleId)) {
     try {
-      const scanResult = await runChecklistScan(ctx, dealId, input.subjectDocumentIds ?? []);
+      const scanResult = await runChecklistScan(ctx, dealId, subjectIds); // FIX 3: use reconstructed subject IDs
       coverageMapBlock = "\n\n" + formatCoverageMapForPrompt(scanResult);
       console.log(`[pipeline] Checklist scan complete: ${scanResult.coveredCount} covered, ${scanResult.notFoundCount} not found (${scanResult.scanDurationMs}ms, ${scanResult.totalQueries} queries)`);
     } catch (scanErr) {
@@ -3207,7 +3285,8 @@ A "## Numeric Verification Report" section appears in the input below. It contai
   baseMergePrompt += tagMapBlock;
 
   // --- Inject subject identity block: chronologically ordered IC memo record ---
-  const subjectDocumentIds: string[] = input.subjectDocumentIds ?? [];
+  // FIX 3: Use reconstructed subjectIds (accounts for resume scenarios)
+  const subjectDocumentIds: string[] = subjectIds;
   const subjectFiles = subjectDocumentIds
     .map((id) => ({ id, fileName: idToFileName.get(id) ?? id }))
     .map(({ id, fileName }) => {
@@ -3794,7 +3873,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           finalFindings,
           moduleId,
           useOpus,
-          input.subjectDocumentIds ?? [],
+          subjectIds, // FIX 3: use reconstructed subject IDs, not raw input
           timeRemaining,
           startTime
         );
