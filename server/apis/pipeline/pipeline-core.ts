@@ -82,6 +82,7 @@ import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
+import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -2219,6 +2220,95 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // === CANCEL GATE: post-extraction ===
   if (await checkCancelled(ctx, runId, "post_extraction")) return cancelledResult(runId, "post_extraction");
 
+  // --- Step 0.5.5: Build or validate Source Snapshot (Fix 5) ---
+  // After extraction is complete, build a unified snapshot of all source documents
+  // and their processing metadata. This is the single authority for downstream
+  // checkpoint validation (doc_tables, numeric, merge manifest, origin map).
+  //
+  // On resume: load persisted snapshot and validate against current document set.
+  // If invalid (doc changed, version drift): invalidate is logged but we proceed
+  // with a fresh snapshot (downstream phases handle their own invalidation).
+  let sourceSnapshot: SourceSnapshot | null = null;
+  try {
+    // Load existing snapshot from checkpoint
+    const [snapshotRow] = await ctx.integrations.db.query(
+      `SELECT payload FROM pipeline_checkpoints
+       WHERE module_run_id = $1 AND checkpoint_key = 'source_snapshot' AND status = 'complete'
+       LIMIT 1`,
+      z.object({ payload: z.any() }),
+      [runId],
+      { label: "Load source snapshot checkpoint" }
+    );
+
+    if (snapshotRow?.payload) {
+      const raw = typeof snapshotRow.payload === "string" ? JSON.parse(snapshotRow.payload) : snapshotRow.payload;
+      // Build current document metadata for validation
+      const currentDocMeta = await ctx.integrations.db.query(
+        `SELECT id, COALESCE(length(parsed_text), 0) AS text_length,
+                file_name, document_tag,
+                md5(COALESCE(parsed_text, '')) AS content_md5
+         FROM documents WHERE deal_id = $1
+         ORDER BY file_name`,
+        z.object({ id: z.string(), text_length: z.coerce.number(), file_name: z.string(), document_tag: z.string().nullable(), content_md5: z.string() }),
+        [dealId],
+        { label: "Load doc metadata for snapshot validation" }
+      );
+      const currentDocs: BuildSnapshotInput["documents"] = currentDocMeta.map(d => ({
+        id: d.id,
+        contentHash: d.content_md5,
+        documentType: d.file_name.split(".").pop() ?? "unknown",
+        sourceTag: d.document_tag,
+        chunkCount: Math.ceil(d.text_length / 5000), // CHUNK_CHARS
+      }));
+
+      const validation = validateSourceSnapshot(raw, currentDocs);
+      if (validation.valid) {
+        sourceSnapshot = validation.snapshot;
+        console.log(`[SourceSnapshot] Loaded valid snapshot: fingerprint=${sourceSnapshot.fingerprint.slice(0, 8)}, ${sourceSnapshot.documents.length} docs`);
+      } else {
+        console.log(`[SourceSnapshot] Stored snapshot invalid (${validation.reason}) — rebuilding`);
+      }
+    }
+  } catch (snapshotErr) {
+    // pipeline_checkpoints may not exist; non-fatal for loading
+    console.log(`[SourceSnapshot] Could not load checkpoint: ${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}`);
+  }
+
+  if (!sourceSnapshot) {
+    // Build fresh snapshot from current document state
+    const docMetaForSnapshot = await ctx.integrations.db.query(
+      `SELECT id, COALESCE(length(parsed_text), 0) AS text_length,
+              file_name, document_tag,
+              md5(COALESCE(parsed_text, '')) AS content_md5
+       FROM documents WHERE deal_id = $1
+       ORDER BY file_name`,
+      z.object({ id: z.string(), text_length: z.coerce.number(), file_name: z.string(), document_tag: z.string().nullable(), content_md5: z.string() }),
+      [dealId],
+      { label: "Load doc metadata for fresh snapshot" }
+    );
+    const snapshotInput: BuildSnapshotInput = {
+      documents: docMetaForSnapshot.map(d => ({
+        id: d.id,
+        contentHash: d.content_md5,
+        documentType: d.file_name.split(".").pop() ?? "unknown",
+        sourceTag: d.document_tag,
+        chunkCount: Math.ceil(d.text_length / 5000),
+      })),
+    };
+    sourceSnapshot = buildSourceSnapshot(snapshotInput);
+    console.log(`[SourceSnapshot] Built fresh: fingerprint=${sourceSnapshot.fingerprint.slice(0, 8)}, ${sourceSnapshot.documents.length} docs`);
+
+    // Persist the snapshot checkpoint (fail-closed: must succeed for provenance integrity)
+    await ctx.integrations.db.execute(
+      `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+       VALUES ($1, 'source_snapshot', $2::jsonb, 'complete', $3)
+       ON CONFLICT (module_run_id, checkpoint_key)
+       DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = EXCLUDED.version_hash`,
+      [runId, JSON.stringify(sourceSnapshot), getPipelineVersion()],
+      { label: "Persist source snapshot checkpoint" }
+    );
+  }
+
   // --- Step 0.6: Ensure doc_tables is populated for spreadsheet documents ---
   // Same self-sufficiency pattern as extraction phase. Pure CPU (no LLM calls),
   // completes in seconds. If doc_tables is already populated, this is a no-op.
@@ -2683,20 +2773,18 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     console.log(`[ClaimOriginMap] Built from routed array (${claimOriginMap.entries.size} entries, ${claimOriginMap.ambiguousLegacyIds.size} ambiguous)`);
 
     // Persist the origin map for future resume (with fingerprint)
-    try {
-      const serialized = serializeOriginMap(claimOriginMap, currentFingerprint);
-      await ctx.integrations.db.execute(
-        `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-         VALUES ($1, 'claim_origin_map', $2::jsonb, 'complete', $3)
-         ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-        [runId, JSON.stringify(serialized), getPipelineVersion()],
-        { label: "Persist claim origin map checkpoint" }
-      );
-      originMapPersistedThisRun = true;
-    } catch (persistErr) {
-      // Non-fatal: pipeline_checkpoints table may not exist yet
-      console.warn(`[ClaimOriginMap] Failed to persist origin map: ${persistErr instanceof Error ? persistErr.message : persistErr}`);
-    }
+    // FIX 5: Write failure MUST throw — an unpersisted origin map means resume
+    // will silently rebuild with potentially different extraction order, breaking
+    // provenance continuity. Fail-closed: no silent data loss.
+    const serialized = serializeOriginMap(claimOriginMap, currentFingerprint);
+    await ctx.integrations.db.execute(
+      `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+       VALUES ($1, 'claim_origin_map', $2::jsonb, 'complete', $3)
+       ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
+      [runId, JSON.stringify(serialized), getPipelineVersion()],
+      { label: "Persist claim origin map checkpoint" }
+    );
+    originMapPersistedThisRun = true;
   }
 
   // --- Step 1.5: Web Research Phase (for web research modules only) ---

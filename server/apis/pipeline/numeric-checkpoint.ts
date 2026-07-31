@@ -75,6 +75,13 @@ export interface NumericCheckpoint {
   pipelineVersion: string;
   /** Numeric config version (changes when metric config or cross-agreement config changes) */
   configVersion: string;
+  /**
+   * Unified source-snapshot fingerprint (Fix 5).
+   * Cross-references the run-level SourceSnapshot to detect document set changes
+   * that the local sourceFingerprint (doc+table prefix) might miss.
+   * Optional for backward compatibility with v2 checkpoints written before Fix 5.
+   */
+  snapshotFingerprint?: string;
   /** ISO timestamp when the checkpoint was last written */
   lastUpdated: string;
   /** Cross-agreement debug from last invocation (if any) */
@@ -182,6 +189,8 @@ export interface BuildCheckpointInput {
   tablesLoaded: number;
   tablesTotal: number;
   crossAgreementDebug?: any;
+  /** Unified source-snapshot fingerprint for cross-validation (Fix 5) */
+  snapshotFingerprint?: string;
 }
 
 /**
@@ -190,7 +199,7 @@ export interface BuildCheckpointInput {
 export function buildNumericCheckpoint(input: BuildCheckpointInput): NumericCheckpoint {
   const indexedTableIds = input.indexedTableMetadata.map(t => t.id);
   const sourceFingerprint = computeNumericSourceFingerprint(input.documentIds, indexedTableIds);
-  return {
+  const checkpoint: NumericCheckpoint = {
     version: NUMERIC_CHECKPOINT_VERSION,
     status: input.status,
     documentIds: input.documentIds,
@@ -209,6 +218,10 @@ export function buildNumericCheckpoint(input: BuildCheckpointInput): NumericChec
     lastUpdated: new Date().toISOString(),
     crossAgreementDebug: input.crossAgreementDebug,
   };
+  if (input.snapshotFingerprint) {
+    checkpoint.snapshotFingerprint = input.snapshotFingerprint;
+  }
+  return checkpoint;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +253,9 @@ export function validateNumericCheckpoint(
   raw: unknown,
   currentDocumentIds: string[],
   /** Table IDs from documents 0..checkpoint.documentCursor-1 (re-queried prefix) */
-  prefixTableIds?: string[]
+  prefixTableIds?: string[],
+  /** Current source-snapshot fingerprint for cross-validation (Fix 5) */
+  currentSnapshotFingerprint?: string
 ): ValidateResult {
   if (!raw || typeof raw !== "object") {
     return { valid: false, reason: "Checkpoint is null or not an object", action: "invalidate" };
@@ -330,6 +345,19 @@ export function validateNumericCheckpoint(
           action: "invalidate",
         };
       }
+    }
+  }
+
+  // Snapshot fingerprint cross-check (Fix 5): if both the checkpoint and the
+  // caller supply a snapshot fingerprint, they must agree. A mismatch means
+  // the run-level document set changed in a way the local doc-prefix check might miss.
+  if (currentSnapshotFingerprint && typeof obj.snapshotFingerprint === "string") {
+    if (obj.snapshotFingerprint !== currentSnapshotFingerprint) {
+      return {
+        valid: false,
+        reason: `Snapshot fingerprint mismatch: checkpoint=${(obj.snapshotFingerprint as string).slice(0, 8)}, current=${currentSnapshotFingerprint.slice(0, 8)}. Source snapshot changed.`,
+        action: "invalidate",
+      };
     }
   }
 
