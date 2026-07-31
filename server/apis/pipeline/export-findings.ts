@@ -96,6 +96,11 @@ export default api({
       schema_version: z.coerce.number().nullable(),
     });
 
+    const CanonicalOutputRowLegacy = z.object({
+      findings: z.any(),
+      findings_bytes: z.coerce.number(),
+    });
+
     type ExportRow = {
       findings: unknown;
       findings_bytes: number;
@@ -105,20 +110,39 @@ export default api({
     let row: ExportRow | null = null;
 
     // Fetch canonical artifact — the ONLY source
-    const canonRows = await ctx.integrations.db.query(
-      `SELECT mo.findings,
-              octet_length(mo.findings::text) AS findings_bytes,
-              mo.schema_version
-       FROM module_outputs mo
-       WHERE mo.module_run_id = $1
-       LIMIT 1`,
-      CanonicalOutputRow,
-      [runId],
-      { label: "ExportFindings: fetch canonical artifact from module_outputs" }
-    );
-    if (canonRows.length > 0) {
-      const cr = canonRows[0];
-      row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: cr.schema_version ?? null };
+    // Try with schema_version column first (post-Fix 13 migration)
+    try {
+      const canonRows = await ctx.integrations.db.query(
+        `SELECT mo.findings,
+                octet_length(mo.findings::text) AS findings_bytes,
+                mo.schema_version
+         FROM module_outputs mo
+         WHERE mo.module_run_id = $1
+         LIMIT 1`,
+        CanonicalOutputRow,
+        [runId],
+        { label: "ExportFindings: fetch canonical artifact from module_outputs" }
+      );
+      if (canonRows.length > 0) {
+        const cr = canonRows[0];
+        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: cr.schema_version ?? null };
+      }
+    } catch {
+      // schema_version column may not exist (pre-migration) — retry without it
+      const legacyRows = await ctx.integrations.db.query(
+        `SELECT mo.findings,
+                octet_length(mo.findings::text) AS findings_bytes
+         FROM module_outputs mo
+         WHERE mo.module_run_id = $1
+         LIMIT 1`,
+        CanonicalOutputRowLegacy,
+        [runId],
+        { label: "ExportFindings: fetch canonical artifact (pre-migration)" }
+      );
+      if (legacyRows.length > 0) {
+        const cr = legacyRows[0];
+        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: null };
+      }
     }
 
     // Fix 19: No fallback — missing canonical = incomplete
