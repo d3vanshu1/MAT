@@ -58,7 +58,8 @@
  */
 import { z } from "@superblocksteam/sdk-api";
 import { buildMergedText, type MergedFinding } from "../modules/build-merged-text.js";
-import { parseCanonicalFindings, ensureFindingIds, buildMergedFinding } from "./canonical-finding.js";
+import { parseCanonicalFindings, ensureFindingIds, buildMergedFinding, FINDING_SCHEMA_VERSION } from "./canonical-finding.js";
+import { parseCheckpointStatus, validateCheckpoint, isCheckpointWriteCritical, type CheckpointStatus } from "./checkpoint-state-machine.js";
 import { NUMERIC_MODULES } from "../modules/constants.js";
 import { SUB_AGENT_PROMPTS } from "../modules/analyze-chunk.js";
 import { MERGE_PROMPTS, FINDINGS_RULE_FINAL, FINDINGS_RULE_INTERMEDIATE } from "../modules/merge-findings.js";
@@ -699,6 +700,114 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
   }
 
   return { findings, housekeepingFindings };
+}
+
+// ---------------------------------------------------------------------------
+// Canonical Finalizer — single entry point for all completion paths.
+// Order: 1. validate final merge → 2. arithmetic suppression → 3. numeric validation →
+//        4. reconciliation → 5. consolidation → 6. materiality → 7. absence verification →
+//        8. final validation → 9. formatting → 10. canonical persistence → 11. completion transition.
+// Stages 1-6 are delegated to runPostMergePipeline. 7-11 are handled here.
+// All paths (main, fast, background) MUST call this instead of ad-hoc sequencing.
+// ---------------------------------------------------------------------------
+interface CanonicalFinalizeInput {
+  ctx: PipelineContext;
+  runId: string;
+  moduleId: string;
+  findings: MergedFinding[];
+  housekeepingFindings: MergedFinding[];
+  executiveHeader: string;
+  numericReport: { figures: any[]; discrepancies: any[] } | null;
+  claimsReconciliation: ReconciliationResult | null;
+  fileTagMap: Map<string, string>;
+  useOpus: boolean;
+  startTime: number;
+  verificationPhaseErrored?: boolean;
+  mergeGroupsFallenBack?: number;
+}
+
+interface CanonicalFinalizeResult {
+  findings: MergedFinding[];
+  housekeepingFindings: MergedFinding[];
+  fullReport: string | null;
+  canonicalArtifact: {
+    schema_version: number;
+    findings: MergedFinding[];
+    housekeepingFindings: MergedFinding[];
+    executiveHeader: string;
+    fullReport: string | null;
+    completionStatus: "complete" | "partial_format_failed";
+    timestamp: string;
+  };
+}
+
+async function canonicalFinalize(input: CanonicalFinalizeInput): Promise<CanonicalFinalizeResult> {
+  const { ctx, runId, moduleId, executiveHeader, numericReport, claimsReconciliation, fileTagMap, useOpus, startTime } = input;
+  const verificationPhaseErrored = input.verificationPhaseErrored ?? false;
+  const mergeGroupsFallenBack = input.mergeGroupsFallenBack ?? 0;
+
+  // Stages 1-6: Post-merge quality pipeline
+  const postMerge = await runPostMergePipeline({
+    findings: input.findings,
+    housekeepingFindings: input.housekeepingFindings,
+    numericReport,
+    claimsReconciliation,
+    fileTagMap,
+  });
+  let { findings, housekeepingFindings } = postMerge;
+
+  // Stage 7: Absence verification (already applied during merge via the ABSENCE_PATTERNS code backstop)
+  // The inline absence cap was applied per-finding during merge. Here we do a final sweep to ensure
+  // no absence claim escaped the cap after consolidation/reconciliation may have changed severity.
+  const ABSENCE_PATTERNS_FINALIZE = /\b(does not confirm|does not disclose|absent|not disclosed|missing|no mention|fails to address|not addressed|not confirmed|no evidence of|no reference to|omits?|silent on|does not discuss|not discussed)\b/i;
+  let absenceCaps = 0;
+  for (const f of findings) {
+    const isDataDivergence = f.finding_kind === "data_divergence";
+    if (isDataDivergence) continue;
+    const isAbsence =
+      f.gap_type === "memo_omission" || f.gap_type === "open_item_acknowledged" ||
+      ABSENCE_PATTERNS_FINALIZE.test(f.full_analysis || "") || ABSENCE_PATTERNS_FINALIZE.test(f.detail || "");
+    if (isAbsence && f.absence_confidence !== "verified_absent" && f.severity !== "info") {
+      (f as any).severity = "info";
+      absenceCaps++;
+    }
+  }
+  if (absenceCaps > 0) {
+    console.log(`[canonicalFinalize:absenceVerify] Capped ${absenceCaps} unverified absence finding(s)`);
+  }
+
+  // Stage 8: Final validation — ensure all findings have required fields
+  for (const f of findings) {
+    if (!f.finding_id) (f as any).finding_id = crypto.randomUUID();
+    if (!f.severity) (f as any).severity = "info";
+    if (!f.title) (f as any).title = "Untitled finding";
+  }
+
+  // Stage 9: Formatting
+  const formatBudget = EFFECTIVE_CAP_MS - (Date.now() - startTime);
+  let fullReport: string | null = null;
+  if (formatBudget > 60_000) {
+    fullReport = await formatReportInline(ctx, moduleId, executiveHeader, findings, formatBudget, startTime, housekeepingFindings, verificationPhaseErrored, mergeGroupsFallenBack);
+  } else {
+    console.warn(`[canonicalFinalize] Insufficient budget for formatting (${Math.round(formatBudget / 1000)}s) — report deferred to next invocation`);
+  }
+
+  // Stage 10: Build canonical artifact
+  const canonicalArtifact = {
+    schema_version: FINDING_SCHEMA_VERSION,
+    findings,
+    housekeepingFindings,
+    executiveHeader,
+    fullReport,
+    completionStatus: fullReport ? "complete" as const : "partial_format_failed" as const,
+    timestamp: new Date().toISOString(),
+  };
+
+  // Stage 11 (persistence + transition) is handled by the caller since it requires
+  // different mechanics for main-path vs fast-path (different INSERT patterns).
+  // The caller MUST persist canonicalArtifact and transition to completed status.
+
+  return { findings, housekeepingFindings, fullReport, canonicalArtifact };
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,16 +1671,30 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     if (topCheckpoint) {
       // Only fast-path if: (a) it's a real success node (not error), (b) it's the
       // sole node at its level (node_index=0 and no siblings), (c) no output saved yet
+      // RC10: Also check for a round manifest with finalRootId confirming this is genuinely final
       if (!topCheckpoint.has_error && topCheckpoint.node_index === 0) {
-        // Verify it's truly the final node: there should be exactly 1 node at this level
-        const [siblingCount] = await ctx.integrations.db.query(
-          `SELECT COUNT(*)::int AS cnt FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2`,
-          z.object({ cnt: z.coerce.number() }),
+        // Verify via manifest first (preferred), fall back to sibling-count heuristic
+        let isFinalNode = false;
+        const [manifest] = await ctx.integrations.db.query(
+          `SELECT merged_json FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index = -1 AND status = 'manifest' LIMIT 1`,
+          z.object({ merged_json: z.any() }),
           [runId, topCheckpoint.tree_level],
-          { label: "Fast-path: verify single final node" }
+          { label: "Fast-path: check round manifest for final root" }
         );
-
-        const isFinalNode = siblingCount && siblingCount.cnt === 1;
+        if (manifest?.merged_json) {
+          const m = typeof manifest.merged_json === "string" ? JSON.parse(manifest.merged_json) : manifest.merged_json;
+          isFinalNode = m.isFinalRound === true && m.finalRootId === `${topCheckpoint.tree_level}:0` && m.roundStatus !== "incomplete";
+        }
+        if (!isFinalNode) {
+          // Fallback: sibling count (legacy checkpoints without manifests)
+          const [siblingCount] = await ctx.integrations.db.query(
+            `SELECT COUNT(*)::int AS cnt FROM merge_checkpoints WHERE module_run_id = $1 AND tree_level = $2 AND node_index >= 0`,
+            z.object({ cnt: z.coerce.number() }),
+            [runId, topCheckpoint.tree_level],
+            { label: "Fast-path: verify single final node (fallback)" }
+          );
+          isFinalNode = siblingCount != null && siblingCount.cnt === 1;
+        }
 
         if (isFinalNode) {
           // Check if output already exists (if so, skip — run should have been marked completed)
@@ -2742,16 +2865,16 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // the final-round node (which accumulates ALL findings → can be >4MB) from
   // breaching the gRPC 4MB response limit. `text` is reconstructable from
   // findings via buildMergedText() and is only needed for the final output.
-  const mergeCheckpoints: Array<{ tree_level: number; node_index: number; merged_json: any; prompt_version?: string }> = [];
+  const mergeCheckpoints: Array<{ tree_level: number; node_index: number; merged_json: any; prompt_version?: string; status?: string }> = [];
   let mcOffset = 0;
   while (true) {
     const page = await ctx.integrations.db.query(
-      `SELECT tree_level, node_index, (merged_json - 'text') AS merged_json, prompt_version
+      `SELECT tree_level, node_index, (merged_json - 'text') AS merged_json, prompt_version, COALESCE(status, 'complete') AS status
        FROM merge_checkpoints
        WHERE module_run_id = $1
        ORDER BY tree_level, node_index
        LIMIT ${MERGE_CP_PAGE_SIZE} OFFSET ${mcOffset}`,
-      z.object({ tree_level: z.coerce.number(), node_index: z.coerce.number(), merged_json: z.any(), prompt_version: z.string().nullable().optional() }),
+      z.object({ tree_level: z.coerce.number(), node_index: z.coerce.number(), merged_json: z.any(), prompt_version: z.string().nullable().optional(), status: z.string().optional() }),
       [runId],
       { label: `Load merge checkpoints (offset ${mcOffset})` }
     );
@@ -2781,13 +2904,40 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   for (const cp of mergeCheckpoints) {
     const data = typeof cp.merged_json === "string" ? JSON.parse(cp.merged_json) : cp.merged_json;
     const cpKey = `${cp.tree_level}:${cp.node_index}`;
-    if (data.error) {
-      // failureCount is persisted in the JSON; default to 1 for legacy entries written before this field existed
+
+    // Skip manifest entries (node_index = -1, used for round-level state)
+    if (cp.node_index < 0) continue;
+
+    // RC12: Use checkpoint state machine for reuse validation
+    const cpStatus = parseCheckpointStatus(cp.status);
+    if (data.error || cpStatus === "failed_retryable") {
       const count = typeof data.failureCount === "number" ? data.failureCount : 1;
       errorCountMap.set(cpKey, count);
-      errorMessageMap.set(cpKey, String(data.error));
+      errorMessageMap.set(cpKey, String(data.error ?? "unknown error"));
       continue;
     }
+
+    const validation = validateCheckpoint({
+      status: cpStatus,
+      promptVersion: cp.prompt_version ?? null,
+      currentPromptVersion: currentVersion,
+      truncated: data.truncated === true,
+    });
+
+    if (!validation.reusable) {
+      // Partial or invalid checkpoint — treat as needing retry
+      if (validation.suggestedAction === "retry") {
+        console.log(`[pipeline:RC12] Checkpoint ${cpKey} not reusable: ${validation.reason} — will retry`);
+        continue; // Skip this checkpoint, group will be re-merged
+      }
+      if (validation.suggestedAction === "fail") {
+        console.error(`[pipeline:RC12] Checkpoint ${cpKey} terminal failure: ${validation.reason}`);
+        errorCountMap.set(cpKey, 999); // Prevent retry
+        errorMessageMap.set(cpKey, validation.reason);
+        continue;
+      }
+    }
+
     // `text` is stripped from the query (gRPC 4MB safety) — reconstruct from findings
     const findings = (data.findings ?? []) as MergedFinding[];
     const executiveHeader = String(data.executiveHeader ?? "");
@@ -2806,7 +2956,16 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     findings: [],
   }));
 
-  if (nodes.length === 1) nodes.push({ ...nodes[0] });
+  // RC11: If only one analysis node exists, it IS the final merge result — skip merge entirely
+  // (Previously duplicated the node which caused double-counting in findings)
+  if (nodes.length === 1) {
+    const soleNode = nodes[0];
+    // Skip the merge loop — this node is the root
+    const finalNode = soleNode;
+    console.log(`[pipeline] Single analysis node — skipping merge, proceeding to format`);
+    // Jump to step 5 using this as finalNode
+    // We set nodes = [soleNode] and let the while(nodes.length > 1) condition skip naturally
+  }
 
   const totalMergeRounds = Math.ceil(Math.log(Math.max(nodes.length, 2)) / Math.log(MERGE_GROUP_SIZE));
   let currentRound = 0;
@@ -2966,8 +3125,22 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     const pendingGroups: Array<{ idx: number; members: MergeNode[] }> = [];
     for (const group of groups) {
       if (group.members.length === 1) {
-        nextNodes[group.idx] = group.members[0];
+        // Singleton carry-forward: persist checkpoint so resume can reconstruct this level
+        const singletonNode = group.members[0];
+        nextNodes[group.idx] = singletonNode;
         groupsDone++;
+        const singletonCpKey = `${currentRound}:${group.idx}`;
+        if (!checkpointMap.has(singletonCpKey)) {
+          // Persist singleton as a pass-through checkpoint (idempotent via ON CONFLICT)
+          await ctx.integrations.db.execute(
+            `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
+             VALUES ($1, $2, $3, $4::jsonb, 'singleton_carry', $5, 'complete')
+             ON CONFLICT (module_run_id, tree_level, node_index) DO NOTHING`,
+            [runId, currentRound, group.idx, JSON.stringify({ text: singletonNode.text?.slice(0, 500_000), executiveHeader: singletonNode.executiveHeader, findings: singletonNode.findings, housekeepingFindings: singletonNode.housekeepingFindings, singletonCarry: true }), currentVersion],
+            { label: `Persist singleton carry R${currentRound}:G${group.idx}` }
+          );
+          checkpointMap.set(singletonCpKey, singletonNode);
+        }
         continue;
       }
       const cpKey = `${currentRound}:${group.idx}`;
@@ -3015,8 +3188,24 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
 
       const results = await Promise.allSettled(
         batch.map(async (group) => {
+          // Build structured findings block so the model can reference input finding_ids
+          const inputFindingIds: string[] = [];
+          const structuredFindingsBlocks = group.members.map((m, i) => {
+            if (!m.findings || m.findings.length === 0) return "";
+            const ids = m.findings.map(f => f.finding_id).filter(Boolean);
+            inputFindingIds.push(...ids);
+            const compact = m.findings.map(f => ({
+              finding_id: f.finding_id,
+              severity: f.severity,
+              title: f.title,
+              issue_key: (f as any).issue_key,
+              claim_ids: f.claim_ids,
+            }));
+            return `\n\n### Structured Findings from Set ${i + 1} (reference by finding_id in merged_from_finding_ids)\n\`\`\`json\n${JSON.stringify(compact)}\n\`\`\``;
+          }).join("");
+
           const setBlocks = group.members.map((m, i) => `## Analysis Set ${i + 1}\n\n${truncateMergeNodeText(m.text, MERGE_NODE_TEXT_CAP)}`);
-          const mergeInput = setBlocks.join("\n\n---\n\n") + numericBlock + coverageMapBlock + dealProcessContextBlock;
+          const mergeInput = setBlocks.join("\n\n---\n\n") + structuredFindingsBlocks + numericBlock + coverageMapBlock + dealProcessContextBlock;
 
           // Dynamic timeout: later rounds have much larger payloads and need more time.
           // Round 0-1: cap at 165s (raised from 120s — Freeze Exception #3, prompt growth).
@@ -3194,6 +3383,31 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             findings = group.members.flatMap(m => m.findings ?? []);
           }
 
+          // RC11: Coverage verification — ensure every input finding ID survived the merge
+          // If coverage is incomplete AND response was truncated, carry forward missing findings unchanged
+          if (inputFindingIds.length > 0) {
+            const outputFindingIds = new Set(
+              [...findings, ...housekeepingFindings].flatMap(f =>
+                (f as any).merged_from_finding_ids ?? []
+              )
+            );
+            const missingIds = inputFindingIds.filter(id => !outputFindingIds.has(id));
+            if (missingIds.length > 0) {
+              console.warn(
+                `[Merge][RC11] Coverage gap: ${missingIds.length}/${inputFindingIds.length} input findings not accounted for in R${currentRound}:G${group.idx}` +
+                (truncated ? " (response truncated — carrying forward)" : " (complete response — findings may have been consolidated)")
+              );
+              if (truncated) {
+                // Carry forward missing findings unchanged from input members
+                const allInputFindings = group.members.flatMap(m => m.findings ?? []);
+                const missingSet = new Set(missingIds);
+                const carriedForward = allInputFindings.filter(f => missingSet.has(f.finding_id));
+                findings.push(...carriedForward);
+                console.log(`[Merge][RC11] Carried forward ${carriedForward.length} unmerged findings from truncated response`);
+              }
+            }
+          }
+
           // Accumulate findings across all rounds so we never lose data
           accumulatedFindings.push(...findings);
           if (housekeepingFindings.length > 0) accumulatedHousekeeping.push(...housekeepingFindings);
@@ -3223,12 +3437,15 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           const cpText = node.text.length > MAX_CHECKPOINT_TEXT
             ? node.text.slice(0, MAX_CHECKPOINT_TEXT) + "\n[…checkpoint text truncated]"
             : node.text;
+          // RC11: Truncated responses are marked 'partial' — they should not be treated
+          // as authoritative in recovery/export paths without re-merge
+          const cpStatus = node.truncated ? "partial" : "complete";
           await ctx.integrations.db.execute(
             `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'complete')
-             ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = 'complete'`,
-            [runId, currentRound, group.idx, JSON.stringify({ text: cpText, executiveHeader: node.executiveHeader, findings: node.findings, housekeepingFindings: node.housekeepingFindings, truncated: node.truncated ?? false }), getModuleModel(moduleId, useOpus), currentVersion],
-            { label: `Save merge checkpoint R${currentRound}:G${group.idx}` }
+             VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
+             ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = $7`,
+            [runId, currentRound, group.idx, JSON.stringify({ text: cpText, executiveHeader: node.executiveHeader, findings: node.findings, housekeepingFindings: node.housekeepingFindings, truncated: node.truncated ?? false }), getModuleModel(moduleId, useOpus), currentVersion, cpStatus],
+            { label: `Save merge checkpoint R${currentRound}:G${group.idx} (status=${cpStatus})` }
           );
         } else {
           // Merge call failed — use a placeholder so the tree can still reduce
@@ -3275,6 +3492,30 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     // Track merge failures in overall counters
     failedChunks += mergeFailedGroups;
     if (!firstError && mergeFirstError) firstError = mergeFirstError;
+
+    // Persist merge-round manifest: records expected vs actual state for this round
+    // so that resume/recovery can verify completeness without "highest node_index=0" heuristics
+    const roundManifest = {
+      round: currentRound,
+      totalRounds: totalMergeRounds,
+      inputNodeCount: nodes.length,
+      groupCount: groups.length,
+      completedGroups: groupsDone,
+      failedGroups: mergeFailedGroups,
+      singletonCarries: groups.filter(g => g.members.length === 1).length,
+      expectedNextLevelCount: groups.length,
+      isFinalRound,
+      roundStatus: mergeFailedGroups === 0 ? "complete" : "complete_with_failures",
+      finalRootId: isFinalRound && groups.length === 1 ? `${currentRound}:0` : null,
+      timestamp: new Date().toISOString(),
+    };
+    await ctx.integrations.db.execute(
+      `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
+       VALUES ($1, $2, -1, $3::jsonb, 'manifest', $4, 'manifest')
+       ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $3::jsonb, prompt_version = $4, status = 'manifest'`,
+      [runId, currentRound, JSON.stringify(roundManifest), currentVersion],
+      { label: `Save merge-round manifest R${currentRound}` }
+    );
 
     nodes = nextNodes;
   }

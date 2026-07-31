@@ -24,32 +24,6 @@ const ExtractionSchema = z.object({
   chunkIndex: z.number(),
 });
 
-const EvidenceItemSchema = z.object({
-  figure: z.string(),
-  source_doc: z.string(),
-  verbatim_snippet: z.string(),
-  verified: z.boolean(),
-});
-
-const FindingSchema = z.object({
-  severity: z.enum(["critical", "warning", "info"]),
-  title: z.string(),
-  detail: z.string(),
-  full_analysis: z.string(),
-  source_docs: z.array(z.string()),
-  claim_ids: z.array(z.string()).optional(),
-  absence_confidence: z.enum(["verified_absent", "likely_absent", "unverified"]).optional(),
-  gap_type: z.enum(["diligence_gap", "memo_omission", "open_item_acknowledged"]).optional(),
-  evidence_docs: z.array(z.string()).optional(),
-  independent: z.boolean().optional(),
-  evidence: z.array(EvidenceItemSchema).optional(),
-  materiality_rationale: z.string().optional(),
-  category: z.enum(["principal_finding", "housekeeping", "human_review_flag"]).optional(),
-  numeric_unverified: z.boolean().optional(),
-  /** Severity anchor: the £ figure or source statement justifying the severity assignment */
-  severity_anchor: z.string().optional(),
-});
-
 // ---------------------------------------------------------------------------
 // Merge Prompts — one per module
 // ---------------------------------------------------------------------------
@@ -149,6 +123,7 @@ A JSON array of PRINCIPAL findings only (category = "principal_finding"). Each o
 - "full_analysis": full paragraph with complete reasoning and evidence
 - "source_docs": array of filename strings
 - "claim_ids": array of claim ID strings (e.g. ["c0-3", "c2-7"]) — these are the stable IDs from the extraction step. Preserve them exactly. Every finding must trace back to at least one source claim.
+- "merged_from_finding_ids": (REQUIRED) array of finding_id strings from the INPUT findings that were consolidated into this output finding. Every input finding_id must appear in at least one output finding's merged_from_finding_ids array. If a finding is carried unchanged, its own finding_id goes here.
 - "issue_key": (REQUIRED) normalized snake_case identifier for the specific issue this finding describes (e.g. "fca_authorisation_risk", "one_park_lane_lease", "revenue_growth_mismatch"). Preserve exactly from extraction — when consolidating duplicate findings, keep the issue_key unchanged. Findings about the same underlying issue MUST share the same issue_key.
 - "absence_confidence": (REQUIRED for omission/gap findings) "verified_absent" | "likely_absent" | "unverified" — classification of whether the claimed absence has been cross-checked against all available extractions. Omit only for findings that do not assert something is missing.
 - "gap_type": (REQUIRED for omission/gap findings) "diligence_gap" | "memo_omission" | "open_item_acknowledged". Use "memo_omission" when the information IS present in evidence/reference documents but absent from the subject memo. Use "diligence_gap" when the information is absent from BOTH the subject memo AND all evidence documents. Use "open_item_acknowledged" when the deal record itself discloses the item as open/pending (e.g., results TBD, workstream staged post-IC) — this is distinct from omission. Omit for non-omission findings.
@@ -160,7 +135,7 @@ A JSON array of PRINCIPAL findings only (category = "principal_finding"). Each o
 - "numeric_unverified": boolean. Set to true when the finding's core quantitative claim could NOT be traced to verbatim source text (e.g., chart-derived or vision-inferred figures). Such findings MUST be severity "info" maximum.
 - "severity_anchor": (REQUIRED for all findings) One sentence stating the £ figure or explicit source statement that justifies the assigned severity. Format: "[£X = Y% of EV, exceeds Z threshold]" for quantified anchors, or "[Source document states: verbatim risk language]" for source-stated anchors. If no anchor can be articulated, severity MUST be "info" and category MUST be "housekeeping".
 - "finding_kind": (REQUIRED) "data_divergence" | "source_stated_risk" | "absence_claim" | "process_observation". Use "data_divergence" for findings derived from the Numeric Verification Report (cross-version divergences, model-vs-narrative gaps, reconciliation deltas where two values are compared). Use "source_stated_risk" for risks explicitly stated in DD source documents. Use "absence_claim" for findings asserting something is missing or not disclosed. Use "process_observation" for workflow/admin observations.
-- "structured_impact": (OPTIONAL) Array of impact objects when the finding has quantifiable impact. Each object: {"metric": "name of affected metric", "base_value": "current/stated value", "stress_value": "stressed/actual value", "delta_pct": number (percentage change)}. Include only when specific numeric impact can be calculated from source data.
+- "structured_impact": (OPTIONAL) Array of impact objects when the finding has quantifiable monetary impact. Each object: {"amount": number (the value in stated units, e.g. 19000 for £19k), "currency": "GBP"|"USD"|"EUR"|"other", "unit_multiplier": number (1000 for thousands, 1000000 for millions, 1 for raw), "role": "delta"|"exposure"|"annual_impact"|"deal_value"|"threshold"|"context", "source_doc": "filename where amount appears", "source_coordinate": "page/cell/row reference", "verified": boolean (true only if confirmed by NumericVerify)}. Roles: "delta" = the discrepancy amount; "exposure" = maximum downside; "annual_impact" = recurring effect; "deal_value" = reference EV (cannot drive threshold alone); "threshold" = materiality comparison value; "context" = contextual reference (cannot drive threshold). Only entries with role=delta/exposure/annual_impact and verified=true may drive the materiality gate.
 - "analysis_gap_disclosed": (OPTIONAL) boolean. Set to true ONLY when the finding explicitly acknowledges that full analysis was not possible due to data limitations. This flags findings where the conclusion may be understated.
 
 Note: The gap_type-dependent fields (absence_confidence, gap_type, evidence_docs, independent) apply only to findings that carry a gap_type value. Findings without gap_type omit these fields entirely.

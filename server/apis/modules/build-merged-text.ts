@@ -7,6 +7,15 @@
  * Keeping this in one place guarantees byte-for-byte parity between fresh
  * merges and checkpoint-resumed merges.
  *
+ * ⚠️  IMPORTANT: This produces a LOSSY markdown representation for LLM context only.
+ * It is NOT a persistence format. Fields like structured_impact, verification,
+ * finding_kind, evidence, severity_anchor, etc. are intentionally omitted because
+ * the LLM re-synthesizes them from source text at each merge round.
+ *
+ * Structured findings are preserved in full via the canonical serializer in
+ * save-merge-checkpoint.ts → the `findings` JSONB field retains all metadata.
+ * This text representation is merely the input *prompt* for the next merge call.
+ *
  * RC1 (canonical-finding): MergedFinding is now an alias for CanonicalFinding.
  * All new code should import CanonicalFinding directly from canonical-finding.ts.
  * This re-export preserves backward compat during the migration.

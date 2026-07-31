@@ -36,12 +36,27 @@ type MergeNode = {
   text: string;
   executiveHeader: string;
   findings: Array<{
+    finding_id: string;
     severity: "critical" | "warning" | "info";
     title: string;
     detail: string;
     full_analysis: string;
     source_docs: string[];
     claim_ids?: string[];
+    merged_from_finding_ids?: string[];
+    category?: "principal_finding" | "housekeeping" | "human_review_flag";
+    finding_kind?: "data_divergence" | "source_stated_risk" | "absence_claim" | "process_observation";
+    issue_key?: string;
+    severity_anchor?: string;
+    structured_impact?: Array<{ amount: number; currency: "GBP" | "USD" | "EUR" | "other"; unit_multiplier: number; role: "delta" | "exposure" | "annual_impact" | "deal_value" | "threshold" | "context"; verified: boolean; source_doc?: string; source_coordinate?: string }>;
+    materiality_rationale?: string;
+    numeric_unverified?: boolean;
+    evidence?: Array<{ figure: string; source_doc: string; verbatim_snippet: string; verified: boolean; metric?: string; period?: string }>;
+    absence_confidence?: "verified_absent" | "likely_absent" | "unverified";
+    gap_type?: "diligence_gap" | "memo_omission" | "open_item_acknowledged";
+    evidence_docs?: string[];
+    independent?: boolean;
+    verification?: { status: "revised" | "upheld" | "verification_error" | "failed_retryable"; revisedDetail?: string; evidenceQuoted?: string; evidenceSource?: string; reasoning?: string; queriesRun: string[] };
   }>;
 };
 

@@ -27,6 +27,18 @@
 import { z } from "@superblocksteam/sdk-api";
 
 // ---------------------------------------------------------------------------
+// Schema version — persisted alongside findings to detect incompatible upgrades
+// ---------------------------------------------------------------------------
+
+/**
+ * Increment on breaking schema changes:
+ *   v1: initial schema (severity, title, detail, full_analysis, source_docs)
+ *   v2: added finding_id, merged_from_finding_ids, claim_ids, finding_kind,
+ *       structured_impact, issue_key, evidence, verification, materiality, etc.
+ */
+export const FINDING_SCHEMA_VERSION = 2;
+
+// ---------------------------------------------------------------------------
 // Cross-environment UUID v4 — avoids Node `crypto` import that Vite externalizes
 // ---------------------------------------------------------------------------
 function randomUUID(): string {
@@ -566,4 +578,93 @@ export function validateFindingsFromDB(raw: unknown): { ok: true; findings: Cano
     return { ok: false, errors: ["All items failed to parse"] };
   }
   return { ok: true, findings: result.findings };
+}
+
+// ---------------------------------------------------------------------------
+// Canonical serializer — the ONLY way to turn findings into JSON for persistence
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialize findings for persistence (DB, checkpoint, export).
+ * Guarantees:
+ *   - Every finding has a valid finding_id (throws if missing in strict mode)
+ *   - Schema version is included for future migration
+ *   - No lossy transformations — all fields preserved
+ *
+ * Use this instead of JSON.stringify(findings) directly.
+ */
+export function serializeFindings(
+  findings: CanonicalFinding[],
+  options?: { strict?: boolean; source?: string }
+): { json: string; schemaVersion: number; count: number } {
+  const strict = options?.strict ?? true;
+  const source = options?.source ?? "unknown";
+
+  if (strict) {
+    for (let i = 0; i < findings.length; i++) {
+      if (!findings[i].finding_id || !isValidUUID(findings[i].finding_id)) {
+        throw new Error(
+          `[serializeFindings] Finding at index ${i} has no valid finding_id ` +
+          `(source=${source}). Cannot persist without stable identity.`
+        );
+      }
+    }
+  }
+
+  return {
+    json: JSON.stringify(findings),
+    schemaVersion: FINDING_SCHEMA_VERSION,
+    count: findings.length,
+  };
+}
+
+/**
+ * Deserialize findings from persistence.
+ * NEVER assigns new UUIDs — if a finding_id is missing, it's a validation error.
+ * Use this instead of JSON.parse + manual mapping.
+ *
+ * @param json - Raw JSON string or already-parsed array from DB
+ * @param source - Context for error messages
+ * @param options.rejectOnError - If true, throws when any finding fails validation
+ */
+export function deserializeFindings(
+  json: string | unknown[],
+  source: string,
+  options?: { rejectOnError?: boolean }
+): { findings: CanonicalFinding[]; issues: string[] } {
+  const rejectOnError = options?.rejectOnError ?? false;
+
+  let raw: unknown;
+  if (typeof json === "string") {
+    try {
+      raw = JSON.parse(json);
+    } catch (e) {
+      const msg = `[deserializeFindings] Invalid JSON (source=${source}): ${e}`;
+      if (rejectOnError) throw new Error(msg);
+      return { findings: [], issues: [msg] };
+    }
+  } else {
+    raw = json;
+  }
+
+  const result = parseCanonicalFindings(raw, { mode: "reload", source });
+  const issues: string[] = [];
+
+  if (result.malformed_count > 0) {
+    issues.push(`${result.malformed_count} irrecoverably malformed findings`);
+  }
+  if (result.invalid.length > 0) {
+    for (const inv of result.invalid) {
+      issues.push(`"${inv.finding.title}": ${inv.issues.join("; ")}`);
+    }
+  }
+
+  if (rejectOnError && issues.length > 0) {
+    throw new Error(
+      `[deserializeFindings] Validation failed (source=${source}): ${issues.slice(0, 3).join(" | ")}`
+    );
+  }
+
+  // result.findings already contains all items (valid + coerced-invalid) — NO duplication
+  return { findings: result.findings, issues };
 }

@@ -6,8 +6,17 @@ import { parseCanonicalFindings, type CanonicalFinding } from "../pipeline/canon
  *
  * RC4 (Single Canonical Finalizer): Before persisting, findings are validated
  * through parseCanonicalFindings in "reload" mode. This ensures only canonical-
- * compliant data reaches the database. Invalid items are logged but NOT silently
- * dropped — they persist with coerced defaults so no finding is ever lost.
+ * compliant data reaches the database.
+ *
+ * Behavior:
+ *   - Malformed findings (irrecoverable) → throws, refusing to persist corrupt data.
+ *   - Invalid findings (coercible) → coerced to canonical form and persisted once.
+ *     Validation issues are logged as diagnostics only.
+ *   - Valid findings → persisted as-is.
+ *
+ * Each finding appears exactly ONCE in the persisted array. The parser's `findings`
+ * array already includes both valid and coerced-invalid items — they must NOT be
+ * re-added from `invalid`.
  *
  * Call this instead of writing inline INSERT/UPDATE logic in each recovery path.
  * Keeps module_outputs writes in a single place so schema changes propagate once.
@@ -29,33 +38,34 @@ export async function upsertModuleOutput(
 ): Promise<{ outputId: string; wasUpdate: boolean; validationIssues: number }> {
   const { runId, dealId, executiveHeader, findings, fullReport } = params;
 
-  // RC4: Validate findings through canonical parser before persisting
+  // RC4: Validate findings through canonical parser before persisting.
+  // In "strict" mode: if ANY finding fails canonical validation, reject the entire
+  // persistence call. The caller must fix data quality upstream.
   const parseResult = parseCanonicalFindings(findings, {
     mode: "reload",
     source: `upsert-module-output:${runId}`,
   });
 
+  if (parseResult.malformed_count > 0) {
+    throw new Error(
+      `[upsert-module-output] ${parseResult.malformed_count} findings were irrecoverably malformed. ` +
+      `Run: ${runId}. Refusing to persist corrupt data.`
+    );
+  }
+
   if (parseResult.invalid.length > 0) {
     console.warn(
       `[upsert-module-output] ${parseResult.invalid.length} findings had validation issues ` +
-      `(coerced to canonical form, NOT dropped). Run: ${runId}`
+      `(coerced to canonical form). Run: ${runId}`
     );
     for (const inv of parseResult.invalid.slice(0, 5)) {
       console.warn(`  → "${inv.finding.title}": ${inv.issues.join("; ")}`);
     }
   }
 
-  if (parseResult.malformed_count > 0) {
-    console.error(
-      `[upsert-module-output] ${parseResult.malformed_count} findings were irrecoverably malformed. Run: ${runId}`
-    );
-  }
-
-  // Use validated findings (all items — valid + coerced invalid — are included)
-  const validatedFindings: CanonicalFinding[] = [
-    ...parseResult.findings,
-    ...parseResult.invalid.map(inv => inv.finding),
-  ];
+  // parseResult.findings already contains ALL items (valid + coerced-invalid).
+  // Do NOT re-add from parseResult.invalid — that would duplicate findings.
+  const validatedFindings: CanonicalFinding[] = parseResult.findings;
 
   // Check if output already exists for this run
   const existing = await db.query(

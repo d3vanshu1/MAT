@@ -1,16 +1,8 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
+import { CanonicalFindingSchema } from "../pipeline/canonical-finding.js";
 import { upsertModuleOutput } from "./upsert-module-output.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
-
-const FindingSchema = z.object({
-  severity: z.enum(["critical", "warning", "info"]),
-  title: z.string(),
-  detail: z.string(),
-  full_analysis: z.string(),
-  source_docs: z.array(z.string()),
-  claim_ids: z.array(z.string()).optional(),
-});
 
 const SavedRunSchema = z.object({
   run_id: z.string(),
@@ -29,7 +21,9 @@ export default api({
     dealId: z.string(),
     moduleId: z.string(),
     executiveHeader: z.string(),
-    findings: z.array(FindingSchema),
+    // RC2: Full canonical finding schema — no reduced subsets.
+    // All finding fields (finding_id, structured_impact, verification, etc.) preserved.
+    findings: z.array(CanonicalFindingSchema),
     fullReport: z.string(),
     documentsIncluded: z.array(z.string()).nullable().optional(),
     // When provided, attaches output to this existing run instead of creating a new one.
@@ -68,7 +62,7 @@ export default api({
       effectiveRunId = runRows[0].run_id;
     }
 
-    // Upsert output via shared helper
+    // Upsert output via shared helper (validates via canonical parser, rejects malformed)
     const { outputId } = await upsertModuleOutput(ctx.integrations.db, {
       runId: effectiveRunId,
       dealId,

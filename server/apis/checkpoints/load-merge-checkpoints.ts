@@ -1,5 +1,9 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { buildMergedText } from "../modules/build-merged-text.js";
+import {
+  CanonicalFindingSchema,
+  deserializeFindings,
+} from "../pipeline/canonical-finding.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -29,16 +33,8 @@ export default api({
         mergedNode: z.object({
           text: z.string().optional(),
           executiveHeader: z.string().optional(),
-          findings: z.array(
-            z.object({
-              severity: z.enum(["critical", "warning", "info"]),
-              title: z.string(),
-              detail: z.string(),
-              full_analysis: z.string(),
-              source_docs: z.array(z.string()),
-              claim_ids: z.array(z.string()).optional(),
-            })
-          ).optional(),
+          // RC2: Full canonical finding schema — no reduced subsets
+          findings: z.array(CanonicalFindingSchema).optional(),
           error: z.string().optional(),
           failureCount: z.number().optional(),
           lastError: z.string().optional(),
@@ -80,21 +76,13 @@ export default api({
       }
 
       const executiveHeader = String(merged.executiveHeader ?? "");
-      const findings = Array.isArray(merged.findings)
-        ? merged.findings.map((f: Record<string, unknown>) => ({
-            severity:
-              f.severity === "critical" || f.severity === "warning" || f.severity === "info"
-                ? f.severity
-                : "info",
-            title: String(f.title ?? ""),
-            detail: String(f.detail ?? ""),
-            full_analysis: String(f.full_analysis ?? f.detail ?? ""),
-            source_docs: Array.isArray(f.source_docs) ? f.source_docs.map(String) : [],
-            ...(Array.isArray(f.claim_ids) && f.claim_ids.length > 0
-              ? { claim_ids: f.claim_ids.map(String) }
-              : {}),
-          }))
-        : [];
+
+      // RC2: Use canonical deserializer — preserves finding_id and all fields.
+      // NEVER generates new UUIDs; if finding_id is missing, it's logged as an issue.
+      const { findings } = deserializeFindings(
+        Array.isArray(merged.findings) ? merged.findings : [],
+        `LoadMergeCheckpoints run=${moduleRunId} L${row.tree_level} N${row.node_index}`
+      );
 
       // Reconstruct the text field from executiveHeader + findings.
       // SaveMergeCheckpoint strips the bulky text field to keep JSONB

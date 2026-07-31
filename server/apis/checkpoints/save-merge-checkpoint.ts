@@ -1,4 +1,10 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
+import {
+  CanonicalFindingSchema,
+  FINDING_SCHEMA_VERSION,
+  serializeFindings,
+  type CanonicalFinding,
+} from "../pipeline/canonical-finding.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -18,16 +24,8 @@ export default api({
     mergedNode: z.object({
       text: z.string().optional(),
       executiveHeader: z.string().optional(),
-      findings: z.array(
-        z.object({
-          severity: z.enum(["critical", "warning", "info"]),
-          title: z.string(),
-          detail: z.string(),
-          full_analysis: z.string(),
-          source_docs: z.array(z.string()),
-          claim_ids: z.array(z.string()).optional(),
-        })
-      ).optional(),
+      // RC2: Full canonical finding schema — no reduced subsets
+      findings: z.array(CanonicalFindingSchema).optional(),
       error: z.string().optional(),
     }),
   }),
@@ -41,7 +39,18 @@ export default api({
     // serialization of executiveHeader + findings and is reconstructed
     // on load.  With 4-way merges this field can exceed 50 KB per
     // checkpoint, causing slow JSONB TOAST writes (25-57 s observed).
-    const { text: _stripped, ...compactNode } = mergedNode as Record<string, unknown>;
+    const { text: _stripped, findings, ...rest } = mergedNode as Record<string, unknown>;
+
+    // Persist findings using the canonical serializer — guarantees:
+    // 1. Every finding_id is preserved (no new UUIDs generated on load)
+    // 2. All fields (structured_impact, verification, evidence, etc.) are preserved
+    // 3. Schema version is tracked for future migrations
+    const canonicalFindings = (findings as CanonicalFinding[] | undefined) ?? [];
+    const compactNode = {
+      ...rest,
+      findings: canonicalFindings,
+      _schema_version: FINDING_SCHEMA_VERSION,
+    };
 
     await ctx.integrations.db.execute(
       `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json)
