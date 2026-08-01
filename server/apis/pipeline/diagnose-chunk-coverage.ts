@@ -1,4 +1,5 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
+import { CONTRADICTION_CHECK_ALLOWED_TAGS } from "./source-policy.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -10,9 +11,10 @@ const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
  * Surfaces dropped chunks and identifies if a document was never analyzed.
  */
 
+// Uses shared source-policy for contradiction_check; other modules define inline.
 const MODULE_TAG_RELEVANCE: Record<string, Set<string>> = {
   omission_audit: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "legal", "other"]),
-  contradiction_check: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "legal", "other"]),
+  contradiction_check: CONTRADICTION_CHECK_ALLOWED_TAGS as Set<string>,
   blind_spot_scanner: new Set(["cim", "ic_memo", "consultant_report", "financial_model", "other"]),
   external_risk_overlay: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "legal", "other"]),
   social_reputation: new Set(["cim", "ic_memo", "consultant_report", "customer_data", "other"]),

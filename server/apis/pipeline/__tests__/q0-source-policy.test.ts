@@ -60,18 +60,18 @@ console.log("\n=== Q0-1: Legal DD excluded from contradiction_check routing ==="
 assertEqual(CONTRADICTION_CHECK_ALLOWED_TAGS.has("legal" as any), false,
   "Legal tag NOT in CONTRADICTION_CHECK_ALLOWED_TAGS");
 
-assertEqual(isChunkAllowedForContradictionCheck("legal"), false,
+assertEqual(isChunkAllowedForContradictionCheck("legal").allowed, false,
   "isChunkAllowedForContradictionCheck('legal') returns false");
 
 // Allowed tags pass through
 for (const tag of ["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "other"]) {
-  assertEqual(isChunkAllowedForContradictionCheck(tag), true,
+  assertEqual(isChunkAllowedForContradictionCheck(tag).allowed, true,
     `isChunkAllowedForContradictionCheck('${tag}') returns true`);
 }
 
 // Future specialist tags excluded by default (not in allowed set)
 for (const tag of ["tax", "insurance", "hr", "property"]) {
-  assertEqual(isChunkAllowedForContradictionCheck(tag), false,
+  assertEqual(isChunkAllowedForContradictionCheck(tag).allowed, false,
     `isChunkAllowedForContradictionCheck('${tag}') returns false`);
 }
 
@@ -236,6 +236,60 @@ assertEqual(summary.routed_chunks, 0, "Summary initializes routed_chunks=0");
 assertEqual(summary.excluded_chunks, 0, "Summary initializes excluded_chunks=0");
 assertEqual(summary.targeted_verifications, 0, "Summary initializes targeted_verifications=0");
 assertEqual(summary.targeted_findings_retained, 0, "Summary initializes targeted_findings_retained=0");
+
+// ---------------------------------------------------------------------------
+// 6. Fail-closed safeguard: mis-tagged Legal DD excluded when tagged "other"
+// ---------------------------------------------------------------------------
+console.log("\n=== Q0-6: Fail-closed safeguard for mis-tagged documents ===");
+
+// Document tagged "other" but title indicates Legal DD
+const legalDDResult = isChunkAllowedForContradictionCheck("other", {
+  title: "Project Saint - Legal Due Diligence Report Vol. 1",
+});
+assertEqual(legalDDResult.allowed, false,
+  "Legal DD document tagged 'other' is excluded by metadata");
+assertEqual(legalDDResult.actual_source_type, "legal",
+  "Reports actual source type as 'legal'");
+
+// Tax diligence pattern
+const taxResult = isChunkAllowedForContradictionCheck("other", {
+  filename: "Tax DD Report Final.pdf",
+});
+assertEqual(taxResult.allowed, false,
+  "Tax DD document tagged 'other' is excluded by filename pattern");
+
+// Pension report
+const pensionResult = isChunkAllowedForContradictionCheck("other", {
+  title: "Pension Obligations Report - March 2024",
+});
+assertEqual(pensionResult.allowed, false,
+  "Pension report tagged 'other' is excluded");
+
+// Authoritative doc_type metadata takes precedence
+const docTypeResult = isChunkAllowedForContradictionCheck("other", {
+  doc_type: "legal_due_diligence",
+  title: "Something Innocuous", // title would pass, but doc_type overrides
+});
+assertEqual(docTypeResult.allowed, false,
+  "Authoritative doc_type overrides title");
+
+// Normal "other" document with non-specialist metadata passes
+const normalResult = isChunkAllowedForContradictionCheck("other", {
+  title: "Q3 Board Presentation",
+  filename: "board-deck-q3.pdf",
+});
+assertEqual(normalResult.allowed, true,
+  "Normal 'other' document passes through");
+
+// No metadata at all: "other" is allowed (backward compatible)
+const noMetadata = isChunkAllowedForContradictionCheck("other");
+assertEqual(noMetadata.allowed, true,
+  "'other' without metadata defaults to allowed");
+
+// Unknown tag with no metadata: fail closed
+const unknownResult = isChunkAllowedForContradictionCheck("unknown_tag");
+assertEqual(unknownResult.allowed, false,
+  "Unknown tag fails closed");
 
 // ---------------------------------------------------------------------------
 // Summary

@@ -1347,13 +1347,12 @@ export async function canonicalFinalize(input: CanonicalFinalizeInput): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// Chunk Routing (server-side mirror of client/lib/chunkRouting.ts)
+// Chunk Routing — uses shared source-policy for contradiction_check
 // ---------------------------------------------------------------------------
 const MODULE_TAG_RELEVANCE: Record<string, Set<string>> = {
   omission_audit: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "legal", "other"]),
-  // Q0 SOURCE POLICY: contradiction_check excludes "legal" from unrestricted scanning.
-  // Legal DD may only enter via targeted claim-verification (see source-policy.ts).
-  contradiction_check: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "other"]),
+  // Q0 SOURCE POLICY: Uses shared CONTRADICTION_CHECK_ALLOWED_TAGS from source-policy.ts
+  contradiction_check: CONTRADICTION_CHECK_ALLOWED_TAGS as Set<string>,
   blind_spot_scanner: new Set(["cim", "ic_memo", "consultant_report", "financial_model", "other"]),
   external_risk_overlay: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "legal", "other"]),
   social_reputation: new Set(["cim", "ic_memo", "consultant_report", "customer_data", "other"]),
