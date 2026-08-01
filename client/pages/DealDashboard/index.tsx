@@ -24,6 +24,7 @@ import RunAllModal from "@/components/ic/modules/RunAllModal";
 import RerunSuggestionModal from "@/components/ic/modules/RerunSuggestionModal";
 import RunHistory from "@/components/ic/modules/RunHistory";
 import QAPanel from "@/components/ic/qa/QAPanel";
+import DiagnosticDownloadButton from "@/components/ic/diagnostic/DiagnosticDownloadButton";
 import ReparseDocumentsModal from "@/components/ic/documents/ReparseDocumentsModal";
 
 export { DealDashboardPage as Component };
@@ -2616,6 +2617,14 @@ export default function DealDashboardPage() {
             dealSector={deal.sector ?? null}
             hasDocuments={docs.length > 0}
           />
+
+          {/* Diagnostic corpus download (temporary) */}
+          {moduleData?.modules?.some((m: any) => m.moduleId === "contradiction_check" && m.latestRun?.status === "running") === false && (
+            <DiagnosticDownloadButton
+              runId={moduleData?.modules?.find((m: any) => m.moduleId === "contradiction_check")?.latestRun?.id ?? ""}
+              moduleId="contradiction_check"
+            />
+          )}
         </div>
       </div>
 

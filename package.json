@@ -47,6 +47,7 @@
     "date-fns": "^2.30.0",
     "embla-carousel-react": "^8.6.0",
     "fflate": "^0.8.3",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.540.0",
     "papaparse": "^5.5.3",
     "pdf-lib": "^1.17.1",
