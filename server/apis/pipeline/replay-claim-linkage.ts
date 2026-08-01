@@ -285,6 +285,14 @@ export default api({
       }
     }
 
+    // Build set of ambiguous refs for hard-rejection in Q3
+    const ambiguousRefs = new Set<string>();
+    for (const rec of reconciliation.records) {
+      if (rec.outcome === "unresolved_ambiguous") {
+        ambiguousRefs.add(rec.legacy_ref);
+      }
+    }
+
     // 5. Process each candidate through strict claim-linkage
     const linkageResults: ClaimLinkageResult[] = [];
     const evidenceSnapshots: EvidenceSnapshot[] = [];
@@ -312,6 +320,7 @@ export default api({
           doc_type: finding?.doc_type ?? null,
         },
         claimMap,
+        ambiguousRefs,
       );
 
       linkageResults.push(result);

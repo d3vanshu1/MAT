@@ -120,6 +120,9 @@ export const CLAIM_LINKAGE_DISPOSITIONS = [
   // Ineligible — excluded from Q4
   "not_linked_to_IC_claim",
   "invalid_or_unresolved_claim_reference",
+  "malformed_claim_reference",
+  "ambiguous_reconciliation",
+  "claim_from_non_ic_document",
   "invalid_evidence_authority",
   "supporting_evidence_only",
   "wrong_module",
@@ -163,6 +166,9 @@ export const Q4_ELIGIBLE_ALL: ReadonlySet<ClaimLinkageDisposition> = new Set([
 export const Q4_INELIGIBLE: ReadonlySet<ClaimLinkageDisposition> = new Set([
   "not_linked_to_IC_claim",
   "invalid_or_unresolved_claim_reference",
+  "malformed_claim_reference",
+  "ambiguous_reconciliation",
+  "claim_from_non_ic_document",
   "invalid_evidence_authority",
   "supporting_evidence_only",
   "wrong_module",
@@ -472,10 +478,16 @@ export interface ResolvedClaimRecord {
  *   - Zero matches → invalid reference
  *   - Multiple matches → fail closed (ambiguous)
  *   - Null/empty claim_id → not linked
+ *   - Malformed claim_id → malformed reference
+ *   - Claim from non-IC document → rejected
+ *
+ * INVARIANT: No silent map overwrite — if the first lookup succeeds,
+ * no subsequent logic may silently replace the resolved record.
  */
 export function resolveClaimId(
   claimId: string | null | undefined,
   claimMap: Map<string, any>,
+  ambiguousRefs?: ReadonlySet<string>,
 ): ClaimResolutionResult {
   if (!claimId || claimId.trim() === "") {
     return {
@@ -487,12 +499,36 @@ export function resolveClaimId(
     };
   }
 
-  const record = claimMap.get(claimId);
+  const trimmed = claimId.trim();
+
+  // Malformed reference detection: too short or clearly invalid
+  if (trimmed.length < 3 || /^[^a-z0-9c]/i.test(trimmed)) {
+    return {
+      resolved: false,
+      claim_record: null,
+      failure_reason: `Malformed claim reference '${trimmed}' — too short or invalid format`,
+      ambiguous: false,
+      match_count: 0,
+    };
+  }
+
+  // Check if this ref was flagged as ambiguous by the reconciliation engine
+  if (ambiguousRefs?.has(trimmed)) {
+    return {
+      resolved: false,
+      claim_record: null,
+      failure_reason: `Claim reference '${trimmed}' resolves to multiple documents — ambiguous reconciliation`,
+      ambiguous: true,
+      match_count: 2, // At least 2 (that's what makes it ambiguous)
+    };
+  }
+
+  const record = claimMap.get(trimmed);
   if (!record) {
     return {
       resolved: false,
       claim_record: null,
-      failure_reason: `Claim ID '${claimId}' not found in claims ledger — unresolved reference`,
+      failure_reason: `Claim ID '${trimmed}' not found in claims ledger — unresolved reference`,
       ambiguous: false,
       match_count: 0,
     };
@@ -500,26 +536,31 @@ export function resolveClaimId(
 
   // Build resolved record
   const resolvedRecord: ResolvedClaimRecord = {
-    claim_id: claimId,
+    claim_id: trimmed,
     exact_claim_text: record.verbatim_snippet || record.claim_text || "",
     normalized_claim: buildNormalizedClaim(record),
     claim_type: record.claim_category || record.claim_type || "unclassified",
-    ic_document_id: record.source_doc_id || record.source_doc || "",
-    ic_document_filename: record.source_doc || record.source_filename || "",
+    ic_document_id: record.ic_document_id || record.source_doc_id || record.source_doc || "",
+    ic_document_filename: record.ic_document_filename || record.source_doc || record.source_filename || "",
     memo_version: record.memo_version ?? null,
     page_or_location: record.source_page || record.page || null,
     extraction_coordinates: record.extraction_coordinates || record.section || null,
   };
 
-  // Validate the claim comes from an IC document (not a DD report)
+  // HARD REJECTION: Claim must come from an IC document (not a DD report, not customer data)
   const sourceDoc = (resolvedRecord.ic_document_filename || "").toLowerCase();
   const isICDocument = sourceDoc.includes("ic") || sourceDoc.includes("memo") ||
                        sourceDoc.includes("investment committee") || sourceDoc.includes("cim") ||
                        sourceDoc.includes("screening") || sourceDoc.includes("update");
 
   if (!isICDocument && sourceDoc.length > 0) {
-    // Could be a DD document mis-classified as a claim source
-    // Still resolve but flag for authority check
+    return {
+      resolved: false,
+      claim_record: resolvedRecord,
+      failure_reason: `Claim originates from non-IC document '${resolvedRecord.ic_document_filename}' — only IC memo claims are eligible`,
+      ambiguous: false,
+      match_count: 1,
+    };
   }
 
   return {
@@ -594,6 +635,7 @@ export function classifyClaimLinkage(
     doc_type?: string | null;
   },
   claimMap: Map<string, any>,
+  ambiguousRefs?: ReadonlySet<string>,
 ): ClaimLinkageResult {
   const { finding_id, corpus_index, title } = finding;
 
@@ -607,7 +649,7 @@ export function classifyClaimLinkage(
   if (finding.claim_ids) finding.claim_ids.forEach(id => allClaimIds.add(id));
 
   // Step 2: Resolve the claim
-  const resolution = resolveClaimId(primaryClaimId, claimMap);
+  const resolution = resolveClaimId(primaryClaimId, claimMap, ambiguousRefs);
 
   // No claim reference → not linked
   if (!primaryClaimId) {
@@ -627,14 +669,24 @@ export function classifyClaimLinkage(
     };
   }
 
-  // Unresolved or ambiguous → invalid_or_unresolved_claim_reference
+  // Unresolved or ambiguous → specific disposition based on failure reason
   if (!resolution.resolved || !resolution.claim_record) {
     const authorityClass = deriveAuthorityClass(finding.source_tag ?? null, finding.doc_filename ?? null, finding.doc_type ?? null);
+    // Determine specific disposition from failure reason
+    let disposition: ClaimLinkageDisposition = "invalid_or_unresolved_claim_reference";
+    const failReason = resolution.failure_reason ?? "";
+    if (failReason.includes("Malformed")) {
+      disposition = "malformed_claim_reference";
+    } else if (failReason.includes("non-IC document")) {
+      disposition = "claim_from_non_ic_document";
+    } else if (resolution.ambiguous) {
+      disposition = "ambiguous_reconciliation";
+    }
     return {
       finding_id,
       corpus_index,
       title,
-      claim_linkage_disposition: "invalid_or_unresolved_claim_reference",
+      claim_linkage_disposition: disposition,
       q4_eligible: false,
       claim_provenance: null,
       authority_class: authorityClass,
@@ -716,18 +768,25 @@ export function classifyClaimLinkage(
 }
 
 // ---------------------------------------------------------------------------
-// Verdict derivation — from evidence content only, NOT severity
+// Verdict derivation — STRICT: structured inputs only, no heuristic keywords
 // ---------------------------------------------------------------------------
 
 /**
- * Derives a verdict from the finding's evidence content.
+ * Derives a verdict from the finding's structured evidence.
  *
- * PROHIBITED: Do NOT infer verdicts from severity (critical/warning/info).
- * Verdicts derive ONLY from:
- *   - finding_kind (data_divergence → contradicted, etc.)
- *   - explicit comparison results in evidence/detail
- *   - explicit verification status markers
- * Otherwise → unverifiable
+ * A reportable verdict may ONLY come from:
+ *   1. Structured upstream verification (finding_kind from extraction/merge)
+ *   2. Deterministic numeric comparison (explicit values with comparison operator)
+ *   3. Explicit bounded adjudication (upstream verdict field)
+ *   4. Otherwise → unverifiable
+ *
+ * PROHIBITED:
+ *   - Title/detail keyword matching ("contradicted", "unsupported", etc.)
+ *   - Severity-based inference
+ *   - Pattern matching on natural language in evidence text
+ *
+ * These prohibitions ensure that no heuristic text analysis can establish
+ * a reportable contradiction, confirmation, unsupported status, or material change.
  */
 function deriveVerdictFromEvidence(finding: {
   finding_kind?: string | null;
@@ -735,61 +794,54 @@ function deriveVerdictFromEvidence(finding: {
   full_analysis?: string | null;
   evidence?: string | null;
   title: string;
+  /** Structured upstream verdict — set by deterministic comparison or adjudication */
+  upstream_verdict?: string | null;
+  /** Structured numeric comparison result */
+  numeric_comparison?: {
+    claim_value: number;
+    evidence_value: number;
+    delta_percent: number;
+    direction: "higher" | "lower" | "equal";
+  } | null;
 }): ClaimVerdict {
-  const kind = finding.finding_kind;
-  const title = (finding.title ?? "").toLowerCase();
-  const evidence = (finding.evidence ?? finding.detail ?? finding.full_analysis ?? "").toLowerCase();
-  const combined = `${title} ${evidence}`;
+  // Source 1: Explicit upstream verdict from bounded adjudication
+  if (finding.upstream_verdict) {
+    const uv = finding.upstream_verdict.toLowerCase().trim();
+    if (uv === "contradicted") return "contradicted";
+    if (uv === "confirmed") return "confirmed";
+    if (uv === "partially_supported") return "partially_supported";
+    if (uv === "unsupported") return "unsupported";
+    if (uv === "materially_changed") return "materially_changed";
+    if (uv === "unverifiable") return "unverifiable";
+    // Unrecognized upstream verdict → unverifiable
+  }
 
-  // Data divergence with explicit numeric comparison → contradicted or materially_changed
-  if (kind === "data_divergence") {
-    // Check for explicit change language
-    if (combined.includes("material change") || combined.includes("revision") ||
-        combined.includes("updated") || combined.includes("revised")) {
+  // Source 2: Deterministic numeric comparison
+  if (finding.numeric_comparison) {
+    const { delta_percent, direction } = finding.numeric_comparison;
+    // Material change threshold: >5% deviation
+    if (Math.abs(delta_percent) > 5) {
+      // Direction determines the nature
+      if (Math.abs(delta_percent) > 20) return "contradicted";
       return "materially_changed";
     }
-    return "contradicted";
+    // Within 5% → confirmed
+    if (Math.abs(delta_percent) <= 5) return "confirmed";
   }
 
-  // Explicit unreconcilable → unverifiable
+  // Source 3: Structured finding_kind from upstream extraction/merge
+  const kind = finding.finding_kind;
+  if (kind === "data_divergence") return "materially_changed";
   if (kind === "unreconcilable") return "unverifiable";
-
-  // Scope mismatch → unverifiable
   if (kind === "scope_mismatch") return "unverifiable";
-
-  // Cross-version discrepancy → materially_changed
   if (kind === "cross_version") return "materially_changed";
+  if (kind === "confirmed_alignment") return "confirmed";
+  if (kind === "numeric_contradiction") return "contradicted";
+  if (kind === "partial_alignment") return "partially_supported";
+  if (kind === "data_gap") return "unsupported";
 
-  // Look for explicit verdict markers in evidence
-  if (combined.includes("confirmed") && !combined.includes("not confirmed")) {
-    return "confirmed";
-  }
-  if (combined.includes("contradicted") || combined.includes("directly contradicts")) {
-    return "contradicted";
-  }
-  if (combined.includes("partially supported") || combined.includes("partial support")) {
-    return "partially_supported";
-  }
-  if (combined.includes("unsupported") || combined.includes("not supported")) {
-    return "unsupported";
-  }
-  if (combined.includes("materially changed") || combined.includes("material revision")) {
-    return "materially_changed";
-  }
-
-  // Explicit numeric gap language (strong signal for contradiction)
-  if (/\b\d+\.?\d*\s*[mv%]?\s*(vs|versus|compared to|against)\s*\d+\.?\d*\s*[mv%]?/.test(combined)) {
-    // Has explicit numeric comparison — likely contradicted or materially_changed
-    if (combined.includes("revision") || combined.includes("updated")) return "materially_changed";
-    return "contradicted";
-  }
-
-  // Inconsistency/divergence language without numeric specificity
-  if (combined.includes("inconsisten") || combined.includes("discrepanc") || combined.includes("diverge")) {
-    return "partially_supported";
-  }
-
-  // Default: unverifiable (NOT inferred from severity)
+  // Default: unverifiable — no structured source can establish a verdict
+  // CRITICAL: Do NOT fall through to keyword matching
   return "unverifiable";
 }
 
