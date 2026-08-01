@@ -300,8 +300,8 @@ export default api({
     const beforeAfterTable = allCanonicalFindings.map(cf => ({
       canonical_issue: cf.canonical_issue_key,
       raw_candidate_count: cf.merged_from_finding_ids.length,
-      originating_claim_count: cf.originating_claim_ids.length,
-      evidence_record_count: cf.evidence_records.length,
+      originating_claim_count: cf.originating_claims.length,
+      evidence_record_count: cf.verification_evidence.length,
       final_finding_count: 1,
       merged_from_count: cf.merged_from_finding_ids.length,
       verification_status: cf.verification_status,

@@ -411,6 +411,9 @@ const canonicalKey: CanonicalKey = {
   period: "fy2025",
   entity_or_segment: "group",
   scope: "arr",
+  unit: "$m",
+  actual_or_forecast: "forecast",
+  accounting_basis: null,
   comparison_basis: "memo_vs_model",
   direction_of_difference: "overstatement",
 };
@@ -435,20 +438,21 @@ const { finding, memberOutcomes } = constructCanonicalFinding(
   [snapshot],
 );
 
-assertMatch(finding.canonical_finding_id, /^cfnd-v1-[a-f0-9]{32}$/, "Q5: 128-bit canonical finding ID");
+assertMatch(finding.canonical_finding_id, /^cfnd-v2-[a-f0-9]{32}$/, "Q5: SHA-256 canonical finding ID");
 assertEqual(finding.verification_status, "contradicted", "Q5: verification_status = contradicted");
-assertTrue(finding.originating_claim_ids.length >= 1, "Q5: ≥1 originating claim ID");
-assertTrue(finding.evidence_records.length >= 1, "Q5: ≥1 evidence record");
+assertTrue(finding.originating_claims.length >= 1, "Q5: ≥1 originating claim");
+assertTrue(finding.verification_evidence.length >= 1, "Q5: ≥1 verification evidence record");
 assertTrue(finding.memo_versions.length >= 1, "Q5: ≥1 memo version");
 assertContains(finding.merged_from_finding_ids, "f-001", "Q5: merged_from includes f-001");
 
-// Evidence coordinates preserved
-const authEvidence = finding.evidence_records.find(e => e.authority_status === "authoritative");
-assertTrue(authEvidence !== undefined, "Q5: authoritative evidence record exists");
-assertEqual(authEvidence!.claim_id, resolvedClaimId, "Q5: evidence.claim_id preserved");
-assertEqual(authEvidence!.metric, "revenue", "Q5: evidence.metric preserved");
-assertEqual(authEvidence!.period, "FY2025", "Q5: evidence.period preserved");
-assertEqual(authEvidence!.value, "120", "Q5: evidence.value preserved");
+// Evidence coordinates preserved (strict schema)
+const authEvidence = finding.verification_evidence.find((e: { authority_class: string }) => e.authority_class === "live_financial_model");
+assertTrue(authEvidence !== undefined, "Q5: financial_model evidence record exists");
+if (authEvidence) {
+  assertTrue(authEvidence.metric === "revenue", "Q5: evidence.metric preserved");
+  assertTrue(authEvidence.period === "FY2025", "Q5: evidence.period preserved");
+  assertTrue(authEvidence.value === 120, "Q5: evidence.value preserved");
+}
 
 // Member outcomes
 assertEqual(memberOutcomes.length, 1, "Q5: 1 member outcome");

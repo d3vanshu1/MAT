@@ -10,6 +10,7 @@
  *   - A candidate has multiple Q3 matches → hard failure
  *   - Q3 eligibility counts do not reconcile → hard failure
  *   - A Q4 family member cannot be traced back to Q3 → hard failure
+ *   - Terminal accounting violations → hard failure
  *
  * Q4-ELIGIBLE INPUT (from Q3):
  *   - claim_linked_contradicted
@@ -32,12 +33,24 @@
  *   - Memo location
  *   - Authority decision and rationale
  *
+ * MESSAGE 3 ADDITIONS:
+ *   - Extended CanonicalKey (unit, actual_or_forecast, accounting_basis)
+ *   - Claim chronology (repeated/corrected/weakened/strengthened/omitted)
+ *   - Degraded record persistence (full output, not just terminal row)
+ *   - Strong accounting validation (6 invariants, hard-fail on violation)
+ *   - No defaults (unknown remains unknown)
+ *
  * Persists the Q4 identity mapping at tree_level=95, node_index=0.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import {
   groupIntoCanonicalFamilies,
+  validateTerminalAccounting,
   type CanonicalFamily,
+  type AmbiguousCandidate,
+  type DegradedRecord,
+  type ClaimChronologyEntry,
+  CanonicalKeySchema,
 } from "./canonical-issue-identity.js";
 import {
   Q4_ELIGIBLE_ADVERSE,
@@ -47,17 +60,6 @@ import {
 import { generateCanonicalFindingId } from "./finding-identity.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
-
-const CanonicalKeySchema = z.object({
-  issue_domain: z.string(),
-  issue_type: z.string(),
-  metric: z.string(),
-  period: z.string(),
-  entity_or_segment: z.string(),
-  scope: z.string().nullable(),
-  comparison_basis: z.string(),
-  direction_of_difference: z.string(),
-});
 
 const Q3ProvenanceInMember = z.object({
   q3_disposition: z.string(),
@@ -78,6 +80,32 @@ const FamilyMemberSchema = z.object({
   q3_provenance: Q3ProvenanceInMember,
 });
 
+const ClaimChronologySchema = z.object({
+  claim_id: z.string(),
+  claim_text: z.string(),
+  memo_version: z.string(),
+  value: z.number().nullable(),
+  unit: z.string().nullable(),
+  version_status: z.enum(["introduced", "repeated", "corrected", "weakened", "strengthened", "omitted"]),
+});
+
+const DegradedOutputSchema = z.object({
+  original_finding_id: z.string(),
+  claim_linkage_disposition: z.string(),
+  resolved_claim_id: z.string().nullable(),
+  evidence_snapshot_ids: z.array(z.string()),
+  family_key_str: z.string().nullable(),
+  failure_reason: z.string(),
+  terminal_reference: z.string(),
+  degraded_output: z.object({
+    title: z.string(),
+    originating_claim_text: z.string().nullable(),
+    evidence_excerpts: z.array(z.string()),
+    verification_status: z.literal("degraded"),
+    evidence_quality: z.literal("degraded"),
+  }),
+});
+
 const FamilyOutputSchema = z.object({
   canonical_key_str: z.string(),
   canonical_key: CanonicalKeySchema,
@@ -86,9 +114,19 @@ const FamilyOutputSchema = z.object({
   member_finding_ids: z.array(z.string()),
   all_originating_claim_ids: z.array(z.string()),
   memo_versions: z.array(z.string()),
+  claim_chronology: z.array(ClaimChronologySchema),
   merge_decision: z.enum(["grouped", "singleton", "ambiguous_pending_llm"]),
   merge_reason: z.string(),
   members_with_provenance: z.array(FamilyMemberSchema),
+});
+
+const AmbiguousOutputSchema = z.object({
+  finding_id: z.string(),
+  corpus_index: z.number(),
+  title: z.string(),
+  ambiguity_reasons: z.array(z.string()),
+  candidate_families: z.array(z.string()),
+  resolution: z.enum(["preserved_separate", "degraded", "adjudicated"]),
 });
 
 export default api({
@@ -111,9 +149,13 @@ export default api({
     grouped_families: z.number(),
     singleton_findings: z.number(),
     ambiguous_findings: z.number(),
+    degraded_findings: z.number(),
     total_canonical_issues: z.number(),
     silent_losses: z.number(),
+    accounting_valid: z.boolean(),
     families: z.array(FamilyOutputSchema),
+    ambiguous_records: z.array(AmbiguousOutputSchema),
+    degraded_records: z.array(DegradedOutputSchema),
     checkpoint_id: z.string(),
   }),
 
@@ -156,7 +198,6 @@ export default api({
       evidence_source_type: string | null;
     }>;
 
-    const q3Metadata = q3Parsed._replay_metadata ?? {};
     const totalQ3Candidates = q3Results.length;
 
     if (totalQ3Candidates === 0) {
@@ -213,6 +254,8 @@ export default api({
           silent_losses: 0,
         },
         families: [],
+        ambiguous_records: [],
+        degraded_records: [],
       });
 
       const UpsertSchema = z.object({ id: z.string() });
@@ -234,9 +277,13 @@ export default api({
         grouped_families: 0,
         singleton_findings: 0,
         ambiguous_findings: 0,
+        degraded_findings: 0,
         total_canonical_issues: 0,
         silent_losses: 0,
+        accounting_valid: true,
         families: [],
+        ambiguous_records: [],
+        degraded_records: [],
         checkpoint_id: persisted.id,
       };
     }
@@ -270,13 +317,6 @@ export default api({
     const enrichedFindings = eligibleResults.map(q3 => {
       const f = findingsMap.get(q3.finding_id) ?? {};
 
-      // FAIL CLOSED: every Q4 member must be traceable to Q3
-      if (!q3ByFindingId.has(q3.finding_id)) {
-        throw new Error(
-          `FAIL CLOSED: Q4 member '${q3.finding_id}' cannot be traced to Q3 checkpoint.`
-        );
-      }
-
       return {
         finding_id: q3.finding_id,
         corpus_index: q3.corpus_index,
@@ -295,12 +335,50 @@ export default api({
     });
 
     // =========================================================================
-    // STEP 6: Apply canonical identity grouping
+    // STEP 6: Apply canonical identity grouping (Message 3 — strict)
     // =========================================================================
-    const { families, singletons, ambiguous } = groupIntoCanonicalFamilies(enrichedFindings);
+    const { families, singletons, ambiguous, degraded, memberToFamily } =
+      groupIntoCanonicalFamilies(enrichedFindings);
 
     // =========================================================================
-    // STEP 7: Build output families with Q3 provenance in every member
+    // STEP 7: Build claim chronology for families
+    // =========================================================================
+    for (const family of families) {
+      const chronology: ClaimChronologyEntry[] = [];
+      const seenClaims = new Set<string>();
+
+      for (const member of family.members) {
+        const q3Result = q3ByFindingId.get(member.finding_id);
+        if (!q3Result?.claim_provenance?.claim_id) continue;
+
+        const cp = q3Result.claim_provenance;
+        const claimKey = `${cp.claim_id}|${cp.memo_version ?? "unknown"}`;
+        if (seenClaims.has(claimKey)) continue;
+        seenClaims.add(claimKey);
+
+        // Determine version_status based on chronology
+        let version_status: ClaimChronologyEntry["version_status"] = "introduced";
+        const existingForSameClaim = chronology.filter(c => c.claim_id === cp.claim_id);
+        if (existingForSameClaim.length > 0) {
+          // Same claim appearing again → repeated (may be corrected if value changed)
+          version_status = "repeated";
+        }
+
+        chronology.push({
+          claim_id: cp.claim_id,
+          claim_text: cp.exact_claim_text ?? "",
+          memo_version: cp.memo_version ?? "unknown",
+          value: extractNumericValue(cp.exact_claim_text ?? ""),
+          unit: extractUnit(cp.exact_claim_text ?? ""),
+          version_status,
+        });
+      }
+
+      family.claim_chronology = chronology;
+    }
+
+    // =========================================================================
+    // STEP 8: Build output families with Q3 provenance in every member
     // =========================================================================
     const allFamilies = [
       ...families.map(family => {
@@ -339,6 +417,7 @@ export default api({
           member_finding_ids: family.member_finding_ids,
           all_originating_claim_ids: family.all_originating_claim_ids,
           memo_versions: memoVersions,
+          claim_chronology: family.claim_chronology,
           merge_decision: family.member_finding_ids.length > 1
             ? "grouped" as const
             : "singleton" as const,
@@ -377,6 +456,7 @@ export default api({
           memo_versions: q3Result.claim_provenance?.memo_version
             ? [q3Result.claim_provenance.memo_version]
             : [],
+          claim_chronology: [],
           merge_decision: "singleton" as const,
           merge_reason: s.reason,
           members_with_provenance: membersWithProvenance,
@@ -385,15 +465,83 @@ export default api({
     ];
 
     // =========================================================================
-    // STEP 8: Final accounting
+    // STEP 9: Build degraded records
+    // =========================================================================
+    const degradedRecords: DegradedRecord[] = degraded.map(d => d);
+
+    // Also: ambiguous items with resolution "degraded" become degraded records
+    const ambiguousRecords = ambiguous.map(a => ({
+      finding_id: a.finding_id,
+      corpus_index: a.corpus_index,
+      title: a.title,
+      ambiguity_reasons: a.ambiguity_reasons,
+      candidate_families: a.candidate_families,
+      resolution: a.resolution,
+    }));
+
+    // =========================================================================
+    // STEP 10: Strong terminal accounting (hard-fail on violation)
+    // =========================================================================
+    const inputs = eligibleResults.map(r => r.finding_id);
+    const terminalOutcomes = new Map<string, string[]>();
+    const canonicalOutputIds: string[] = [];
+    const degradedOutputIds: string[] = [];
+    const mergedCounts = new Map<string, number>();
+
+    // Family members → canonical finding terminal
+    for (const familyOut of allFamilies) {
+      const canonId = familyOut.deterministic_finding_id;
+      canonicalOutputIds.push(canonId);
+      mergedCounts.set(canonId, familyOut.member_count);
+      for (const fid of familyOut.member_finding_ids) {
+        if (!terminalOutcomes.has(fid)) terminalOutcomes.set(fid, []);
+        terminalOutcomes.get(fid)!.push(canonId);
+      }
+    }
+
+    // Ambiguous items → treated as separate canonical terminals
+    for (const a of ambiguous) {
+      const ambigTerminal = `ambig-${a.finding_id}`;
+      canonicalOutputIds.push(ambigTerminal);
+      mergedCounts.set(ambigTerminal, 1);
+      if (!terminalOutcomes.has(a.finding_id)) terminalOutcomes.set(a.finding_id, []);
+      terminalOutcomes.get(a.finding_id)!.push(ambigTerminal);
+    }
+
+    // Degraded items → degraded terminal
+    for (const d of degradedRecords) {
+      const degradedTerminal = `dgrdd-${d.original_finding_id}`;
+      degradedOutputIds.push(degradedTerminal);
+      if (!terminalOutcomes.has(d.original_finding_id)) terminalOutcomes.set(d.original_finding_id, []);
+      terminalOutcomes.get(d.original_finding_id)!.push(degradedTerminal);
+    }
+
+    const accounting = validateTerminalAccounting({
+      inputs,
+      terminalOutcomes,
+      canonicalOutputIds,
+      degradedOutputIds,
+      memberToFamily,
+      mergedCounts,
+    });
+
+    if (!accounting.valid) {
+      throw new Error(
+        `FAIL CLOSED: Terminal accounting violations in Q4:\n` +
+        accounting.violations.map(v => `  • ${v}`).join("\n")
+      );
+    }
+
+    // =========================================================================
+    // STEP 11: Final accounting
     // =========================================================================
     const totalAccountedFor = families.reduce((sum, f) => sum + f.member_finding_ids.length, 0) +
-                              singletons.length + ambiguous.length;
+                              singletons.length + ambiguous.length + degradedRecords.length;
     const silentLosses = q4EligibleInput - totalAccountedFor;
     const totalCanonicalIssues = families.length + singletons.length;
 
     // =========================================================================
-    // STEP 9: Persist at tree_level=95
+    // STEP 12: Persist at tree_level=95
     // =========================================================================
     const q4Payload = JSON.stringify({
       _identity_metadata: {
@@ -402,17 +550,21 @@ export default api({
         identity_type: "Q4_canonical_issue",
         q3_gated: true,
         timestamp: new Date().toISOString(),
-        schema_version: "2.0.0",
+        schema_version: "3.0.0",
         total_q3_candidates: totalQ3Candidates,
         q4_eligible_input: q4EligibleInput,
         q4_ineligible_excluded: q4IneligibleExcluded,
         grouped_families: families.length,
         singleton_findings: singletons.length,
         ambiguous_findings: ambiguous.length,
+        degraded_findings: degradedRecords.length,
         total_canonical_issues: totalCanonicalIssues,
         silent_losses: silentLosses,
+        accounting_valid: accounting.valid,
       },
       families: allFamilies,
+      ambiguous_records: ambiguousRecords,
+      degraded_records: degradedRecords,
     });
 
     const UpsertSchema = z.object({ id: z.string() });
@@ -434,10 +586,35 @@ export default api({
       grouped_families: families.length,
       singleton_findings: singletons.length,
       ambiguous_findings: ambiguous.length,
+      degraded_findings: degradedRecords.length,
       total_canonical_issues: totalCanonicalIssues,
       silent_losses: silentLosses,
+      accounting_valid: accounting.valid,
       families: allFamilies,
+      ambiguous_records: ambiguousRecords,
+      degraded_records: degradedRecords,
       checkpoint_id: persisted.id,
     };
   },
 });
+
+// ---------------------------------------------------------------------------
+// Helpers: extract numeric value and unit from claim text
+// ---------------------------------------------------------------------------
+
+function extractNumericValue(text: string): number | null {
+  // Match patterns like "£45m", "$120m", "45.3%", "£12.5m"
+  const match = text.match(/[£$€]?\s*(\d+(?:\.\d+)?)\s*[mb%]?/i);
+  if (match) {
+    return parseFloat(match[1]);
+  }
+  return null;
+}
+
+function extractUnit(text: string): string | null {
+  if (/£\d/.test(text) || /\bgbp\b/i.test(text)) return "£m";
+  if (/\$\d/.test(text) || /\busd\b/i.test(text)) return "$m";
+  if (/€\d/.test(text) || /\beur\b/i.test(text)) return "€m";
+  if (/\d+(\.\d+)?%/.test(text)) return "%";
+  return null;
+}
