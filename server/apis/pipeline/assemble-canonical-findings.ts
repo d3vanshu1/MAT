@@ -88,6 +88,7 @@ export default api({
     const q4Families = (q4Parsed.families ?? []) as Array<{
       canonical_key_str: string;
       canonical_key: any;
+      deterministic_finding_id?: string;
       member_count: number;
       member_finding_ids: string[];
       all_originating_claim_ids: string[];
@@ -158,6 +159,7 @@ export default api({
 
     // Build Q3 lookup for verdicts
     const q3VerdictMap = new Map<string, { verdict: string; claim_id: string | null; claim_text: string; memo_version: string | null }>();
+    const q3EvidenceSnapshotsByClaimId = new Map<string, any>();
     if (q3Rows.length > 0) {
       const q3Parsed = typeof q3Rows[0].merged_json === "string"
         ? JSON.parse(q3Rows[0].merged_json)
@@ -171,6 +173,13 @@ export default api({
           claim_text: provenance?.exact_claim_text ?? "",
           memo_version: provenance?.memo_version ?? null,
         });
+      }
+      // Load evidence snapshots for embedding in canonical findings
+      const snapshots = (q3Parsed.evidence_snapshots ?? []) as Array<any>;
+      for (const snap of snapshots) {
+        if (snap.claim_id) {
+          q3EvidenceSnapshotsByClaimId.set(snap.claim_id, snap);
+        }
       }
     }
 
@@ -250,11 +259,19 @@ export default api({
       });
 
       try {
+        // Collect evidence snapshots for this family's claim IDs
+        const familyEvidenceSnapshots: any[] = [];
+        for (const claimId of family.all_originating_claim_ids) {
+          const snap = q3EvidenceSnapshotsByClaimId.get(claimId);
+          if (snap) familyEvidenceSnapshots.push(snap);
+        }
+
         const { finding, memberOutcomes } = constructCanonicalFinding(
           family.canonical_key_str,
           family.canonical_key,
           memberFindings,
-          resolvedClaims
+          resolvedClaims,
+          familyEvidenceSnapshots,
         );
         allCanonicalFindings.push(finding);
         allMemberOutcomes.push(...memberOutcomes);

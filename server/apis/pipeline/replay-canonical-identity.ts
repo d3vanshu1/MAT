@@ -44,6 +44,7 @@ import {
   type ClaimLinkageDisposition,
   type ClaimProvenance,
 } from "./claim-linkage.js";
+import { generateCanonicalFindingId } from "./finding-identity.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -80,6 +81,7 @@ const FamilyMemberSchema = z.object({
 const FamilyOutputSchema = z.object({
   canonical_key_str: z.string(),
   canonical_key: CanonicalKeySchema,
+  deterministic_finding_id: z.string(),
   member_count: z.number(),
   member_finding_ids: z.array(z.string()),
   all_originating_claim_ids: z.array(z.string()),
@@ -332,6 +334,7 @@ export default api({
         return {
           canonical_key_str: family.canonical_key_str,
           canonical_key: family.canonical_key,
+          deterministic_finding_id: generateCanonicalFindingId({ canonical_key_str: family.canonical_key_str, member_finding_ids: family.member_finding_ids }),
           member_count: family.member_finding_ids.length,
           member_finding_ids: family.member_finding_ids,
           all_originating_claim_ids: family.all_originating_claim_ids,
@@ -367,6 +370,7 @@ export default api({
         return {
           canonical_key_str: s.canonical_key_str,
           canonical_key: s.canonical_key,
+          deterministic_finding_id: generateCanonicalFindingId({ canonical_key_str: s.canonical_key_str, member_finding_ids: [s.finding_id] }),
           member_count: 1,
           member_finding_ids: [s.finding_id],
           all_originating_claim_ids: s.originating_claim_ids,

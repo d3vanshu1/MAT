@@ -101,6 +101,8 @@ export const CanonicalFindingSchema = z.object({
   })),
   /** Finding IDs that were merged into this canonical finding */
   merged_from_finding_ids: z.array(z.string()),
+  /** Evidence snapshots (captured at Q3 linkage time) */
+  evidence_snapshots: z.array(z.any()).optional(),
   /** Final verification status */
   verification_status: z.enum([
     "contradicted",
@@ -183,6 +185,7 @@ export function constructCanonicalFinding(
   canonicalKey: CanonicalKey,
   members: RawFinding[],
   resolvedClaims: Map<string, ClaimData>,
+  evidenceSnapshots?: any[],
 ): { finding: CanonicalFinding; memberOutcomes: MemberOutcome[] } {
   const memberFindingIds = members.map(m => m.finding_id);
   const canonicalFindingId = generateCanonicalFindingId({
@@ -284,6 +287,7 @@ export function constructCanonicalFinding(
     source_documents: Array.from(sourceDocSet),
     comparison_results: comparisonResults,
     merged_from_finding_ids: memberFindingIds,
+    evidence_snapshots: evidenceSnapshots ?? [],
     verification_status: verificationStatus,
   };
 
