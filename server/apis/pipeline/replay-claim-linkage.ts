@@ -30,6 +30,10 @@ import {
   CLAIM_LINKAGE_DISPOSITIONS,
   ClaimProvenanceSchema,
 } from "./claim-linkage.js";
+import {
+  buildEvidenceSnapshot,
+  type EvidenceSnapshot,
+} from "./finding-identity.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -212,6 +216,7 @@ export default api({
 
     // 5. Process each candidate through strict claim-linkage
     const linkageResults: ClaimLinkageResult[] = [];
+    const evidenceSnapshots: EvidenceSnapshot[] = [];
     const dispositionCounts: Record<string, number> = {};
 
     for (const candidate of candidates) {
@@ -241,6 +246,32 @@ export default api({
       linkageResults.push(result);
       dispositionCounts[result.claim_linkage_disposition] =
         (dispositionCounts[result.claim_linkage_disposition] ?? 0) + 1;
+
+      // Build evidence snapshot if claim was resolved
+      if (result.claim_provenance && result.claim_provenance.claim_id) {
+        const resolvedClaim = claimMap.get(result.claim_provenance.claim_id);
+        if (resolvedClaim) {
+          const snapshot = buildEvidenceSnapshot({
+            claim_id: result.claim_provenance.claim_id,
+            claim_record: {
+              metric: resolvedClaim.metric ?? "",
+              period: resolvedClaim.period ?? "",
+              scope_qualifier: resolvedClaim.scope_qualifier ?? "",
+              value: resolvedClaim.value ?? 0,
+              unit: resolvedClaim.unit ?? "",
+              verbatim_snippet: resolvedClaim.verbatim_snippet ?? "",
+              memo_version: resolvedClaim.memo_version ?? "",
+              ic_document_id: resolvedClaim.ic_document_id ?? "",
+              ic_document_filename: resolvedClaim.ic_document_filename ?? "",
+              claim_type: resolvedClaim.claim_type ?? "",
+            },
+            authority_class: result.authority_class,
+            verdict: result.claim_provenance.verdict,
+            evidence_text: result.claim_provenance.evidence,
+          });
+          evidenceSnapshots.push(snapshot);
+        }
+      }
     }
 
     // 6. Compute eligibility breakdown
@@ -282,15 +313,17 @@ export default api({
         module_id: moduleId,
         replay_type: "Q3_claim_linkage_strict",
         replay_timestamp: new Date().toISOString(),
-        schema_version: "2.0.0",
+        schema_version: "3.0.0",
         total_candidates: totalCandidates,
         q4_eligible_count: q4EligibleCount,
         q4_ineligible_count: q4IneligibleCount,
         silent_losses: silentLosses,
         eligibility_breakdown: eligibilityBreakdown,
+        evidence_snapshots_count: evidenceSnapshots.length,
       },
       linkage_by_disposition: dispositionCounts,
       results: linkageResults,
+      evidence_snapshots: evidenceSnapshots,
     });
 
     const UpsertSchema = z.object({ id: z.string() });

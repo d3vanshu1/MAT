@@ -31,6 +31,7 @@
 
 import { z } from "@superblocksteam/sdk-api";
 import type { CanonicalKey } from "./canonical-issue-identity.js";
+import { generateCanonicalFindingId } from "./finding-identity.js";
 
 // ---------------------------------------------------------------------------
 // Evidence record schema
@@ -171,17 +172,6 @@ interface ClaimData {
   verdict: string;
 }
 
-function randomUUID(): string {
-  if (typeof globalThis !== "undefined" && typeof (globalThis as any).crypto?.randomUUID === "function") {
-    return (globalThis as any).crypto.randomUUID() as string;
-  }
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
 /**
  * Constructs a canonical finding from a group of related findings (a family).
  *
@@ -194,8 +184,11 @@ export function constructCanonicalFinding(
   members: RawFinding[],
   resolvedClaims: Map<string, ClaimData>,
 ): { finding: CanonicalFinding; memberOutcomes: MemberOutcome[] } {
-  const canonicalFindingId = randomUUID();
   const memberFindingIds = members.map(m => m.finding_id);
+  const canonicalFindingId = generateCanonicalFindingId({
+    canonical_key_str: canonicalKeyStr,
+    member_finding_ids: memberFindingIds,
+  });
 
   // --- Aggregate evidence records ---
   const evidenceMap = new Map<string, EvidenceRecord>();
