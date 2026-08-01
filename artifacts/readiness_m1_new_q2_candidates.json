@@ -1,0 +1,67 @@
+{
+  "milestone": "M1",
+  "title": "Regenerate Q2 Candidates — Gate Result",
+  "description": "M1 verifies that the pipeline can regenerate Q2 contradiction candidates from reconciliation findings with deterministic clm-v1-* claim linkage. Every reportable candidate carries exactly one valid claim ID resolved via exact_coordinate strategy from the populated claims ledger.",
+  "deal_id": "c46b4129-8a16-48ae-ad3a-1da061255445",
+  "run_id": "33a88bb1-d2b6-4ee8-81f7-335573c28c73",
+  "executed_at": "2026-08-01T08:26:23Z",
+  "api": "RegenerateQ2Candidates",
+
+  "summary": {
+    "total_reconciliation_findings": 221,
+    "total_regenerated_candidates": 221,
+    "reportable_candidates": 218,
+    "non_reportable_candidates": 3,
+    "non_reportable_breakdown": {
+      "zero_claim_ids": 1,
+      "duplicate_claim_ids_rejected": 2,
+      "invalid_non_ic_links_rejected": 0
+    }
+  },
+
+  "candidates_by_memo": {
+    "2nd IC (May 2026)": 77,
+    "3rd IC (Jun 2026)": 72,
+    "Screening IC (Dec 2025)": 69,
+    "21 June Update (Jun 2026)": 0
+  },
+
+  "candidates_by_claim_type": {
+    "operating_metric": 181,
+    "returns_projection": 24,
+    "valuation_structuring": 13
+  },
+
+  "candidates_by_finding_kind": {
+    "data_divergence": 12,
+    "scope_mismatch": 5,
+    "unreconcilable": 201
+  },
+
+  "gate_checks": {
+    "reportable_with_exactly_one_clm_v1": 218,
+    "reportable_total": 218,
+    "pct_with_valid_claim": 100,
+    "reportable_with_zero_or_multiple_claim_ids": 0,
+    "duplicates_in_reportable": 0,
+    "invalid_links_in_reportable": 0,
+    "duplicate_claim_ids_rejected": 2,
+    "non_ic_claims_rejected": 0,
+    "at_least_one_saint_issue": true
+  },
+
+  "gate_passed": true,
+
+  "gate_logic": "gate_passed = reportable.length > 0 && reportableWithExactlyOneClaimId === reportable.length && reportableWithZeroOrMultiple === 0 && duplicatesInReportable === 0 && invalidLinksInReportable === 0 && at_least_one_saint_issue",
+
+  "resolution_strategy": "exact_coordinate (all 218 reportable resolved via coordinate matching from claims ledger at tree_level=99)",
+
+  "notes": [
+    "All 218 reportable candidates resolved via exact_coordinate strategy — no fallback strategies needed",
+    "2 duplicate claim IDs rejected: IRG finding citing same Screening IC coordinates twice (21.7% IRR and 27.4% IRR share a coordinate, also MoM counterparts)",
+    "1 zero-claim finding: reconciliation finding with no attached claim object (non-reportable)",
+    "0 findings from 21 June Update — expected, as it carries 0 claims in the ledger",
+    "data_divergence candidates (12) include revenue/EBITDA figures that are the primary Saint issues",
+    "Gate logic fixed: checks leakage into reportable set (0), not total rejection count (2)"
+  ]
+}
