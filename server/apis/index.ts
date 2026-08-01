@@ -77,6 +77,7 @@ import ExportReplayEvidence from './pipeline/export-replay-evidence.js';
 import ReplayClaimLinkage from './pipeline/replay-claim-linkage.js';
 import ReplayCanonicalIdentity from './pipeline/replay-canonical-identity.js';
 import AssembleCanonicalFindings from './pipeline/assemble-canonical-findings.js';
+import ReplayPopulateClaimsLedger from './pipeline/replay-populate-claims-ledger.js';
 
 // Database setup
 import SetupSchema from './db/setup-schema.js';
@@ -152,7 +153,7 @@ const apis = {
   AnalyzeChunk, UniversalExtract, MergeFindings, FormatReport, WebResearch,
   SaveModuleResult, LoadModuleResults, GetRunHistory, GetRunOutput,
   // Server-side pipeline
-  RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,   ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact, ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings,
+  RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,   ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact, ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings, ReplayPopulateClaimsLedger,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

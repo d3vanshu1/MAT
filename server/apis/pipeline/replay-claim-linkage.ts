@@ -140,28 +140,75 @@ export default api({
       }
     }
 
-    // 4. Load claims ledger (from claims extraction checkpoint)
-    const claimsRow = await ctx.integrations.db.query(
-      `SELECT payload FROM pipeline_checkpoints
-       WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'
-       ORDER BY created_at DESC LIMIT 1`,
-      z.object({ payload: z.any() }),
+    // 4. Load POPULATED claims ledger (tree_level=99 — deterministic IDs)
+    // This is the canonical claims ledger populated by ReplayPopulateClaimsLedger.
+    // Falls back to pipeline_checkpoints if tree_level=99 not available.
+    const ClaimsCheckpointRow = z.object({ merged_json: z.any() });
+    const claimsLedgerRows = await ctx.integrations.db.query(
+      `SELECT merged_json FROM merge_checkpoints
+       WHERE module_run_id = $1 AND tree_level = 99 AND node_index = 0
+       ORDER BY updated_at DESC LIMIT 1`,
+      ClaimsCheckpointRow,
       [runId],
-      { label: "Load claims ledger checkpoint" }
+      { label: "Load populated claims ledger (tree_level=99)" }
     );
 
-    // Build claim_id → claim lookup
+    // Build claim_id → claim lookup from the populated ledger
     const claimMap = new Map<string, any>();
-    if (claimsRow.length > 0) {
-      const claimsPayload = typeof claimsRow[0].payload === "string"
-        ? JSON.parse(claimsRow[0].payload)
-        : claimsRow[0].payload;
-      const claims = claimsPayload?.claims || [];
+    // Also build content-based indexes for reconciliation
+    const claimsByMetricPeriod = new Map<string, any[]>();
+    let claimsLedgerSource = "none";
+
+    if (claimsLedgerRows.length > 0) {
+      const ledgerPayload = typeof claimsLedgerRows[0].merged_json === "string"
+        ? JSON.parse(claimsLedgerRows[0].merged_json)
+        : claimsLedgerRows[0].merged_json;
+      const claims = ledgerPayload?.claims || [];
+      claimsLedgerSource = `tree_level_99 (${claims.length} claims)`;
+
       for (const claim of claims) {
-        const claimId = claim.claim_id || claim.id;
-        if (claimId) claimMap.set(claimId, claim);
+        if (claim.claim_id) {
+          claimMap.set(claim.claim_id, claim);
+        }
+        // Content index for reconciliation
+        const metricKey = `${(claim.metric || "").toLowerCase()}|${(claim.period || "").toLowerCase()}`;
+        if (!claimsByMetricPeriod.has(metricKey)) {
+          claimsByMetricPeriod.set(metricKey, []);
+        }
+        claimsByMetricPeriod.get(metricKey)!.push(claim);
+      }
+    } else {
+      // Fallback: try pipeline_checkpoints
+      const fallbackRows = await ctx.integrations.db.query(
+        `SELECT payload FROM pipeline_checkpoints
+         WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'
+         ORDER BY updated_at DESC LIMIT 1`,
+        z.object({ payload: z.any() }),
+        [runId],
+        { label: "Load claims ledger fallback (pipeline_checkpoints)" }
+      );
+
+      if (fallbackRows.length > 0 && fallbackRows[0].payload) {
+        const claimsPayload = typeof fallbackRows[0].payload === "string"
+          ? JSON.parse(fallbackRows[0].payload)
+          : fallbackRows[0].payload;
+        const claims = claimsPayload?.claims || [];
+        claimsLedgerSource = `pipeline_checkpoints_fallback (${claims.length} claims)`;
+
+        for (const claim of claims) {
+          const claimId = claim.claim_id || claim.id;
+          if (claimId) claimMap.set(claimId, claim);
+          // Content index
+          const metricKey = `${(claim.metric || "").toLowerCase()}|${(claim.period || "").toLowerCase()}`;
+          if (!claimsByMetricPeriod.has(metricKey)) {
+            claimsByMetricPeriod.set(metricKey, []);
+          }
+          claimsByMetricPeriod.get(metricKey)!.push(claim);
+        }
       }
     }
+
+    console.log(`[ReplayClaimLinkage] Claims ledger: ${claimsLedgerSource} — ${claimMap.size} indexed by ID, ${claimsByMetricPeriod.size} metric-period groups`);
 
     // 5. Process each candidate through strict claim-linkage
     const linkageResults: ClaimLinkageResult[] = [];
