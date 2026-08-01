@@ -84,6 +84,7 @@ import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCount
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
 import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
+import { CONTRADICTION_CHECK_ALLOWED_TAGS, createPolicySummary, type SourcePolicySummary } from "./source-policy.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -1350,7 +1351,9 @@ export async function canonicalFinalize(input: CanonicalFinalizeInput): Promise<
 // ---------------------------------------------------------------------------
 const MODULE_TAG_RELEVANCE: Record<string, Set<string>> = {
   omission_audit: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "legal", "other"]),
-  contradiction_check: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "legal", "other"]),
+  // Q0 SOURCE POLICY: contradiction_check excludes "legal" from unrestricted scanning.
+  // Legal DD may only enter via targeted claim-verification (see source-policy.ts).
+  contradiction_check: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "financial_model", "other"]),
   blind_spot_scanner: new Set(["cim", "ic_memo", "consultant_report", "financial_model", "other"]),
   external_risk_overlay: new Set(["cim", "ic_memo", "customer_data", "consultant_report", "legal", "other"]),
   social_reputation: new Set(["cim", "ic_memo", "consultant_report", "customer_data", "other"]),

@@ -39,14 +39,15 @@ const MODULE_TAG_RELEVANCE: Record<string, Set<DocumentTag>> = {
     "other",
   ]),
 
-  // Receives ALL — contradictions can exist between any document pair
+  // Q0 SOURCE POLICY: contradiction_check excludes "legal" from unrestricted scanning.
+  // Legal DD may only enter via targeted claim-verification (see source-policy.ts).
+  // The module's question: "Which IC claims are contradicted by financial/commercial evidence?"
   contradiction_check: new Set([
     "cim",
     "ic_memo",
     "customer_data",
     "consultant_report",
     "financial_model",
-    "legal",
     "other",
   ]),
 
