@@ -6,6 +6,14 @@
  * (tree_level=98), joins them, and returns separate arrays by class plus
  * the complete 273-row mapping.
  *
+ * HARDENING (C0):
+ *   - ledger_rows: total entries in the loaded ledger
+ *   - unique_ledger_ids: count of distinct finding_ids in the ledger
+ *   - resolved_findings: count of ledger entries resolved to source findings
+ *   - unresolved_finding_ids: IDs that could not be joined to source content
+ *   - duplicate_ledger_ids: IDs appearing more than once in the ledger
+ *   - Fail-closed: throws if any ledger row cannot be resolved OR if duplicates exist
+ *
  * Returns chunked base64 output for large payloads.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
@@ -37,7 +45,7 @@ type ExportRecord = z.infer<typeof ExportRecordSchema>;
 
 export default api({
   name: "ExportReplayEvidence",
-  description: "Exports full 273-row disposition ledger with finding content, by class",
+  description: "Exports full disposition ledger with finding content; fail-closed on integrity errors",
 
   integrations: {
     db: postgres(IC_DILIGENCE_DB),
@@ -47,6 +55,8 @@ export default api({
     runId: z.string(),
     chunkIndex: z.number().default(0),
     chunkSize: z.number().default(50),
+    /** When true, skips fail-closed checks (for diagnostics only) */
+    allowUnresolved: z.boolean().default(false),
   }),
 
   output: z.object({
@@ -65,9 +75,15 @@ export default api({
       source_recommendation: z.number(),
       scope_limitation: z.number(),
     }),
+    // --- Hardening fields (C0) ---
+    ledger_rows: z.number(),
+    unique_ledger_ids: z.number(),
+    resolved_findings: z.number(),
+    unresolved_finding_ids: z.array(z.string()),
+    duplicate_ledger_ids: z.array(z.string()),
   }),
 
-  async run(ctx, { runId, chunkIndex, chunkSize }) {
+  async run(ctx, { runId, chunkIndex, chunkSize, allowUnresolved }) {
     // Load the disposition ledger (tree_level=97)
     const LedgerRow = z.object({
       merged_json: z.any(),
@@ -99,6 +115,30 @@ export default api({
       category: string | null;
       l3_node: number;
     }>;
+
+    // -----------------------------------------------------------------------
+    // Hardening: Validate ledger integrity
+    // -----------------------------------------------------------------------
+    const ledgerRowCount = ledger.length;
+    const idOccurrences = new Map<string, number>();
+    for (const entry of ledger) {
+      const count = idOccurrences.get(entry.finding_id) ?? 0;
+      idOccurrences.set(entry.finding_id, count + 1);
+    }
+    const uniqueLedgerIds = idOccurrences.size;
+    const duplicateLedgerIds: string[] = [];
+    for (const [id, count] of idOccurrences) {
+      if (count > 1) duplicateLedgerIds.push(id);
+    }
+
+    // Fail closed on duplicate ledger IDs (indicates ledger corruption)
+    if (duplicateLedgerIds.length > 0 && !allowUnresolved) {
+      throw new Error(
+        `[ExportReplayEvidence] Fail-closed: ${duplicateLedgerIds.length} duplicate finding_id(s) in ledger — ` +
+        `IDs: ${duplicateLedgerIds.slice(0, 5).join(", ")}${duplicateLedgerIds.length > 5 ? "..." : ""}. ` +
+        `This indicates ledger corruption. Pass allowUnresolved=true to bypass for diagnostics.`
+      );
+    }
 
     // Load the original findings corpus (tree_level=98)
     const CorpusRow = z.object({
@@ -194,8 +234,10 @@ export default api({
       }
     }
 
-    // Join ledger with findings
+    // Join ledger with findings — track resolved vs unresolved
     const allRecords: ExportRecord[] = [];
+    const unresolvedIds: string[] = [];
+    let resolvedCount = 0;
     const counts = {
       retained_as_contradiction_candidate: 0,
       excluded_wrong_module: 0,
@@ -208,6 +250,12 @@ export default api({
 
     for (const entry of ledger) {
       const finding = findingsMap.get(entry.finding_id);
+      if (finding) {
+        resolvedCount++;
+      } else {
+        unresolvedIds.push(entry.finding_id);
+      }
+
       const record: ExportRecord = {
         corpus_index: entry.corpus_index,
         finding_id: entry.finding_id,
@@ -235,6 +283,17 @@ export default api({
       }
     }
 
+    // -----------------------------------------------------------------------
+    // Fail-closed: every ledger row must resolve to a source finding
+    // -----------------------------------------------------------------------
+    if (unresolvedIds.length > 0 && !allowUnresolved) {
+      throw new Error(
+        `[ExportReplayEvidence] Fail-closed: ${unresolvedIds.length} ledger row(s) could not be resolved ` +
+        `to a source finding — IDs: ${unresolvedIds.slice(0, 5).join(", ")}${unresolvedIds.length > 5 ? "..." : ""}. ` +
+        `This indicates corpus/ledger mismatch. Pass allowUnresolved=true to bypass for diagnostics.`
+      );
+    }
+
     // Sort by corpus_index
     allRecords.sort((a, b) => a.corpus_index - b.corpus_index);
 
@@ -251,6 +310,12 @@ export default api({
       total_chunks: totalChunks,
       records,
       counts,
+      // Hardening fields
+      ledger_rows: ledgerRowCount,
+      unique_ledger_ids: uniqueLedgerIds,
+      resolved_findings: resolvedCount,
+      unresolved_finding_ids: unresolvedIds,
+      duplicate_ledger_ids: duplicateLedgerIds,
     };
   },
 });

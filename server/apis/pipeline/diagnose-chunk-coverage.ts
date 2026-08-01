@@ -1,5 +1,5 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { CONTRADICTION_CHECK_ALLOWED_TAGS } from "./source-policy.js";
+import { CONTRADICTION_CHECK_ALLOWED_TAGS, isChunkAllowedForContradictionCheck } from "./source-policy.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -106,9 +106,17 @@ export default api({
     );
 
     // 2. Determine which chunks would be routed (same logic as pipeline-core)
+    // For contradiction_check: uses metadata-aware source policy (same as production routing)
     const routed = extracted.filter(row => {
       if (row.failed) return false;
       const tag = row.tag ?? "other";
+      if (moduleId === "contradiction_check") {
+        const decision = isChunkAllowedForContradictionCheck(tag, {
+          title: row.file_name,
+          filename: row.file_name,
+        });
+        return decision.allowed;
+      }
       return relevantTags.has(tag);
     });
 

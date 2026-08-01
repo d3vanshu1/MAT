@@ -84,7 +84,8 @@ import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCount
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
 import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, validateManifest, deserializeManifest, type MergeRootManifest, type RoundSummary, type LeafNode, MERGE_ROOT_MANIFEST_VERSION } from "./merge-root-manifest.js";
 import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
-import { CONTRADICTION_CHECK_ALLOWED_TAGS, createPolicySummary, type SourcePolicySummary } from "./source-policy.js";
+import { CONTRADICTION_CHECK_ALLOWED_TAGS, isChunkAllowedForContradictionCheck, createPolicySummary, type SourcePolicySummary } from "./source-policy.js";
+import { type RoutingDiagnosticEntry, type RoutingDiagnostics } from "./replay-classifier.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -3430,6 +3431,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   }
 
   const relevantTags = MODULE_TAG_RELEVANCE[moduleId] ?? new Set(["other"]);
+  const routingDiagnostics: RoutingDiagnosticEntry[] = [];
   const routed = allExtractions.filter(row => {
     const ext = typeof row.extraction_json === "string"
       ? JSON.parse(row.extraction_json)
@@ -3439,6 +3441,28 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     // failed chunks, but this filter protects against stale DB state or reruns.)
     if (ext.failed) return false;
     const tag = String(ext.documentTag ?? "other");
+
+    // For contradiction_check: use metadata-aware source policy
+    if (moduleId === "contradiction_check") {
+      const filename = idToFileName.get(row.document_id) ?? ext.sourceFile ?? "";
+      const decision = isChunkAllowedForContradictionCheck(tag, {
+        title: ext.documentTitle ?? filename,
+        filename,
+        doc_type: ext.doc_type ?? undefined,
+        document_category: ext.document_category ?? undefined,
+      });
+      routingDiagnostics.push({
+        document_id: row.document_id,
+        document_title: filename,
+        chunk_index: row.chunk_index,
+        tag,
+        actual_source_type: decision.actual_source_type ?? tag,
+        allowed: decision.allowed,
+        reason: decision.reason ?? "allowed",
+      });
+      return decision.allowed;
+    }
+
     return relevantTags.has(tag);
   });
 
@@ -3453,6 +3477,32 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       result: null,
       firstError: errMsg,
     };
+  }
+
+  // Persist routing diagnostics for contradiction_check
+  if (moduleId === "contradiction_check" && routingDiagnostics.length > 0) {
+    const diagnosticPayload = JSON.stringify({
+      total_chunks_considered: routingDiagnostics.length,
+      chunks_routed: routingDiagnostics.filter(e => e.allowed).length,
+      chunks_excluded: routingDiagnostics.filter(e => !e.allowed).length,
+      by_source_type: routingDiagnostics.reduce((acc, e) => {
+        const key = e.actual_source_type;
+        if (!acc[key]) acc[key] = { routed: 0, excluded: 0 };
+        if (e.allowed) acc[key].routed++; else acc[key].excluded++;
+        return acc;
+      }, {} as Record<string, { routed: number; excluded: number }>),
+      entries: routingDiagnostics,
+      timestamp: new Date().toISOString(),
+    });
+    await ctx.integrations.db.execute(
+      `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, status, payload, created_at)
+       VALUES ($1, 'routing_diagnostics', 'complete', $2::jsonb, now())
+       ON CONFLICT (module_run_id, checkpoint_key) WHERE checkpoint_key = 'routing_diagnostics'
+       DO UPDATE SET payload = $2::jsonb, status = 'complete'`,
+      [runId, diagnosticPayload],
+      { label: "Persist routing diagnostics" }
+    );
+    console.log(`[RoutingDiagnostics] ${routingDiagnostics.filter(e => e.allowed).length} routed, ${routingDiagnostics.filter(e => !e.allowed).length} excluded`);
   }
 
   // --- Step 1.1: Load or Build Claim Origin Map (explicit provenance) ---

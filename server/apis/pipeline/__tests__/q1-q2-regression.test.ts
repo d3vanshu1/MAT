@@ -15,19 +15,23 @@
  * 11. Mixed IC and Legal DD sources are handled deterministically
  * 12. Missing finding IDs or malformed records fail safely
  *
- * These tests operate on the disposition harness logic directly,
- * using synthetic fixtures (not live database queries).
+ * IMPORTANT: This test uses the SHARED replay-classifier.ts module —
+ * no mirrored test-only classifier. This ensures test ≡ production invariant.
  */
 
 import {
-  NARRATIVE_SOURCES,
-  EVIDENCE_SOURCES,
   EXCLUDED_SOURCES,
   CONTRADICTION_CHECK_ALLOWED_TAGS,
-  isFindingInScope,
   isChunkAllowedForContradictionCheck,
   SPECIALIST_DOCUMENT_PATTERNS,
 } from "../source-policy.js";
+
+import {
+  deriveSourceTag,
+  classifyReplayFinding,
+  type ClassificationInput,
+  type ClassificationResult,
+} from "../replay-classifier.js";
 
 // ---------------------------------------------------------------------------
 // Inline test harness (no external test runner)
@@ -58,128 +62,50 @@ function assertFalse(condition: boolean, label: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Disposition classification logic (mirrored from replay-disposition-harness)
-// Used here for unit-level testing without DB dependency
+// Shared classify helper — wraps the production function for test convenience
 // ---------------------------------------------------------------------------
-
-type DispositionClass =
-  | "retained_as_contradiction_candidate"
-  | "excluded_wrong_module"
-  | "confirmed_claim"
-  | "supporting_evidence"
-  | "process_diagnostic"
-  | "source_recommendation"
-  | "scope_limitation"
-  | "excluded_immaterial"
-  | "excluded_unsupported"
-  | "excluded_false_positive"
-  | "merged_into";
 
 interface MockFinding {
   id: string;
   title: string;
   severity?: string;
   source_tag?: string;
+  _source_tag?: string;
   finding_kind?: string;
   category?: string;
   detail?: string;
+  full_analysis?: string;
   originating_claim_id?: string | null;
+  _originating_claim_id?: string | null;
+  claim_id?: string | null;
+  _claim_type?: string | null;
+  claim_type?: string | null;
   source_docs?: string[];
 }
 
-function classifyFinding(f: MockFinding): { disposition: DispositionClass; reason: string } {
-  const sourceTag = f.source_tag || "other";
-  const hasOriginatingClaim = !!f.originating_claim_id;
-
-  // Rule 1: Source policy — excluded sources without targeted claim
-  if (EXCLUDED_SOURCES.has(sourceTag as any)) {
-    if (!hasOriginatingClaim) {
-      return { disposition: "excluded_wrong_module", reason: "Finding from excluded source without IC claim" };
-    }
-    // With claim, check if it qualifies for targeted verification
-    return { disposition: "retained_as_contradiction_candidate", reason: "Finding from excluded source with qualifying IC claim" };
-  }
-
-  // Rule 2: Fail-closed for mis-tagged specialist documents
-  if (sourceTag === "other" && f.source_docs?.length) {
-    for (const doc of f.source_docs) {
-      for (const spec of SPECIALIST_DOCUMENT_PATTERNS) {
-        if (spec.pattern.test(doc)) {
-          return { disposition: "excluded_wrong_module", reason: `Mis-tagged specialist doc: ${spec.reason}` };
-        }
-      }
-    }
-  }
-
-  // Rule 3: Process diagnostics
-  const title = f.title.toLowerCase();
-  const detail = (f.detail || "").toLowerCase();
-  if (
-    title.includes("extraction fail") ||
-    title.includes("not extracted") ||
-    title.includes("text truncation") ||
-    title.includes("missing") && title.includes("record") ||
-    title.includes("analysis cannot proceed") ||
-    f.finding_kind === "process_diagnostic"
-  ) {
-    return { disposition: "process_diagnostic", reason: "Missing document, extraction failure, or process issue" };
-  }
-
-  // Rule 4: Confirmed claims (positive verification)
-  if (
-    f.finding_kind === "confirmed_claim" ||
-    (title.includes("confirmed") && !title.includes("not confirmed")) ||
-    (title.includes("in place") && f.severity === "info") ||
-    (title.includes("consistent") && title.includes("data"))
-  ) {
-    return { disposition: "confirmed_claim", reason: "Verified IC narrative claim" };
-  }
-
-  // Rule 5: Source recommendations (advisory, not contradictions)
-  if (
-    f.finding_kind === "recommendation" ||
-    title.includes("recommendation") ||
-    title.includes("suggested action") ||
-    f.category === "recommendation"
-  ) {
-    return { disposition: "source_recommendation", reason: "Advisory recommendation from diligence source" };
-  }
-
-  // Rule 6: Scope limitations
-  if (
-    f.finding_kind === "scope_limitation" ||
-    title.includes("scope limitation") ||
-    title.includes("outside scope") ||
-    title.includes("not in scope")
-  ) {
-    return { disposition: "scope_limitation", reason: "Analysis scope limitation" };
-  }
-
-  // Rule 7: Severity + finding_kind based classification
-  // WARNING: info-severity findings CAN remain contradiction candidates if they
-  // describe narrative-vs-evidence conflicts. This rule only demotes info findings
-  // that do NOT show adversity.
-  if (f.severity === "info" && f.finding_kind !== "contradiction") {
-    // Check if title/detail indicate adversity despite info severity
-    const adverseSignals = [
-      "contradict", "conflict", "discrepancy", "diverge", "mismatch",
-      "overstates", "understates", "revision", "material change",
-      "unsupported", "unsubstantiated", "decline", "decelerat",
-      "not reconciled", "inconsistent", "threatens", "tension",
-    ];
-    const hasAdversity = adverseSignals.some(s => title.includes(s) || detail.includes(s));
-    if (!hasAdversity) {
-      return { disposition: "supporting_evidence", reason: "Info-level finding without substantive contradiction" };
-    }
-  }
-
-  // Rule 8: Warning/critical severity with adversity → retained
-  if (f.severity === "warning" || f.severity === "critical") {
-    return { disposition: "retained_as_contradiction_candidate", reason: "Finding describes narrative-vs-evidence conflict" };
-  }
-
-  // Rule 9: Info with adversity → retained
-  return { disposition: "retained_as_contradiction_candidate", reason: "Info finding with adversity signal — retained for review" };
+/**
+ * Uses the SHARED replay-classifier.ts classify function.
+ * No mirrored test-only implementation.
+ */
+function classifyFinding(f: MockFinding): ClassificationResult {
+  const input: ClassificationInput = {
+    title: f.title,
+    detail: f.detail ?? null,
+    full_analysis: f.full_analysis ?? null,
+    severity: f.severity ?? null,
+    category: f.category ?? null,
+    finding_kind: f.finding_kind ?? null,
+    source_tag: f.source_tag ?? null,
+    _source_tag: f._source_tag ?? null,
+    source_docs: f.source_docs ?? null,
+    _originating_claim_id: f._originating_claim_id ?? f.originating_claim_id ?? null,
+    claim_id: f.claim_id ?? null,
+    _claim_type: f._claim_type ?? null,
+    claim_type: f.claim_type ?? null,
+    originating_claim_id: f.originating_claim_id ?? null,
+  };
+  const derivedTag = deriveSourceTag(input, f.source_docs);
+  return classifyReplayFinding(input, derivedTag);
 }
 
 // ===========================================================================
@@ -187,7 +113,7 @@ function classifyFinding(f: MockFinding): { disposition: DispositionClass; reaso
 // ===========================================================================
 
 console.log("═".repeat(60));
-console.log("Q1/Q2 Regression Tests — Replay Disposition Harness");
+console.log("Q1/Q2 Regression Tests — Replay Disposition (shared classifier)");
 console.log("═".repeat(60));
 
 // ---------------------------------------------------------------------------
@@ -235,7 +161,7 @@ assertEqual(JSON.stringify(run1), JSON.stringify(run2), "Two runs produce identi
 // ---------------------------------------------------------------------------
 console.log("\n=== Test 4: Input immutability ===");
 
-const original = { id: "fx", title: "Test finding", severity: "warning", source_tag: "ic_memo" };
+const original: MockFinding = { id: "fx", title: "Test finding", severity: "warning", source_tag: "ic_memo" };
 const frozen = JSON.stringify(original);
 classifyFinding(original);
 assertEqual(JSON.stringify(original), frozen, "Input finding not mutated after classification");
@@ -314,7 +240,6 @@ const recommendation: MockFinding = {
   title: "Recommendation: enhance revenue disaggregation",
   severity: "info",
   source_tag: "consultant_report",
-  finding_kind: "recommendation",
 };
 const recResult = classifyFinding(recommendation);
 assertEqual(recResult.disposition, "source_recommendation",
@@ -325,7 +250,6 @@ const scopeLim: MockFinding = {
   title: "Analysis scope limitation — FY21 data unavailable",
   severity: "info",
   source_tag: "other",
-  finding_kind: "scope_limitation",
 };
 const scopeResult = classifyFinding(scopeLim);
 assertEqual(scopeResult.disposition, "scope_limitation",
