@@ -119,21 +119,35 @@ export function parseLegacyRef(ref: string): ParsedLegacyRef {
 /**
  * Builds a positional index from the enriched claims ledger.
  *
- * The claims ledger preserves document ordering (sorted by upload order)
- * and within each document, claims are in extraction order. The positional
- * index maps `{chunk_index}:{claim_index}` → claim_id.
+ * HISTORICAL PRODUCER SEMANTICS (proven from extraction-prompt.ts chunkDocument):
+ *   N in `c{N}-{M}` = chunk_index WITHIN A SINGLE DOCUMENT (starts at 0 per doc)
+ *   M in `c{N}-{M}` = claim ordinal WITHIN THAT CHUNK
  *
- * The "chunk" in `c{chunk}-{claim}` corresponds to the document index
- * in the extraction order (the IC documents in upload/processing order).
- * The "claim" corresponds to the claim's zero-based position within that document.
+ * CRITICAL: Since chunkIndex is document-local and resets to 0 per document,
+ * the same `c0-0` reference is produced by every single-chunk document.
+ * Without document identity in the reference, `c0-0` is AMBIGUOUS across documents.
+ *
+ * SAFE RESOLUTION (from claim-origin-map, when available):
+ *   - Use the persisted (document_id, chunk_index, claim_index) provenance
+ *   - If only ONE claim exists at position (N, M) → unique, resolvable
+ *   - If MULTIPLE claims from different documents share (N, M) → AMBIGUOUS
+ *
+ * FALLBACK RESOLUTION (ledger-only, no origin map):
+ *   - Group claims by document in processing order
+ *   - Each document contributes ONE chunk slot (chunk N = document at index N)
+ *   - M = claim ordinal within that document's claims (in extraction order)
+ *   - This is the legacy heuristic: ONLY SAFE if document count equals max chunk+1
+ *
+ * ANY position resolved by MULTIPLE documents is AMBIGUOUS and NOT bridged.
  */
 export function buildPositionalIndex(
   claims: IdentifiedClaim[],
-  documentOrder: string[], // IC document IDs in the order they were processed
+  documentOrder: string[],
 ): Map<string, string> {
   const positionalMap = new Map<string, string>(); // "chunk:claim" → claim_id
+  const positionCandidates = new Map<string, string[]>(); // "chunk:claim" → [claim_ids]
 
-  // Group claims by document, preserving insertion order (which is extraction order)
+  // Group claims by document, preserving extraction order within each doc
   const claimsByDoc = new Map<string, IdentifiedClaim[]>();
   for (const claim of claims) {
     if (!claimsByDoc.has(claim.ic_document_id)) {
@@ -142,18 +156,84 @@ export function buildPositionalIndex(
     claimsByDoc.get(claim.ic_document_id)!.push(claim);
   }
 
-  // For each document in processing order, assign positional indices
+  // The producer assigns chunk_index per-document (all starting at 0).
+  // Since IdentifiedClaim lacks chunk_index, we use document ORDER as the
+  // chunk index proxy — but ONLY if the mapping is unique.
+  // Each document occupies ONE chunk slot: chunk N = Nth document.
+  // Claim M = Mth claim in that document's extraction order.
   for (let chunkIdx = 0; chunkIdx < documentOrder.length; chunkIdx++) {
     const docId = documentOrder[chunkIdx];
     const docClaims = claimsByDoc.get(docId) ?? [];
 
     for (let claimIdx = 0; claimIdx < docClaims.length; claimIdx++) {
       const key = `${chunkIdx}:${claimIdx}`;
-      positionalMap.set(key, docClaims[claimIdx].claim_id);
+      if (!positionCandidates.has(key)) {
+        positionCandidates.set(key, []);
+      }
+      positionCandidates.get(key)!.push(docClaims[claimIdx].claim_id);
     }
   }
 
+  // SAFETY: Only bridge positions that resolve to EXACTLY ONE claim
+  for (const [key, candidates] of positionCandidates) {
+    if (candidates.length === 1) {
+      positionalMap.set(key, candidates[0]);
+    }
+    // Multiple candidates at same position → AMBIGUOUS, fail-closed
+  }
+
   return positionalMap;
+}
+
+/**
+ * Returns the set of legacy cN-M references that are ambiguous (same local position
+ * exists in multiple documents). These MUST NOT be auto-resolved.
+ *
+ * Key insight: The legacy producer generates cN-M where N = chunk index WITHIN a single
+ * document (resets to 0 per document). So c0-0 from any document means "first claim in
+ * that document's first chunk." If multiple documents each have a claim at local position
+ * (N, M), then cN-M is ambiguous — we cannot determine which document it came from.
+ *
+ * This is distinct from buildPositionalIndex which uses document-order as a disambiguation
+ * strategy (doc 0 → chunk 0, doc 1 → chunk 1, etc). That mapping is deterministic but
+ * does NOT match what the legacy producer actually meant.
+ */
+export function getAmbiguousPositionalKeys(
+  claims: IdentifiedClaim[],
+  documentOrder: string[],
+): Set<string> {
+  // Group claims by document
+  const claimsByDoc = new Map<string, IdentifiedClaim[]>();
+  for (const claim of claims) {
+    if (!claimsByDoc.has(claim.ic_document_id)) {
+      claimsByDoc.set(claim.ic_document_id, []);
+    }
+    claimsByDoc.get(claim.ic_document_id)!.push(claim);
+  }
+
+  // For each LOCAL position (chunk=0 always since we treat each doc as one chunk,
+  // claimIdx = order within that doc), track how many documents have a claim there.
+  // The legacy producer emits c0-M for the Mth claim of a document (single chunk per doc).
+  const positionOccupancy = new Map<string, number>(); // "N:M" → count of docs having claim at that local position
+
+  for (const docId of documentOrder) {
+    const docClaims = claimsByDoc.get(docId) ?? [];
+    // Each document's claims map to local positions c0-0, c0-1, c0-2, ...
+    // (N=0 because each document is treated as a single chunk by the producer)
+    for (let claimIdx = 0; claimIdx < docClaims.length; claimIdx++) {
+      const key = `0:${claimIdx}`;
+      positionOccupancy.set(key, (positionOccupancy.get(key) ?? 0) + 1);
+    }
+  }
+
+  const ambiguous = new Set<string>();
+  for (const [key, count] of positionOccupancy) {
+    if (count > 1) {
+      const [chunk, claim] = key.split(":");
+      ambiguous.add(`c${chunk}-${claim}`);
+    }
+  }
+  return ambiguous;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,8 +327,9 @@ export function buildReconciliationIndex(
     unresolved_no_positional_data: 0,
   };
 
-  // Build positional index
+  // Build positional index + ambiguous refs set
   const positionalIndex = buildPositionalIndex(claims, documentOrder);
+  const ambiguousPositionalRefs = getAmbiguousPositionalKeys(claims, documentOrder);
 
   for (const ref of legacyRefs) {
     summary.total_attempted++;
@@ -281,6 +362,22 @@ export function buildReconciliationIndex(
       }
 
       case "positional": {
+        // CRITICAL: Check ambiguity FIRST — ambiguous positional refs MUST fail closed.
+        // Historical producer semantics: cN-M where N = chunk_index within a single document
+        // (resets to 0 per document). Since all documents start at chunk 0, many positional
+        // keys are shared across multiple IC documents and cannot be resolved deterministically.
+        if (ambiguousPositionalRefs.has(ref)) {
+          records.push({
+            legacy_ref: ref,
+            resolved_claim_id: null,
+            outcome: "unresolved_ambiguous",
+            candidates_considered: documentOrder.length,
+            rationale: `Positional ref '${ref}' maps to the same chunk:claim position in ${documentOrder.length} IC documents — ambiguous, fail-closed`,
+          });
+          summary.unresolved_ambiguous++;
+          break;
+        }
+
         const key = `${parsed.chunkIndex}:${parsed.claimIndex}`;
         const resolved = positionalIndex.get(key);
 

@@ -11,7 +11,7 @@
 |--------|-------|
 | Total Q2 candidates | 46 |
 | Claims ledger | 274 (97 screening + 88 2nd IC + 89 3rd IC) |
-| IC documents | 3 |
+| IC documents | 4 (incl. 4th IC: `989537e9-cad0-4588-b7d0-5391d29a44d8`) |
 | Ambiguous legacy IDs (cross-doc) | 579 |
 
 ## Resolution Method Counts
