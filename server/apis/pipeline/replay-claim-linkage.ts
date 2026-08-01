@@ -1,20 +1,22 @@
 /**
- * ReplayClaimLinkage — Q3 Claim-Linkage Replay
+ * ReplayClaimLinkage — Q3 Claim-Linkage Replay (Strict Enforcement)
  *
  * Loads the 46 retained contradiction candidates from the Q2 disposition ledger
- * and classifies each as claim-linked (with verdict) or not-linked-to-IC-claim.
+ * and applies strict claim resolution, authority validation, and verdict assignment.
  *
- * For each candidate, produces:
- *   - The exact originating IC claim and source location; OR
- *   - The reason no valid originating claim exists
+ * ENFORCEMENT RULES:
+ *   - A candidate is claim-linked ONLY when its claim_id resolves to exactly one
+ *     claims-ledger record from an eligible IC document.
+ *   - Unresolved/missing claim IDs → invalid_or_unresolved_claim_reference (excluded from Q4)
+ *   - Invalid evidence authority → invalid_evidence_authority (excluded from Q4)
+ *   - No severity-based truth inference — verdicts derive from evidence content only
+ *   - Full 17-field provenance for every reportable row
  *
- * ACCEPTANCE CRITERIA:
- *   - 100% of retained findings have either an originating IC claim or explicit not-linked reason
- *   - No standalone FDD/CDD/model observation remains as a finding without a claim
- *   - Missing evidence → unverifiable (not invented contradiction)
- *   - Evidence from inappropriate source type → rejected
- *   - Existing quantitative reconciliation behavior unchanged
- *   - Replay is deterministic and fully accounted for
+ * CORE INVARIANT: No resolved IC claim, no contradiction-check finding.
+ *
+ * OUTPUT:
+ *   - Per-candidate: disposition, q4_eligible, full provenance, authority decision
+ *   - Aggregate: eligibility counts, disposition breakdown, accounting
  *
  * Persists the Q3 replay at tree_level=96, node_index=0.
  */
@@ -22,8 +24,11 @@ import { api, z, postgres } from "@superblocksteam/sdk-api";
 import {
   classifyClaimLinkage,
   type ClaimLinkageResult,
-  type QualitativeClaim,
+  type ClaimLinkageDisposition,
+  Q4_ELIGIBLE_ADVERSE,
+  Q4_ELIGIBLE_ALL,
   CLAIM_LINKAGE_DISPOSITIONS,
+  ClaimProvenanceSchema,
 } from "./claim-linkage.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -33,15 +38,18 @@ const ClaimLinkageRecordSchema = z.object({
   corpus_index: z.number(),
   title: z.string(),
   claim_linkage_disposition: z.string(),
-  originating_claim: z.any().nullable(),
+  q4_eligible: z.boolean(),
+  claim_provenance: ClaimProvenanceSchema.nullable(),
+  authority_class: z.string(),
+  authority_valid: z.boolean(),
+  authority_rationale: z.string(),
   reason: z.string(),
   evidence_source_type: z.string().nullable(),
-  evidence_authority_valid: z.boolean(),
 });
 
 export default api({
   name: "ReplayClaimLinkage",
-  description: "Q3 replay: links 46 retained candidates to originating IC claims or classifies as not-linked",
+  description: "Q3 replay: strict claim resolution, authority enforcement, full provenance",
 
   integrations: {
     db: postgres(IC_DILIGENCE_DB),
@@ -54,9 +62,17 @@ export default api({
 
   output: z.object({
     total_candidates: z.number(),
-    claim_linked: z.number(),
-    not_linked: z.number(),
+    q4_eligible_count: z.number(),
+    q4_ineligible_count: z.number(),
     linkage_by_disposition: z.record(z.string(), z.number()),
+    eligibility_breakdown: z.object({
+      claim_linked_adverse: z.number(),
+      claim_linked_confirmed: z.number(),
+      not_linked: z.number(),
+      invalid_claim_reference: z.number(),
+      invalid_authority: z.number(),
+      other_ineligible: z.number(),
+    }),
     linkage_results: z.array(ClaimLinkageRecordSchema),
     // Accounting
     silent_losses: z.number(),
@@ -142,40 +158,17 @@ export default api({
         : claimsRow[0].payload;
       const claims = claimsPayload?.claims || [];
       for (const claim of claims) {
-        // Claims from Step 0.8 use a compound ID format
         const claimId = claim.claim_id || claim.id;
         if (claimId) claimMap.set(claimId, claim);
       }
     }
 
-    // 5. Process each candidate through claim-linkage
+    // 5. Process each candidate through strict claim-linkage
     const linkageResults: ClaimLinkageResult[] = [];
     const dispositionCounts: Record<string, number> = {};
 
     for (const candidate of candidates) {
       const finding = findingsMap.get(candidate.finding_id);
-
-      // Attempt to resolve originating claim
-      let resolvedClaim: QualitativeClaim | null = null;
-      const claimId = finding?.originating_claim_id || finding?.claim_id ||
-                      (finding?.claim_ids?.length ? finding.claim_ids[0] : null);
-
-      if (claimId && claimMap.has(claimId)) {
-        const rawClaim = claimMap.get(claimId)!;
-        resolvedClaim = {
-          originating_claim_id: claimId,
-          claim_text: rawClaim.verbatim_snippet || rawClaim.claim_text || "",
-          claim_type: rawClaim.claim_category || rawClaim.claim_type || "operating_metric",
-          ic_source_document: rawClaim.source_doc || "",
-          ic_source_location: rawClaim.source_page || "unknown",
-          memo_version: rawClaim.memo_version ?? null,
-          normalized_claim: `${rawClaim.metric ?? ""} ${rawClaim.scope_qualifier ?? ""} ${rawClaim.period ?? ""}`.trim() || rawClaim.claim_text || "",
-          verification_source: finding?.source_docs?.[0] ?? null,
-          verification_evidence: finding?.evidence ?? finding?.detail ?? null,
-          comparison_performed: finding?.full_analysis ?? null,
-          verdict: deriveVerdictFromFinding(finding, candidate.severity),
-        };
-      }
 
       const result = classifyClaimLinkage(
         {
@@ -191,8 +184,11 @@ export default api({
           claim_ids: finding?.claim_ids,
           claim_type: finding?.claim_type,
           finding_kind: finding?.finding_kind,
+          evidence: finding?.evidence,
+          doc_filename: finding?.source_docs?.[0] ?? null,
+          doc_type: finding?.doc_type ?? null,
         },
-        resolvedClaim,
+        claimMap,
       );
 
       linkageResults.push(result);
@@ -200,22 +196,51 @@ export default api({
         (dispositionCounts[result.claim_linkage_disposition] ?? 0) + 1;
     }
 
-    // 6. Accounting
-    const claimLinked = linkageResults.filter(r => r.claim_linkage_disposition !== "not_linked_to_IC_claim").length;
-    const notLinked = linkageResults.filter(r => r.claim_linkage_disposition === "not_linked_to_IC_claim").length;
+    // 6. Compute eligibility breakdown
+    const q4EligibleCount = linkageResults.filter(r => r.q4_eligible).length;
+    const q4IneligibleCount = linkageResults.filter(r => !r.q4_eligible).length;
+
+    const eligibilityBreakdown = {
+      claim_linked_adverse: linkageResults.filter(r =>
+        Q4_ELIGIBLE_ADVERSE.has(r.claim_linkage_disposition as ClaimLinkageDisposition)
+      ).length,
+      claim_linked_confirmed: linkageResults.filter(r =>
+        r.claim_linkage_disposition === "claim_linked_confirmed"
+      ).length,
+      not_linked: linkageResults.filter(r =>
+        r.claim_linkage_disposition === "not_linked_to_IC_claim"
+      ).length,
+      invalid_claim_reference: linkageResults.filter(r =>
+        r.claim_linkage_disposition === "invalid_or_unresolved_claim_reference"
+      ).length,
+      invalid_authority: linkageResults.filter(r =>
+        r.claim_linkage_disposition === "invalid_evidence_authority"
+      ).length,
+      other_ineligible: linkageResults.filter(r =>
+        !r.q4_eligible &&
+        r.claim_linkage_disposition !== "not_linked_to_IC_claim" &&
+        r.claim_linkage_disposition !== "invalid_or_unresolved_claim_reference" &&
+        r.claim_linkage_disposition !== "invalid_evidence_authority" &&
+        r.claim_linkage_disposition !== "claim_linked_confirmed"
+      ).length,
+    };
+
+    // 7. Accounting — strict: every input must have exactly one output
     const silentLosses = totalCandidates - linkageResults.length;
 
-    // 7. Persist Q3 replay at tree_level=96
+    // 8. Persist Q3 replay at tree_level=96
     const q3Payload = JSON.stringify({
       _replay_metadata: {
         run_id: runId,
         module_id: moduleId,
-        replay_type: "Q3_claim_linkage",
+        replay_type: "Q3_claim_linkage_strict",
         replay_timestamp: new Date().toISOString(),
+        schema_version: "2.0.0",
         total_candidates: totalCandidates,
-        claim_linked: claimLinked,
-        not_linked: notLinked,
+        q4_eligible_count: q4EligibleCount,
+        q4_ineligible_count: q4IneligibleCount,
         silent_losses: silentLosses,
+        eligibility_breakdown: eligibilityBreakdown,
       },
       linkage_by_disposition: dispositionCounts,
       results: linkageResults,
@@ -235,65 +260,13 @@ export default api({
 
     return {
       total_candidates: totalCandidates,
-      claim_linked: claimLinked,
-      not_linked: notLinked,
+      q4_eligible_count: q4EligibleCount,
+      q4_ineligible_count: q4IneligibleCount,
       linkage_by_disposition: dispositionCounts,
+      eligibility_breakdown: eligibilityBreakdown,
       linkage_results: linkageResults,
       silent_losses: silentLosses,
       checkpoint_id: persisted.id,
     };
   },
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Derives a verdict from the finding's existing metadata.
- * For reconciliation findings (data_divergence), the verdict is "contradicted".
- * For unreconcilable findings, the verdict is "unverifiable".
- * For other findings, infers from severity + content.
- */
-function deriveVerdictFromFinding(finding: any, severity: string | null): "confirmed" | "contradicted" | "partially_supported" | "unsupported" | "unverifiable" | "materially_changed" {
-  if (!finding) return "unverifiable";
-
-  const kind = finding.finding_kind;
-  const title = String(finding.title ?? "").toLowerCase();
-  const detail = String(finding.detail ?? finding.full_analysis ?? "").toLowerCase();
-
-  // Data divergence → contradicted or materially_changed
-  if (kind === "data_divergence") {
-    if (title.includes("material change") || title.includes("revision")) {
-      return "materially_changed";
-    }
-    return "contradicted";
-  }
-
-  // Unreconcilable → unverifiable
-  if (kind === "unreconcilable") return "unverifiable";
-
-  // Scope mismatch → unverifiable
-  if (kind === "scope_mismatch") return "unverifiable";
-
-  // Cross-version → materially_changed
-  if (kind === "cross_version") return "materially_changed";
-
-  // Severity-based heuristic
-  if (severity === "critical") {
-    if (title.includes("unsupported") || detail.includes("unsupported")) return "unsupported";
-    return "contradicted";
-  }
-  if (severity === "warning") {
-    if (title.includes("partial") || detail.includes("partially")) return "partially_supported";
-    if (title.includes("revision") || title.includes("change")) return "materially_changed";
-    return "contradicted";
-  }
-
-  // Info severity with adversity
-  if (title.includes("inconsisten") || title.includes("discrepanc") || title.includes("diverge")) {
-    return "partially_supported";
-  }
-
-  return "unverifiable";
-}

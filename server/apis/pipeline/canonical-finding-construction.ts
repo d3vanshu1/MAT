@@ -31,7 +31,6 @@
 
 import { z } from "@superblocksteam/sdk-api";
 import type { CanonicalKey } from "./canonical-issue-identity.js";
-import type { QualitativeClaim } from "./claim-linkage.js";
 
 // ---------------------------------------------------------------------------
 // Evidence record schema
@@ -335,24 +334,31 @@ function getAuthorityStatus(sourceTag: string): "authoritative" | "secondary" | 
 }
 
 function deriveVerificationStatus(
-  members: RawFinding[],
+  _members: RawFinding[],
   comparisons: Array<{ verdict: string }>
 ): CanonicalFinding["verification_status"] {
-  // Aggregate verdicts from comparisons
-  const verdicts = comparisons.map(c => c.verdict);
-  if (verdicts.includes("contradicted")) return "contradicted";
-  if (verdicts.includes("materially_changed")) return "materially_changed";
-  if (verdicts.includes("partially_supported")) return "partially_supported";
-  if (verdicts.includes("unsupported")) return "unsupported";
-  if (verdicts.includes("unverifiable")) return "unverifiable";
+  // Derive verification status ONLY from Q3 verdicts in comparison results.
+  // PROHIBITED: Do NOT infer from severity (critical/warning/info).
+  // Missing or conflicting verdicts → unverifiable or degraded.
+  const verdicts = comparisons.map(c => c.verdict).filter(v => v && v !== "");
+
+  if (verdicts.length === 0) {
+    // No verdict data available — fail closed to unverifiable
+    return "unverifiable";
+  }
+
+  // Confirmed claims must not become adverse findings
   if (verdicts.every(v => v === "confirmed")) return "confirmed";
 
-  // Fall back to finding severity
-  const hasCritical = members.some(m => m.severity === "critical");
-  const hasWarning = members.some(m => m.severity === "warning");
-  if (hasCritical) return "contradicted";
-  if (hasWarning) return "materially_changed";
-  return "unverifiable";
+  // Adverse verdicts — most severe wins (from Q3 actual verdicts)
+  if (verdicts.includes("contradicted")) return "contradicted";
+  if (verdicts.includes("materially_changed")) return "materially_changed";
+  if (verdicts.includes("unsupported")) return "unsupported";
+  if (verdicts.includes("partially_supported")) return "partially_supported";
+  if (verdicts.includes("unverifiable")) return "unverifiable";
+
+  // Conflicting mix of confirmed + non-confirmed → degraded
+  return "degraded";
 }
 
 function deriveCanonicalTitle(key: CanonicalKey, members: RawFinding[]): string {

@@ -145,16 +145,49 @@ export default api({
       corpusTitleMap.set(e.finding_id, e.title);
     }
 
-    // 3. Load claims ledger
+    // 3. Load Q3 checkpoint (tree_level=96) for real verdicts
+    const Q3Row = z.object({ merged_json: z.any() });
+    const q3Rows = await ctx.integrations.db.query(
+      `SELECT merged_json FROM merge_checkpoints
+       WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
+       ORDER BY updated_at DESC LIMIT 1`,
+      Q3Row,
+      [runId],
+      { label: "Load Q3 claim-linkage for real verdicts" }
+    );
+
+    // Build Q3 lookup for verdicts
+    const q3VerdictMap = new Map<string, { verdict: string; claim_id: string | null; claim_text: string; memo_version: string | null }>();
+    if (q3Rows.length > 0) {
+      const q3Parsed = typeof q3Rows[0].merged_json === "string"
+        ? JSON.parse(q3Rows[0].merged_json)
+        : q3Rows[0].merged_json;
+      const q3Results = (q3Parsed.results ?? []) as Array<any>;
+      for (const r of q3Results) {
+        const provenance = r.claim_provenance;
+        q3VerdictMap.set(r.finding_id, {
+          verdict: provenance?.verdict ?? "unverifiable",
+          claim_id: provenance?.claim_id ?? null,
+          claim_text: provenance?.exact_claim_text ?? "",
+          memo_version: provenance?.memo_version ?? null,
+        });
+      }
+    }
+
+    // Also load claims ledger for supplementary claim text (NOT for verdicts)
     const claimsRows = await ctx.integrations.db.query(
       `SELECT payload FROM pipeline_checkpoints
        WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'
        ORDER BY created_at DESC LIMIT 1`,
       z.object({ payload: z.any() }),
       [runId],
-      { label: "Load claims ledger" }
+      { label: "Load claims ledger for claim text" }
     );
+
+    // Build resolvedClaims using Q3 verdicts (NOT hardcoded)
     const resolvedClaims = new Map<string, { claim_id: string; claim_text: string; memo_version: string | null; verdict: string }>();
+
+    // First populate from claims_ledger for claim text
     if (claimsRows.length > 0) {
       const claimsPayload = typeof claimsRows[0].payload === "string"
         ? JSON.parse(claimsRows[0].payload)
@@ -166,9 +199,26 @@ export default api({
             claim_id: cid,
             claim_text: claim.verbatim_snippet || claim.claim_text || "",
             memo_version: claim.memo_version ?? null,
-            verdict: "contradicted", // Will be overridden by Q3 data
+            // Default to unverifiable — NOT contradicted
+            verdict: "unverifiable",
           });
         }
+      }
+    }
+
+    // Override verdicts with Q3 real verdicts (the source of truth)
+    for (const [findingId, q3Data] of q3VerdictMap) {
+      if (q3Data.claim_id && resolvedClaims.has(q3Data.claim_id)) {
+        const existing = resolvedClaims.get(q3Data.claim_id)!;
+        existing.verdict = q3Data.verdict; // Use Q3 verdict, not hardcoded
+      } else if (q3Data.claim_id) {
+        // Claim from Q3 not in claims_ledger — still use Q3 data
+        resolvedClaims.set(q3Data.claim_id, {
+          claim_id: q3Data.claim_id,
+          claim_text: q3Data.claim_text,
+          memo_version: q3Data.memo_version,
+          verdict: q3Data.verdict,
+        });
       }
     }
 
