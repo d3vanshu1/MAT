@@ -7,18 +7,21 @@
  * bridge map so that legacy references can be resolved to the canonical ledger.
  *
  * RECONCILIATION STRATEGIES (tried in order):
- *   1. POSITIONAL: `c{chunk}-{claim}` → reconstruct by document order + claim position within doc
+ *   1. PROVENANCE-BACKED POSITIONAL: `c{chunk}-{claim}` → resolved ONLY when explicit
+ *      source-document provenance (document_id, chunk_index, claim_index) is available.
+ *      Document-order heuristics are NOT used — they are unsafe.
  *   2. METRIC-PERIOD: For slug-style refs like `numeric_verification_fy2026_divergence` → match by metric+period+keywords
  *   3. DIRECT: If the ref happens to be a `clm-v1-*` ID already → pass through
  *
- * AMBIGUITY HANDLING:
- *   - Zero matches → unresolved (logged, not bridged)
- *   - One match → bridged successfully
- *   - Multiple matches → ambiguous (rejected, not bridged)
+ * POSITIONAL RESOLUTION POLICY:
+ *   - Bare cN-M refs WITHOUT source-document provenance are ALWAYS unresolved.
+ *   - Document-order positional mapping is REMOVED — it is provably unsafe when
+ *     N resets to 0 per document and multiple IC documents exist.
+ *   - Provenance-backed resolution requires an explicit (doc_id, chunk, claim) tuple.
  *
  * INVARIANTS:
- *   - Never fabricates a mapping — every bridge is backed by positional or content evidence
- *   - Ambiguous mappings are rejected (fail-closed)
+ *   - Never fabricates a mapping — every bridge is backed by provenance or content evidence
+ *   - No document-order heuristic — positional refs require provenance
  *   - Every reconciliation attempt is recorded with its outcome for audit
  */
 
@@ -113,127 +116,88 @@ export function parseLegacyRef(ref: string): ParsedLegacyRef {
 }
 
 // ---------------------------------------------------------------------------
-// Positional index builder
+// Positional index builder — PROVENANCE-ONLY (no document-order heuristic)
 // ---------------------------------------------------------------------------
 
 /**
- * Builds a positional index from the enriched claims ledger.
+ * Provenance record: explicit (document_id, chunk_index, claim_index) → claim_id mapping.
+ * This comes from the claim-origin-map when available.
+ */
+export interface ClaimProvenance {
+  claim_id: string;
+  document_id: string;
+  chunk_index: number;
+  claim_index: number;
+}
+
+/**
+ * Builds a positional index from EXPLICIT provenance records only.
  *
- * HISTORICAL PRODUCER SEMANTICS (proven from extraction-prompt.ts chunkDocument):
- *   N in `c{N}-{M}` = chunk_index WITHIN A SINGLE DOCUMENT (starts at 0 per doc)
- *   M in `c{N}-{M}` = claim ordinal WITHIN THAT CHUNK
+ * POLICY: Document-order positional resolution is REMOVED.
+ * Bare cN-M refs may resolve ONLY when source-document provenance is available.
+ * Without provenance, ALL positional refs are unresolved.
  *
- * CRITICAL: Since chunkIndex is document-local and resets to 0 per document,
- * the same `c0-0` reference is produced by every single-chunk document.
- * Without document identity in the reference, `c0-0` is AMBIGUOUS across documents.
- *
- * SAFE RESOLUTION (from claim-origin-map, when available):
- *   - Use the persisted (document_id, chunk_index, claim_index) provenance
- *   - If only ONE claim exists at position (N, M) → unique, resolvable
- *   - If MULTIPLE claims from different documents share (N, M) → AMBIGUOUS
- *
- * FALLBACK RESOLUTION (ledger-only, no origin map):
- *   - Group claims by document in processing order
- *   - Each document contributes ONE chunk slot (chunk N = document at index N)
- *   - M = claim ordinal within that document's claims (in extraction order)
- *   - This is the legacy heuristic: ONLY SAFE if document count equals max chunk+1
- *
- * ANY position resolved by MULTIPLE documents is AMBIGUOUS and NOT bridged.
+ * @param provenance - Explicit (doc_id, chunk_index, claim_index) → claim_id records.
+ *                     Empty array means no provenance is available (all positional = unresolved).
+ * @param documentOrder - IC document IDs (used only for the provenance-backed lookup key).
+ * @returns Map from "docIdx:chunkIdx:claimIdx" → claim_id (only unique entries).
+ *          Returns EMPTY MAP when no provenance is available (forcing all cN-M to unresolved).
  */
 export function buildPositionalIndex(
-  claims: IdentifiedClaim[],
+  provenance: ClaimProvenance[],
   documentOrder: string[],
 ): Map<string, string> {
-  const positionalMap = new Map<string, string>(); // "chunk:claim" → claim_id
-  const positionCandidates = new Map<string, string[]>(); // "chunk:claim" → [claim_ids]
-
-  // Group claims by document, preserving extraction order within each doc
-  const claimsByDoc = new Map<string, IdentifiedClaim[]>();
-  for (const claim of claims) {
-    if (!claimsByDoc.has(claim.ic_document_id)) {
-      claimsByDoc.set(claim.ic_document_id, []);
-    }
-    claimsByDoc.get(claim.ic_document_id)!.push(claim);
+  if (provenance.length === 0) {
+    // No provenance available — ALL positional refs are unresolved.
+    // This is the safe default. Document-order heuristic is NOT used.
+    return new Map();
   }
 
-  // The producer assigns chunk_index per-document (all starting at 0).
-  // Since IdentifiedClaim lacks chunk_index, we use document ORDER as the
-  // chunk index proxy — but ONLY if the mapping is unique.
-  // Each document occupies ONE chunk slot: chunk N = Nth document.
-  // Claim M = Mth claim in that document's extraction order.
-  for (let chunkIdx = 0; chunkIdx < documentOrder.length; chunkIdx++) {
-    const docId = documentOrder[chunkIdx];
-    const docClaims = claimsByDoc.get(docId) ?? [];
-
-    for (let claimIdx = 0; claimIdx < docClaims.length; claimIdx++) {
-      const key = `${chunkIdx}:${claimIdx}`;
-      if (!positionCandidates.has(key)) {
-        positionCandidates.set(key, []);
-      }
-      positionCandidates.get(key)!.push(docClaims[claimIdx].claim_id);
-    }
+  // Build doc_id → document_order_index map
+  const docIndexMap = new Map<string, number>();
+  for (let i = 0; i < documentOrder.length; i++) {
+    docIndexMap.set(documentOrder[i], i);
   }
 
-  // SAFETY: Only bridge positions that resolve to EXACTLY ONE claim
+  // With provenance, resolve using explicit (doc, chunk, claim) tuples
+  const positionCandidates = new Map<string, string[]>();
+
+  for (const record of provenance) {
+    const docIdx = docIndexMap.get(record.document_id);
+    if (docIdx === undefined) continue; // Unknown document
+
+    // Key includes document index so c0-0 in doc A ≠ c0-0 in doc B
+    const key = `${docIdx}:${record.chunk_index}:${record.claim_index}`;
+    if (!positionCandidates.has(key)) {
+      positionCandidates.set(key, []);
+    }
+    positionCandidates.get(key)!.push(record.claim_id);
+  }
+
+  // Only bridge unique positions
+  const positionalMap = new Map<string, string>();
   for (const [key, candidates] of positionCandidates) {
     if (candidates.length === 1) {
       positionalMap.set(key, candidates[0]);
     }
-    // Multiple candidates at same position → AMBIGUOUS, fail-closed
   }
-
   return positionalMap;
 }
 
 /**
- * Returns the set of legacy cN-M references that are ambiguous (same local position
- * exists in multiple documents). These MUST NOT be auto-resolved.
- *
- * Key insight: The legacy producer generates cN-M where N = chunk index WITHIN a single
- * document (resets to 0 per document). So c0-0 from any document means "first claim in
- * that document's first chunk." If multiple documents each have a claim at local position
- * (N, M), then cN-M is ambiguous — we cannot determine which document it came from.
- *
- * This is distinct from buildPositionalIndex which uses document-order as a disambiguation
- * strategy (doc 0 → chunk 0, doc 1 → chunk 1, etc). That mapping is deterministic but
- * does NOT match what the legacy producer actually meant.
+ * Returns the count of documents in the extraction corpus.
+ * ALL bare cN-M refs without provenance are unresolved regardless.
  */
-export function getAmbiguousPositionalKeys(
-  claims: IdentifiedClaim[],
+export function getPositionalResolutionPolicy(
+  provenance: ClaimProvenance[],
   documentOrder: string[],
-): Set<string> {
-  // Group claims by document
-  const claimsByDoc = new Map<string, IdentifiedClaim[]>();
-  for (const claim of claims) {
-    if (!claimsByDoc.has(claim.ic_document_id)) {
-      claimsByDoc.set(claim.ic_document_id, []);
-    }
-    claimsByDoc.get(claim.ic_document_id)!.push(claim);
-  }
-
-  // For each LOCAL position (chunk=0 always since we treat each doc as one chunk,
-  // claimIdx = order within that doc), track how many documents have a claim there.
-  // The legacy producer emits c0-M for the Mth claim of a document (single chunk per doc).
-  const positionOccupancy = new Map<string, number>(); // "N:M" → count of docs having claim at that local position
-
-  for (const docId of documentOrder) {
-    const docClaims = claimsByDoc.get(docId) ?? [];
-    // Each document's claims map to local positions c0-0, c0-1, c0-2, ...
-    // (N=0 because each document is treated as a single chunk by the producer)
-    for (let claimIdx = 0; claimIdx < docClaims.length; claimIdx++) {
-      const key = `0:${claimIdx}`;
-      positionOccupancy.set(key, (positionOccupancy.get(key) ?? 0) + 1);
-    }
-  }
-
-  const ambiguous = new Set<string>();
-  for (const [key, count] of positionOccupancy) {
-    if (count > 1) {
-      const [chunk, claim] = key.split(":");
-      ambiguous.add(`c${chunk}-${claim}`);
-    }
-  }
-  return ambiguous;
+): { provenanceAvailable: boolean; documentCount: number; resolvableCount: number } {
+  const resolvable = buildPositionalIndex(provenance, documentOrder).size;
+  return {
+    provenanceAvailable: provenance.length > 0,
+    documentCount: documentOrder.length,
+    resolvableCount: resolvable,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -304,15 +268,17 @@ export function matchByContent(
  * found in findings to deterministic claim IDs.
  *
  * @param legacyRefs - All unique legacy references found across findings
- * @param claims - The full enriched claims ledger
+ * @param claims - The full enriched claims ledger (for content matching)
  * @param documentOrder - IC document IDs in the order they were processed/extracted
  * @param claimMap - Map from claim_id → IdentifiedClaim (for direct lookups)
+ * @param provenance - Explicit positional provenance records (empty = no positional resolution)
  */
 export function buildReconciliationIndex(
   legacyRefs: string[],
   claims: IdentifiedClaim[],
   documentOrder: string[],
   claimMap: Map<string, IdentifiedClaim>,
+  provenance: ClaimProvenance[] = [],
 ): ReconciliationIndex {
   const bridge = new Map<string, string>();
   const records: ReconciliationRecord[] = [];
@@ -327,9 +293,8 @@ export function buildReconciliationIndex(
     unresolved_no_positional_data: 0,
   };
 
-  // Build positional index + ambiguous refs set
-  const positionalIndex = buildPositionalIndex(claims, documentOrder);
-  const ambiguousPositionalRefs = getAmbiguousPositionalKeys(claims, documentOrder);
+  // Build positional index from explicit provenance only (no document-order heuristic)
+  const positionalIndex = buildPositionalIndex(provenance, documentOrder);
 
   for (const ref of legacyRefs) {
     summary.total_attempted++;
@@ -362,57 +327,60 @@ export function buildReconciliationIndex(
       }
 
       case "positional": {
-        // CRITICAL: Check ambiguity FIRST — ambiguous positional refs MUST fail closed.
-        // Historical producer semantics: cN-M where N = chunk_index within a single document
-        // (resets to 0 per document). Since all documents start at chunk 0, many positional
-        // keys are shared across multiple IC documents and cannot be resolved deterministically.
-        if (ambiguousPositionalRefs.has(ref)) {
+        // POLICY: Without source-document provenance, ALL positional refs are unresolved.
+        // Document-order heuristic is NOT used. Only explicit provenance can resolve cN-M.
+        if (provenance.length === 0) {
           records.push({
             legacy_ref: ref,
             resolved_claim_id: null,
-            outcome: "unresolved_ambiguous",
-            candidates_considered: documentOrder.length,
-            rationale: `Positional ref '${ref}' maps to the same chunk:claim position in ${documentOrder.length} IC documents — ambiguous, fail-closed`,
+            outcome: "unresolved_no_positional_data",
+            candidates_considered: 0,
+            rationale: `Positional ref '${ref}' cannot be resolved — no source-document provenance available. Document-order resolution is disabled.`,
           });
-          summary.unresolved_ambiguous++;
+          summary.unresolved_no_positional_data++;
           break;
         }
 
-        const key = `${parsed.chunkIndex}:${parsed.claimIndex}`;
-        const resolved = positionalIndex.get(key);
+        // With provenance, attempt to resolve using docIdx:chunkIdx:claimIdx key
+        // The ref cN-M encodes (chunk_within_doc=N, claim_within_chunk=M)
+        // We need to check ALL documents at position (N, M)
+        const matchingKeys: string[] = [];
+        for (let docIdx = 0; docIdx < documentOrder.length; docIdx++) {
+          const key = `${docIdx}:${parsed.chunkIndex}:${parsed.claimIndex}`;
+          if (positionalIndex.has(key)) {
+            matchingKeys.push(key);
+          }
+        }
 
-        if (resolved) {
+        if (matchingKeys.length === 1) {
+          const resolved = positionalIndex.get(matchingKeys[0])!;
           bridge.set(ref, resolved);
           records.push({
             legacy_ref: ref,
             resolved_claim_id: resolved,
             outcome: "bridged_positional",
             candidates_considered: 1,
-            rationale: `Positional match: chunk=${parsed.chunkIndex}, claim=${parsed.claimIndex} → ${resolved}`,
+            rationale: `Provenance-backed positional match: ${matchingKeys[0]} → ${resolved}`,
           });
           summary.bridged_positional++;
+        } else if (matchingKeys.length > 1) {
+          records.push({
+            legacy_ref: ref,
+            resolved_claim_id: null,
+            outcome: "unresolved_ambiguous",
+            candidates_considered: matchingKeys.length,
+            rationale: `Positional ref '${ref}' matches ${matchingKeys.length} documents at (chunk=${parsed.chunkIndex}, claim=${parsed.claimIndex}) — ambiguous, fail-closed`,
+          });
+          summary.unresolved_ambiguous++;
         } else {
-          // Check if the chunk index is out of range
-          const maxChunk = documentOrder.length - 1;
-          if (parsed.chunkIndex! > maxChunk) {
-            records.push({
-              legacy_ref: ref,
-              resolved_claim_id: null,
-              outcome: "unresolved_no_positional_data",
-              candidates_considered: 0,
-              rationale: `Chunk index ${parsed.chunkIndex} exceeds document count (max=${maxChunk})`,
-            });
-            summary.unresolved_no_positional_data++;
-          } else {
-            records.push({
-              legacy_ref: ref,
-              resolved_claim_id: null,
-              outcome: "unresolved_no_match",
-              candidates_considered: 0,
-              rationale: `Positional key '${key}' not found — claim index may exceed claims in document ${parsed.chunkIndex}`,
-            });
-            summary.unresolved_no_match++;
-          }
+          records.push({
+            legacy_ref: ref,
+            resolved_claim_id: null,
+            outcome: "unresolved_no_match",
+            candidates_considered: 0,
+            rationale: `Provenance has no claim at position (chunk=${parsed.chunkIndex}, claim=${parsed.claimIndex}) in any document`,
+          });
+          summary.unresolved_no_match++;
         }
         break;
       }
