@@ -1,0 +1,47 @@
+finding_id,legacy_reference,source_document_id,source_document_name,source_page_or_location,deterministic_claim_id,exact_claim_text,resolution_method,match_count,confidence,disposition,rejection_reason,q3_eligible
+09b0ed19-507a-468f-b523-0001ededcc62,c3-0,SCG IC Screening Memo vS.pdf (part 6),,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+13b32cad-c75e-4e73-bb62-1da99bb1167f,,Project Saint - Financial Model_VS.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+16030191-4755-49e8-8240-ff17176651b8,c3-5,SCG - Project Saint-IM_vF.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+16728e2b-e068-4cb8-a977-b751b7fa89c2,,scg - project saint - financial model_vs.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+1b7cc197-0a16-4574-9e24-480c6eedae8c,,,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+1d2f9830-e547-4214-89bb-daa759f0765a,,SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf (part 3),,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+1f523e8f-6bba-4e68-a8c0-173c4282796b,c1-8,2026-05-18 SCG - 2nd IC Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+209fbadc-7dec-43cf-886c-8be1abbd3379,c2-12,SCG IC Screening Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+20e3fdf6-170f-4fdb-9e9b-a7e9c782ef04,c7-2,2026-05-18 SCG - 2nd IC Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+2f129733-a253-41bb-81e1-b74b44bfb260,,Numeric Verification Report,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+3362932f-32da-4b3c-9912-73c000665b13,c3-8,SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+3472b88d-4bbf-419a-b769-104a8eeba5f8,c1-11,project saint - financial model_vs.xlsx,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+39c4d73c-c0e6-429f-a3a3-6428feaa9743,c0-7,SCG IC Screening Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+3f697082-2c3f-46d3-b1fd-937fa04cb7c7,,,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+4ae09093-36f0-4864-a8c2-76d5e11c6a0f,,Numeric Verification Report,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+4f52f38d-b4d0-47d5-a9c4-bafb2b70f33a,numeric_verification_fy2026_divergence,SCG - Project Saint-IM_vF.pdf (part 28),,,,,unresolved_no_match,0,none,unresolved_rejected,"Slug 'numeric_verification_fy2026_divergence' does not match any claim by metric/period/scope",false
+555dc3fb-44f1-4abe-93f3-1de7ff5d2e2b,,2026-06-15 SCG - 3rd IC Memo vS.pdf,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+59b907fd-309f-4d24-8f02-526fc28f3f59,,Numeric Verification Report (cross-version divergence data),,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+6589ec57-a914-4466-9fac-5335250c32b1,,SCG - Project Saint - Financial Model_vS.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+66403a35-fe4e-4aa1-9afd-10b21c1ec945,numverify_2026_revenue_divergence,Project Saint - Financial Model_vs.xlsx,,,,,unresolved_no_match,0,none,unresolved_rejected,"Slug 'numverify_2026_revenue_divergence' does not match any claim by metric/period/scope",false
+66cf87c9-0344-45f7-9d32-0d466e636b68,,scg - project saint - financial model_vs.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+6a80d131-924e-4206-aeaf-a5840beb7718,c1-6,SCG IC Screening Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+6f414af3-c1da-490a-b05c-d4fe4614ea88,c1-1,2026-05-18 SCG - 2nd IC Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+75483ba9-87f7-4335-bfe2-2405adbd4428,c0-7,2026-05-18 SCG - 2nd IC Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+7b1aa12d-d074-429f-9fee-a2f1da668076,c1-4,SCG IC Screening Memo vS.pdf (part 7),,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+7f8879fa-74dc-49c5-9f82-c78c1fdb0eb6,ic_memo_returns_improved_23.4pct_4_1,2026-06-21 Saint IC update_vS.pdf,,,,,unresolved_ambiguous,26,none,unresolved_rejected,"Multiple claims match slug keywords",false
+98625859-1f03-40bf-b476-95aee23211e2,,,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+a090a7aa-9618-4f64-b09a-d7b8633f4a94,,Project Saint - Financial Model_vs.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+a28e8292-9707-40bb-93f0-f298da97729c,c21-0,2026-06-15 SCG - 3rd IC Memo vS.pdf (part 21),,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+aa5faf18-2ab4-4a07-9920-e37e5ed066e3,c0-6,2026-06-15 SCG - 3rd IC Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+b0c91b78-7b81-4524-b36b-3a19a7099b11,,Project Saint - Financial Model_vs.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+bfc2ade3-122d-462e-81a9-6dc77a48b0c3,part_39_claim_sip_calls_margin,SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf,,,,,unresolved_no_match,0,none,unresolved_rejected,"Slug 'part_39_claim_sip_calls_margin' does not match any claim by metric/period/scope",false
+c9f62ee0-9118-4649-8115-fa01a67f61c3,ic_memo_returns_improved_23.4pct_4_1,2026-06-21 Saint IC update_vS.pdf,,,,,unresolved_ambiguous,26,none,unresolved_rejected,"Multiple claims match slug keywords",false
+db0fdb3b-8161-4ea7-afdb-d568780ce14c,,,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+ddb8fde1-2584-4d20-b4c3-3afdd9f9cbb6,,Numeric Verification Report,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+dfe22f4e-8313-431c-bf0c-b3b87241fff1,c4-1,SCG IC Screening Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+e087ad67-46f1-45ff-a918-7acad23a1abb,,Project Saint - Financial Model_vs.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+e2de290b-cef1-40c5-bbd4-5287c1655faa,,SCG - Project Saint - Financial Model_vS.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+e52c5b6e-5c58-4869-853f-27d2cb540215,c1-6,2026-05-18 SCG - 2nd IC Memo vS.pdf,,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+eb6b24ed-0558-463c-ba79-b0c85bb11d17,,,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+f46ae205-825d-4368-ac15-1a16e3963c99,c0-6,SCG - Project Saint-IM_vF.pdf (part 12),,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+f89222b8-5093-4407-9e63-3504282314d6,c22-2,SCG - Project Saint-IM_vF.pdf (part 22),,,,,unresolved_ambiguous,0,none,unresolved_rejected,"Ambiguous: same positional ID exists in multiple IC documents",false
+fc583588-a128-48b7-a79f-676742c837c8,,Project Saint - Financial Model_vS - updated for CT to Mar-26 vF.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+fcb2e225-8899-48ec-b25b-13772fd279d6,,SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf (part 32),,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+feca0064-794b-4f4a-ba73-1b2568b8eab8,,Project Saint - Financial Model_VS.xlsx,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false
+ffa53ba3-e9a7-4303-9bc4-c1293b3298b9,,Numeric Verification Report,,,,,unresolved_missing_ref,0,none,unresolved_rejected,"No claim reference present on finding",false

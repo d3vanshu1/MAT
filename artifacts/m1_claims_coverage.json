@@ -1,0 +1,53 @@
+{
+  "artifact_type": "m1_claims_coverage",
+  "deal_id": "c46b4129-8a16-48ae-ad3a-1da061255445",
+  "run_id": "33a88bb1-d2b6-4ee8-81f7-335573c28c73",
+  "generation_timestamp": "2026-08-01T08:05:00.000Z",
+  "claims_ledger_checkpoint_id": "d8ddd182-fc93-443e-83e7-8324f74bc6ad",
+  "total_persisted_claims": 263,
+  "claims_by_memo": {
+    "screening": 89,
+    "2nd_ic": 87,
+    "3rd_ic": 87,
+    "21_june_update": 0
+  },
+  "ic_documents": [
+    {
+      "document_id": "7d059993-c5a2-4e12-8eaf-2f5c8e1c7e9b",
+      "memo_version": "screening",
+      "file_name": "SCG IC Screening Memo vS.pdf",
+      "claims_extracted": 89
+    },
+    {
+      "document_id": "01026268-70b2-4b5e-b71f-b9c81c6d4ca7",
+      "memo_version": "2nd_ic",
+      "file_name": "2026-05-18 SCG - 2nd IC Memo vS.pdf",
+      "claims_extracted": 87
+    },
+    {
+      "document_id": "125261e4-a152-457f-8c29-3e8c7d22f6a5",
+      "memo_version": "3rd_ic",
+      "file_name": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+      "claims_extracted": 87
+    },
+    {
+      "document_id": "694e184c-bf4e-4948-8dd3-df7565d91781",
+      "memo_version": "21_june_update",
+      "file_name": "2026-06-21 Saint IC update_vS.pdf",
+      "claims_extracted": 0
+    }
+  ],
+  "deduplication": {
+    "redundant_extractions_removed": 11,
+    "deduplication_strategy": "claim_id_hash_uniqueness",
+    "note": "11 extractions from overlapping chunk boundaries produced duplicate claim_ids and were deduplicated during ReplayPopulateClaimsLedger"
+  },
+  "coverage_assessment": {
+    "total_ic_documents_tagged": 4,
+    "documents_with_claims": 3,
+    "documents_with_zero_claims": 1,
+    "zero_claim_document": "694e184c-bf4e-4948-8dd3-df7565d91781",
+    "coverage_percentage": 75.0,
+    "note": "21 June Update was processed through extraction pipeline but yielded 0 claims — see m1_update_zero_claim_diagnostic.json"
+  }
+}

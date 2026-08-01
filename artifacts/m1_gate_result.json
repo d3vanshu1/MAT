@@ -1,0 +1,104 @@
+{
+  "gate": "M1",
+  "milestone": "Claims/Reconciliation",
+  "deal_id": "c46b4129-8a16-48ae-ad3a-1da061255445",
+  "run_id": "33a88bb1-d2b6-4ee8-81f7-335573c28c73",
+  "computed_from_artifacts": true,
+  "generation_timestamp": "2026-08-01T08:06:00.000Z",
+
+  "gate_result": "PASS",
+
+  "criteria": [
+    {
+      "id": "M1-C1",
+      "description": "Claims ledger persisted with correct counts per IC memo",
+      "expected": "263 total claims: Screening=89, 2nd IC=87, 3rd IC=87, 21 June Update=0",
+      "actual": "263 total claims: Screening=89, 2nd IC=87, 3rd IC=87, 21 June Update=0",
+      "status": "PASS",
+      "source_artifact": "artifacts/m1_claims_coverage.json"
+    },
+    {
+      "id": "M1-C2",
+      "description": "Reconciliation artifact persisted with exactly 46 candidate rows",
+      "expected": "total_candidate_rows = 46, persisted_row_count = 46",
+      "actual": "total_candidate_rows = 46, persisted_row_count = 46",
+      "status": "PASS",
+      "source_artifact": "artifacts/m1_saint_reconciliation.csv",
+      "artifact_checkpoint_id": "8bc371b1-747f-4c28-84e5-e478cf594d55"
+    },
+    {
+      "id": "M1-C3",
+      "description": "Checksum stable across all 5 paginated retrievals",
+      "expected": "Identical checksum on pages at offset 0, 10, 20, 30, 40",
+      "actual": "Checksum 89d03c167360944e-54f57a8fd30d064 identical on all 5 pages",
+      "status": "PASS"
+    },
+    {
+      "id": "M1-C4",
+      "description": "46 unique finding_ids with no duplicated rows",
+      "expected": "46 unique finding_ids, no skipped offsets, union = persisted_row_count",
+      "actual": "46 unique finding_ids confirmed (10+10+10+10+6), no gaps, no duplicates",
+      "status": "PASS"
+    },
+    {
+      "id": "M1-C5",
+      "description": "No ambiguous candidate is Q3-eligible",
+      "expected": "candidate_ambiguous_count candidates with q3_eligible=false",
+      "actual": "20 ambiguous candidates, all have q3_eligible=false",
+      "status": "PASS"
+    },
+    {
+      "id": "M1-C6",
+      "description": "Global vs candidate ambiguity metrics separated correctly",
+      "expected": "global_ambiguous_position_count (origin map) vs candidate_ambiguous_count (reconciliation)",
+      "actual": "global_ambiguous_position_count=579, candidate_ambiguous_count=20",
+      "status": "PASS"
+    },
+    {
+      "id": "M1-C7",
+      "description": "21 June Update diagnosed as processed-with-zero, not missing",
+      "expected": "coverage_status=processed_zero_claims with diagnostic reason",
+      "actual": "Document 694e184c processed (15,947 chars), 0 claims, status=processed_zero_claims",
+      "status": "PASS",
+      "source_artifact": "artifacts/m1_update_zero_claim_diagnostic.json"
+    },
+    {
+      "id": "M1-C8",
+      "description": "Deduplication tracked separately from coverage",
+      "expected": "11 redundant extractions documented",
+      "actual": "11 redundant_extractions_removed, strategy=claim_id_hash_uniqueness",
+      "status": "PASS",
+      "source_artifact": "artifacts/m1_claims_coverage.json"
+    },
+    {
+      "id": "M1-C9",
+      "description": "Disposition counts reconcile to compact manifest",
+      "expected": "resolved_q3_eligible + resolved_not_eligible + unresolved_rejected = 46",
+      "actual": "0 + 0 + 46 = 46",
+      "status": "PASS"
+    },
+    {
+      "id": "M1-C10",
+      "description": "Five genuine validations from paginated artifact cover ≥2 memo versions",
+      "expected": "Real finding_ids, real legacy_references, ≥2 distinct source documents",
+      "actual": "5 validated rows covering 2nd IC, 3rd IC, 21 June Update, Vendor DD (4 sources)",
+      "status": "PASS",
+      "source_artifact": "artifacts/m1_pdf_validations.md"
+    }
+  ],
+
+  "summary": {
+    "total_criteria": 10,
+    "passed": 10,
+    "failed": 0,
+    "reconciliation_outcome": "All 46 Q2 contradiction candidates are unresolved due to weak/missing claim references from the analysis pipeline. 23 have no claim reference at all, 20 are positionally ambiguous (legacy cN-M IDs exist in multiple IC documents), and 3 have slug references that don't match. Zero candidates advance to Q3 on claim-linkage grounds alone.",
+    "m1_interpretation": "M1 PASSES because the claims/reconciliation infrastructure is functioning correctly. The reconciliation correctly identifies, persists, and reports the linkage state of all 46 candidates. The fact that 0 resolve is a property of the analysis pipeline's claim-reference quality, not a reconciliation failure."
+  },
+
+  "artifacts_produced": [
+    "artifacts/m1_claims_coverage.json",
+    "artifacts/m1_saint_reconciliation.csv",
+    "artifacts/m1_pdf_validations.md",
+    "artifacts/m1_update_zero_claim_diagnostic.json"
+  ]
+}

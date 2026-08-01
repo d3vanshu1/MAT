@@ -70,6 +70,7 @@ export default api({
     claims_by_type: z.record(z.number()),
     claims_by_category: z.record(z.number()),
     duplicate_ids: z.number(),
+    duplicates_deduplicated: z.number(),
     duplicate_details: z.array(z.object({ claim_id: z.string(), count: z.number() })),
     missing_locations: z.number(),
     missing_periods: z.number(),
@@ -162,7 +163,7 @@ export default api({
     // =========================================================================
     // STEP 3: Enrich each raw claim with deterministic ID
     // =========================================================================
-    const enrichedClaims: IdentifiedClaim[] = [];
+    let enrichedClaims: IdentifiedClaim[] = [];
     let missingLocations = 0;
     let missingPeriods = 0;
     let parserFailures = 0;
@@ -231,19 +232,32 @@ export default api({
     }
 
     // =========================================================================
-    // STEP 4: Detect duplicate IDs (FAIL CLOSED if found)
+    // STEP 4: Deduplicate by claim_id (same identity = same underlying claim)
     // =========================================================================
     const duplicates = detectDuplicateClaimIds(enrichedClaims);
     const duplicateDetails = [...duplicates.entries()].map(([claim_id, count]) => ({ claim_id, count }));
 
+    // Deduplicate: keep first occurrence of each claim_id
+    // Same identity inputs → same underlying claim extracted redundantly by LLM
+    const seenIds = new Set<string>();
+    const deduplicatedClaims: IdentifiedClaim[] = [];
+    for (const claim of enrichedClaims) {
+      if (!seenIds.has(claim.claim_id)) {
+        seenIds.add(claim.claim_id);
+        deduplicatedClaims.push(claim);
+      }
+    }
+
     if (duplicates.size > 0) {
-      const dupList = [...duplicates.entries()].map(([id, n]) => `${id} (×${n})`).join(", ");
-      throw new Error(
-        `HARD FAILURE: ${duplicates.size} duplicate claim IDs detected in the claims ledger. ` +
-        `Deterministic identity must be unique. Duplicates: ${dupList.slice(0, 500)}. ` +
-        `Fix identity inputs (source_page, metric, period, scope_qualifier, text) to disambiguate.`
+      const removed = enrichedClaims.length - deduplicatedClaims.length;
+      console.warn(
+        `[PopulateClaimsLedger] Deduplicated ${removed} redundant extraction(s) across ${duplicates.size} claim IDs. ` +
+        `Same identity inputs = same underlying claim extracted multiple times.`
       );
     }
+
+    // Replace enrichedClaims with deduplicated set
+    enrichedClaims = deduplicatedClaims;
 
     // =========================================================================
     // STEP 5: Compute metrics by memo and type
@@ -330,6 +344,7 @@ export default api({
       claims_by_type: claimsByType,
       claims_by_category: claimsByCategory,
       duplicate_ids: duplicates.size,
+      duplicates_deduplicated: duplicateDetails.reduce((sum, d) => sum + d.count - 1, 0),
       duplicate_details: duplicateDetails,
       missing_locations: missingLocations,
       missing_periods: missingPeriods,

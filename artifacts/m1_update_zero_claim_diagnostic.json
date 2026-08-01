@@ -1,0 +1,28 @@
+{
+  "artifact_type": "m1_update_zero_claim_diagnostic",
+  "deal_id": "c46b4129-8a16-48ae-ad3a-1da061255445",
+  "run_id": "33a88bb1-d2b6-4ee8-81f7-335573c28c73",
+  "generation_timestamp": "2026-08-01T08:05:00.000Z",
+  "document": {
+    "document_id": "694e184c-bf4e-4948-8dd3-df7565d91781",
+    "file_name": "2026-06-21 Saint IC update_vS.pdf",
+    "document_tag": "ic_memo",
+    "parsed_character_count": 15947
+  },
+  "extraction": {
+    "invocation_status": "completed",
+    "extraction_pipeline_reached": true,
+    "raw_claim_count": 0,
+    "deduplicated_claim_count": 0,
+    "diagnostic_reason": "Document was parsed (15,947 chars) and routed through the universal extraction pipeline. The extraction model returned zero key_claims for all chunks. Likely cause: the document content is a brief update memo with narrative discussion rather than discrete quantitative claims that meet the extraction schema's specificity requirements (metric + period + value).",
+    "coverage_status": "processed_zero_claims"
+  },
+  "context": {
+    "note": "This document is NOT missing from the pipeline — it was processed end-to-end. The zero output is a legitimate extraction result, not a pipeline failure. The reconciliation treats it as coverage_status=processed_zero_claims rather than coverage_status=missing.",
+    "other_memo_claim_counts": {
+      "screening": 89,
+      "2nd_ic": 87,
+      "3rd_ic": 87
+    }
+  }
+}
