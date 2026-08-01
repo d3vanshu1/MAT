@@ -2600,6 +2600,12 @@ export default function DealDashboardPage() {
             <AlertBanner count={stats.criticalFindings} />
           )}
 
+          {/* Diagnostic corpus download (temporary) — always visible; uses known recovery run ID as fallback */}
+          <DiagnosticDownloadButton
+            runId={moduleData?.modules?.find((m: any) => m.moduleId === "contradiction_check")?.latestRun?.id ?? "33a88bb1-d2b6-4ee8-81f7-335573c28c73"}
+            moduleId="contradiction_check"
+          />
+
           <ModuleGrid
             moduleStatuses={statuses}
             runningModules={runningModules}
@@ -2617,14 +2623,6 @@ export default function DealDashboardPage() {
             dealSector={deal.sector ?? null}
             hasDocuments={docs.length > 0}
           />
-
-          {/* Diagnostic corpus download (temporary) */}
-          {moduleData?.modules?.some((m: any) => m.moduleId === "contradiction_check" && m.latestRun?.status === "running") === false && (
-            <DiagnosticDownloadButton
-              runId={moduleData?.modules?.find((m: any) => m.moduleId === "contradiction_check")?.latestRun?.id ?? ""}
-              moduleId="contradiction_check"
-            />
-          )}
         </div>
       </div>
 
