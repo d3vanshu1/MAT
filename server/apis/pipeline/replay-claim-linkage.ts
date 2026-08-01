@@ -34,6 +34,12 @@ import {
   buildEvidenceSnapshot,
   type EvidenceSnapshot,
 } from "./finding-identity.js";
+import {
+  buildReconciliationIndex,
+  resolveViaReconciliation,
+  type ReconciliationIndex,
+} from "./legacy-claim-reconciler.js";
+import type { IdentifiedClaim } from "./claims-ledger-identity.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -214,6 +220,71 @@ export default api({
 
     console.log(`[ReplayClaimLinkage] Claims ledger: ${claimsLedgerSource} — ${claimMap.size} indexed by ID, ${claimsByMetricPeriod.size} metric-period groups`);
 
+    // 4a. HARD FAILURE: Detect duplicate claim IDs in the loaded ledger
+    const claimIdCounts = new Map<string, number>();
+    const allLedgerClaims: IdentifiedClaim[] = [];
+    for (const [, claim] of claimMap) {
+      const cid = claim.claim_id;
+      if (cid) {
+        claimIdCounts.set(cid, (claimIdCounts.get(cid) ?? 0) + 1);
+        allLedgerClaims.push(claim);
+      }
+    }
+    const duplicateClaimIds = [...claimIdCounts.entries()].filter(([, n]) => n > 1);
+    if (duplicateClaimIds.length > 0) {
+      const dupList = duplicateClaimIds.map(([id, n]) => `${id} (×${n})`).join(", ");
+      throw new Error(
+        `HARD FAILURE in Q3: Claims ledger contains ${duplicateClaimIds.length} duplicate claim IDs. ` +
+        `Deterministic identity must be unique. Duplicates: ${dupList.slice(0, 500)}. ` +
+        `Re-run ReplayPopulateClaimsLedger to fix identity inputs.`
+      );
+    }
+
+    // 4b. Build legacy-to-deterministic reconciliation bridge
+    // Collect all unique legacy refs from candidates
+    const legacyRefsSet = new Set<string>();
+    for (const candidate of candidates) {
+      const finding = findingsMap.get(candidate.finding_id);
+      if (finding?.originating_claim_id) legacyRefsSet.add(finding.originating_claim_id);
+      if (finding?.claim_ids) {
+        for (const cid of finding.claim_ids) legacyRefsSet.add(cid);
+      }
+    }
+
+    // Load document order for positional reconciliation
+    const DocOrderRow = z.object({ id: z.string() });
+    const orderedDocs = await ctx.integrations.db.query(
+      `SELECT id FROM documents
+       WHERE deal_id = (SELECT deal_id FROM module_runs WHERE id = $1 LIMIT 1)
+         AND document_tag = 'ic_memo'
+       ORDER BY uploaded_at ASC`,
+      DocOrderRow,
+      [runId],
+      { label: "Load IC document order for positional reconciliation" }
+    );
+    const documentOrder = orderedDocs.map(d => d.id);
+
+    const reconciliation = buildReconciliationIndex(
+      [...legacyRefsSet],
+      allLedgerClaims,
+      documentOrder,
+      claimMap as Map<string, IdentifiedClaim>,
+    );
+
+    console.log(
+      `[ReplayClaimLinkage] Reconciliation: ${reconciliation.summary.total_attempted} refs attempted, ` +
+      `${reconciliation.summary.bridged_positional} positional, ${reconciliation.summary.bridged_metric_period} metric-period, ` +
+      `${reconciliation.summary.bridged_direct} direct, ` +
+      `${reconciliation.summary.unresolved_no_match + reconciliation.summary.unresolved_ambiguous + reconciliation.summary.unresolved_malformed + reconciliation.summary.unresolved_no_positional_data} unresolved`
+    );
+
+    // Augment claimMap with bridged entries so resolveClaimId can find them
+    for (const [legacyRef, canonicalId] of reconciliation.bridge) {
+      if (!claimMap.has(legacyRef)) {
+        claimMap.set(legacyRef, claimMap.get(canonicalId));
+      }
+    }
+
     // 5. Process each candidate through strict claim-linkage
     const linkageResults: ClaimLinkageResult[] = [];
     const evidenceSnapshots: EvidenceSnapshot[] = [];
@@ -251,6 +322,16 @@ export default api({
       if (result.claim_provenance && result.claim_provenance.claim_id) {
         const resolvedClaim = claimMap.get(result.claim_provenance.claim_id);
         if (resolvedClaim) {
+          // Collect originating claim IDs for this finding
+          const finding = findingsMap.get(candidate.finding_id);
+          const originatingIds: string[] = [];
+          if (finding?.originating_claim_id) originatingIds.push(finding.originating_claim_id);
+          if (finding?.claim_ids) {
+            for (const cid of finding.claim_ids) {
+              if (!originatingIds.includes(cid)) originatingIds.push(cid);
+            }
+          }
+
           const snapshot = buildEvidenceSnapshot({
             claim_id: result.claim_provenance.claim_id,
             claim_record: {
@@ -268,6 +349,7 @@ export default api({
             authority_class: result.authority_class,
             verdict: result.claim_provenance.verdict,
             evidence_text: result.claim_provenance.evidence,
+            originating_claim_ids: originatingIds,
           });
           evidenceSnapshots.push(snapshot);
         }

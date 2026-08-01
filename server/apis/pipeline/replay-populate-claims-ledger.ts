@@ -198,15 +198,50 @@ export default api({
     console.log(`[PopulateClaimsLedger] Enriched ${enrichedClaims.length}/${rawClaims.length} claims (${parserFailures} failures)`);
 
     // =========================================================================
+    // STEP 3b: SOURCE-LEDGER QUALITY GATES
+    // =========================================================================
+    // Gate 1: Minimum claim count (a deal must have substantive claims to be processable)
+    const MIN_CLAIMS = 10;
+    if (enrichedClaims.length < MIN_CLAIMS) {
+      throw new Error(
+        `QUALITY GATE FAILURE: Only ${enrichedClaims.length} claims enriched (minimum ${MIN_CLAIMS}). ` +
+        `Insufficient claims-ledger coverage for reliable Q3\u2192Q5 processing. ` +
+        `Check extraction checkpoint or IC memo document tags.`
+      );
+    }
+
+    // Gate 2: Parser failure rate must be < 20%
+    const failureRate = rawClaims.length > 0 ? parserFailures / rawClaims.length : 0;
+    if (failureRate > 0.2) {
+      throw new Error(
+        `QUALITY GATE FAILURE: Parser failure rate ${(failureRate * 100).toFixed(1)}% exceeds 20% threshold. ` +
+        `${parserFailures}/${rawClaims.length} claims failed enrichment. ` +
+        `Check IC document metadata (document_tag = 'ic_memo') and filename normalization.`
+      );
+    }
+
+    // Gate 3: At least 2 IC memo documents must be represented
+    const representedDocIds = new Set(enrichedClaims.map(c => c.ic_document_id));
+    if (representedDocIds.size < 2) {
+      throw new Error(
+        `QUALITY GATE FAILURE: Only ${representedDocIds.size} IC document(s) represented in claims ledger. ` +
+        `Expected at least 2 memo versions for cross-version verification. ` +
+        `Documents found: ${[...filenameToDocId.values()].map(d => d.file_name).join(", ")}`
+      );
+    }
+
+    // =========================================================================
     // STEP 4: Detect duplicate IDs (FAIL CLOSED if found)
     // =========================================================================
     const duplicates = detectDuplicateClaimIds(enrichedClaims);
     const duplicateDetails = [...duplicates.entries()].map(([claim_id, count]) => ({ claim_id, count }));
 
     if (duplicates.size > 0) {
-      console.warn(
-        `[PopulateClaimsLedger] WARNING: ${duplicates.size} duplicate claim IDs detected. ` +
-        `These will be reported but the ledger will be persisted with all entries for inspection.`
+      const dupList = [...duplicates.entries()].map(([id, n]) => `${id} (×${n})`).join(", ");
+      throw new Error(
+        `HARD FAILURE: ${duplicates.size} duplicate claim IDs detected in the claims ledger. ` +
+        `Deterministic identity must be unique. Duplicates: ${dupList.slice(0, 500)}. ` +
+        `Fix identity inputs (source_page, metric, period, scope_qualifier, text) to disambiguate.`
       );
     }
 

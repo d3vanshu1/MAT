@@ -34,33 +34,52 @@
 export const FINDING_IDENTITY_VERSION = "1";
 
 // ---------------------------------------------------------------------------
-// FNV-1a hash (pure JS, no Node crypto dependency)
+// Deterministic hash — 128-bit (4×32-bit FNV-1a lanes with cross-mixing)
 // Same implementation as claims-ledger-identity.ts — shared for consistency.
+// Produces a 32-char hex string (128-bit). Collision-resistant for < 10M items.
 // ---------------------------------------------------------------------------
 
 export function fnv1aHashForFinding(str: string): string {
-  // FNV-1a parameters (32-bit)
-  let h1 = 0x811c9dc5 >>> 0;
-  let h2 = 0x01000193 >>> 0;
+  // Four independent FNV-1a 32-bit lanes with distinct offset bases
+  let h0 = 0x811c9dc5 >>> 0;
+  let h1 = 0x050c5d1f >>> 0;
+  let h2 = 0x1a47e90b >>> 0;
+  let h3 = 0x3b9aca07 >>> 0;
+
+  const FNV_PRIME = 0x01000193;
 
   for (let i = 0; i < str.length; i++) {
     const c = str.charCodeAt(i);
-    h1 ^= c & 0xff;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 ^= (c >> 8) & 0xff;
-    h2 = Math.imul(h2, 0x01000193) >>> 0;
-    // Mix in position for extra entropy
-    h1 ^= (i * 31) & 0xff;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    const lo = c & 0xff;
+    const hi = (c >> 8) & 0xff;
+
+    h0 ^= lo;
+    h0 = Math.imul(h0, FNV_PRIME) >>> 0;
+
+    h1 ^= hi ^ ((i & 0xff));
+    h1 = Math.imul(h1, FNV_PRIME) >>> 0;
+
+    h2 ^= ((lo << 4) | (hi >>> 4)) & 0xff;
+    h2 ^= (h0 >>> 24) & 0xff;
+    h2 = Math.imul(h2, FNV_PRIME) >>> 0;
+
+    h3 ^= (lo ^ (i * 31)) & 0xff;
+    h3 ^= (h1 >>> 16) & 0xff;
+    h3 = Math.imul(h3, FNV_PRIME) >>> 0;
   }
 
-  // Additional mixing passes for longer strings
-  for (let i = 0; i < str.length; i++) {
-    h2 ^= str.charCodeAt(i);
-    h2 = Math.imul(h2, 0x811c9dc5) >>> 0;
-  }
+  // Final avalanche
+  h0 ^= h2 >>> 16; h0 = Math.imul(h0, FNV_PRIME) >>> 0;
+  h1 ^= h3 >>> 16; h1 = Math.imul(h1, FNV_PRIME) >>> 0;
+  h2 ^= h0 >>> 16; h2 = Math.imul(h2, FNV_PRIME) >>> 0;
+  h3 ^= h1 >>> 16; h3 = Math.imul(h3, FNV_PRIME) >>> 0;
 
-  return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+  return (
+    h0.toString(16).padStart(8, "0") +
+    h1.toString(16).padStart(8, "0") +
+    h2.toString(16).padStart(8, "0") +
+    h3.toString(16).padStart(8, "0")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -136,8 +155,8 @@ export interface EvidenceSnapshot {
   verdict: string;
   /** The evidence text that supported the verdict */
   evidence_text: string | null;
-  /** Timestamp of when this snapshot was captured */
-  snapshot_timestamp: string;
+  /** Originating claim IDs from the finding (for identity tracing) */
+  originating_claim_ids: string[];
 }
 
 export const EVIDENCE_SNAPSHOT_VERSION = "1";
@@ -162,6 +181,7 @@ export function buildEvidenceSnapshot(params: {
   authority_class: string;
   verdict: string;
   evidence_text: string | null;
+  originating_claim_ids?: string[];
 }): EvidenceSnapshot {
   return {
     snapshot_version: EVIDENCE_SNAPSHOT_VERSION,
@@ -179,6 +199,6 @@ export function buildEvidenceSnapshot(params: {
     authority_class: params.authority_class,
     verdict: params.verdict,
     evidence_text: params.evidence_text,
-    snapshot_timestamp: new Date().toISOString(),
+    originating_claim_ids: params.originating_claim_ids ?? [],
   };
 }

@@ -194,12 +194,45 @@ export function constructCanonicalFinding(
   });
 
   // --- Aggregate evidence records ---
+  // PREFERENCE: Use structured evidence snapshots (from Q3) when available.
+  // These have full coordinates: document, page, metric, period, value, authority.
+  // Only fall back to prose reconstruction when snapshots are absent.
   const evidenceMap = new Map<string, EvidenceRecord>();
   const sourceDocSet = new Set<string>();
   const allClaimIds: string[] = [];
   const allMemoVersions: string[] = [];
   const comparisonResults: CanonicalFinding["comparison_results"] = [];
 
+  // Build evidence records from authoritative snapshots FIRST
+  if (evidenceSnapshots && evidenceSnapshots.length > 0) {
+    for (const snap of evidenceSnapshots) {
+      const snapKey = `snap:${snap.claim_id}:${snap.ic_document_id}`;
+      if (!evidenceMap.has(snapKey)) {
+        evidenceMap.set(snapKey, {
+          source_document: snap.ic_document_filename || "unknown",
+          source_location: snap.verbatim_snippet ? `page ${snap.scope_qualifier || "n/a"}` : null,
+          evidence_text: snap.evidence_text || snap.verbatim_snippet || "",
+          claim_id: snap.claim_id,
+          metric: snap.metric || null,
+          period: snap.period || null,
+          scope: snap.scope_qualifier || null,
+          value: snap.value != null ? String(snap.value) : null,
+          unit: snap.unit || null,
+          authority_status: "authoritative",
+        });
+      }
+      if (snap.ic_document_filename) sourceDocSet.add(snap.ic_document_filename);
+      if (snap.claim_id) allClaimIds.push(snap.claim_id);
+      if (snap.originating_claim_ids) {
+        for (const oid of snap.originating_claim_ids) allClaimIds.push(oid);
+      }
+      if (snap.memo_version && !allMemoVersions.includes(snap.memo_version)) {
+        allMemoVersions.push(snap.memo_version);
+      }
+    }
+  }
+
+  // Supplement from member findings (for source docs and secondary evidence)
   for (const member of members) {
     // Collect source docs
     for (const doc of member.source_docs ?? []) {
@@ -210,18 +243,21 @@ export function constructCanonicalFinding(
     if (member.originating_claim_id) allClaimIds.push(member.originating_claim_id);
     for (const cid of member.claim_ids ?? []) allClaimIds.push(cid);
 
-    // Build evidence record from finding content
+    // Build supplementary evidence record from finding content ONLY if no snapshot covered it
     const evidenceText = member.detail ?? member.full_analysis ?? member.evidence ?? null;
     const primaryDoc = member.source_docs?.[0] ?? "unknown";
+    const evidenceKey = `finding:${primaryDoc}:${member.finding_id}`;
 
-    if (evidenceText) {
-      const evidenceKey = `${primaryDoc}:${member.finding_id}`;
-      if (!evidenceMap.has(evidenceKey)) {
+    if (evidenceText && !evidenceMap.has(evidenceKey)) {
+      // Only add as secondary if no snapshot already covers this claim
+      const claimId = member.originating_claim_id ?? (member.claim_ids?.[0] ?? null);
+      const alreadyCovered = claimId && [...evidenceMap.keys()].some(k => k.includes(claimId));
+      if (!alreadyCovered) {
         evidenceMap.set(evidenceKey, {
           source_document: primaryDoc,
           source_location: null,
-          evidence_text: evidenceText.slice(0, 500), // Cap evidence text
-          claim_id: member.originating_claim_id ?? (member.claim_ids?.[0] ?? null),
+          evidence_text: evidenceText.slice(0, 500),
+          claim_id: claimId,
           metric: canonicalKey.metric !== "unspecified" ? canonicalKey.metric : null,
           period: canonicalKey.period !== "unspecified" ? canonicalKey.period : null,
           scope: canonicalKey.scope,

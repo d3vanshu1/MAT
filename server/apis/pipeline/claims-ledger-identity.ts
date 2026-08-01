@@ -31,34 +31,56 @@
  */
 
 // ---------------------------------------------------------------------------
-// Deterministic hash (pure JS, no Node crypto dependency)
-// Uses FNV-1a 64-bit split into two 32-bit halves for hex output.
-// Collision-resistant for < 100K items.
+// Deterministic hash — 128-bit (4×32-bit FNV-1a lanes with cross-mixing)
+// Produces a 32-char hex string (128-bit). Collision-resistant for < 10M items.
+// Pure JS, no Node crypto dependency.
 // ---------------------------------------------------------------------------
 
-function fnv1aHash(str: string): string {
-  // FNV-1a parameters (32-bit)
-  let h1 = 0x811c9dc5 >>> 0;
-  let h2 = 0x01000193 >>> 0;
+function deterministicHash128(str: string): string {
+  // Four independent FNV-1a 32-bit lanes with distinct offset bases
+  let h0 = 0x811c9dc5 >>> 0;
+  let h1 = 0x050c5d1f >>> 0;
+  let h2 = 0x1a47e90b >>> 0;
+  let h3 = 0x3b9aca07 >>> 0;
+
+  const FNV_PRIME = 0x01000193;
 
   for (let i = 0; i < str.length; i++) {
     const c = str.charCodeAt(i);
-    h1 ^= c & 0xff;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
-    h2 ^= (c >> 8) & 0xff;
-    h2 = Math.imul(h2, 0x01000193) >>> 0;
-    // Mix in position for extra entropy
-    h1 ^= (i * 31) & 0xff;
-    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    const lo = c & 0xff;
+    const hi = (c >> 8) & 0xff;
+
+    // Lane 0: byte low
+    h0 ^= lo;
+    h0 = Math.imul(h0, FNV_PRIME) >>> 0;
+
+    // Lane 1: byte high + position
+    h1 ^= hi ^ ((i & 0xff));
+    h1 = Math.imul(h1, FNV_PRIME) >>> 0;
+
+    // Lane 2: rotated byte + cross-mix from h0
+    h2 ^= ((lo << 4) | (hi >>> 4)) & 0xff;
+    h2 ^= (h0 >>> 24) & 0xff;
+    h2 = Math.imul(h2, FNV_PRIME) >>> 0;
+
+    // Lane 3: position-dependent mix + cross-mix from h1
+    h3 ^= (lo ^ (i * 31)) & 0xff;
+    h3 ^= (h1 >>> 16) & 0xff;
+    h3 = Math.imul(h3, FNV_PRIME) >>> 0;
   }
 
-  // Additional mixing passes for longer strings
-  for (let i = 0; i < str.length; i++) {
-    h2 ^= str.charCodeAt(i);
-    h2 = Math.imul(h2, 0x811c9dc5) >>> 0;
-  }
+  // Final avalanche: mix lanes into each other
+  h0 ^= h2 >>> 16; h0 = Math.imul(h0, FNV_PRIME) >>> 0;
+  h1 ^= h3 >>> 16; h1 = Math.imul(h1, FNV_PRIME) >>> 0;
+  h2 ^= h0 >>> 16; h2 = Math.imul(h2, FNV_PRIME) >>> 0;
+  h3 ^= h1 >>> 16; h3 = Math.imul(h3, FNV_PRIME) >>> 0;
 
-  return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+  return (
+    h0.toString(16).padStart(8, "0") +
+    h1.toString(16).padStart(8, "0") +
+    h2.toString(16).padStart(8, "0") +
+    h3.toString(16).padStart(8, "0")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +171,7 @@ export function generateClaimId(params: {
     `text=${params.normalized_claim_text}`,
   ].join("|");
 
-  const hash = fnv1aHash(identityPayload);
+  const hash = deterministicHash128(identityPayload);
   return `clm-v${CLAIM_SCHEMA_VERSION}-${hash}`;
 }
 
