@@ -1,0 +1,19 @@
+{
+  "phase": "q3_claim_linkage",
+  "checkpoint_id": "8bc371b1-747f-4c28-84e5-e478cf594d55",
+  "tree_level": 96,
+  "q2_artifact_id_consumed": "79fcc832-7a9f-4307-b684-916be60db184",
+  "q3_input_count": 12,
+  "q3_eligible_count": 12,
+  "q3_input_equals_q2_reportable": true,
+  "invariant_check": "persisted Q2 reportable (12) = Q3 input (12)",
+  "all_claim_linked": true,
+  "all_with_valid_authority": true,
+  "disposition_breakdown": {
+    "claim_linked_adverse": 12,
+    "claim_linked_confirmed": 0,
+    "invalid_claim_reference": 0,
+    "invalid_authority": 0
+  },
+  "silent_losses": 0
+}

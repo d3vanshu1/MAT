@@ -1,0 +1,46 @@
+{
+  "phase": "q4_canonical_identity",
+  "checkpoint_id": "35a3889c-3c29-49d0-b749-8e9b8356ab1c",
+  "tree_level": 95,
+  "q4_family_count": 6,
+  "total_members_across_families": 12,
+  "families": [
+    {
+      "family_key": "revenue|fy_mar_26|total_group_revenue",
+      "member_count": 4,
+      "representative_title": "Total Group Revenue (FY Mar-26): memo higher than model",
+      "memo_versions": ["2nd IC (May 2026)", "3rd IC (Jun 2026)", "Screening IC (Dec 2025)"]
+    },
+    {
+      "family_key": "ebitda|fy_mar_26|cash_ebitda",
+      "member_count": 3,
+      "representative_title": "Cash EBITDA (FY Mar-26): memo vs model divergence",
+      "memo_versions": ["2nd IC (May 2026)", "3rd IC (Jun 2026)", "Screening IC (Dec 2025)"]
+    },
+    {
+      "family_key": "revenue|fy25a|total_group_revenue",
+      "member_count": 2,
+      "representative_title": "Total Group Revenue historical divergence",
+      "memo_versions": ["Screening IC (Dec 2025)"]
+    },
+    {
+      "family_key": "ebitda|fy25a|cash_ebitda_reported",
+      "member_count": 1,
+      "representative_title": "Cash EBITDA (Reported / Non Pro Forma) (FY25A): memo lower than model by £2.1m",
+      "memo_versions": ["Screening IC (Dec 2025)"]
+    },
+    {
+      "family_key": "revenue|fy24a|total_group_revenue",
+      "member_count": 1,
+      "representative_title": "Total Group Revenue historical period divergence",
+      "memo_versions": ["Screening IC (Dec 2025)"]
+    },
+    {
+      "family_key": "ebitda|fy_mar_26|cash_ebitda_pro_forma",
+      "member_count": 1,
+      "representative_title": "Cash EBITDA pro forma divergence",
+      "memo_versions": ["2nd IC (May 2026)"]
+    }
+  ],
+  "silent_losses": 0
+}

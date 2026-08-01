@@ -1,0 +1,59 @@
+{
+  "phase": "q5_canonical_findings",
+  "canonical_checkpoint_id": "f3e48a37-b5c6-4494-a66c-fa0f19556336",
+  "terminal_checkpoint_id": "4e9c7696-0237-4d5c-a2b0-a6c05592d80e",
+  "tree_levels": {
+    "canonical": 94,
+    "terminal": 93
+  },
+  "q5_persisted_count": 6,
+  "all_from_data_divergence": true,
+  "all_with_structured_evidence": true,
+  "all_with_valid_authority": true,
+  "canonical_findings": [
+    {
+      "finding_id": "cfind-revenue-fy26-total",
+      "family_key": "revenue|fy_mar_26|total_group_revenue",
+      "title": "Total Group Revenue (FY Mar-26): memo higher than model",
+      "disposition": "canonical_adverse",
+      "verdict_source": "deterministic_computation"
+    },
+    {
+      "finding_id": "cfind-ebitda-fy26-cash",
+      "family_key": "ebitda|fy_mar_26|cash_ebitda",
+      "title": "Cash EBITDA (FY Mar-26): memo vs model divergence",
+      "disposition": "canonical_adverse",
+      "verdict_source": "deterministic_computation"
+    },
+    {
+      "finding_id": "cfind-revenue-fy25a",
+      "family_key": "revenue|fy25a|total_group_revenue",
+      "title": "Total Group Revenue historical period divergence",
+      "disposition": "canonical_adverse",
+      "verdict_source": "deterministic_computation"
+    },
+    {
+      "finding_id": "cfind-ebitda-fy25a-reported",
+      "family_key": "ebitda|fy25a|cash_ebitda_reported",
+      "title": "Cash EBITDA (Reported / Non Pro Forma) (FY25A): memo lower than model by £2.1m (4.5%)",
+      "disposition": "canonical_adverse",
+      "verdict_source": "deterministic_computation"
+    },
+    {
+      "finding_id": "cfind-revenue-fy24a",
+      "family_key": "revenue|fy24a|total_group_revenue",
+      "title": "Total Group Revenue FY24A divergence",
+      "disposition": "canonical_adverse",
+      "verdict_source": "deterministic_computation"
+    },
+    {
+      "finding_id": "cfind-ebitda-fy26-proforma",
+      "family_key": "ebitda|fy_mar_26|cash_ebitda_pro_forma",
+      "title": "Cash EBITDA pro forma divergence",
+      "disposition": "canonical_adverse",
+      "verdict_source": "deterministic_computation"
+    }
+  ],
+  "terminal_output_mismatches": 0,
+  "silent_losses": 0
+}

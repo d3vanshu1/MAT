@@ -1,0 +1,33 @@
+{
+  "artifact_type": "regenerated_q2_candidates_v1",
+  "artifact_id": "79fcc832-7a9f-4307-b684-916be60db184",
+  "schema_version": "1.0.0",
+  "run_id": "33a88bb1-d2b6-4ee8-81f7-335573c28c73",
+  "deal_id": "c46b4129-8a16-48ae-ad3a-1da061255445",
+  "source_claims_ledger_artifact_id": "d8ddd182-fc93-443e-83e7-8324f74bc6ad",
+  "generation_mode": "strict_regeneration_v2",
+  "generated_at": "2026-08-01T08:38:50Z",
+  "checksum": "b4e975fcd388519efe226aecb3aa221e7d691a3865f31ce2f4940ae2ba540d72",
+  "total_candidates": 221,
+  "reportable_count": 12,
+  "non_reportable_count": 209,
+  "disposition_summary": {
+    "reportable_q3_eligible": 12,
+    "process_diagnostic": 201,
+    "unverifiable": 5,
+    "non_reportable": 3,
+    "duplicate_candidate_identity": 0
+  },
+  "persistence": {
+    "tree_level": 100,
+    "node_index": 0,
+    "status": "regenerated_q2_candidates_v1"
+  },
+  "strict_rules_applied": {
+    "only_data_divergence_with_full_evidence_reportable": true,
+    "collision_safe_matching": true,
+    "no_cross_document_fallback": true,
+    "sha256_identity": true,
+    "verification_evidence_id_in_identity": true
+  }
+}
