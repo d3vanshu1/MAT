@@ -50,6 +50,13 @@ import {
   type LegacyEvidenceEntry,
   type EvidenceAdmissionLedger,
 } from "./evidence-admission-boundary.js";
+import {
+  executeCanonicalComparison,
+  serializeComparisonLedger,
+  type CanonicalComparison,
+  type ComparisonClaimInput,
+  type ComparisonEvidenceInput,
+} from "./canonical-comparison.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -328,6 +335,9 @@ export default api({
     const evidenceSnapshots: EvidenceSnapshot[] = [];
     const dispositionCounts: Record<string, number> = {};
 
+    // MAT-F03: Canonical comparison ledger
+    const canonicalComparisons: CanonicalComparison[] = [];
+
     // MAT-F02B: Evidence admission ledger — tracks all evidence through canonical gate
     const evidenceAdmissionResults: CandidateEvidenceAdmissionResult[] = [];
 
@@ -449,6 +459,57 @@ export default api({
       dispositionCounts[result.claim_linkage_disposition] =
         (dispositionCounts[result.claim_linkage_disposition] ?? 0) + 1;
 
+      // ─── MAT-F03: Canonical comparison ──────────────────────────────────────
+      // For candidates with admitted evidence AND a resolved claim, run the
+      // deterministic comparison engine: compatibility → normalization → delta → verdict
+      if (evidenceAdmission?.has_admitted_evidence && result.claim_provenance?.claim_id) {
+        const resolvedClaim = claimMap.get(result.claim_provenance.claim_id);
+        if (resolvedClaim) {
+          for (const admitted of evidenceAdmission.admitted) {
+            const compClaim: ComparisonClaimInput = {
+              claim_id: result.claim_provenance.claim_id,
+              entity: resolvedClaim.entity ?? resolvedClaim.scope_qualifier ?? "SCG",
+              metric: resolvedClaim.metric ?? null,
+              period: resolvedClaim.period ?? null,
+              segment: resolvedClaim.segment ?? null,
+              scope: resolvedClaim.scope_qualifier ?? null,
+              unit: resolvedClaim.unit ?? null,
+              currency: resolvedClaim.currency ?? "GBP",
+              scale: resolvedClaim.scale ?? null,
+              actual_or_forecast: resolvedClaim.actual_or_forecast ?? null,
+              accounting_basis: resolvedClaim.accounting_basis ?? null,
+              comparison_basis: "memo_claim",
+              value: resolvedClaim.value ?? null,
+              ic_document_id: resolvedClaim.ic_document_id ?? null,
+            };
+
+            const compEvidence: ComparisonEvidenceInput = {
+              evidence_id: admitted.evidence_id,
+              entity: admitted.canonical_record.target.entity ?? "SCG",
+              metric: admitted.canonical_record.proposition.metric ?? null,
+              period: admitted.canonical_record.proposition.period ?? null,
+              segment: admitted.canonical_record.target.segment ?? null,
+              scope: admitted.canonical_record.proposition.scope ?? null,
+              unit: admitted.canonical_record.proposition.unit ?? null,
+              currency: admitted.canonical_record.proposition.currency ?? "GBP",
+              scale: admitted.canonical_record.proposition.scale ?? null,
+              actual_or_forecast: admitted.canonical_record.proposition.actual_forecast_status ?? null,
+              accounting_basis: admitted.canonical_record.proposition.accounting_basis ?? null,
+              comparison_basis: admitted.coordinate.kind === "workbook" ?
+                (admitted.coordinate.sheet?.includes("hardcoded") ? "reference_forecast" : "current_model") :
+                "model_evidence",
+              value: admitted.canonical_record.proposition.value ?? null,
+              source_document_id: admitted.source_document_id,
+              has_entity_bridge: admitted.entity_applicability.allowed && !admitted.entity_applicability.direct_entity_match,
+            };
+
+            const comparison = executeCanonicalComparison(compClaim, compEvidence);
+            canonicalComparisons.push(comparison);
+          }
+        }
+      }
+      // ─── End MAT-F03 ────────────────────────────────────────────────────────
+
       // Build evidence snapshot if claim was resolved
       if (result.claim_provenance && result.claim_provenance.claim_id) {
         const resolvedClaim = claimMap.get(result.claim_provenance.claim_id);
@@ -560,6 +621,8 @@ export default api({
       evidence_snapshots: evidenceSnapshots,
       // MAT-F02B: Full evidence admission ledger (admitted + rejected records)
       evidence_admission_ledgers: evidenceAdmissionLedgers,
+      // MAT-F03: Canonical comparison results
+      canonical_comparisons: JSON.parse(serializeComparisonLedger(canonicalComparisons)),
     });
 
     const UpsertSchema = z.object({ id: z.string() });

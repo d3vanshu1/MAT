@@ -1,0 +1,202 @@
+{
+  "schema_version": "mat-f03-fixtures-v1",
+  "generated_at": "2026-08-03T03:29:00Z",
+  "description": "MAT-F03 acceptance fixture outputs from executeCanonicalComparison()",
+
+  "fixtures": [
+    {
+      "_label": "Fixture 1 — Valid £194m revenue contradiction",
+      "schema_version": "comparison-v1",
+      "comparison_id": "cmp-v1-<content-derived>",
+      "claim_id": "claim-scg-rev-fy26-001",
+      "evidence_id": "ev-v1-scg-model-001",
+      "compatibility": {
+        "entity": "compatible",
+        "metric": "compatible",
+        "period": "compatible",
+        "segment": "not_applicable",
+        "scope": "compatible",
+        "unit_scale": "compatible",
+        "currency": "compatible",
+        "actual_forecast": "compatible",
+        "accounting_basis": "not_applicable",
+        "comparison_basis": "compatible",
+        "allowed": true,
+        "rejection_reasons": [],
+        "rule_version": "compat-v1.0"
+      },
+      "calculation": {
+        "calculation_type": "numeric",
+        "normalized_claim_value": 194000000,
+        "normalized_fact_value": 184391535,
+        "signed_delta": 9608465,
+        "absolute_delta": 9608465,
+        "percentage_delta": 5.210903504,
+        "direction": "claim_higher",
+        "normalization_rule_version": "norm-v1.0"
+      },
+      "verdict": {
+        "value": "contradicted",
+        "rule_version": "verdict-v1.0",
+        "reason_codes": ["material_difference"]
+      },
+      "reportable": true
+    },
+
+    {
+      "_label": "Fixture 2 — Live vs hardcoded forecast revision (£184.4m vs £187.1m)",
+      "schema_version": "comparison-v1",
+      "comparison_id": "cmp-v1-<content-derived>",
+      "claim_id": "claim-model-rev-fy26-live",
+      "evidence_id": "ev-v1-frozen-001",
+      "compatibility": {
+        "entity": "compatible",
+        "metric": "compatible",
+        "period": "compatible",
+        "segment": "not_applicable",
+        "scope": "compatible",
+        "unit_scale": "compatible",
+        "currency": "compatible",
+        "actual_forecast": "compatible",
+        "accounting_basis": "not_applicable",
+        "comparison_basis": "compatible",
+        "allowed": true,
+        "rejection_reasons": [],
+        "rule_version": "compat-v1.0"
+      },
+      "calculation": {
+        "calculation_type": "numeric",
+        "normalized_claim_value": 184391535,
+        "normalized_fact_value": 187063000,
+        "signed_delta": -2671465,
+        "absolute_delta": 2671465,
+        "percentage_delta": -1.428,
+        "direction": "claim_lower",
+        "normalization_rule_version": "norm-v1.0"
+      },
+      "verdict": {
+        "value": "materially_changed",
+        "rule_version": "verdict-v1.0",
+        "reason_codes": ["forecast_revision"]
+      },
+      "reportable": true
+    },
+
+    {
+      "_label": "Fixture 3 — Unit mismatch rejection (percentage vs currency)",
+      "schema_version": "comparison-v1",
+      "comparison_id": "cmp-v1-<content-derived>",
+      "claim_id": "claim-scg-rev-fy26-001",
+      "evidence_id": "ev-v1-pct-reject",
+      "compatibility": {
+        "entity": "compatible",
+        "metric": "compatible",
+        "period": "compatible",
+        "segment": "not_applicable",
+        "scope": "compatible",
+        "unit_scale": "incompatible",
+        "currency": "not_applicable",
+        "actual_forecast": "compatible",
+        "accounting_basis": "not_applicable",
+        "comparison_basis": "compatible",
+        "allowed": false,
+        "rejection_reasons": ["unit_scale_incompatible"],
+        "rule_version": "compat-v1.0"
+      },
+      "calculation": {
+        "calculation_type": "not_performed",
+        "normalized_claim_value": null,
+        "normalized_fact_value": null,
+        "signed_delta": null,
+        "absolute_delta": null,
+        "percentage_delta": null,
+        "direction": "not_applicable",
+        "normalization_rule_version": "norm-v1.0"
+      },
+      "verdict": {
+        "value": "unverifiable",
+        "rule_version": "verdict-v1.0",
+        "reason_codes": ["compatibility_rejected", "unit_scale_incompatible"]
+      },
+      "reportable": false
+    },
+
+    {
+      "_label": "Fixture 4 — EBITDA basis rejection (reported vs cash)",
+      "schema_version": "comparison-v1",
+      "comparison_id": "cmp-v1-<content-derived>",
+      "claim_id": "claim-reported-ebitda-001",
+      "evidence_id": "ev-v1-cash-ebitda-001",
+      "compatibility": {
+        "entity": "compatible",
+        "metric": "incompatible",
+        "period": "compatible",
+        "segment": "not_applicable",
+        "scope": "compatible",
+        "unit_scale": "compatible",
+        "currency": "compatible",
+        "actual_forecast": "compatible",
+        "accounting_basis": "not_applicable",
+        "comparison_basis": "compatible",
+        "allowed": false,
+        "rejection_reasons": ["metric_incompatible"],
+        "rule_version": "compat-v1.0"
+      },
+      "calculation": {
+        "calculation_type": "not_performed",
+        "normalized_claim_value": null,
+        "normalized_fact_value": null,
+        "signed_delta": null,
+        "absolute_delta": null,
+        "percentage_delta": null,
+        "direction": "not_applicable",
+        "normalization_rule_version": "norm-v1.0"
+      },
+      "verdict": {
+        "value": "unverifiable",
+        "rule_version": "verdict-v1.0",
+        "reason_codes": ["compatibility_rejected", "metric_incompatible"]
+      },
+      "reportable": false
+    },
+
+    {
+      "_label": "Fixture 5 — Entity mismatch rejection (Gamma vs SCG, no bridge)",
+      "schema_version": "comparison-v1",
+      "comparison_id": "cmp-v1-<content-derived>",
+      "claim_id": "claim-scg-rev-fy26-001",
+      "evidence_id": "ev-v1-gamma-001",
+      "compatibility": {
+        "entity": "incompatible",
+        "metric": "compatible",
+        "period": "compatible",
+        "segment": "not_applicable",
+        "scope": "compatible",
+        "unit_scale": "compatible",
+        "currency": "compatible",
+        "actual_forecast": "compatible",
+        "accounting_basis": "not_applicable",
+        "comparison_basis": "compatible",
+        "allowed": false,
+        "rejection_reasons": ["entity_incompatible"],
+        "rule_version": "compat-v1.0"
+      },
+      "calculation": {
+        "calculation_type": "not_performed",
+        "normalized_claim_value": null,
+        "normalized_fact_value": null,
+        "signed_delta": null,
+        "absolute_delta": null,
+        "percentage_delta": null,
+        "direction": "not_applicable",
+        "normalization_rule_version": "norm-v1.0"
+      },
+      "verdict": {
+        "value": "unverifiable",
+        "rule_version": "verdict-v1.0",
+        "reason_codes": ["compatibility_rejected", "entity_incompatible"]
+      },
+      "reportable": false
+    }
+  ]
+}
