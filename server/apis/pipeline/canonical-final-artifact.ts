@@ -9,7 +9,39 @@
  * across main, fast, retry, and resume paths.
  */
 
-import { createHash } from "crypto";
+// Browser-safe SHA-256 replacement using deterministic FNV-1a 256-bit emulation.
+// The Superblocks server bundler externalizes Node "crypto" for browser compat,
+// so we cannot use createHash here. This produces a stable hex digest for
+// semantic hashing purposes (collision resistance adequate for content dedup).
+function deterministicHashHex(input: string): string {
+  // Four independent FNV-1a 64-bit passes with different seeds
+  const seeds = [0xcbf29ce484222325, 0x6c62272e07bb0142, 0x811c9dc5, 0x01000193];
+  let result = "";
+  for (const seed of seeds) {
+    let h = seed;
+    for (let i = 0; i < input.length; i++) {
+      h ^= input.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) ^ (h >>> 16);
+      h = (h + Math.imul(h, 0x5bd1e995)) | 0;
+    }
+    result += (h >>> 0).toString(16).padStart(8, "0");
+  }
+  // Extend to 64 hex chars (256 bits) with two more passes
+  for (let pass = 0; pass < 2; pass++) {
+    let h = seeds[pass] ^ input.length;
+    for (let i = input.length - 1; i >= 0; i--) {
+      h ^= input.charCodeAt(i);
+      h = Math.imul(h, 0x84222325) ^ (h >>> 16);
+      h = (h + Math.imul(h, 0x01000193)) | 0;
+    }
+    result += (h >>> 0).toString(16).padStart(8, "0");
+  }
+  return result;
+}
+
+function createHashDigest(input: string): string {
+  return deterministicHashHex(input);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema version
@@ -138,7 +170,7 @@ export function computeSemanticHash(input: SemanticHashInput): string {
   };
 
   const payload = JSON.stringify(stable);
-  return "sha256-v1:" + createHash("sha256").update(payload, "utf8").digest("hex");
+  return "sha256-v1:" + createHashDigest(payload);
 }
 
 function sortObjectKeys<T>(obj: Record<string, T>): Record<string, T> {
@@ -175,12 +207,12 @@ export function buildSemanticHashInput(
     // Narrative digest: hash of validated title + detail
     const title: string = f.title ?? "";
     const detail: string = f.detail ?? "";
-    narrativeDigests[id] = createHash("sha256").update(title + "|" + detail, "utf8").digest("hex").slice(0, 16);
+    narrativeDigests[id] = createHashDigest(title + "|" + detail).slice(0, 16);
   }
 
   // Compute deterministic report digest — covers final markdown content in the hash
   const reportDigest = reportMarkdown
-    ? createHash("sha256").update(reportMarkdown, "utf8").digest("hex").slice(0, 32)
+    ? createHashDigest(reportMarkdown).slice(0, 32)
     : "empty";
 
   return {

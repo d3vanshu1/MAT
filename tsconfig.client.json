@@ -1,7 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "dist", "vite.config.ts", "server"],
+  "exclude": ["node_modules", "dist", "vite.config.ts", "server", "reference", "acceptance"],
   "compilerOptions": {
     "composite": true,
     "noEmit": false,

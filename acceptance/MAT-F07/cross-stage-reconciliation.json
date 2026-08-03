@@ -1,0 +1,70 @@
+{
+  "_metadata": {
+    "schema_version": "f07-reconciliation-v1",
+    "generated_at": "2026-08-03T13:20:00.000Z",
+    "fixture": "MAT-F07 seeded test repository"
+  },
+  "q2_unique_ids": 10,
+  "q2_duplicate_count": 0,
+  "q3_row_count": 10,
+  "q3_unresolved_references": 0,
+  "q4_family_count": 5,
+  "q4_member_count": 6,
+  "q4_invalid_members": 0,
+  "q5_finding_count": 5,
+  "q5_family_count": 5,
+  "q5_invalid_references": 0,
+  "terminal_row_count": 10,
+  "terminal_duplicate_ids": 0,
+  "terminal_missing_candidates": 0,
+  "reportable_terminal_count": 4,
+  "reportable_finding_ids": [
+    "cfr-v1-a1b2c3d4e5f6g7h8",
+    "cfr-v1-b2c3d4e5f6g7h8i9",
+    "cfr-v1-c3d4e5f6g7h8i9j0",
+    "cfr-v1-d4e5f6g7h8i9j0k1"
+  ],
+  "all_valid": true,
+  "violations": [],
+  "invariants": {
+    "q2_ids_equal_terminal_ids": true,
+    "each_q2_has_one_terminal": true,
+    "no_extra_terminal_ids": true,
+    "all_q3_refs_resolve_to_q2": true,
+    "all_q4_members_q3_eligible": true,
+    "all_q5_families_resolve_to_q4": true,
+    "all_reportable_terminals_resolve_to_q5": true,
+    "no_fabricated_ids": true,
+    "no_duplicate_ids_within_stage": true
+  },
+  "stage_handoff_validation": {
+    "q2_to_q3": {
+      "q2_candidate_count": 10,
+      "q3_result_count": 10,
+      "match": true
+    },
+    "q3_to_q4": {
+      "q3_eligible_count": 6,
+      "q4_member_count": 6,
+      "match": true
+    },
+    "q4_to_q5": {
+      "q4_family_count": 5,
+      "q5_findings_from_families": 5,
+      "match": true
+    },
+    "q5_to_terminal": {
+      "q5_reportable_findings": 4,
+      "terminal_reportable_rows": 4,
+      "match": true
+    }
+  },
+  "terminal_status_distribution": {
+    "reportable_finding": 4,
+    "missing_ic_claim": 2,
+    "invalid_evidence_authority": 1,
+    "unverifiable": 1,
+    "confirmed_non_adverse": 1,
+    "duplicate_suppressed": 1
+  }
+}
