@@ -1,0 +1,24 @@
+# Parent Test Results
+
+Parent revision (prior to MAT-F01) does NOT have:
+- CanonicalIcClaim schema
+- Qualitative claim extraction path
+- Source validation enforcement (exact_text_found)
+- Claim-first admission gate
+- SHA-256 content-derived claim IDs
+- Terminal rejection reason persistence
+
+## Assertion Results on Parent
+
+| Assertion | Status | Reason |
+|-----------|--------|--------|
+| A1: Exact quantitative claim | PARTIAL PASS | Existing ClaimSchema captures quantitative claims but lacks schema_version, source_validation, and claim_type fields |
+| A2: Exact qualitative claim | FAIL | No qualitative claim extraction path exists. ClaimSchema only handles numeric metrics. |
+| A3: No claimless substantive candidate | FAIL | claim-linkage.ts uses `not_linked_to_IC_claim` disposition but does not enforce admission gate at persistence boundary. A candidate can still be generated from a diligence passage before claim resolution. |
+| A4: Ambiguous/paraphrased fails closed | FAIL | No verbatim source validation exists. claims-ledger-identity.ts uses FNV-1a hash (not SHA-256), and verbatim_snippet is not validated against source text. Paraphrased text would pass. |
+| A5: Stable identity (fresh vs resume) | FAIL | claims-ledger-identity.ts uses FNV-1a (not SHA-256) and includes metric/period/scope in identity rather than exact text + type. Qualitative claims have no identity path. |
+
+## Summary
+
+Parent fails: A2, A3, A4, A5 (minimum 4 required failures met)
+Parent partial: A1

@@ -2650,6 +2650,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
             // Save to module_outputs
             let outputSaved = false;
+            let lastSaveError = "";
             for (let attempt = 1; attempt <= 2; attempt++) {
               try {
                 await upsertModuleOutput(ctx.integrations.db, {
@@ -2662,14 +2663,16 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 console.log(`[pipeline:fast-path] Report saved (${fullReport.length} chars, attempt ${attempt})`);
                 outputSaved = true;
                 break;
-              } catch (saveErr) {
+              } catch (saveErr: any) {
+                lastSaveError = saveErr?.message ?? String(saveErr);
                 console.warn(`[pipeline:fast-path] Save failed (attempt ${attempt}/2):`, saveErr);
+                console.warn(`[pipeline:fast-path] Report size: fullReport=${fullReport?.length ?? 0} chars, findings=${finalFindings?.length ?? 0} items`);
                 if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2000));
               }
             }
 
             if (!outputSaved) {
-              console.error(`[pipeline:fast-path] module_outputs save failed after 2 attempts — NOT marking completed`);
+              console.error(`[pipeline:fast-path] module_outputs save failed after 2 attempts — NOT marking completed. Last error: ${lastSaveError}`);
               return {
                 status: "in_progress",
                 runId,
@@ -2679,7 +2682,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 failedChunks: 0,
                 truncatedChunks: 0,
                 truncatedMerges: 0,
-                firstError: "module_outputs save failed — will retry on next invocation",
+                firstError: `module_outputs save failed (${lastSaveError}) — will retry on next invocation`,
               };
             }
 
@@ -5257,6 +5260,13 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     console.warn("[pipeline] Failed to query permanently_failed extractions:", pfErr);
   }
 
+  let lastSaveError = "";
+  // Keepalive: re-establish DB connection before save (connection may have gone idle during formatting)
+  try {
+    await ctx.integrations.db.execute(`SELECT 1`, [], { label: "Pre-save keepalive" });
+  } catch (kaErr: any) {
+    console.warn(`[pipeline] Pre-save keepalive failed:`, kaErr?.message);
+  }
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       await upsertModuleOutput(ctx.integrations.db, {
@@ -5269,8 +5279,10 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       console.log(`[pipeline] Report saved to module_outputs (${fullReport.length} chars, attempt ${attempt})`);
       outputSaved = true;
       break;
-    } catch (saveErr) {
+    } catch (saveErr: any) {
+      lastSaveError = saveErr?.message ?? String(saveErr);
       console.warn(`[pipeline] Failed to save report to module_outputs (attempt ${attempt}/2):`, saveErr);
+      console.warn(`[pipeline] Report size: fullReport=${fullReport?.length ?? 0} chars, findings=${finalFindings?.length ?? 0} items, findings_json=${JSON.stringify(finalFindings).length} chars`);
       if (attempt < 2) {
         // Brief pause before retry
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -5282,7 +5294,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     // Both save attempts failed — return in_progress so the client re-invokes.
     // The merge tree is complete (checkpoints saved), so re-invocation will
     // skip straight to formatting+save with a fresh time budget.
-    console.error(`[pipeline] module_outputs save failed after 2 attempts — NOT marking completed`);
+    console.error(`[pipeline] module_outputs save failed after 2 attempts — NOT marking completed. Last error: ${lastSaveError}`);
     return {
       status: "in_progress",
       runId,
@@ -5297,7 +5309,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       failedChunks,
       truncatedChunks,
       truncatedMerges,
-      firstError: "module_outputs save failed — will retry on next invocation",
+      firstError: `module_outputs save failed (${lastSaveError}) — will retry on next invocation`,
     };
   }
 

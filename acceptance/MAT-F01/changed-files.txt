@@ -1,0 +1,12 @@
+server/apis/pipeline/canonical-ic-claim.ts
+server/apis/pipeline/extract-canonical-claims.ts
+server/apis/pipeline/__tests__/mat-f01-canonical-claim.test.ts
+acceptance/MAT-F01/contract.md
+acceptance/MAT-F01/changed-files.txt
+acceptance/MAT-F01/parent-test-results.txt
+acceptance/MAT-F01/new-test-results.txt
+acceptance/MAT-F01/claim-ledger.jsonl
+acceptance/MAT-F01/candidate-terminal-ledger.jsonl
+acceptance/MAT-F01/fresh-resume-comparison.json
+acceptance/MAT-F01/runtime-log.txt
+acceptance/MAT-F01/known-limitations.md

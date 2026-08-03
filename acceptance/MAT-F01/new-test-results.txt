@@ -1,0 +1,127 @@
+# New Test Results — MAT-F01
+
+Execution: server/apis/pipeline/__tests__/mat-f01-canonical-claim.test.ts
+
+## Assertion Results
+
+| Assertion | Status | Implementation |
+|-----------|--------|----------------|
+| A1: Exact quantitative claim | PASS | buildCanonicalClaim + validateClaimSource |
+| A2: Exact qualitative claim | PASS | buildQualitativeClaim + validateClaimSource |
+| A3: No claimless substantive candidate | PASS | admitCandidate returns missing_ic_claim / topic_only_linkage |
+| A4: Ambiguous/paraphrased fails closed | PASS | admitCandidate returns ambiguous_ic_claim / claim_text_not_found / claim_reference_not_resolved |
+| A5: Stable identity (fresh vs resume) | PASS | generateCanonicalClaimId (SHA-256) produces identical IDs |
+| T7: Changed source → changed ID | PASS | Different text → different SHA-256 hash → different claim_id |
+| T8: Duplicate deduplication | PASS | buildClaimLedger deduplicates by claim_id |
+
+## Detailed Test Output
+
+```
+══════════════════════════════════════════════════════════════════════
+ASSERTION 1: Exact Quantitative Claim
+══════════════════════════════════════════════════════════════════════
+  ✓ A1: exact text found in source
+  ✓ A1: coordinate valid
+  ✓ A1: validation method
+  ✓ A1: source_start populated
+  ✓ A1: source_end populated
+  ✓ A1: schema_version
+  ✓ A1: claim_id format
+  ✓ A1: exact_claim_text preserved
+  ✓ A1: document_id
+  ✓ A1: memo_version
+  ✓ A1: page_or_slide
+  ✓ A1: target entity
+  ✓ A1: metric
+  ✓ A1: period
+  ✓ A1: forecast status
+  ✓ A1: unit
+  ✓ A1: scale
+  ✓ A1: stated_value
+  ✓ A1: currency
+  ✓ A1: source validation passed
+  ✓ A1: atomic split produces different claim IDs
+  ✓ A1: EBITDA claim preserves same source text
+  ✓ A1: EBITDA claim preserves same coordinate
+  ✓ A1: claim_id is deterministic (regenerated matches)
+
+══════════════════════════════════════════════════════════════════════
+ASSERTION 2: Exact Qualitative Claim
+══════════════════════════════════════════════════════════════════════
+  ✓ A2: exact qualitative text found in source
+  ✓ A2: coordinate valid
+  ✓ A2: schema_version
+  ✓ A2: claim_type is qualitative
+  ✓ A2: claim_id format
+  ✓ A2: exact source sentence preserved
+  ✓ A2: page coordinate
+  ✓ A2: target entity
+  ✓ A2: normalized proposition present
+  ✓ A2: no numeric value for qualitative
+  ✓ A2: no metric for qualitative
+  ✓ A2: source validation passed
+  ✓ A2: coordinate validation passed
+  ✓ A2: extractor version
+
+══════════════════════════════════════════════════════════════════════
+ASSERTION 3: No Claimless Substantive Candidate
+══════════════════════════════════════════════════════════════════════
+  ✓ A3: claimless candidate NOT admitted
+  ✓ A3: reason is missing_ic_claim
+  ✓ A3: rejection_detail provided
+  ✓ A3: no resolved claim
+  ✓ A3: terminal record is non-reportable
+  ✓ A3: terminal reason persisted
+  ✓ A3: terminal timestamp present
+  ✓ A3: topic-only candidate NOT admitted
+  ✓ A3: reason is topic_only_linkage
+
+══════════════════════════════════════════════════════════════════════
+ASSERTION 4: Ambiguous or Paraphrased Linkage Fails Closed
+══════════════════════════════════════════════════════════════════════
+  ✓ A4a: ambiguous candidate NOT admitted
+  ✓ A4a: reason is ambiguous_ic_claim
+  ✓ A4b: paraphrased text NOT found in source
+  ✓ A4b: paraphrased-source candidate NOT admitted
+  ✓ A4b: reason is claim_text_not_found
+  ✓ A4c: nonexistent claim_id NOT admitted
+  ✓ A4c: reason is claim_reference_not_resolved
+
+══════════════════════════════════════════════════════════════════════
+ASSERTION 5: Stable Identity Across Fresh and Resume
+══════════════════════════════════════════════════════════════════════
+  ✓ A5: same claim count
+  ✓ A5: identical claim IDs
+  ✓ A5: identical exact texts
+  ✓ A5: identical coordinates
+  ✓ A5: identical validations
+
+══════════════════════════════════════════════════════════════════════
+TEST 7: Changed source sentence produces changed claim ID
+══════════════════════════════════════════════════════════════════════
+  ✓ T7: changed text produces different claim ID
+  ✓ T7: changed ID has correct format
+
+══════════════════════════════════════════════════════════════════════
+TEST 8: Duplicate extraction deduplicates to one canonical identity
+══════════════════════════════════════════════════════════════════════
+  ✓ T8: deduplication reduces to 2 unique claims
+  ✓ T8: revenue claim present
+  ✓ T8: EBITDA claim present
+
+══════════════════════════════════════════════════════════════════════
+TEST: Valid candidate admission succeeds
+══════════════════════════════════════════════════════════════════════
+  ✓ VALID: candidate with valid claim_id admitted
+  ✓ VALID: claim_id preserved
+  ✓ VALID: resolved claim populated
+  ✓ VALID: no rejection reason
+
+══════════════════════════════════════════════════════════════════════
+MAT-F01 ACCEPTANCE TESTS — RESULTS
+══════════════════════════════════════════════════════════════════════
+  Passed: 51
+  Failed: 0
+```
+
+## All 5 Frozen Assertions: PASS

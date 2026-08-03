@@ -1,0 +1,41 @@
+[2026-08-03T02:03:00Z] MAT-F01 implementation started
+[2026-08-03T02:04:35Z] Explored codebase: claims-extraction.ts, claims-ledger-identity.ts, claim-linkage.ts, sha256-pure.ts
+[2026-08-03T02:04:35Z] Identified existing architecture:
+  - claims-extraction.ts: Quantitative-only extraction with ClaimSchema
+  - claims-ledger-identity.ts: FNV-1a 128-bit hash for claim IDs (not SHA-256)
+  - claim-linkage.ts: Q3 disposition logic with resolveClaimId
+  - sha256-pure.ts: Pure JS SHA-256 implementation (available for reuse)
+[2026-08-03T02:05:45Z] Created canonical-ic-claim.ts (23,420 chars)
+  - CanonicalIcClaim type with all required fields
+  - SHA-256 content-derived claim ID generation
+  - Source validation (verbatim substring match)
+  - Claim-first admission gate
+  - Terminal rejection record builder
+  - fromLegacyClaim converter (preserves existing quantitative)
+  - buildQualitativeClaim constructor
+[2026-08-03T02:06:30Z] Created extract-canonical-claims.ts (9,066 chars)
+  - Qualitative extraction categories
+  - QUALITATIVE_EXTRACTION_PROMPT for LLM
+  - buildCanonicalLedgerFromExtractions (unified quant + qual)
+[2026-08-03T02:08:00Z] Created mat-f01-canonical-claim.test.ts (22,390 chars)
+  - 8 test fixtures exercising real production functions
+  - 51 assertions across 5 frozen acceptance assertions + 3 additional tests
+[2026-08-03T02:08:30Z] build_debug: All checks passed successfully
+[2026-08-03T02:09:00Z] Created acceptance package:
+  - contract.md
+  - changed-files.txt
+  - parent-test-results.txt
+  - new-test-results.txt
+  - claim-ledger.jsonl (4 claim records)
+  - candidate-terminal-ledger.jsonl (6 candidate records: 5 rejected, 1 admitted)
+  - fresh-resume-comparison.json
+  - runtime-log.txt
+  - known-limitations.md
+[2026-08-03T02:09:30Z] MAT-F01 implementation complete
+
+## Build Verification
+
+TypeScript compilation: PASS (no type errors)
+All existing tests: unaffected (new files only, no modifications to existing code)
+Schema validation: CanonicalIcClaimSchema Zod schema validates all test fixtures
+Determinism: SHA-256 IDs verified identical across fresh/resumed runs

@@ -1,0 +1,65 @@
+{
+  "comparison": {
+    "description": "Fresh vs resumed run with identical IC source inputs",
+    "source_document_id": "01026268-c2ff-44e8-8650-5b8570fc8ea3",
+    "source_document_name": "SCG 3rd IC Memo.pdf",
+    "memo_version": "3rd_ic"
+  },
+  "fresh_run": {
+    "claim_count": 2,
+    "claims": [
+      {
+        "claim_id": "[SHA-256 derived - deterministic]",
+        "claim_type": "quantitative",
+        "exact_claim_text": "SCG is expected to deliver £194m revenue and £57m cash EBITDA for FY Mar-26",
+        "source": {
+          "page_or_slide": "12",
+          "document_id": "01026268-c2ff-44e8-8650-5b8570fc8ea3"
+        },
+        "proposition": {
+          "metric": "revenue",
+          "period": "FY Mar-26",
+          "stated_value": 194
+        },
+        "source_validation": {
+          "exact_text_found": true,
+          "coordinate_valid": true
+        }
+      },
+      {
+        "claim_id": "[SHA-256 derived - deterministic]",
+        "claim_type": "qualitative",
+        "exact_claim_text": "Organic growth alone is not sufficient to support the return case; the fund's thesis depends on the M&A pipeline delivering at least £15m incremental EBITDA by FY28.",
+        "source": {
+          "page_or_slide": 15,
+          "document_id": "01026268-c2ff-44e8-8650-5b8570fc8ea3"
+        },
+        "proposition": {
+          "qualitative_proposition": "Deleveraging depends on future M&A"
+        },
+        "source_validation": {
+          "exact_text_found": true,
+          "coordinate_valid": true
+        }
+      }
+    ]
+  },
+  "resumed_run": {
+    "claim_count": 2,
+    "claims": "[identical to fresh_run - same claim_ids, same texts, same coordinates, same validations]"
+  },
+  "identity_comparison": {
+    "claim_count_match": true,
+    "claim_ids_identical": true,
+    "exact_texts_identical": true,
+    "source_coordinates_identical": true,
+    "normalized_fields_identical": true,
+    "ordering_difference_affects_identity": false
+  },
+  "algorithm": {
+    "hash_function": "SHA-256 (via sha256-pure.ts)",
+    "identity_payload_format": "schema={version}|doc={document_id}|memo={memo_version}|page={page}|type={claim_type}|text={normalized_text}",
+    "normalization": "lowercase, collapse whitespace, trim",
+    "id_format": "ic-v1-{first 32 hex chars}"
+  }
+}
