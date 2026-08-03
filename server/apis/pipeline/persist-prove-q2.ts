@@ -763,307 +763,225 @@ export default api({
     }
 
     // =========================================================================
-    // STEP 8: Run Q3 (claim linkage) consuming the persisted Q2 artifact
+    // STEP 8: Run Q3 using REAL production stage runner
     // =========================================================================
-    // We write Q3 directly using the reportable candidates from this artifact
-    // (they already have deterministic claim IDs and full provenance)
-    const q3Results = reportable.map((c, idx) => ({
-      finding_id: c.candidate_id,
-      corpus_index: idx,
-      title: c.title,
-      claim_linkage_disposition: "claim_linked_contradicted",
-      q4_eligible: true,
-      claim_provenance: {
-        claim_id: c.claim_id,
-        exact_claim_text: c.exact_claim_text,
-        ic_document_id: c.ic_document_id,
-        ic_document_filename: c.ic_document_filename,
-        memo_version: c.memo_version,
-        page_or_location: c.source_page,
-        metric: c.metric,
-        period: c.period,
-        scope_qualifier: c.scope_qualifier,
-        value: c.value,
-        unit: c.unit,
-        evidence: c.detail,
-        verdict: "contradicted",
-      },
-      authority_class: "model_comparison",
-      authority_valid: true,
-      authority_rationale: "structured numeric comparison against operating model",
-      reason: c.reason,
-      evidence_source_type: "operating_model",
+    const { executeQ3Stage } = await import("./q3-production-stage.js");
+    const { executeQ4Stage } = await import("./q4-production-stage.js");
+    const { executeQ5Stage } = await import("./q5-production-stage.js");
+    const { executeTerminalAccounting, reconcileAllStages } = await import("./terminal-accounting-stage.js");
+
+    // Map reportable candidates to Q2CandidateInput shape
+    const q2CandidatesForChain = reportable.map(c => ({
+      candidate_id: c.candidate_id,
+      canonical_claim_id: c.claim_id || null,
+      admitted_evidence_ids: c.verification_evidence
+        ? [`ev-${c.candidate_id.slice(0, 12)}`]
+        : [],
+      originating_run_id: runId,
+      originating_module_id: "persist-prove-q2",
+      candidate_type: c.finding_kind || "data_divergence",
+      creation_rule_version: "strict_regeneration_v2",
+      title: c.title || "",
+      detail: c.detail || null,
+      finding_kind: c.finding_kind || null,
+      severity: c.severity || null,
+      source_tag: c.source_tag || null,
+      source_docs: c.source_docs || [],
+      metric: c.metric || null,
+      period: c.period || null,
+      scope_qualifier: c.scope_qualifier || null,
+      entity_segment: c.entity_segment || null,
+      unit: c.unit || null,
+      actual_or_forecast: c.actual_or_forecast || null,
+      accounting_basis: c.accounting_basis || null,
+      comparison_basis: c.comparison_inputs?.comparison_method || null,
+      verification_evidence: c.verification_evidence,
+      comparison_inputs: c.comparison_inputs,
     }));
+
+    // Q3: Real claim linkage classification
+    const q3Output = executeQ3Stage({
+      candidates: q2CandidatesForChain,
+      claimMap: claimById,
+      ambiguousRefs: undefined,
+      canonicalLedger: null,
+    });
 
     const q3Payload = {
       _replay_metadata: {
         run_id: runId,
-        replay_type: "Q3_fresh_run_from_persisted_q2",
+        replay_type: "Q3_production_stage_v2",
         replay_timestamp: new Date().toISOString(),
-        schema_version: "4.0.0",
+        schema_version: "5.0.0",
         source_q2_artifact_id: q2ArtifactId,
-        total_candidates: reportable.length,
-        q4_eligible_count: reportable.length,
-        q4_ineligible_count: 0,
+        total_candidates: q2CandidatesForChain.length,
+        q4_eligible_count: q3Output.eligible_count,
+        q4_ineligible_count: q3Output.ineligible_count,
         silent_losses: 0,
       },
-      linkage_by_disposition: { claim_linked_contradicted: reportable.length },
-      results: q3Results,
-      evidence_snapshots: reportable.map(c => ({
-        claim_id: c.claim_id,
-        metric: c.metric,
-        period: c.period,
-        scope_qualifier: c.scope_qualifier,
-        value: c.value,
-        unit: c.unit,
-        memo_version: c.memo_version,
-        ic_document_id: c.ic_document_id,
-        ic_document_filename: c.ic_document_filename,
-        authority_class: "model_comparison",
-        verdict: "contradicted",
-      })),
+      results: q3Output.results,
     };
 
     const [q3Persisted] = await ctx.integrations.db.query(
       `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
-       VALUES ($1, 96, 0, 'q3_fresh_run', $2::jsonb, now())
+       VALUES ($1, 96, 0, 'q3_production_v2', $2::jsonb, now())
        ON CONFLICT (module_run_id, tree_level, node_index)
-       DO UPDATE SET merged_json = $2::jsonb, status = 'q3_fresh_run', updated_at = now()
+       DO UPDATE SET merged_json = $2::jsonb, status = 'q3_production_v2', updated_at = now()
        RETURNING id`,
       UpsertSchema,
       [runId, JSON.stringify(q3Payload)],
-      { label: "Persist Q3 claim-linkage from persisted Q2 artifact" }
+      { label: "Persist Q3 production stage (real classifyClaimLinkage)" }
     );
 
     // Gate: Q3 input = persisted Q2 reportable count
-    const q3InputCount = reportable.length;
+    const q3InputCount = q2CandidatesForChain.length;
     if (q3InputCount !== reportable.length) {
       failedGates.push(`q3_input (${q3InputCount}) != q2_reportable (${reportable.length})`);
     }
 
     // =========================================================================
-    // STEP 9: Run Q4 (canonical identity) from Q3 results
+    // STEP 9: Run Q4 using REAL production stage runner
     // =========================================================================
-    // Group by canonical key: metric|period|scope|unit
-    const familyMap = new Map<string, any[]>();
-    for (const r of q3Results) {
-      const c = reportable.find(cand => cand.candidate_id === r.finding_id)!;
-      const key = [
-        (c.metric || "").toLowerCase(),
-        (c.period || "").toLowerCase(),
-        (c.scope_qualifier || "").toLowerCase(),
-        (c.unit || "").toLowerCase(),
-      ].join("|");
-      if (!familyMap.has(key)) familyMap.set(key, []);
-      familyMap.get(key)!.push({ ...r, candidate: c });
-    }
-
-    const q4Families: any[] = [];
-    for (const [keyStr, members] of familyMap) {
-      const primaryMember = members[0];
-      const c = primaryMember.candidate;
-      q4Families.push({
-        canonical_key_str: keyStr,
-        canonical_key: {
-          metric: c.metric,
-          period: c.period,
-          scope_qualifier: c.scope_qualifier,
-          unit: c.unit,
-        },
-        deterministic_finding_id: `cfind-${deterministicHash(keyStr).slice(0, 16)}`,
-        member_count: members.length,
-        member_finding_ids: members.map((m: any) => m.finding_id),
-        all_originating_claim_ids: members.map((m: any) => m.claim_provenance.claim_id),
-        memo_versions: [...new Set(members.map((m: any) => m.candidate.memo_version))],
-        merge_decision: members.length === 1 ? "singleton" : "grouped",
-        merge_reason: members.length === 1 ? "unique canonical key" : `${members.length} members share canonical key`,
-        claim_chronology: members.map((m: any) => ({
-          claim_id: m.claim_provenance.claim_id,
-          claim_text: m.claim_provenance.exact_claim_text,
-          memo_version: m.candidate.memo_version,
-          value: m.candidate.value,
-          unit: m.candidate.unit,
-          version_status: "introduced",
-        })),
-        members_with_provenance: members.map((m: any) => ({
-          finding_id: m.finding_id,
-          corpus_index: m.corpus_index,
-          title: m.title,
-          q3_provenance: {
-            q3_disposition: m.claim_linkage_disposition,
-            q3_verdict: m.claim_provenance.verdict,
-            q3_authority_class: m.authority_class,
-            q3_authority_valid: m.authority_valid,
-            q3_authority_rationale: m.authority_rationale,
-            q3_claim_id: m.claim_provenance.claim_id,
-            q3_ic_document_filename: m.claim_provenance.ic_document_filename,
-            q3_memo_version: m.candidate.memo_version,
-            q3_page_or_location: m.claim_provenance.page_or_location,
-          },
-        })),
-      });
-    }
+    const q4Output = executeQ4Stage({
+      q3Results: q3Output.results,
+      candidates: q2CandidatesForChain,
+    });
 
     const q4Payload = {
       _metadata: {
         run_id: runId,
-        replay_type: "Q4_fresh_run",
+        replay_type: "Q4_production_stage_v2",
         timestamp: new Date().toISOString(),
-        schema_version: "4.0.0",
+        schema_version: "5.0.0",
         source_q3_checkpoint: q3Persisted.id,
-        total_q3_candidates: q3Results.length,
-        q4_eligible_input: q3Results.length,
-        grouped_families: q4Families.filter(f => f.member_count > 1).length,
-        singleton_findings: q4Families.filter(f => f.member_count === 1).length,
+        total_q3_candidates: q3Output.results.length,
+        q4_eligible_input: q3Output.eligible_count,
+        grouped_families: q4Output.families.filter(f => f.member_count > 1).length,
+        singleton_findings: q4Output.families.filter(f => f.member_count === 1).length,
+        ambiguous_count: q4Output.ambiguous.length,
+        degraded_count: q4Output.degraded.length,
       },
-      families: q4Families,
-      ambiguous_records: [],
-      degraded_records: [],
+      families: q4Output.families,
+      singletons: q4Output.singletons,
+      ambiguous_records: q4Output.ambiguous,
+      degraded_records: q4Output.degraded,
     };
 
     const [q4Persisted] = await ctx.integrations.db.query(
       `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
-       VALUES ($1, 95, 0, 'q4_fresh_run', $2::jsonb, now())
+       VALUES ($1, 95, 0, 'q4_production_v2', $2::jsonb, now())
        ON CONFLICT (module_run_id, tree_level, node_index)
-       DO UPDATE SET merged_json = $2::jsonb, status = 'q4_fresh_run', updated_at = now()
+       DO UPDATE SET merged_json = $2::jsonb, status = 'q4_production_v2', updated_at = now()
        RETURNING id`,
       UpsertSchema,
       [runId, JSON.stringify(q4Payload)],
-      { label: "Persist Q4 canonical identity" }
+      { label: "Persist Q4 canonical identity (real groupIntoCanonicalFamilies)" }
     );
 
     // Gate: families >= 1
-    if (q4Families.length === 0) {
+    if (q4Output.families.length === 0) {
       failedGates.push("q4_family_count = 0 (required: ≥1)");
     }
 
     // =========================================================================
-    // STEP 10: Run Q5 (assemble canonical findings) from Q4 families
+    // STEP 10: Run Q5 using REAL production stage runner
     // =========================================================================
-    const canonicalFindings: any[] = [];
-    const terminalOutcomes: any[] = [];
+    const q5Output = executeQ5Stage({
+      families: q4Output.families,
+      q3Results: q3Output.results,
+      candidates: q2CandidatesForChain,
+    });
 
-    for (const family of q4Families) {
-      const primaryMember = family.members_with_provenance[0];
-      const primaryCandidate = reportable.find(c => c.candidate_id === primaryMember.finding_id);
-
-      const canonicalFinding = {
-        canonical_finding_id: family.deterministic_finding_id,
-        canonical_key: family.canonical_key,
-        canonical_key_str: family.canonical_key_str,
-        title: primaryCandidate?.title || family.canonical_key_str,
-        metric: family.canonical_key.metric,
-        period: family.canonical_key.period,
-        scope_qualifier: family.canonical_key.scope_qualifier,
-        unit: family.canonical_key.unit,
-        member_count: family.member_count,
-        originating_claim_ids: family.all_originating_claim_ids,
-        memo_versions: family.memo_versions,
-        claim_chronology: family.claim_chronology,
-        evidence_records: family.members_with_provenance.map((m: any) => {
-          const cand = reportable.find(c => c.candidate_id === m.finding_id);
-          return {
-            finding_id: m.finding_id,
-            claim_id: m.q3_provenance.q3_claim_id,
-            ic_document_filename: m.q3_provenance.q3_ic_document_filename,
-            memo_version: m.q3_provenance.q3_memo_version,
-            page: m.q3_provenance.q3_page_or_location,
-            verdict: m.q3_provenance.q3_verdict,
-            verification_evidence: cand?.verification_evidence,
-            comparison_inputs: cand?.comparison_inputs,
-          };
-        }),
-        verification_status: "verified",
-        merge_decision: family.merge_decision,
-      };
-      canonicalFindings.push(canonicalFinding);
-
-      // Terminal outcomes for each member
-      for (let i = 0; i < family.member_finding_ids.length; i++) {
-        terminalOutcomes.push({
-          finding_id: family.member_finding_ids[i],
-          canonical_finding_id: family.deterministic_finding_id,
-          terminal_outcome: i === 0 ? "retained_as_canonical_finding" : "merged_into_canonical_finding",
-        });
-      }
-    }
-
-    // Also add non-reportable to terminal ledger
-    for (const c of nonReportable) {
-      terminalOutcomes.push({
-        finding_id: c.candidate_id || `nr-${terminalOutcomes.length}`,
-        canonical_finding_id: null,
-        terminal_outcome: "excluded_with_reason",
-        reason: c.reason,
-      });
-    }
-
-    // Persist Q5 canonical findings (tree_level=94)
     const q5CanonicalPayload = {
       _metadata: {
         run_id: runId,
         timestamp: new Date().toISOString(),
-        schema_version: "4.0.0",
+        schema_version: "5.0.0",
         source_q4_checkpoint: q4Persisted.id,
-        canonical_findings_count: canonicalFindings.length,
+        canonical_findings_count: q5Output.findings.length,
+        reportable_count: q5Output.findings.filter(f => f.reportable).length,
       },
-      canonical_findings: canonicalFindings,
+      canonical_findings: q5Output.findings,
     };
 
     const [q5CanonicalPersisted] = await ctx.integrations.db.query(
       `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
-       VALUES ($1, 94, 0, 'q5_fresh_run', $2::jsonb, now())
+       VALUES ($1, 94, 0, 'q5_production_v2', $2::jsonb, now())
        ON CONFLICT (module_run_id, tree_level, node_index)
-       DO UPDATE SET merged_json = $2::jsonb, status = 'q5_fresh_run', updated_at = now()
+       DO UPDATE SET merged_json = $2::jsonb, status = 'q5_production_v2', updated_at = now()
        RETURNING id`,
       UpsertSchema,
       [runId, JSON.stringify(q5CanonicalPayload)],
-      { label: "Persist Q5 canonical findings" }
-    );
-
-    // Persist terminal ledger (tree_level=93)
-    const terminalPayload = {
-      _metadata: {
-        run_id: runId,
-        timestamp: new Date().toISOString(),
-        total_entries: terminalOutcomes.length,
-        retained: terminalOutcomes.filter(t => t.terminal_outcome === "retained_as_canonical_finding").length,
-        merged: terminalOutcomes.filter(t => t.terminal_outcome === "merged_into_canonical_finding").length,
-        excluded: terminalOutcomes.filter(t => t.terminal_outcome === "excluded_with_reason").length,
-      },
-      terminal_outcomes: terminalOutcomes,
-    };
-
-    const [terminalPersisted] = await ctx.integrations.db.query(
-      `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
-       VALUES ($1, 93, 0, 'terminal_fresh_run', $2::jsonb, now())
-       ON CONFLICT (module_run_id, tree_level, node_index)
-       DO UPDATE SET merged_json = $2::jsonb, status = 'terminal_fresh_run', updated_at = now()
-       RETURNING id`,
-      UpsertSchema,
-      [runId, JSON.stringify(terminalPayload)],
-      { label: "Persist terminal outcome ledger" }
+      { label: "Persist Q5 canonical findings (real worst-adverse-wins)" }
     );
 
     // Gate: Q5 >= 1
-    if (canonicalFindings.length === 0) {
+    if (q5Output.findings.length === 0) {
       failedGates.push("q5_persisted_count = 0 (required: ≥1)");
     }
 
     // =========================================================================
-    // STEP 11: Chain integrity checks
+    // STEP 10b: Run Terminal Accounting using REAL production stage runner
     // =========================================================================
-    // Silent losses: every Q2 candidate must appear in terminal
-    const terminalFindingIds = new Set(terminalOutcomes.map(t => t.finding_id));
-    const allQ2Ids = candidates.map(c => c.candidate_id).filter(Boolean);
-    let silentLosses = 0;
-    for (const id of reportable.map(c => c.candidate_id)) {
-      if (!terminalFindingIds.has(id)) silentLosses++;
+    const terminalOutput = executeTerminalAccounting({
+      candidates: q2CandidatesForChain,
+      q3Results: q3Output.results,
+      q4Output,
+      q5Findings: q5Output.findings,
+    });
+
+    const terminalPayload = {
+      _metadata: {
+        run_id: runId,
+        timestamp: new Date().toISOString(),
+        schema_version: "5.0.0",
+        total_entries: terminalOutput.records.length,
+        reportable: terminalOutput.records.filter(t => t.reportable).length,
+        non_reportable: terminalOutput.records.filter(t => !t.reportable).length,
+        invariant_violations: terminalOutput.invariant_violations,
+      },
+      terminal_records: terminalOutput.records,
+    };
+
+    const [terminalPersisted] = await ctx.integrations.db.query(
+      `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
+       VALUES ($1, 93, 0, 'terminal_production_v2', $2::jsonb, now())
+       ON CONFLICT (module_run_id, tree_level, node_index)
+       DO UPDATE SET merged_json = $2::jsonb, status = 'terminal_production_v2', updated_at = now()
+       RETURNING id`,
+      UpsertSchema,
+      [runId, JSON.stringify(terminalPayload)],
+      { label: "Persist terminal accounting (real full taxonomy)" }
+    );
+
+    // =========================================================================
+    // STEP 11: Cross-stage reconciliation + chain integrity
+    // =========================================================================
+    const reconciliation = reconcileAllStages(
+      q2CandidatesForChain,
+      q3Output.results,
+      q4Output,
+      q5Output.findings,
+      terminalOutput.records,
+    );
+
+    // Terminal accounting invariants
+    if (terminalOutput.invariant_violations.length > 0) {
+      for (const v of terminalOutput.invariant_violations) {
+        failedGates.push(`terminal_invariant: ${v}`);
+      }
     }
 
-    // Terminal/output mismatches
-    const retainedCount = terminalOutcomes.filter(t => t.terminal_outcome === "retained_as_canonical_finding").length;
-    const terminalOutputMismatches = retainedCount !== canonicalFindings.length ? 1 : 0;
+    // Cross-stage reconciliation violations
+    if (!reconciliation.all_valid) {
+      for (const v of reconciliation.violations) {
+        failedGates.push(`reconciliation: ${v}`);
+      }
+    }
+
+    // Silent losses
+    const silentLosses = reconciliation.terminal_missing_candidates;
+    const terminalOutputMismatches = reconciliation.terminal_duplicate_ids;
 
     if (silentLosses > 0) failedGates.push(`silent_losses = ${silentLosses} (required: 0)`);
     if (terminalOutputMismatches > 0) failedGates.push(`terminal_output_mismatches = ${terminalOutputMismatches} (required: 0)`);
@@ -1089,11 +1007,11 @@ export default api({
       duplicate_candidate_ids: duplicateCandidateIds,
       reportable_unreconcilable: reportableUnreconcilable,
       q3_input_count: q3InputCount,
-      q3_eligible_count: reportable.length,
+      q3_eligible_count: q3Output.eligible_count,
       q3_checkpoint_id: q3Persisted.id,
-      q4_family_count: q4Families.length,
+      q4_family_count: q4Output.families.length,
       q4_checkpoint_id: q4Persisted.id,
-      q5_persisted_count: canonicalFindings.length,
+      q5_persisted_count: q5Output.findings.length,
       q5_canonical_checkpoint_id: q5CanonicalPersisted.id,
       q5_terminal_checkpoint_id: terminalPersisted.id,
       silent_losses: silentLosses,
@@ -1110,8 +1028,8 @@ export default api({
         cross_document_fallback: crossDocFallbackMatches,
         duplicate_ids: duplicateCandidateIds,
         real_saint_q3_eligible: saintCandidates.length,
-        q4_families: q4Families.length,
-        q5_findings: canonicalFindings.length,
+        q4_families: q4Output.families.length,
+        q5_findings: q5Output.findings.length,
         eligible_with_evidence: reportable.length - eligibleMissingEvidence,
         terminal_mismatches: terminalOutputMismatches,
         silent_losses: silentLosses,

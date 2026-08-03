@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "include": ["server/**/*"],
+  "exclude": ["server/**/__tests__/**"],
   "compilerOptions": {
     "composite": true,
     "noEmit": false,
