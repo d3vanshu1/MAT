@@ -2,8 +2,7 @@ import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { MERGE_PROMPTS, FINDINGS_RULE_FINAL } from "../modules/merge-findings.js";
 import { parseCanonicalFindings } from "./canonical-finding.js";
 import { getModuleModel } from "./model-config.js";
-import { applyBatchAuthorityGate } from "./narrative-authority-gate.js";
-import { shouldExcludeAsProcessObject } from "./narrative-boundary.js";
+import { enforceNarrativeBoundary } from "./narrative-enforcement.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -179,16 +178,42 @@ export default api({
 
     console.log(`[CompleteMerge] Parsed ${findings.length} findings, executive header: ${executiveHeader.slice(0, 100)}...`);
 
-    // Step 5b (MAT-F05): Exclude process objects, apply authority gate
-    const substantiveFindings = findings.filter((f: any) => {
-      if (shouldExcludeAsProcessObject(f)) {
-        console.log(`[CompleteMerge][F05] Excluded process object: "${f.title}"`);
-        return false;
+    // Step 5b (MAT-F05): Full narrative enforcement sequence
+    // Load canonical records from Q3 checkpoint for this run
+    let canonicalRecordMap: Map<string, any> | undefined;
+    try {
+      const q3Checkpoints = await ctx.integrations.db.query(
+        `SELECT checkpoint_data FROM pipeline_checkpoints
+         WHERE run_id = $1 AND stage = 'q3_claim_linkage'
+         ORDER BY created_at DESC LIMIT 1`,
+        z.object({ checkpoint_data: z.any() }),
+        [runId],
+        { label: "CompleteMerge: load Q3 canonical records" }
+      );
+      if (q3Checkpoints.length > 0) {
+        const cpData = typeof q3Checkpoints[0].checkpoint_data === "string"
+          ? JSON.parse(q3Checkpoints[0].checkpoint_data)
+          : q3Checkpoints[0].checkpoint_data;
+        if (cpData?.canonical_findings && Array.isArray(cpData.canonical_findings)) {
+          canonicalRecordMap = new Map();
+          for (const rec of cpData.canonical_findings) {
+            if (rec?.claim?.claim_id) {
+              canonicalRecordMap.set(rec.claim.claim_id, rec);
+            }
+          }
+          console.log(`[CompleteMerge][F05] Loaded ${canonicalRecordMap.size} canonical records from Q3`);
+        }
       }
-      return true;
-    });
-    findings = applyBatchAuthorityGate(substantiveFindings, undefined).accepted;
-    console.log(`[CompleteMerge][F05] Authority gate applied: ${substantiveFindings.length} → ${findings.length} findings`);
+    } catch (q3Err: any) {
+      console.warn(`[CompleteMerge][F05] Could not load Q3 canonical records: ${q3Err?.message}`);
+    }
+
+    const enforcement = enforceNarrativeBoundary(findings, canonicalRecordMap);
+    findings = enforcement.findings;
+    console.log(`[CompleteMerge][F05] Enforcement: ${enforcement.counts.input} in → ${enforcement.counts.output} out (narrative_rejected=${enforcement.counts.narrative_rejected})`);
+    if (enforcement.diagnostics.length > 0) {
+      console.log(`[CompleteMerge][F05] Diagnostics: ${JSON.stringify(enforcement.diagnostics)}`);
+    }
 
     // Step 6: Save root checkpoint
     const newLevel = topLevel + 1;

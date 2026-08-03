@@ -4,8 +4,7 @@ import { NUMERIC_MODULES } from "./constants.js";
 import { getModuleModel } from "../pipeline/model-config.js";
 import { LEGAL_TAX_REGULATORY_SCOPE_BOUNDARY } from "./analyze-chunk.js";
 import { parseCanonicalFindings, type CanonicalFinding } from "../pipeline/canonical-finding.js";
-import { applyBatchAuthorityGate } from "../pipeline/narrative-authority-gate.js";
-import { shouldExcludeAsProcessObject } from "../pipeline/narrative-boundary.js";
+import { enforceNarrativeBoundary } from "../pipeline/narrative-enforcement.js";
 
 // ---------------------------------------------------------------------------
 // Integration
@@ -737,15 +736,16 @@ No deterministic numeric verification was performed for this analysis. All figur
       }
     }
 
-    // MAT-F05: Exclude process/fallback objects and apply authority gate
-    // This prevents LLM-originated process text from becoming findings
-    // and strips LLM authority over verdict, severity, verified flags.
+    // MAT-F05: Full narrative enforcement sequence
+    // Process-object exclusion → canonical-record lookup → processNarration → authority gate
+    // Note: merge-findings operates without a Q3 checkpoint (it IS the merge step).
+    // Canonical record map is undefined here — findings without canonical linkage
+    // are demoted to non-reportable per F05 rules.
     const preGateCount = findings.length;
-findings = findings.filter(f => !shouldExcludeAsProcessObject(f));
-const gateResult = applyBatchAuthorityGate(findings, undefined);
-findings = gateResult.accepted as CanonicalFinding[];
-if (findings.length < preGateCount) {
-      console.log(`[Merge][F05] Authority gate: ${preGateCount} → ${findings.length} findings (${preGateCount - findings.length} excluded)`);
+    const enforcement = enforceNarrativeBoundary(findings, undefined);
+    findings = enforcement.findings as CanonicalFinding[];
+    if (findings.length < preGateCount) {
+      console.log(`[Merge][F05] Enforcement: ${preGateCount} → ${findings.length} findings (process_excluded=${enforcement.counts.process_excluded}, no_canonical=${enforcement.counts.no_canonical_rejected}, narrative_rejected=${enforcement.counts.narrative_rejected})`);
     }
 
     // Build a merged text representation for the next round of tree-reduce.

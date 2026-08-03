@@ -1,0 +1,88 @@
+{
+  "_meta": {
+    "spec": "MAT-F05-integration",
+    "title": "Narrative Enforcement — Accepted/Rejected Diagnostic Samples",
+    "generated": "2026-08-03",
+    "description": "One accepted narrative and four rejected narratives showing enforcement output, fallback text, and reason codes. Produced by enforceNarrativeBoundary() — the actual production function."
+  },
+
+  "accepted": {
+    "finding_id": "f-test-linked-001",
+    "input_narrative": {
+      "title": "Revenue Projection Variance",
+      "detail": "The IC memo states £194m of FY Mar-26 revenue. The current model records £184.4m at P&L/B12.",
+      "full_analysis": "The IC memo projects group revenue of £194m for FY Mar-26. The current financial model (SCG_Financial_Model_v3.xlsx) shows £184,391,535 in cell B12. This is a shortfall of approximately £9.6m (−4.95%). The deterministic verdict is contradicted."
+    },
+    "enforcement_status": "accepted",
+    "reason_codes": [],
+    "output_narrative": {
+      "title": "Revenue Projection Variance",
+      "detail": "The IC memo states £194m of FY Mar-26 revenue. The current model records £184.4m at P&L/B12.",
+      "full_analysis": "The IC memo projects group revenue of £194m for FY Mar-26. The current financial model (SCG_Financial_Model_v3.xlsx) shows £184,391,535 in cell B12. This is a shortfall of approximately £9.6m (−4.95%). The deterministic verdict is contradicted."
+    }
+  },
+
+  "rejected_1_invented_numeric": {
+    "finding_id": "f-test-linked-001",
+    "input_narrative": {
+      "title": "Revenue Variance",
+      "detail": "The IC memo states £195m of revenue, while the model shows £180m.",
+      "full_analysis": "Revenue is £195m in the memo but only £180m in the model, a major shortfall."
+    },
+    "enforcement_status": "rejected",
+    "reason_codes": ["RULE_1_INVENTED_NUMERIC"],
+    "fallback_output": {
+      "title": "Revenue — Fy Mar-26: Contradicted",
+      "detail": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted.",
+      "full_analysis": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted."
+    }
+  },
+
+  "rejected_2_invented_range": {
+    "finding_id": "f-test-linked-001",
+    "input_narrative": {
+      "title": "Revenue Shortfall",
+      "detail": "The variance is 5-15 percentage points below expectation.",
+      "full_analysis": "Revenue is 5-15 percentage points below projection, indicating significant risk."
+    },
+    "enforcement_status": "rejected",
+    "reason_codes": ["RULE_2_INVENTED_RANGE"],
+    "fallback_output": {
+      "title": "Revenue — Fy Mar-26: Contradicted",
+      "detail": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted.",
+      "full_analysis": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted."
+    }
+  },
+
+  "rejected_3_verdict_contradiction": {
+    "finding_id": "f-test-linked-001",
+    "input_narrative": {
+      "title": "Revenue Confirmed",
+      "detail": "The model confirms the IC memo revenue of £194m.",
+      "full_analysis": "After analysis, the figure is confirmed by the current financial model."
+    },
+    "enforcement_status": "rejected",
+    "reason_codes": ["RULE_7_VERDICT_CONTRADICTION"],
+    "fallback_output": {
+      "title": "Revenue — Fy Mar-26: Contradicted",
+      "detail": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted.",
+      "full_analysis": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted."
+    }
+  },
+
+  "rejected_4_unknown_entity_and_source": {
+    "finding_id": "f-test-linked-001",
+    "input_narrative": {
+      "title": "Revenue Comparison",
+      "detail": "Gamma Holdings Ltd revenue demonstrates that SCG EBITDA is materially overstated.",
+      "full_analysis": "Based on Gamma Holdings Ltd comparables, the SCG EBITDA projection of £194m is materially overstated."
+    },
+    "enforcement_status": "rejected",
+    "reason_codes": ["RULE_5_UNKNOWN_ENTITY"],
+    "fallback_output": {
+      "title": "Revenue — Fy Mar-26: Contradicted",
+      "detail": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted.",
+      "full_analysis": "The IC memo states revenue of FY Mar-26: £194.0m. The SCG_Financial_Model_v3.xlsx records £184,391,535 at [P&L/B12]. A £9.6m difference (higher in memo). The deterministic verdict is contradicted."
+    }
+  }
+}

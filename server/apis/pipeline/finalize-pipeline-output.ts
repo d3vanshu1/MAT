@@ -1,7 +1,6 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { parseCanonicalFindings } from "./canonical-finding.js";
-import { applyBatchAuthorityGate } from "./narrative-authority-gate.js";
-import { shouldExcludeAsProcessObject } from "./narrative-boundary.js";
+import { enforceNarrativeBoundary } from "./narrative-enforcement.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -121,9 +120,8 @@ export default api({
 
     console.log(`[Finalize] Parsed ${findings.length} findings`);
 
-    // Step 3b (MAT-F05): Apply authority gate — strip LLM-originated authoritative fields,
-    // exclude process objects, and enforce rule-based caps.
-    // Canonical records are loaded from Q3 checkpoint if available.
+    // Step 3b (MAT-F05): Full narrative enforcement sequence —
+    // process-object exclusion → canonical-record lookup → processNarration → authority gate
     let canonicalRecordMap: Map<string, any> | undefined;
     try {
       const q3Checkpoints = await ctx.integrations.db.query(
@@ -152,22 +150,15 @@ export default api({
       console.warn(`[Finalize][F05] Could not load Q3 canonical records: ${q3Err?.message}`);
     }
 
-    // Exclude process/fallback objects (MAT-F05 §H)
-    const substantiveFindings = findings.filter((f: any) => {
-      if (shouldExcludeAsProcessObject(f)) {
-        console.log(`[Finalize][F05] Excluded process object: "${f.title}"`);
-        return false;
-      }
-      return true;
-    });
+    // Apply full F05 enforcement: exclusion → narration validation → authority gate
+    const enforcement = enforceNarrativeBoundary(findings, canonicalRecordMap);
+    const gatedFindings = enforcement.findings;
+    console.log(`[Finalize][F05] Enforcement: ${enforcement.counts.input} in → ${enforcement.counts.output} out (process_excluded=${enforcement.counts.process_excluded}, no_canonical=${enforcement.counts.no_canonical_rejected}, narrative_rejected=${enforcement.counts.narrative_rejected})`);
 
-    // Apply batch authority gate (MAT-F05 §E) — enforces canonical record over LLM
-    const gateResult = applyBatchAuthorityGate(
-      substantiveFindings,
-      canonicalRecordMap ?? undefined
-    );
-    const gatedFindings = gateResult.accepted;
-    console.log(`[Finalize][F05] Authority gate: ${findings.length} → ${gatedFindings.length} findings`);
+    // Persist diagnostics as a log line (structured)
+    if (enforcement.diagnostics.length > 0) {
+      console.log(`[Finalize][F05] Diagnostics: ${JSON.stringify(enforcement.diagnostics)}`);
+    }
 
     // Step 4: Format report (pure mechanical — no AI) using gated findings
     const fullReport = formatReportMechanical(topNode.executive_header, gatedFindings);
