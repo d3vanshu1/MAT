@@ -58,6 +58,13 @@ import {
   type ComparisonEvidenceInput,
   type VerdictValue,
 } from "./canonical-comparison.js";
+import {
+  buildCanonicalFindingRecord,
+  serializeCanonicalFindingLedger,
+  type CanonicalFindingRecord,
+  type CanonicalDisposition,
+  CANONICAL_FINDING_SCHEMA_VERSION,
+} from "./canonical-finding-record.js";
 
 // ===========================================================================
 // MAT-F03: Canonical Comparison → Production Disposition Aggregation
@@ -156,6 +163,21 @@ function aggregateCanonicalDisposition(
   };
 }
 
+/**
+ * MAT-F04: Reverse map from production disposition string back to VerdictValue.
+ * Used when building the canonical finding record from the overridden disposition.
+ */
+function mapVerdictFromDisposition(disposition: string): VerdictValue {
+  switch (disposition) {
+    case "claim_linked_confirmed": return "confirmed";
+    case "claim_linked_contradicted": return "contradicted";
+    case "claim_linked_materially_changed": return "materially_changed";
+    case "claim_linked_partially_supported": return "partially_supported";
+    case "claim_linked_unsupported": return "unsupported";
+    case "incompatible_claim_evidence": return "unverifiable";
+    default: return "unverifiable";
+  }
+}
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
 const ClaimLinkageRecordSchema = z.object({
@@ -436,6 +458,9 @@ export default api({
     // MAT-F03: Canonical comparison ledger
     const canonicalComparisons: CanonicalComparison[] = [];
 
+    // MAT-F04: Canonical finding records — lossless structured envelope
+    const canonicalFindings: CanonicalFindingRecord[] = [];
+
     // MAT-F02B: Evidence admission ledger — tracks all evidence through canonical gate
     const evidenceAdmissionResults: CandidateEvidenceAdmissionResult[] = [];
 
@@ -628,6 +653,41 @@ export default api({
       }
       // ─── End MAT-F03 ────────────────────────────────────────────────────────
 
+      // ─── MAT-F04: Build canonical finding record ────────────────────────────
+      // Construct the lossless canonical envelope ONLY for candidates that have
+      // both a resolved claim and canonical comparisons.
+      if (candidateComparisons.length > 0 && result.claim_provenance?.claim_id) {
+        const resolvedClaimForFinding = claimMap.get(result.claim_provenance.claim_id);
+        if (resolvedClaimForFinding && evidenceAdmission?.has_admitted_evidence) {
+          const canonicalDisposition: CanonicalDisposition = {
+            verdict: mapVerdictFromDisposition(result.claim_linkage_disposition),
+            reportable: candidateComparisons.some(c => c.reportable),
+            reason_codes: candidateComparisons
+              .flatMap(c => c.verdict.reason_codes)
+              .filter((v, i, a) => a.indexOf(v) === i),
+            rule_version: candidateComparisons[0]?.verdict.rule_version ?? "verdict-v1.0",
+          };
+
+          const canonicalFinding = buildCanonicalFindingRecord({
+            claim: resolvedClaimForFinding,
+            admittedEvidence: evidenceAdmission.admitted,
+            comparisons: candidateComparisons,
+            disposition: canonicalDisposition,
+            narrative: {
+              title: candidate.title,
+              summary: result.reason,
+            },
+            legacyDiagnostic: {
+              legacy_disposition: result.reason.includes("[legacy:") ? result.reason : undefined,
+              legacy_q4_eligible: result.q4_eligible,
+            },
+          });
+
+          canonicalFindings.push(canonicalFinding);
+        }
+      }
+      // ─── End MAT-F04 ────────────────────────────────────────────────────────
+
       linkageResults.push(result);
       dispositionCounts[result.claim_linkage_disposition] =
         (dispositionCounts[result.claim_linkage_disposition] ?? 0) + 1;
@@ -737,6 +797,8 @@ export default api({
           total_rejected: totalRejected,
           candidates_with_evidence: evidenceAdmissionResults.length,
         },
+        // MAT-F04: Canonical finding records count
+        canonical_findings_count: canonicalFindings.length,
       },
       linkage_by_disposition: dispositionCounts,
       results: linkageResults,
@@ -745,6 +807,8 @@ export default api({
       evidence_admission_ledgers: evidenceAdmissionLedgers,
       // MAT-F03: Canonical comparison results
       canonical_comparisons: JSON.parse(serializeComparisonLedger(canonicalComparisons)),
+      // MAT-F04: Canonical finding records — lossless structured envelope
+      canonical_findings: JSON.parse(serializeCanonicalFindingLedger(canonicalFindings)),
     });
 
     const UpsertSchema = z.object({ id: z.string() });

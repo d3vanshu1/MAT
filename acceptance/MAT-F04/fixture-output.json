@@ -1,0 +1,197 @@
+{
+  "_metadata": {
+    "fixture_type": "MAT-F04-canonical-finding-record",
+    "description": "Lossless canonical finding records with stable content-derived identity",
+    "schema_version": "canonical-finding-v1",
+    "identity_version": "identity-v1.0",
+    "generated": "2026-08-03",
+    "test_file": "server/apis/pipeline/__tests__/mat-f04-canonical-finding-record.test.ts"
+  },
+  "findings": [
+    {
+      "id": 1,
+      "title": "Complete £194m revenue finding (£194m memo vs £184.4m model)",
+      "claim": {
+        "claim_id": "clm-v1-abc123def456",
+        "metric": "total_group_revenue",
+        "period": "FY Mar-26",
+        "value": 194,
+        "unit": "gbp_millions",
+        "ic_document_id": "doc-ic-001",
+        "ic_document_filename": "3rd IC Memo - SCG.pdf",
+        "memo_version": "3rd IC",
+        "source_page": "12",
+        "accounting_basis": null,
+        "comparison_basis": "memo_claim"
+      },
+      "evidence": {
+        "evidence_id": "ev-v1-model-rev-001",
+        "source_document_id": "doc-fs-summary-001",
+        "source_document_name": "FS Summary.xlsx",
+        "authority_class": "current_financial_model",
+        "coordinate": {
+          "kind": "workbook",
+          "sheet": "P&L Summary",
+          "cell_or_range": "C42"
+        },
+        "comparison_basis": "current_model"
+      },
+      "comparison": {
+        "compatibility_allowed": true,
+        "normalized_claim_value": 194000000,
+        "normalized_fact_value": 184391535,
+        "signed_delta": 9608465,
+        "absolute_delta": 9608465,
+        "percentage_delta_approx": 5.2109,
+        "direction": "claim_higher",
+        "verdict": "contradicted"
+      },
+      "disposition": {
+        "verdict": "contradicted",
+        "reportable": true
+      }
+    },
+    {
+      "id": 2,
+      "title": "Live-versus-hardcoded revenue revision (FS Summary vs FS Summary (hardcoded))",
+      "claim": {
+        "claim_id": "clm-v1-live-rev-001",
+        "metric": "total_group_revenue",
+        "period": "FY Mar-26",
+        "value": 200,
+        "unit": "gbp_millions",
+        "comparison_basis": "current_model"
+      },
+      "evidence": {
+        "evidence_id": "ev-v1-ref-rev-001",
+        "source_document_name": "FS Summary (hardcoded).xlsx",
+        "coordinate": {
+          "kind": "workbook",
+          "sheet": "P&L Summary",
+          "cell_or_range": "C42"
+        },
+        "comparison_basis": "reference_forecast"
+      },
+      "comparison": {
+        "compatibility_allowed": true,
+        "verdict": "materially_changed",
+        "note": "forecast revision detected (live vs reference)"
+      },
+      "disposition": {
+        "verdict": "materially_changed",
+        "reportable": true
+      }
+    },
+    {
+      "id": 3,
+      "title": "Reported EBITDA revision",
+      "claim": {
+        "claim_id": "clm-v1-reported-ebitda",
+        "metric": "reported_ebitda",
+        "period": "FY Mar-26",
+        "accounting_basis": "reported",
+        "comparison_basis": "memo_claim"
+      },
+      "evidence": {
+        "evidence_id": "ev-v1-reported-ebitda-model",
+        "source_document_name": "FS Summary.xlsx",
+        "accounting_basis": "reported",
+        "comparison_basis": "current_model"
+      },
+      "comparison": {
+        "compatibility_allowed": true,
+        "note": "same accounting basis (reported vs reported) — compatible"
+      },
+      "disposition": {
+        "verdict": "contradicted",
+        "reportable": true
+      }
+    },
+    {
+      "id": 4,
+      "title": "Cash EBITDA comparison",
+      "claim": {
+        "claim_id": "clm-v1-cash-ebitda",
+        "metric": "cash_ebitda",
+        "period": "FY Mar-26",
+        "accounting_basis": "cash",
+        "comparison_basis": "memo_claim"
+      },
+      "evidence": {
+        "evidence_id": "ev-v1-cash-ebitda-model",
+        "source_document_name": "FS Summary.xlsx",
+        "accounting_basis": "cash",
+        "comparison_basis": "current_model"
+      },
+      "comparison": {
+        "compatibility_allowed": true,
+        "note": "same accounting basis (cash vs cash) — compatible"
+      },
+      "proposition_key_includes": ["cash_ebitda", "cash"],
+      "distinct_from": ["reported EBITDA", "EBITDA adjustments"]
+    },
+    {
+      "id": 5,
+      "title": "EBITDA adjustments widening",
+      "claim": {
+        "claim_id": "clm-v1-ebitda-adj",
+        "metric": "ebitda_adjustments",
+        "period": "FY Mar-26",
+        "comparison_basis": "memo_claim"
+      },
+      "evidence": {
+        "evidence_id": "ev-v1-ebitda-adj-model",
+        "source_document_name": "FS Summary.xlsx",
+        "comparison_basis": "current_model"
+      },
+      "comparison": {
+        "compatibility_allowed": true,
+        "note": "EBITDA adjustments is a DISTINCT metric from any EBITDA basis"
+      },
+      "proposition_key_includes": ["ebitda_adjustments"],
+      "distinct_from": ["reported EBITDA", "cash EBITDA", "adjusted EBITDA"]
+    },
+    {
+      "id": 6,
+      "title": "Mixed admitted/rejected evidence example",
+      "description": "One admitted model evidence + one rejected IC memo evidence",
+      "admitted_evidence": {
+        "evidence_id": "ev-v1-model-rev-001",
+        "authority_class": "current_financial_model",
+        "admission_status": "admitted",
+        "coordinate": { "kind": "workbook", "sheet": "P&L Summary", "cell_or_range": "C42" }
+      },
+      "rejected_evidence": {
+        "evidence_id": "ev-v1-ic-memo-self",
+        "authority_class": "ic_memo",
+        "admission_status": "rejected",
+        "rejection_reason": "ic_memo_self_verification",
+        "note": "IC memo cannot verify its own claims"
+      },
+      "canonical_finding_evidence_count": 1,
+      "canonical_finding_contains_rejected": false,
+      "identity_based_on": ["ev-v1-model-rev-001"],
+      "identity_NOT_based_on": ["ev-v1-ic-memo-self"]
+    }
+  ],
+  "identity_rules": {
+    "included_in_hash": [
+      "canonical claim ID",
+      "sorted admitted evidence IDs",
+      "comparison IDs (sorted)",
+      "proposition key (entity|metric|period|segment|scope|unit|actual_forecast|accounting_basis|comparison_basis)",
+      "deterministic verdict",
+      "identity schema version"
+    ],
+    "excluded_from_hash": [
+      "runtime order",
+      "timestamps",
+      "generated title",
+      "generated summary",
+      "array insertion order",
+      "mutable severity wording",
+      "detail field",
+      "full_analysis field"
+    ]
+  }
+}
