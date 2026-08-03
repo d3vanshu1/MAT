@@ -89,6 +89,11 @@ export interface CanonicalComparison {
   claim_id: string;
   evidence_id: string;
 
+  /** Normalized comparison basis from claim side (memo_claim, current_model, etc.) */
+  claim_comparison_basis: string | null;
+  /** Normalized comparison basis from evidence side (current_model, reference_forecast, prior_model, etc.) */
+  evidence_comparison_basis: string | null;
+
   compatibility: DimensionCompatibility;
   calculation: Calculation;
   verdict: Verdict;
@@ -1128,6 +1133,8 @@ export function executeCanonicalComparison(
     comparison_id,
     claim_id: claim.claim_id,
     evidence_id: evidence.evidence_id,
+    claim_comparison_basis: claim.comparison_basis ?? null,
+    evidence_comparison_basis: evidence.comparison_basis ?? null,
     compatibility,
     calculation,
     verdict,

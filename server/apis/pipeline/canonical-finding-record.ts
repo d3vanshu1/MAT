@@ -269,29 +269,12 @@ export function generatePropositionKey(
   claim: IdentifiedClaim,
   comparisons: CanonicalComparison[],
 ): string {
-  // Derive comparison basis from the first compatible comparison (if any)
-  const compatibleComparison = comparisons.find(c => c.compatibility.allowed);
-  // If no compatible comparison, derive from the first comparison's claim basis
-  const comparisonBasis = compatibleComparison
-    ? "compatible"
-    : (comparisons.length > 0 ? "incompatible" : "none");
-
-  // Use comparison_basis from the comparison itself for cross-type distinction
-  // The claim's comparison_basis field distinguishes memo_claim from current_model etc.
-  const claimComparisonBasis = (claim as any).comparison_basis ??
-    (comparisons.length > 0 ? "has_comparison" : "no_comparison");
-
-  // Evidence comparison basis (from evidence side)
-  const evidenceComparisonBases = comparisons
-    .map(c => {
-      const ev = c.evidence_id;
-      return ev;
-    });
-  // For proposition key, use the first comparison's evidence to determine type
+  // Derive the normalized comparison basis pair from the first comparison.
+  // This distinguishes: memo_claim vs current_model, current_model vs reference_forecast, etc.
   const firstComp = comparisons[0];
-  const evidenceBasisForKey = firstComp
-    ? extractComparisonBasisFromComparison(firstComp)
-    : "none";
+  const normalizedBasisPair = firstComp
+    ? deriveNormalizedComparisonBasisPair(firstComp)
+    : "no_comparison";
 
   const parts = [
     normalize(claim.entity_or_segment ?? claim.scope_qualifier ?? "scg"),
@@ -302,25 +285,33 @@ export function generatePropositionKey(
     normalize(claim.unit),
     normalize(claim.actual_or_forecast ?? "unknown"),
     normalize(claim.accounting_basis ?? "unspecified"),
-    normalize(evidenceBasisForKey),
+    normalize(normalizedBasisPair),
   ];
 
   return parts.join("|");
 }
 
 /**
- * Extract the effective comparison basis type from a CanonicalComparison.
- * This determines whether it's memo-vs-model, live-vs-reference, etc.
+ * Derive a normalized comparison basis pair string from a CanonicalComparison.
+ * 
+ * This creates a directional key that distinguishes:
+ *   memo_claim__current_model
+ *   current_model__reference_forecast
+ *   current_model__prior_model
+ *   memo_claim__reference_forecast
+ *
+ * This ensures that:
+ *   - memo revenue vs current model → distinct from
+ *   - live revenue vs frozen reference → distinct from
+ *   - current model vs prior model
  */
-function extractComparisonBasisFromComparison(comparison: CanonicalComparison): string {
-  // The comparison itself records the claim and evidence IDs but not their bases directly.
-  // We derive from the compatibility dimensions present.
-  // For proposition key purposes, we use the comparison_basis dimension result.
-  const basisDecision = comparison.compatibility.comparison_basis;
-  if (basisDecision === "compatible") return "basis_compatible";
-  if (basisDecision === "incompatible") return "basis_incompatible";
-  if (basisDecision === "unknown") return "basis_unknown";
-  return "basis_na";
+function deriveNormalizedComparisonBasisPair(comparison: CanonicalComparison): string {
+  const claimBasis = comparison.claim_comparison_basis ?? "unknown";
+  const evidenceBasis = comparison.evidence_comparison_basis ?? "unknown";
+  
+  // Sort alphabetically to ensure stable key regardless of which side is claim/evidence
+  // NO — we want directionality. claim_basis first, evidence_basis second.
+  return `${claimBasis}__${evidenceBasis}`;
 }
 
 function normalize(value: string): string {

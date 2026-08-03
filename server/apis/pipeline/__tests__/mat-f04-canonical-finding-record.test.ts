@@ -343,9 +343,8 @@ console.log("\nTEST 5: memo-versus-model and live-versus-hardcoded remain distin
   const finding1 = buildTestFinding({ comparisons: [comp1] });
   const finding2 = buildTestFinding({ comparisons: [comp2] });
 
-  assert(finding1.identity.proposition_key !== finding2.identity.proposition_key || 
-         finding1.identity.semantic_hash !== finding2.identity.semantic_hash,
-    "memo-vs-model and live-vs-hardcoded produce distinct identities");
+  assert(finding1.identity.proposition_key !== finding2.identity.proposition_key,
+    "memo-vs-model and live-vs-hardcoded produce distinct proposition_keys");
   assert(finding1.identity.finding_id !== finding2.identity.finding_id,
     "distinct finding_ids");
 }

@@ -37,6 +37,7 @@ import {
   generateStableEvidenceIdFromParts,
   type FindingIdentityPayload,
 } from "./finding-identity.js";
+import type { CanonicalFindingRecord } from "./canonical-finding-record.js";
 
 // ---------------------------------------------------------------------------
 // Strict Originating Claim Schema
@@ -199,6 +200,15 @@ export const CanonicalFindingSchema = z.object({
   ]),
   /** Whether this finding has full structured evidence or is degraded */
   evidence_quality: z.enum(["full", "partial", "degraded"]),
+  /** MAT-F04: Reference to canonical finding records used as source of truth */
+  canonical_finding_source: z.object({
+    /** F04 finding IDs that sourced this canonical finding */
+    finding_ids: z.array(z.string()),
+    /** F04 semantic hashes for identity verification */
+    semantic_hashes: z.array(z.string()),
+    /** F04 proposition keys for grouping provenance */
+    proposition_keys: z.array(z.string()),
+  }).optional(),
 });
 
 export type CanonicalFinding = z.infer<typeof CanonicalFindingSchema>;
@@ -298,6 +308,7 @@ export function constructCanonicalFinding(
   members: RawFinding[],
   resolvedClaims: Map<string, ClaimData>,
   evidenceSnapshots?: EvidenceSnapshot[],
+  canonicalFindingRecords?: CanonicalFindingRecord[],
 ): { finding: CanonicalFinding; memberOutcomes: MemberOutcome[] } {
   const memberFindingIds = members.map(m => m.finding_id);
 
@@ -419,37 +430,58 @@ export function constructCanonicalFinding(
   // If no structured snapshots available, evidence_quality = "degraded"
 
   // --- Build comparison results (strict schema) ---
+  // MAT-F04: Prefer canonical finding records when available
   const comparisonResults: ComparisonResult[] = [];
-  for (const snap of evidenceSnapshots ?? []) {
-    if (snap.value == null) continue;
+  let hasCanonicalComparisons = false;
 
-    const claimData = resolvedClaims.get(snap.claim_id);
-    if (!claimData) continue;
-
-    // Extract claim value from the claim text if numeric
-    // For now, use the snapshot's value as both claim and evidence
-    // (the snapshot records the CLAIM value; evidence would come from verification source)
-    const claimValue = snap.value;
-    // In a full implementation, authoritative_value comes from the verification source
-    // For now, mark as incomparable if we don't have explicit numeric comparison
-    comparisonResults.push({
-      claim_value: claimValue,
-      authoritative_value: null, // Would come from model/DD source
-      signed_delta: null,
-      percentage_delta: null,
-      direction: "incomparable",
-      deterministic_verdict: snap.verdict || "unverifiable",
-      claim_unit: snap.unit || null,
-      evidence_unit: null,
-      claim_period: snap.period || null,
-      evidence_period: null,
-      comparison_compatible: false,
-    });
+  if (canonicalFindingRecords && canonicalFindingRecords.length > 0) {
+    // Source of truth: use F04 canonical comparison records
+    for (const cfr of canonicalFindingRecords) {
+      for (const comp of cfr.comparisons) {
+        comparisonResults.push({
+          claim_value: comp.calculation.normalized_claim_value,
+          authoritative_value: comp.calculation.normalized_fact_value,
+          signed_delta: comp.calculation.signed_delta,
+          percentage_delta: comp.calculation.percentage_delta,
+          direction: comp.calculation.direction === "claim_higher" ? "higher"
+            : comp.calculation.direction === "claim_lower" ? "lower"
+            : comp.calculation.direction === "equal" ? "equal"
+            : "incomparable",
+          deterministic_verdict: comp.verdict.value,
+          claim_unit: null,
+          evidence_unit: null,
+          claim_period: null,
+          evidence_period: null,
+          comparison_compatible: comp.compatibility.allowed,
+        });
+        hasCanonicalComparisons = true;
+      }
+    }
+  } else {
+    // Fallback: use evidence snapshots (legacy path)
+    for (const snap of evidenceSnapshots ?? []) {
+      if (snap.value == null) continue;
+      const claimData = resolvedClaims.get(snap.claim_id);
+      if (!claimData) continue;
+      comparisonResults.push({
+        claim_value: snap.value,
+        authoritative_value: null,
+        signed_delta: null,
+        percentage_delta: null,
+        direction: "incomparable",
+        deterministic_verdict: snap.verdict || "unverifiable",
+        claim_unit: snap.unit || null,
+        evidence_unit: null,
+        claim_period: snap.period || null,
+        evidence_period: null,
+        comparison_compatible: false,
+      });
+    }
   }
 
   // --- Determine evidence quality ---
   const hasStructuredEvidence = evidenceMap.size > 0;
-  const hasNumericComparison = comparisonResults.some(r => r.comparison_compatible);
+  const hasNumericComparison = comparisonResults.some(r => r.comparison_compatible) || hasCanonicalComparisons;
   let evidenceQuality: "full" | "partial" | "degraded";
   if (hasStructuredEvidence && originatingClaims.length > 0) {
     evidenceQuality = hasNumericComparison ? "full" : "partial";
@@ -479,6 +511,14 @@ export function constructCanonicalFinding(
     merged_from_finding_ids: memberFindingIds,
     verification_status: verificationStatus,
     evidence_quality: evidenceQuality,
+    // MAT-F04: Preserve canonical finding record references
+    canonical_finding_source: canonicalFindingRecords && canonicalFindingRecords.length > 0
+      ? {
+          finding_ids: canonicalFindingRecords.map(cfr => cfr.identity.finding_id),
+          semantic_hashes: canonicalFindingRecords.map(cfr => cfr.identity.semantic_hash),
+          proposition_keys: canonicalFindingRecords.map(cfr => cfr.identity.proposition_key),
+        }
+      : undefined,
   };
 
   // --- Member outcomes ---

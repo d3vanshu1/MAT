@@ -29,6 +29,10 @@ import {
   type MemberOutcome,
   type CanonicalFinding,
 } from "./canonical-finding-construction.js";
+import {
+  deserializeCanonicalFindingLedger,
+  type CanonicalFindingRecord,
+} from "./canonical-finding-record.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -159,6 +163,9 @@ export default api({
 
     // Build Q3 lookup for verdicts
     const q3VerdictMap = new Map<string, { verdict: string; claim_id: string | null; claim_text: string; memo_version: string | null }>();
+    // MAT-F04: Maps for canonical finding records from Q3
+    const canonicalFindingRecordMap = new Map<string, CanonicalFindingRecord>();
+    const canonicalFindingsByClaimId = new Map<string, CanonicalFindingRecord>();
     const q3EvidenceSnapshotsByClaimId = new Map<string, any>();
     if (q3Rows.length > 0) {
       const q3Parsed = typeof q3Rows[0].merged_json === "string"
@@ -179,6 +186,22 @@ export default api({
       for (const snap of snapshots) {
         if (snap.claim_id) {
           q3EvidenceSnapshotsByClaimId.set(snap.claim_id, snap);
+        }
+      }
+
+      // MAT-F04: Load canonical finding records (lossless structured envelope)
+      if (q3Parsed.canonical_findings) {
+        const rawFindings = Array.isArray(q3Parsed.canonical_findings)
+          ? q3Parsed.canonical_findings
+          : [];
+        for (const cfr of rawFindings as CanonicalFindingRecord[]) {
+          if (cfr.identity?.finding_id) {
+            canonicalFindingRecordMap.set(cfr.identity.finding_id, cfr);
+            // Also index by claim_id for lookup during family construction
+            if (cfr.claim?.claim_id) {
+              canonicalFindingsByClaimId.set(cfr.claim.claim_id, cfr);
+            }
+          }
         }
       }
     }
@@ -266,12 +289,20 @@ export default api({
           if (snap) familyEvidenceSnapshots.push(snap);
         }
 
+        // MAT-F04: Collect canonical finding records for this family
+        const familyCanonicalRecords: CanonicalFindingRecord[] = [];
+        for (const claimId of family.all_originating_claim_ids) {
+          const cfr = canonicalFindingsByClaimId.get(claimId);
+          if (cfr) familyCanonicalRecords.push(cfr);
+        }
+
         const { finding, memberOutcomes } = constructCanonicalFinding(
           family.canonical_key_str,
           family.canonical_key,
           memberFindings,
           resolvedClaims,
           familyEvidenceSnapshots,
+          familyCanonicalRecords,
         );
         allCanonicalFindings.push(finding);
         allMemberOutcomes.push(...memberOutcomes);

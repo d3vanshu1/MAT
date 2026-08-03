@@ -1,0 +1,39 @@
+{
+  "_metadata": {
+    "fixture_type": "MAT-F04-comparison-basis-distinction",
+    "description": "Three distinct comparison-basis proposition keys proving no overmerge",
+    "generated": "2026-08-03"
+  },
+  "distinct_proposition_keys": [
+    {
+      "id": 1,
+      "description": "Memo FY26 revenue claim versus current model",
+      "claim_comparison_basis": "memo_claim",
+      "evidence_comparison_basis": "current_model",
+      "normalized_basis_pair": "memo_claim__current_model",
+      "proposition_key_suffix": "memo_claim__current_model",
+      "example_proposition_key": "scg|total_group_revenue|fy_mar_26|all|group|gbp_millions|forecast|unspecified|memo_claim__current_model"
+    },
+    {
+      "id": 2,
+      "description": "Live FY26 revenue versus frozen/hardcoded reference",
+      "claim_comparison_basis": "current_model",
+      "evidence_comparison_basis": "reference_forecast",
+      "normalized_basis_pair": "current_model__reference_forecast",
+      "proposition_key_suffix": "current_model__reference_forecast",
+      "example_proposition_key": "scg|total_group_revenue|fy_mar_26|all|group|gbp_millions|forecast|unspecified|current_model__reference_forecast"
+    },
+    {
+      "id": 3,
+      "description": "Current model versus prior model",
+      "claim_comparison_basis": "current_model",
+      "evidence_comparison_basis": "prior_model",
+      "normalized_basis_pair": "current_model__prior_model",
+      "proposition_key_suffix": "current_model__prior_model",
+      "example_proposition_key": "scg|total_group_revenue|fy_mar_26|all|group|gbp_millions|forecast|unspecified|current_model__prior_model"
+    }
+  ],
+  "assertion": "All three have different proposition keys and different finding IDs because the normalized basis pair (last segment) differs",
+  "parent_revision_behavior": "Parent revision would produce basis_compatible for all three → same proposition key → overmerge",
+  "new_revision_behavior": "New revision preserves claim_comparison_basis and evidence_comparison_basis from CanonicalComparison → distinct keys"
+}
