@@ -60,6 +60,14 @@ import {
   admitCandidate,
   type CandidateRejectionReason,
 } from "./canonical-ic-claim.js";
+import {
+  type CanonicalEvidenceRecord,
+  type EvidenceAdmissionResult,
+  type EvidenceRejectionReason,
+  admitEvidence,
+  classifySourceAuthority,
+  type EvidenceAuthorityClass,
+} from "./canonical-evidence.js";
 
 // ---------------------------------------------------------------------------
 // Document-Level Authority Classes
@@ -1008,3 +1016,23 @@ export function buildCanonicalLedgerFromCheckpoint(
     claimMap,
   };
 }
+
+// ---------------------------------------------------------------------------
+// MAT-F02: Production evidence admission — callable from Q3/Q4 boundary
+// ---------------------------------------------------------------------------
+
+/**
+ * Production wrapper for evidence admission.
+ * Re-exports the canonical evidence module's admission gate through the
+ * claim-linkage boundary so Q3/Q4 callers don't need a separate import.
+ */
+export {
+  admitEvidence as admitEvidenceAtBoundary,
+  classifySourceAuthority as classifyEvidenceSourceAuthority,
+};
+export type {
+  CanonicalEvidenceRecord,
+  EvidenceAdmissionResult,
+  EvidenceRejectionReason,
+  EvidenceAuthorityClass,
+};

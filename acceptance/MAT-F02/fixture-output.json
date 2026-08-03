@@ -1,0 +1,145 @@
+[
+  {
+    "label": "admitted_model",
+    "admitted": true,
+    "evidence_record": {
+      "schema_version": "evidence-v1",
+      "source": {
+        "document_id": "doc-model-001",
+        "document_name": "SCG CT-to-Mar-26 Model v4.xlsm",
+        "authority_class": "current_financial_model",
+        "source_type": "workbook"
+      },
+      "coordinate": {
+        "kind": "workbook",
+        "sheet": "FS Summary",
+        "cell_or_range": "E42",
+        "displayed_value": 194,
+        "raw_value": 194000000
+      },
+      "target": { "entity": "SCG", "segment": null },
+      "proposition": {
+        "metric": "revenue",
+        "period": "FY Mar-26",
+        "scope": "Total Group",
+        "unit": "£m",
+        "currency": "GBP",
+        "scale": "millions",
+        "actual_forecast_status": "forecast",
+        "value": 194
+      },
+      "evidence_role": "verifying",
+      "authority_decision": {
+        "allowed": true,
+        "reason_code": "current_model_for_financial",
+        "rule_version": "authority-policy-v1"
+      },
+      "entity_applicability": {
+        "allowed": true,
+        "direct_entity_match": true,
+        "bridge_evidence_id": null,
+        "reason_code": "direct_entity_match"
+      }
+    },
+    "rejection_reason": null
+  },
+  {
+    "label": "admitted_legal_dd",
+    "admitted": true,
+    "evidence_record": {
+      "schema_version": "evidence-v1",
+      "source": {
+        "document_id": "doc-legal-001",
+        "document_name": "Legal DD Report — SCG.pdf",
+        "authority_class": "legal_dd",
+        "source_type": "pdf"
+      },
+      "coordinate": {
+        "kind": "pdf",
+        "page": 23,
+        "exact_quote": "standard change-of-control clause requiring counterparty consent for 3 of the 12 material customer contracts"
+      },
+      "target": { "entity": "SCG", "segment": null },
+      "proposition": {
+        "qualitative_proposition": "Change-of-control requires consent for 3/12 contracts",
+        "actual_forecast_status": "not_applicable"
+      },
+      "evidence_role": "verifying",
+      "authority_decision": {
+        "allowed": true,
+        "reason_code": "legal_dd_for_legal_proposition",
+        "rule_version": "authority-policy-v1"
+      },
+      "entity_applicability": {
+        "allowed": true,
+        "direct_entity_match": true,
+        "bridge_evidence_id": null,
+        "reason_code": "direct_entity_match"
+      }
+    },
+    "rejection_reason": null
+  },
+  {
+    "label": "admitted_commercial_cdd",
+    "admitted": true,
+    "evidence_record": {
+      "schema_version": "evidence-v1",
+      "source": {
+        "document_id": "doc-cdd-001",
+        "document_name": "Altman Solon Commercial Due Diligence.pdf",
+        "authority_class": "commercial_cdd",
+        "source_type": "pdf"
+      },
+      "coordinate": {
+        "kind": "pdf",
+        "page": 8,
+        "exact_quote": "The UK managed services market is estimated at £12.4bn in 2025, growing at approximately 7% per annum"
+      },
+      "target": { "entity": "SCG", "segment": null },
+      "proposition": {
+        "metric": "market_size",
+        "period": "2025",
+        "scope": "UK Managed Services",
+        "unit": "£bn",
+        "currency": "GBP",
+        "scale": "billions",
+        "actual_forecast_status": "actual",
+        "value": 12.4
+      },
+      "evidence_role": "verifying",
+      "authority_decision": {
+        "allowed": true,
+        "reason_code": "commercial_cdd_for_market_proposition",
+        "rule_version": "authority-policy-v1"
+      },
+      "entity_applicability": {
+        "allowed": true,
+        "direct_entity_match": true,
+        "bridge_evidence_id": null,
+        "reason_code": "direct_entity_match"
+      }
+    },
+    "rejection_reason": null
+  },
+  {
+    "label": "rejected_gamma_to_scg",
+    "admitted": false,
+    "evidence_record": null,
+    "rejection_reason": "entity_bridge_missing",
+    "rejection_detail": "Entity applicability rejected: evidence_entity=Gamma, claim_entity=SCG, reason=entity_bridge_missing"
+  },
+  {
+    "label": "rejected_ic_self_verification",
+    "admitted": false,
+    "evidence_record": null,
+    "rejection_reason": "ic_memo_self_verification",
+    "rejection_detail": "Authority rejected: ic_memo_self_verification (class=ic_memo, proposition=financial)"
+  },
+  {
+    "label": "rejected_invalid_coordinate",
+    "admitted": false,
+    "evidence_record": null,
+    "rejection_reason": "quote_not_found",
+    "rejection_detail": "Coordinate invalid: quote_not_in_document"
+  }
+]
