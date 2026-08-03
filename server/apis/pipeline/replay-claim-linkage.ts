@@ -368,6 +368,60 @@ export default api({
       }
       // ─── End MAT-F02B evidence admission ────────────────────────────────────
 
+      // ─── MAT-F02B: Gate enforcement ─────────────────────────────────────────
+      // If evidence existed but NONE was admitted, this candidate cannot produce
+      // a Q4-eligible result. Override to invalid_evidence_authority immediately.
+      if (evidenceAdmission && rawEvidenceEntries.length > 0 && !evidenceAdmission.has_admitted_evidence) {
+        const authorityClass = evidenceAdmission.rejected.length > 0
+          ? evidenceAdmission.rejected[0].authority_class
+          : "unknown_or_other" as const;
+        const rejectionReasons = evidenceAdmission.rejected.map(r => r.rejection_reason).join(", ");
+
+        const gatedResult: ClaimLinkageResult = {
+          finding_id: candidate.finding_id,
+          corpus_index: candidate.corpus_index,
+          title: candidate.title,
+          claim_linkage_disposition: "invalid_evidence_authority",
+          q4_eligible: false,
+          claim_provenance: null,
+          authority_class: authorityClass as any,
+          authority_valid: false,
+          authority_rationale: `MAT-F02B: All evidence rejected by canonical admission gate — ${rejectionReasons}`,
+          reason: `Evidence admission gate: all ${rawEvidenceEntries.length} entries rejected (${rejectionReasons})`,
+          evidence_source_type: candidate.source_tag ?? null,
+        };
+
+        linkageResults.push(gatedResult);
+        dispositionCounts[gatedResult.claim_linkage_disposition] =
+          (dispositionCounts[gatedResult.claim_linkage_disposition] ?? 0) + 1;
+        continue; // Skip classifyClaimLinkage entirely — no admitted evidence
+      }
+
+      // Derive admitted-only evidence fields for classifyClaimLinkage
+      // Only admitted evidence may influence authority, disposition, and provenance
+      let filteredEvidence: string | null = finding?.evidence ?? null;
+      let filteredDocFilename: string | null = finding?.source_docs?.[0] ?? null;
+      let filteredSourceTag: string | null = candidate.source_tag;
+      let admittedEvidenceIds: string[] = [];
+
+      if (evidenceAdmission && evidenceAdmission.has_admitted_evidence) {
+        // Synthesize evidence text from admitted entries only
+        const admittedTexts = evidenceAdmission.admitted.map(a => {
+          if (a.coordinate.kind === "workbook") {
+            return `[${a.source_document_name}] ${a.coordinate.sheet}!${a.coordinate.cell_or_range}: ${a.canonical_record.proposition.value ?? ""}`;
+          }
+          if (a.coordinate.kind === "pdf") {
+            return `[${a.source_document_name}] p.${a.coordinate.page}: "${a.coordinate.exact_quote}"`;
+          }
+          return `[${a.source_document_name}]`;
+        });
+        filteredEvidence = admittedTexts.join(" | ");
+        // Use the first admitted evidence's document for authority derivation
+        filteredDocFilename = evidenceAdmission.admitted[0].source_document_name;
+        admittedEvidenceIds = evidenceAdmission.admitted.map(a => a.evidence_id);
+      }
+      // ─── End MAT-F02B gate enforcement ──────────────────────────────────────
+
       const result = classifyClaimLinkage(
         {
           finding_id: candidate.finding_id,
@@ -376,14 +430,14 @@ export default api({
           detail: finding?.detail,
           full_analysis: finding?.full_analysis,
           severity: candidate.severity,
-          source_tag: candidate.source_tag,
+          source_tag: filteredSourceTag,
           source_docs: finding?.source_docs,
           originating_claim_id: finding?.originating_claim_id,
           claim_ids: finding?.claim_ids,
           claim_type: finding?.claim_type,
           finding_kind: finding?.finding_kind,
-          evidence: finding?.evidence,
-          doc_filename: finding?.source_docs?.[0] ?? null,
+          evidence: filteredEvidence,
+          doc_filename: filteredDocFilename,
           doc_type: finding?.doc_type ?? null,
         },
         claimMap,
