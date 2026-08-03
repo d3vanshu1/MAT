@@ -744,7 +744,11 @@ export async function runClaimsExtraction(
 
   // Deduplicate by claim_id (deterministic — same source = same ID)
   // MAT-F01B: Include qualitative claims in the SAME canonical ledger
-  const allCanonicalWithQualitative = [...canonicalClaims, ...newQualitativeClaims];
+  // Correction 1: Retain prior qualitative claims from resumed ledger
+  const priorQualitativeClaims: CanonicalIcClaim[] = priorLedger?.canonical_claims
+    ? priorLedger.canonical_claims.filter(c => c.claim_type === "qualitative")
+    : [];
+  const allCanonicalWithQualitative = [...canonicalClaims, ...priorQualitativeClaims, ...newQualitativeClaims];
   const canonicalLedger = buildCanonicalLedger(allCanonicalWithQualitative);
   ledger.canonical_claims = canonicalLedger.claims;
 

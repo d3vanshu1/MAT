@@ -300,6 +300,14 @@ function checkMaterialAmbiguity(
       // Contradictory verdicts are always materially distinct
       reasonCodes.push("contradictory_verdict");
     }
+
+    // Check admitted evidence identity (Correction 3)
+    // Same key/basis/verdict but different evidence sets → fail closed
+    const firstEvIds = [...(first.evidence ?? []).map(e => e.evidence_id)].sort().join(",");
+    const otherEvIds = [...(other.evidence ?? []).map(e => e.evidence_id)].sort().join(",");
+    if (firstEvIds && otherEvIds && firstEvIds !== otherEvIds) {
+      reasonCodes.push("different_evidence_sets");
+    }
   }
 
   // Deduplicate reason codes

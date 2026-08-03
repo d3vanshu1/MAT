@@ -1,13 +1,12 @@
 /**
  * MAT-F07 Stage 2: Q4 Production Stage
  *
- * Groups Q3-eligible candidates into canonical families using the REAL
- * production handler (groupIntoCanonicalFamilies) with the full 11-field
- * canonical proposition key.
+ * Groups Q3-eligible candidates into canonical families using the EXACT
+ * persisted F04 proposition key as the partition identity.
  *
- * F04 IDENTITY INTEGRATION (MAT-F07 §3):
- *   - When f04_proposition_key is present on a candidate, Q4 groups by that
- *     exact key — title/detail regex is NOT used for identity derivation.
+ * F04 IDENTITY INTEGRATION (MAT-F07 §3 + Correction 2):
+ *   - The exact f04_proposition_key IS the family grouping key.
+ *   - groupIntoCanonicalFamilies is NOT used for primary partitioning.
  *   - Each Q4 family preserves member F04 finding IDs, semantic hashes,
  *     and proposition keys for Q5 resolution.
  *   - Ambiguous resolution (multiple distinct F04 records) → fail closed.
@@ -27,9 +26,6 @@
  */
 
 import {
-  groupIntoCanonicalFamilies,
-  type CanonicalFamily,
-  type CanonicalIdentityResult,
   type AmbiguousCandidate,
   type DegradedRecord,
   type CanonicalKey,
@@ -80,8 +76,8 @@ export interface Q4StageOutput {
 // ===========================================================================
 
 /**
- * Execute Q4 stage using the REAL production handler (groupIntoCanonicalFamilies).
- * Uses full 11-field canonical proposition key. No reduced grouping.
+ * Execute Q4 stage: partition Q3-eligible candidates into canonical families
+ * by exact F04 proposition key. No title/detail regex grouping is used.
  * Only Q3-eligible candidates may enter.
  *
  * When f04_proposition_key is available on a candidate, it takes absolute priority
@@ -132,53 +128,39 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
     );
   }
 
-  // Build the finding objects for groupIntoCanonicalFamilies
-  // Pass structured_proposition from Q2 so Q4 groups by F04 proposition key, not title/detail
-  const findingsForGrouping = q4Eligible.map((q3r, idx) => {
-    const candidate = input.candidates.find(c => c.candidate_id === q3r.candidate_id);
-    return {
-      finding_id: q3r.candidate_id,
-      corpus_index: idx,
-      title: candidate?.title ?? "",
-      detail: candidate?.detail ?? null,
-      full_analysis: null as string | null,
-      severity: candidate?.severity ?? null,
-      source_tag: candidate?.source_tag ?? null,
-      finding_kind: candidate?.finding_kind ?? null,
-      issue_key: null as string | null,
-      originating_claim_id: candidate?.canonical_claim_id ?? null,
-      claim_ids: candidate?.canonical_claim_id ? [candidate.canonical_claim_id] : null,
-      source_docs: candidate?.source_docs ?? null,
-      claim_type: null as string | null,
-      // F04 structured proposition key — takes priority over title/detail regex
-      structured_proposition: candidate ? {
-        metric: candidate.metric,
-        period: candidate.period,
-        entity_or_segment: candidate.entity_segment,
-        scope: candidate.scope_qualifier,
-        unit: candidate.unit,
-        actual_or_forecast: candidate.actual_or_forecast,
-        accounting_basis: candidate.accounting_basis,
-        comparison_basis: candidate.comparison_basis,
-      } : null,
-    };
-  });
+  // --- Correction 2: Partition DIRECTLY by exact f04_proposition_key ---
+  // The F04 key IS the family identity. groupIntoCanonicalFamilies is NOT used for
+  // primary grouping — the persisted F04 key takes absolute authority.
+  // Title, detail, and projected fields cannot generate or replace it.
 
-  // Call the REAL production Q4 grouper
-  const groupResult = groupIntoCanonicalFamilies(findingsForGrouping);
-
-  // Build Q3→F04 lookup for enriching families
-  const q3F04Lookup = new Map<string, Q3ResultRow>();
-  for (const q3r of q4Eligible) {
-    q3F04Lookup.set(q3r.candidate_id, q3r);
+  // Build Q3→candidate lookup
+  const candidateLookup = new Map<string, Q2CandidateInput>();
+  for (const c of input.candidates) {
+    candidateLookup.set(c.candidate_id, c);
   }
 
-  // Map internal families to Q4Family schema
-  const families: Q4Family[] = groupResult.families.map(fam => {
-    const familyId = `q4fam-${fam.canonical_key_str.replace(/[^a-z0-9]/g, "").slice(0, 20)}-${fam.member_finding_ids.length}m`;
+  // Partition by exact F04 proposition key
+  const keyPartitions = new Map<string, Q3ResultRow[]>();
+  for (const q3r of q4Eligible) {
+    const key = q3r.f04_proposition_key!; // Guaranteed non-null by H2 pre-filter
+    const partition = keyPartitions.get(key);
+    if (partition) {
+      partition.push(q3r);
+    } else {
+      keyPartitions.set(key, [q3r]);
+    }
+  }
+
+  // Build families from F04-key partitions
+  const families: Q4Family[] = [];
+  const ambiguous: AmbiguousCandidate[] = [];
+
+  for (const [f04Key, members] of keyPartitions) {
+    const memberIds = members.map(m => m.candidate_id);
+    const familyId = `q4fam-${f04Key.replace(/[^a-z0-9]/g, "").slice(0, 20)}-${memberIds.length}m`;
 
     // Determine representative vs non-representative (first member = representative)
-    const duplicateDecisions = fam.member_finding_ids.map((mid, idx) => ({
+    const duplicateDecisions = memberIds.map((mid, idx) => ({
       candidate_id: mid,
       decision: (idx === 0 ? "representative" : "non_representative") as "representative" | "non_representative",
     }));
@@ -187,69 +169,40 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
     const memberF04FindingIds: string[] = [];
     const memberF04SemanticHashes: string[] = [];
     const memberF04EvidenceIds: string[] = [];
-    let familyF04Key: string | null = null;
+    const memoVersions: string[] = [];
+    const allClaimIds: string[] = [];
 
-    for (const mid of fam.member_finding_ids) {
-      const q3r = q3F04Lookup.get(mid);
-      if (q3r?.f04_finding_id) {
-        memberF04FindingIds.push(q3r.f04_finding_id);
-      }
-      if (q3r?.f04_semantic_hash) {
-        memberF04SemanticHashes.push(q3r.f04_semantic_hash);
-      }
-      if (q3r?.f04_admitted_evidence_ids) {
-        memberF04EvidenceIds.push(...q3r.f04_admitted_evidence_ids);
-      }
-      if (q3r?.f04_proposition_key && !familyF04Key) {
-        familyF04Key = q3r.f04_proposition_key;
+    for (const q3r of members) {
+      if (q3r.f04_finding_id) memberF04FindingIds.push(q3r.f04_finding_id);
+      if (q3r.f04_semantic_hash) memberF04SemanticHashes.push(q3r.f04_semantic_hash);
+      if (q3r.f04_admitted_evidence_ids) memberF04EvidenceIds.push(...q3r.f04_admitted_evidence_ids);
+      // Derive claim_id and memo version from matching candidate
+      const cand = candidateLookup.get(q3r.candidate_id);
+      if (cand?.canonical_claim_id) allClaimIds.push(cand.canonical_claim_id);
+      if (cand?.source_docs) {
+        for (const doc of cand.source_docs) {
+          const ver = deriveMemoVersionFromFilename(doc);
+          if (ver && !memoVersions.includes(ver)) memoVersions.push(ver);
+        }
       }
     }
 
-    return {
-      family_id: familyId,
-      member_q3_ids: fam.member_finding_ids,
-      member_candidate_ids: fam.member_finding_ids,
-      canonical_proposition_key: fam.canonical_key_str,
-      canonical_key: fam.canonical_key,
-      grouping_rule_version: "canonical-issue-identity-v1",
-      duplicate_decisions: duplicateDecisions,
-      member_count: fam.member_finding_ids.length,
-      memo_versions: fam.memo_versions,
-      all_originating_claim_ids: fam.all_originating_claim_ids,
-      // F04 identity
-      member_f04_finding_ids: memberF04FindingIds,
-      member_f04_semantic_hashes: memberF04SemanticHashes,
-      f04_proposition_key: familyF04Key,
-      member_f04_evidence_ids: memberF04EvidenceIds,
-    };
-  });
-
-  // Add singletons as single-member families
-  for (const singleton of groupResult.singletons) {
-    const familyId = `q4fam-singleton-${singleton.finding_id.slice(0, 16)}`;
-
-    // Collect F04 identity for singleton
-    const q3r = q3F04Lookup.get(singleton.finding_id);
-    const memberF04FindingIds: string[] = q3r?.f04_finding_id ? [q3r.f04_finding_id] : [];
-    const memberF04SemanticHashes: string[] = q3r?.f04_semantic_hash ? [q3r.f04_semantic_hash] : [];
-    const memberF04EvidenceIds: string[] = q3r?.f04_admitted_evidence_ids ?? [];
-    const familyF04Key: string | null = q3r?.f04_proposition_key ?? null;
-
     families.push({
       family_id: familyId,
-      member_q3_ids: [singleton.finding_id],
-      member_candidate_ids: [singleton.finding_id],
-      canonical_proposition_key: singleton.canonical_key_str,
-      canonical_key: singleton.canonical_key,
-      grouping_rule_version: "canonical-issue-identity-v1",
-      duplicate_decisions: [{ candidate_id: singleton.finding_id, decision: "representative" }],
-      member_count: 1,
-      memo_versions: singleton.memo_versions,
-      all_originating_claim_ids: singleton.originating_claim_ids,
+      member_q3_ids: memberIds,
+      member_candidate_ids: memberIds,
+      // CRITICAL: canonical_proposition_key === exact persisted F04 key
+      canonical_proposition_key: f04Key,
+      canonical_key: {} as CanonicalKey, // F04 key is authoritative — typed object unused
+      grouping_rule_version: "f04-exact-key-partition-v1",
+      duplicate_decisions: duplicateDecisions,
+      member_count: memberIds.length,
+      memo_versions: memoVersions,
+      all_originating_claim_ids: allClaimIds,
       // F04 identity
       member_f04_finding_ids: memberF04FindingIds,
       member_f04_semantic_hashes: memberF04SemanticHashes,
-      f04_proposition_key: familyF04Key,
+      f04_proposition_key: f04Key,
       member_f04_evidence_ids: memberF04EvidenceIds,
     });
   }
@@ -262,11 +215,16 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
     }
   }
 
+  // Singletons = families with exactly 1 member
+  const singletonIds = families
+    .filter(f => f.member_count === 1)
+    .map(f => f.member_candidate_ids[0]);
+
   return {
     families,
-    singletons: groupResult.singletons.map(s => s.finding_id),
-    ambiguous: groupResult.ambiguous,
-    degraded: groupResult.degraded,
+    singletons: singletonIds,
+    ambiguous,
+    degraded: [],
     memberToFamily,
   };
 }
@@ -334,4 +292,10 @@ function validateProjectedDimensions(
 /** Normalize a dimension value for comparison (lowercase, trim whitespace) */
 function normalize(v: string): string {
   return v.toLowerCase().trim().replace(/[\s_-]+/g, "_");
+}
+
+/** Derive a memo version label from a source document filename */
+function deriveMemoVersionFromFilename(filename: string): string | null {
+  const match = filename.match(/v(\d+)/i);
+  return match ? `v${match[1]}` : null;
 }
