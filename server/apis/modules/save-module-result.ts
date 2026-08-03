@@ -39,10 +39,63 @@ export default api({
     let effectiveRunId: string;
 
     if (runId) {
-      // Server-pipeline path: run already exists and is marked completed by pipeline-core.
-      // Just update documents_included if provided (pipeline-core doesn't set this).
+      // Server-pipeline path: run already exists and is managed by pipeline-core.
       effectiveRunId = runId;
-      if (documentsIncluded && documentsIncluded.length > 0) {
+
+      // MAT-F06 §D: Guard against duplicate client write.
+      // If the canonical finalizer already wrote module_outputs with a semantic_hash,
+      // the client call is a late-arriving duplicate — skip upsertModuleOutput entirely.
+      // Wrapped in try-catch: if semantic_hash column doesn't exist yet (pre-migration),
+      // gracefully fall through to the legacy path.
+      let guardTriggered = false;
+      try {
+        const ExistingOutputSchema = z.object({
+          id: z.string(),
+          semantic_hash: z.string().nullable(),
+        });
+        const RunStatusSchema = z.object({ status: z.string() });
+
+        const [runStatusRows, existingOutputRows] = await Promise.all([
+          ctx.integrations.db.query(
+            `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
+            RunStatusSchema,
+            [effectiveRunId],
+            { label: "SaveModuleResult: check run status" }
+          ),
+          ctx.integrations.db.query(
+            `SELECT id, semantic_hash FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
+            ExistingOutputSchema,
+            [effectiveRunId],
+            { label: "SaveModuleResult: check existing output" }
+          ),
+        ]);
+
+        if (
+          runStatusRows[0]?.status === "completed" &&
+          existingOutputRows[0]?.semantic_hash
+        ) {
+          // Run already canonically finalized — skip duplicate write, just update docs if needed
+          console.log(
+            `[SaveModuleResult] Run ${effectiveRunId} already canonically finalized (hash=${existingOutputRows[0].semantic_hash.slice(0, 8)}…) — skipping duplicate write`
+          );
+          if (documentsIncluded && documentsIncluded.length > 0) {
+            await ctx.integrations.db.execute(
+              `UPDATE module_runs SET documents_included = $2::text[] WHERE id = $1`,
+              [effectiveRunId, documentsIncluded],
+              { label: "Update documents_included (canonical guard)" }
+            );
+          }
+          return { result: { run_id: effectiveRunId, output_id: existingOutputRows[0].id } };
+        }
+      } catch (guardErr: any) {
+        // Pre-migration: semantic_hash column may not exist yet — fall through to legacy path
+        console.warn(
+          `[SaveModuleResult] F06 guard check failed (pre-migration?): ${guardErr?.message ?? guardErr}`
+        );
+      }
+
+      // Not canonically finalized (or guard unavailable) — allow legacy upsert to proceed below.
+      if (!guardTriggered && documentsIncluded && documentsIncluded.length > 0) {
         await ctx.integrations.db.execute(
           `UPDATE module_runs SET documents_included = $2::text[] WHERE id = $1`,
           [effectiveRunId, documentsIncluded],

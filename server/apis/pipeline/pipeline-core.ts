@@ -72,6 +72,7 @@ import { runReconciliation, validateSupersessionProof, type ReconciliationResult
 import { runCleanParsedTextPhase } from "./clean-parsed-text.js";
 import { runWebResearchPhase } from "./web-research-phase.js";
 import { upsertModuleOutput } from "../modules/upsert-module-output.js";
+import { canonicalFinalize as f06CanonicalFinalize, loadCheckpointStatus, type FinalizerPrerequisites } from "./canonical-finalizer.js";
 import { getModuleModel, SONNET_MODEL } from "./model-config.js";
 import { runChecklistScan, formatCoverageMapForPrompt, type ChecklistScanResult } from "./checklist-scan-phase.js";
 import { runAbsenceVerificationPhase } from "./absence-verification-phase.js";
@@ -1278,7 +1279,7 @@ interface CanonicalFinalizeResult {
   };
 }
 
-export async function canonicalFinalize(input: CanonicalFinalizeInput): Promise<CanonicalFinalizeResult> {
+export async function runPostMergeFinalization(input: CanonicalFinalizeInput): Promise<CanonicalFinalizeResult> {
   const { ctx, runId, moduleId, executiveHeader, numericReport, claimsReconciliation, fileTagMap, useOpus, startTime } = input;
   const verificationPhaseErrored = input.verificationPhaseErrored ?? false;
   const mergeGroupsFallenBack = input.mergeGroupsFallenBack ?? 0;
@@ -2648,31 +2649,40 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               };
             }
 
-            // Save to module_outputs
-            let outputSaved = false;
-            let lastSaveError = "";
-            for (let attempt = 1; attempt <= 2; attempt++) {
-              try {
-                await upsertModuleOutput(ctx.integrations.db, {
-                  runId,
-                  dealId,
-                  executiveHeader: finalNode.executiveHeader,
-                  findings: finalFindings,
-                  fullReport,
-                });
-                console.log(`[pipeline:fast-path] Report saved (${fullReport.length} chars, attempt ${attempt})`);
-                outputSaved = true;
-                break;
-              } catch (saveErr: any) {
-                lastSaveError = saveErr?.message ?? String(saveErr);
-                console.warn(`[pipeline:fast-path] Save failed (attempt ${attempt}/2):`, saveErr);
-                console.warn(`[pipeline:fast-path] Report size: fullReport=${fullReport?.length ?? 0} chars, findings=${finalFindings?.length ?? 0} items`);
-                if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 2000));
+            // ─── MAT-F06: Delegate to canonical finalizer (§A — one path) ───
+            const fpCheckpointStatus = await loadCheckpointStatus(
+              ctx.integrations.db, runId, moduleId, finalFindings.length > 0
+            );
+            const fpOutcome = await f06CanonicalFinalize(
+              ctx.integrations.db,
+              runId,
+              dealId,
+              {
+                findings: finalFindings,
+                executiveHeader: finalNode.executiveHeader,
+                moduleType: moduleId,
+                checkpointStatus: fpCheckpointStatus,
+                preFormattedReport: fullReport,
               }
+            );
+
+            if (fpOutcome.status === "prerequisites_missing") {
+              console.error(`[pipeline:fast-path] F06 prerequisites missing: ${fpOutcome.missingKeys.join(", ")} — returning in_progress`);
+              return {
+                status: "in_progress",
+                runId,
+                phase: "f06_prerequisites_missing",
+                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                result: null,
+                failedChunks: 0,
+                truncatedChunks: 0,
+                truncatedMerges: 0,
+                firstError: `F06 prerequisites missing: ${fpOutcome.missingKeys.join(", ")}`,
+              };
             }
 
-            if (!outputSaved) {
-              console.error(`[pipeline:fast-path] module_outputs save failed after 2 attempts — NOT marking completed. Last error: ${lastSaveError}`);
+            if (fpOutcome.status === "persist_failed") {
+              console.error(`[pipeline:fast-path] F06 persist failed: ${fpOutcome.error}`);
               return {
                 status: "in_progress",
                 runId,
@@ -2682,16 +2692,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 failedChunks: 0,
                 truncatedChunks: 0,
                 truncatedMerges: 0,
-                firstError: `module_outputs save failed (${lastSaveError}) — will retry on next invocation`,
+                firstError: `F06 persist failed: ${fpOutcome.error}`,
               };
             }
 
-            // Mark run completed
-            await ctx.integrations.db.execute(
-              `UPDATE module_runs SET status = 'completed'::module_status, completed_at = now() WHERE id = $1 AND status = 'running'::module_status`,
-              [runId],
-              { label: "Fast-path: mark run completed" }
-            );
+            console.log(`[pipeline:fast-path] F06 outcome=${fpOutcome.status}`);
 
             // Post-completion audit (Fix 22/24: post-quality text, bounded timeout)
             try {
@@ -5261,40 +5266,56 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
   }
 
   let lastSaveError = "";
-  // Keepalive: re-establish DB connection before save (connection may have gone idle during formatting)
+  // ─── MAT-F06: Delegate to canonical finalizer (§A — one path) ───
+  // Keepalive: re-establish DB connection before finalization
   try {
-    await ctx.integrations.db.execute(`SELECT 1`, [], { label: "Pre-save keepalive" });
+    await ctx.integrations.db.execute(`SELECT 1`, [], { label: "Pre-finalize keepalive" });
   } catch (kaErr: any) {
-    console.warn(`[pipeline] Pre-save keepalive failed:`, kaErr?.message);
-  }
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      await upsertModuleOutput(ctx.integrations.db, {
-        runId,
-        dealId,
-        executiveHeader: finalNode.executiveHeader,
-        findings: finalFindings,
-        fullReport,
-      });
-      console.log(`[pipeline] Report saved to module_outputs (${fullReport.length} chars, attempt ${attempt})`);
-      outputSaved = true;
-      break;
-    } catch (saveErr: any) {
-      lastSaveError = saveErr?.message ?? String(saveErr);
-      console.warn(`[pipeline] Failed to save report to module_outputs (attempt ${attempt}/2):`, saveErr);
-      console.warn(`[pipeline] Report size: fullReport=${fullReport?.length ?? 0} chars, findings=${finalFindings?.length ?? 0} items, findings_json=${JSON.stringify(finalFindings).length} chars`);
-      if (attempt < 2) {
-        // Brief pause before retry
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-    }
+    console.warn(`[pipeline] Pre-finalize keepalive failed:`, kaErr?.message);
   }
 
-  if (!outputSaved) {
-    // Both save attempts failed — return in_progress so the client re-invokes.
-    // The merge tree is complete (checkpoints saved), so re-invocation will
-    // skip straight to formatting+save with a fresh time budget.
-    console.error(`[pipeline] module_outputs save failed after 2 attempts — NOT marking completed. Last error: ${lastSaveError}`);
+  const mainCheckpointStatus = await loadCheckpointStatus(
+    ctx.integrations.db, runId, moduleId, finalFindings.length > 0
+  );
+  const mainOutcome = await f06CanonicalFinalize(
+    ctx.integrations.db,
+    runId,
+    dealId,
+    {
+      findings: finalFindings,
+      executiveHeader: finalNode.executiveHeader,
+      moduleType: moduleId,
+      checkpointStatus: mainCheckpointStatus,
+      preFormattedReport: fullReport,
+      degradedConditions: permanentlyFailedExtractions.length > 0
+        ? [`${permanentlyFailedExtractions.length} section(s) could not be extracted after exhausting retries.`]
+        : undefined,
+    }
+  );
+
+  if (mainOutcome.status === "prerequisites_missing") {
+    console.error(`[pipeline] F06 prerequisites missing: ${mainOutcome.missingKeys.join(", ")} — returning in_progress`);
+    return {
+      status: "in_progress",
+      runId,
+      phase: "f06_prerequisites_missing",
+      progress: {
+        analysisTotal: routed.length,
+        analysisCompleted: routed.length,
+        mergeRound: totalMergeRounds,
+        mergeTotal: totalMergeRounds,
+      },
+      result: null,
+      failedChunks,
+      truncatedChunks,
+      truncatedMerges,
+      firstError: `F06 prerequisites missing: ${mainOutcome.missingKeys.join(", ")}`,
+    };
+  }
+
+  if (mainOutcome.status === "persist_failed") {
+    lastSaveError = mainOutcome.error;
+    console.error(`[pipeline] F06 persist failed after canonical finalization — NOT marking completed. Error: ${lastSaveError}`);
     return {
       status: "in_progress",
       runId,
@@ -5309,17 +5330,12 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       failedChunks,
       truncatedChunks,
       truncatedMerges,
-      firstError: `module_outputs save failed (${lastSaveError}) — will retry on next invocation`,
+      firstError: `F06 persist failed (${lastSaveError}) — will retry on next invocation`,
     };
   }
 
-  // Mark run completed
-  // Guard: only complete if still running — prevents resurrection after purge/cancel
-  await ctx.integrations.db.execute(
-    `UPDATE module_runs SET status = 'completed'::module_status, completed_at = now() WHERE id = $1 AND status = 'running'::module_status`,
-    [runId],
-    { label: "Mark run completed (guarded)" }
-  );
+  outputSaved = true;
+  console.log(`[pipeline] F06 outcome=${mainOutcome.status}`);
 
   // Post-completion framing audit (Fix 22/24: receives post-quality text, awaited with bounded timeout)
   try {

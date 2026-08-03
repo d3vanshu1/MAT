@@ -193,10 +193,22 @@ export function enforceNarrativeBoundary(
   // ── Step 2 & 3: Canonical lookup + narrative validation ───────────────────
   const narrativeValidated: CanonicalFinding[] = [];
 
+  // Whether we have an actual canonical record map to validate against.
+  // If none provided, claim-linked findings skip to processNarration with no record
+  // (will get fallback narration). Non-claim findings pass through without demotion.
+  const hasCanonicalMap = !!canonicalRecordMap && canonicalRecordMap.size > 0;
+
   for (const f of substantive) {
     const canonicalRecord = resolveCanonicalRecord(f, canonicalRecordMap);
+    const hasClaimIds = Array.isArray(f.claim_ids) && f.claim_ids.length > 0;
 
-    if (!canonicalRecord) {
+    // Fail-closed rule applies ONLY when:
+    //   (a) we have a canonical record map (we explicitly loaded F04 records), AND
+    //   (b) this finding claims canonical linkage (has claim_ids), AND
+    //   (c) no record resolved (ambiguous or truly missing)
+    const failClosed = hasCanonicalMap && hasClaimIds && !canonicalRecord;
+
+    if (failClosed) {
       // No canonical record → fail closed: demote to non-reportable
       counts.no_canonical_rejected++;
       diagnostics.push({
@@ -216,6 +228,23 @@ export function enforceNarrativeBoundary(
         full_analysis: "No canonical finding record resolved for this LLM output. Per MAT-F05, findings without F04 canonical authority are non-reportable.",
       };
       narrativeValidated.push(demoted);
+      continue;
+    }
+
+    // Pass-through case: no claim_ids (structural/numeric finding) or no canonical map.
+    // Apply processNarration with or without a canonical record.
+    // Without a record, processNarration uses deterministic fallback that doesn't invent facts.
+    if (!canonicalRecord) {
+      // No canonical record available — narrative passes through without validation
+      // (the authority gate below still enforces structured fields)
+      counts.narrative_accepted++;
+      diagnostics.push({
+        finding_id: f.finding_id || "(no-id)",
+        status: "accepted",
+        reason_codes: hasCanonicalMap ? [] : ["NO_CANONICAL_MAP_PASSTHROUGH"],
+        original_title: f.title,
+      });
+      narrativeValidated.push(f);
       continue;
     }
 

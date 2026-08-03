@@ -1,0 +1,77 @@
+{
+  "mat_feature": "MAT-F06",
+  "title": "One Canonical Finalizer, One Write, Execution-Path Parity",
+  "schema_version": "mat-final-v1",
+  "test_count": 27,
+
+  "frozen_assertions": {
+    "A1": {
+      "label": "One finalizer across all paths",
+      "description": "All execution paths (main, fast, retry, resume, FinalizePipelineOutput) call canonicalFinalize(). No path may independently format, persist, or mark completion.",
+      "tests": ["A1.01", "A1.02", "A1.03", "A1.04", "A1.05"],
+      "status_outcomes_tested": ["completed", "idempotent", "rejected_overwrite", "completed (update)", "persist_failed"]
+    },
+    "A2": {
+      "label": "Missing prerequisites block completion",
+      "description": "The finalizer refuses to proceed when required checkpoint keys are absent or have non-complete status. For contradiction_check: claims_ledger, reconciliation, canonical_findings. For other modules: canonical_findings only.",
+      "tests": ["A2.01", "A2.02", "A2.03", "A2.04", "A2.05", "A2.06"],
+      "checkpoint_keys": ["claims_ledger", "reconciliation", "canonical_findings"]
+    },
+    "A3": {
+      "label": "Exactly one durable write",
+      "description": "Fresh run → one INSERT. Existing incomplete → one UPDATE. Idempotent → zero writes. Completion mark always AFTER artifact persist. Semantic hash stored in module_runs.",
+      "tests": ["A3.01", "A3.02", "A3.03", "A3.04", "A3.05"],
+      "invariants": [
+        "run is never marked completed before artifact is durably written",
+        "idempotent retry with identical content is a no-op",
+        "retry with different content against completed run is REJECTED"
+      ]
+    },
+    "A4": {
+      "label": "Report/API/export parity",
+      "description": "The report, API output, and export all derive from the same reportable finding set. Semantic hash is insertion-order-insensitive and excludes volatile fields.",
+      "tests": ["A4.01", "A4.02", "A4.03", "A4.04", "A4.05", "A4.06"],
+      "hash_properties": [
+        "insertion-order-insensitive",
+        "excludes timestamps",
+        "excludes request IDs",
+        "excludes run_id",
+        "changes when content changes"
+      ]
+    },
+    "A5": {
+      "label": "Diagnostics cannot become findings",
+      "description": "§F filter ensures process objects, housekeeping, placeholders, degraded notices, and unlinked items never appear as substantive findings in the report.",
+      "tests": ["A5.01", "A5.02", "A5.03", "A5.04", "A5.05"],
+      "exclusion_categories": ["process_object", "housekeeping", "degraded_notice", "placeholder", "unlinked"]
+    }
+  },
+
+  "execution_paths_unified": [
+    "pipeline-core.ts fast-path (single-domain merges)",
+    "pipeline-core.ts main-path (full contradiction audit)",
+    "FinalizePipelineOutput (recovery/manual finalization)",
+    "resume-stale-pipelines.ts (auto-resume, calls runPipelineCore)"
+  ],
+
+  "save_module_result_guard": {
+    "description": "§D guard: SaveModuleResult checks if run already has semantic_hash before writing. If canonically finalized, skips upsertModuleOutput entirely. Only updates documents_included.",
+    "condition": "runStatus === 'completed' AND existingOutput.semantic_hash IS NOT NULL",
+    "action": "return existing output_id, skip duplicate write"
+  },
+
+  "canonical_finalizer_sequence": [
+    "1. Validate prerequisites (checkpoint status)",
+    "2. Parse and validate findings",
+    "3. Apply F05 narrative enforcement",
+    "4. Classify reportable vs excluded (§F filter)",
+    "5. Build diagnostics (§G)",
+    "6. Format report (pre-formatted or mechanical)",
+    "7. Compute semantic hash",
+    "8. Idempotency guard",
+    "9. Build artifact",
+    "10. Persist once (INSERT or UPDATE)",
+    "11. Verify persistence",
+    "12. Mark run completed with hash"
+  ]
+}

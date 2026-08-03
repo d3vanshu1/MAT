@@ -15,7 +15,7 @@
  */
 
 import { FINDING_SCHEMA_VERSION } from "../canonical-finding.js";
-import { canonicalFinalize } from "../pipeline-core.js";
+import { canonicalFinalize } from "../canonical-finalizer.js";
 import { upsertModuleOutput } from "../../modules/upsert-module-output.js";
 import { strictReloadFindings } from "../../modules/strict-reload-findings.js";
 
