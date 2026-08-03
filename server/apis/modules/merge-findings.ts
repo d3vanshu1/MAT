@@ -4,6 +4,8 @@ import { NUMERIC_MODULES } from "./constants.js";
 import { getModuleModel } from "../pipeline/model-config.js";
 import { LEGAL_TAX_REGULATORY_SCOPE_BOUNDARY } from "./analyze-chunk.js";
 import { parseCanonicalFindings, type CanonicalFinding } from "../pipeline/canonical-finding.js";
+import { applyBatchAuthorityGate } from "../pipeline/narrative-authority-gate.js";
+import { shouldExcludeAsProcessObject } from "../pipeline/narrative-boundary.js";
 
 // ---------------------------------------------------------------------------
 // Integration
@@ -733,6 +735,17 @@ No deterministic numeric verification was performed for this analysis. All figur
         // Non-fatal: housekeeping parse failure doesn't break the pipeline
         console.warn("[merge] Failed to parse housekeeping_appendix JSON");
       }
+    }
+
+    // MAT-F05: Exclude process/fallback objects and apply authority gate
+    // This prevents LLM-originated process text from becoming findings
+    // and strips LLM authority over verdict, severity, verified flags.
+    const preGateCount = findings.length;
+findings = findings.filter(f => !shouldExcludeAsProcessObject(f));
+const gateResult = applyBatchAuthorityGate(findings, undefined);
+findings = gateResult.accepted as CanonicalFinding[];
+if (findings.length < preGateCount) {
+      console.log(`[Merge][F05] Authority gate: ${preGateCount} → ${findings.length} findings (${preGateCount - findings.length} excluded)`);
     }
 
     // Build a merged text representation for the next round of tree-reduce.

@@ -1,5 +1,7 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { parseCanonicalFindings } from "./canonical-finding.js";
+import { applyBatchAuthorityGate } from "./narrative-authority-gate.js";
+import { shouldExcludeAsProcessObject } from "./narrative-boundary.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -119,8 +121,56 @@ export default api({
 
     console.log(`[Finalize] Parsed ${findings.length} findings`);
 
-    // Step 4: Format report (pure mechanical — no AI)
-    const fullReport = formatReportMechanical(topNode.executive_header, findings);
+    // Step 3b (MAT-F05): Apply authority gate — strip LLM-originated authoritative fields,
+    // exclude process objects, and enforce rule-based caps.
+    // Canonical records are loaded from Q3 checkpoint if available.
+    let canonicalRecordMap: Map<string, any> | undefined;
+    try {
+      const q3Checkpoints = await ctx.integrations.db.query(
+        `SELECT checkpoint_data FROM pipeline_checkpoints
+         WHERE run_id = $1 AND stage = 'q3_claim_linkage'
+         ORDER BY created_at DESC LIMIT 1`,
+        z.object({ checkpoint_data: z.any() }),
+        [runId],
+        { label: "Finalize: load Q3 canonical records" }
+      );
+      if (q3Checkpoints.length > 0) {
+        const cpData = typeof q3Checkpoints[0].checkpoint_data === "string"
+          ? JSON.parse(q3Checkpoints[0].checkpoint_data)
+          : q3Checkpoints[0].checkpoint_data;
+        if (cpData?.canonical_findings && Array.isArray(cpData.canonical_findings)) {
+          canonicalRecordMap = new Map();
+          for (const rec of cpData.canonical_findings) {
+            if (rec?.claim?.claim_id) {
+              canonicalRecordMap.set(rec.claim.claim_id, rec);
+            }
+          }
+          console.log(`[Finalize][F05] Loaded ${canonicalRecordMap.size} canonical records from Q3`);
+        }
+      }
+    } catch (q3Err: any) {
+      console.warn(`[Finalize][F05] Could not load Q3 canonical records: ${q3Err?.message}`);
+    }
+
+    // Exclude process/fallback objects (MAT-F05 §H)
+    const substantiveFindings = findings.filter((f: any) => {
+      if (shouldExcludeAsProcessObject(f)) {
+        console.log(`[Finalize][F05] Excluded process object: "${f.title}"`);
+        return false;
+      }
+      return true;
+    });
+
+    // Apply batch authority gate (MAT-F05 §E) — enforces canonical record over LLM
+    const gateResult = applyBatchAuthorityGate(
+      substantiveFindings,
+      canonicalRecordMap ?? undefined
+    );
+    const gatedFindings = gateResult.accepted;
+    console.log(`[Finalize][F05] Authority gate: ${findings.length} → ${gatedFindings.length} findings`);
+
+    // Step 4: Format report (pure mechanical — no AI) using gated findings
+    const fullReport = formatReportMechanical(topNode.executive_header, gatedFindings);
     console.log(`[Finalize] Formatted report: ${fullReport.length} chars`);
 
     // Step 5: Save to module_outputs (direct minimal INSERT — bypasses upsertModuleOutput)
@@ -139,7 +189,7 @@ export default api({
         savedOutputId = checkExisting[0].id;
         await ctx.integrations.db.execute(
           `UPDATE module_outputs SET executive_header = $2, findings = $3::jsonb, full_report_markdown = $4 WHERE id = $1`,
-          [savedOutputId, topNode.executive_header, JSON.stringify(findings), fullReport],
+          [savedOutputId, topNode.executive_header, JSON.stringify(gatedFindings), fullReport],
           { label: "Finalize: update existing output" }
         );
       } else {
@@ -149,7 +199,7 @@ export default api({
            VALUES ($1, $2, $3::jsonb, $4)
            RETURNING id`,
           z.object({ id: z.string() }),
-          [runId, topNode.executive_header, JSON.stringify(findings), fullReport],
+          [runId, topNode.executive_header, JSON.stringify(gatedFindings), fullReport],
           { label: "Finalize: insert new output" }
         );
         savedOutputId = inserted[0].id;

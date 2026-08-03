@@ -1,0 +1,159 @@
+{
+  "_meta": {
+    "spec": "MAT-F05",
+    "title": "Narrative Boundary — Machine-Generated Fixture Outputs",
+    "generated": "2026-08-03",
+    "deal": "SCG / Saint Capital Group",
+    "finding": "FY Mar-26 revenue: IC memo £194m vs model £184.4m",
+    "description": "Six representative fixture outputs produced by F05 production functions. Used for deterministic acceptance verification without requiring a live pipeline run."
+  },
+
+  "fixture_1_locked_narration_input": {
+    "_description": "LockedNarrationInput built from the SCG £194m revenue canonical finding. This is the ONLY input provided to the LLM for narration. No authoritative fields may be reconstructed from LLM output.",
+    "exact_claim_text": "Management projects FY Mar-26 revenue of £194m for the group",
+    "claim_metric": "revenue",
+    "claim_period": "FY Mar-26",
+    "claim_entity": "SCG",
+    "claim_value": 194000000,
+    "claim_unit": "GBP_millions",
+    "admitted_evidence": [
+      {
+        "evidence_id": "ev-001",
+        "source_document_name": "SCG_Financial_Model_v3.xlsx",
+        "coordinate_label": "P&L/B12",
+        "exact_excerpt": "P&L/B12: 184391535",
+        "evidence_role": "contradicting",
+        "authority_class": "current_financial_model",
+        "value": 184391535,
+        "unit": "GBP"
+      }
+    ],
+    "calculations": [
+      {
+        "normalized_claim_value": 194000000,
+        "normalized_fact_value": 184391535,
+        "signed_delta": -9608465,
+        "percentage_delta": -4.95,
+        "direction": "claim_higher"
+      }
+    ],
+    "source_document_names": ["SCG_Financial_Model_v3.xlsx"],
+    "referenced_entities": ["SCG", "Saint"],
+    "referenced_periods": ["FY Mar-26"],
+    "comparison_basis": "memo_claim__current_model",
+    "comparison_compatible": true,
+    "reportable": true,
+    "disposition_reason_codes": ["numeric_divergence_above_threshold"],
+    "deterministic_verdict": "contradicted",
+    "evidence_roles": ["contradicting"],
+    "all_canonical_numbers": [194000000, 184391535, -9608465, -4.95]
+  },
+
+  "fixture_2_valid_narrative_validation_pass": {
+    "_description": "A narrative that correctly references only canonical values (£194m, £184.4m, -4.95%) and uses the correct admitted source. validateNarrativeOutput() must return passed: true.",
+    "narrative_input": {
+      "title": "Revenue Projection Variance",
+      "summary": "The IC memo states £194m of FY Mar-26 revenue. The current model records £184.4m at P&L/B12, a £9.6m difference.",
+      "explanation": "The IC memo projects group revenue of £194m for FY Mar-26. The current financial model (SCG_Financial_Model_v3.xlsx) shows £184,391,535 in cell B12 of the P&L sheet. This represents a shortfall of approximately £9.6m (−4.95%). The deterministic verdict is contradicted."
+    },
+    "expected_validation_result": {
+      "passed": true,
+      "reason_codes": [],
+      "rule_violations": []
+    }
+  },
+
+  "fixture_3_rejected_narrative_invented_numeric": {
+    "_description": "A narrative that invents a value (£195m) not present in all_canonical_numbers. validateNarrativeOutput() must return passed: false with RULE_1_INVENTED_NUMERIC.",
+    "narrative_input": {
+      "title": "Revenue Projection Variance",
+      "summary": "The IC memo states £195m of revenue, while the model shows £180m.",
+      "explanation": "The revenue projection has a variance of approximately 12.3% below expectations."
+    },
+    "expected_validation_result": {
+      "passed": false,
+      "reason_codes_must_include": ["RULE_1_INVENTED_NUMERIC"]
+    }
+  },
+
+  "fixture_4_rejected_narrative_verdict_contradiction": {
+    "_description": "A narrative that asserts 'confirms' against a deterministic_verdict of 'contradicted'. validateNarrativeOutput() must return passed: false with RULE_7_VERDICT_CONTRADICTION.",
+    "narrative_input": {
+      "title": "Revenue Confirmed",
+      "summary": "The model confirms the IC memo revenue of £194m.",
+      "explanation": "After analysis, the figure is confirmed by the current financial model."
+    },
+    "expected_validation_result": {
+      "passed": false,
+      "reason_codes_must_include": ["RULE_7_VERDICT_CONTRADICTION"]
+    }
+  },
+
+  "fixture_5_deterministic_fallback_narrative": {
+    "_description": "Output of generateDeterministicFallbackNarrative() for the SCG £194m finding. Must include canonical claim value, must reference 'contradicted' verdict, must pass its own validateNarrativeOutput() check.",
+    "input": "fixture_1_locked_narration_input (above)",
+    "expected_output_constraints": {
+      "title": { "min_length": 5, "must_not_include_invented_numerics": true },
+      "summary": {
+        "must_reference_one_of": ["194", "184", "9.6", "9608465"],
+        "must_not_include_invented_numerics": true
+      },
+      "explanation": {
+        "must_contain": "contradicted",
+        "must_not_include_invented_numerics": true,
+        "must_pass_validateNarrativeOutput": true
+      }
+    },
+    "representative_sample": {
+      "title": "Revenue Projection Variance",
+      "summary": "The IC memo states FY Mar-26 revenue of £194m for the group. The admitted evidence (SCG_Financial_Model_v3.xlsx) records £184,391,535, a signed delta of −£9,608,465 (−4.95%). The deterministic verdict is contradicted.",
+      "explanation": "Canonical finding: SCG revenue for FY Mar-26. The IC memo states: Management projects FY Mar-26 revenue of £194m for the group. Admitted evidence: SCG_Financial_Model_v3.xlsx — coordinate P&L/B12 — £184,391,535 GBP [contradicting]. Calculation: claim £194,000,000 vs fact £184,391,535, delta −£9,608,465 (−4.95%), direction claim_higher. Deterministic verdict: contradicted. Disposition reason: numeric_divergence_above_threshold. This narrative was generated deterministically from canonical facts."
+    }
+  },
+
+  "fixture_6_authority_gate_verified_demotion": {
+    "_description": "applyAuthorityGate() applied to a finding where the LLM has set evidence.verified=true without a canonical record (conservative: verdict treated as unverifiable). Gate must demote verified to false.",
+    "finding_input": {
+      "finding_id": "f0000001-0000-0000-0000-000000000001",
+      "severity": "critical",
+      "title": "Revenue Variance",
+      "detail": "IC memo claims £194m, model shows £184.4m",
+      "full_analysis": "Full analysis text here",
+      "source_docs": ["SCG_Financial_Model_v3.xlsx"],
+      "claim_ids": ["clm-v1-abc123"],
+      "evidence": [
+        {
+          "figure": "194",
+          "source_doc": "test.pdf",
+          "verbatim_snippet": "",
+          "verified": true
+        }
+      ]
+    },
+    "canonical_record": null,
+    "expected_output": {
+      "excluded": false,
+      "finding.evidence[0].verified": false,
+      "was_modified": true,
+      "modifications_must_include_pattern": "Demoted verified=true"
+    }
+  },
+
+  "fixture_7_process_object_exclusion": {
+    "_description": "shouldExcludeAsProcessObject() applied to 5 operational/diagnostic objects. All 5 must return true (excluded). A substantive finding must return false.",
+    "excluded_cases": [
+      { "title": "Analysis Complete", "detail": "All chunks processed successfully", "severity": "info", "source_docs": [], "expected": true },
+      { "title": "No findings identified", "detail": "", "severity": "info", "source_docs": [], "expected": true },
+      { "title": "Module Diagnostic", "detail": "Pipeline ran in 45s", "severity": "info", "source_docs": [], "expected": true },
+      { "title": "Degraded Run Notice", "detail": "Some extractions failed", "severity": "info", "source_docs": [], "expected": true },
+      { "title": "Processing Summary", "detail": "5 of 5 chunks analyzed", "severity": "info", "source_docs": [], "expected": true }
+    ],
+    "not_excluded_case": {
+      "title": "Revenue Projection Variance",
+      "detail": "IC memo states £194m",
+      "severity": "critical",
+      "source_docs": ["SCG_Financial_Model_v3.xlsx"],
+      "expected": false
+    }
+  }
+}
