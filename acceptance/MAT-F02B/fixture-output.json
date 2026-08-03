@@ -1,0 +1,114 @@
+{
+  "schema_version": "mat-f02b-fixture-v1",
+  "description": "Machine-generated fixture records for MAT-F02B acceptance",
+  "records": [
+    {
+      "fixture_type": "admitted_model_record",
+      "evidence_id": "ev-v1-<content-derived-hash>",
+      "source_document_id": "bbbbbbbb-2222-4000-8000-222222222222",
+      "source_document_name": "SCG Model v3.2.xlsx",
+      "authority_class": "current_financial_model",
+      "coordinate": {
+        "kind": "workbook",
+        "sheet": "FS Summary",
+        "cell_or_range": "B12",
+        "displayed_value": "£184.4m",
+        "raw_value": "£184.4m"
+      },
+      "target_entity": "SCG",
+      "evidence_role": "contradicting",
+      "authority_decision": {
+        "allowed": true,
+        "reason_code": "current_model_for_financial",
+        "rule_version": "authority-policy-v1"
+      },
+      "entity_applicability": {
+        "allowed": true,
+        "direct_entity_match": true,
+        "bridge_evidence_id": null,
+        "reason_code": "direct_entity_match"
+      },
+      "proposition": {
+        "metric": "revenue",
+        "period": "FY2026",
+        "scope": "group",
+        "unit": "GBP_millions",
+        "currency": "GBP",
+        "value": "£184.4m",
+        "actual_forecast_status": "forecast"
+      }
+    },
+    {
+      "fixture_type": "admitted_legal_dd_record",
+      "evidence_id": "ev-v1-<content-derived-hash>",
+      "source_document_id": "cccccccc-3333-4000-8000-333333333333",
+      "source_document_name": "SCG Legal DD Final.pdf",
+      "authority_class": "legal_dd",
+      "coordinate": {
+        "kind": "pdf",
+        "page": 14,
+        "exact_quote": "The lease assignment clause requires 90 days' written notice to the landlord per Section 4.2 of the agreement"
+      },
+      "target_entity": "SCG",
+      "evidence_role": "contradicting",
+      "authority_decision": {
+        "allowed": true,
+        "reason_code": "legal_dd_for_legal_proposition",
+        "rule_version": "authority-policy-v1"
+      },
+      "entity_applicability": {
+        "allowed": true,
+        "direct_entity_match": true,
+        "bridge_evidence_id": null,
+        "reason_code": "direct_entity_match"
+      },
+      "proposition": {
+        "metric": "lease_assignment_notice",
+        "period": "current",
+        "scope": "group"
+      }
+    },
+    {
+      "fixture_type": "gamma_to_scg_rejection",
+      "evidence_id": "ev-v1-<content-derived-hash>",
+      "candidate_or_claim_reference": "test-finding-001",
+      "admission_status": "rejected",
+      "rejection_reason": "entity_bridge_missing",
+      "source_document_id": "dddddddd-4444-4000-8000-444444444444",
+      "source_document_name": "Altman Solon CDD - Gamma.pdf",
+      "authority_class": "commercial_cdd",
+      "authority_decision": {
+        "allowed": true,
+        "reason_code": "commercial_cdd_for_market_proposition",
+        "rule_version": "authority-policy-v1"
+      },
+      "entity_applicability": {
+        "allowed": false,
+        "direct_entity_match": false,
+        "bridge_evidence_id": null,
+        "reason_code": "entity_bridge_missing"
+      },
+      "coordinate": {
+        "kind": "pdf",
+        "page": 42,
+        "exact_quote": "Gamma's market share in the North region is approximately 25%"
+      }
+    },
+    {
+      "fixture_type": "invalid_coordinate_rejection",
+      "evidence_id": "ev-v1-<content-derived-hash>",
+      "candidate_or_claim_reference": "test-finding-001",
+      "admission_status": "rejected",
+      "rejection_reason": "invalid_workbook_coordinate",
+      "source_document_id": "bbbbbbbb-2222-4000-8000-222222222222",
+      "source_document_name": "SCG Model v3.2.xlsx",
+      "authority_class": "current_financial_model",
+      "authority_decision": null,
+      "entity_applicability": null,
+      "coordinate_validation": {
+        "coordinate_valid": false,
+        "validation_method": "invalid_cell_format"
+      }
+    }
+  ]
+}

@@ -41,6 +41,15 @@ import {
   type ReconciliationIndex,
 } from "./legacy-claim-reconciler.js";
 import type { IdentifiedClaim } from "./claims-ledger-identity.js";
+import {
+  admitCandidateEvidence,
+  serializeEvidenceAdmissionLedger,
+  type CandidateEvidenceAdmissionResult,
+  type AdmittedEvidenceRecord,
+  type RejectedEvidenceRecord,
+  type LegacyEvidenceEntry,
+  type EvidenceAdmissionLedger,
+} from "./evidence-admission-boundary.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -319,8 +328,45 @@ export default api({
     const evidenceSnapshots: EvidenceSnapshot[] = [];
     const dispositionCounts: Record<string, number> = {};
 
+    // MAT-F02B: Evidence admission ledger — tracks all evidence through canonical gate
+    const evidenceAdmissionResults: CandidateEvidenceAdmissionResult[] = [];
+
     for (const candidate of candidates) {
       const finding = findingsMap.get(candidate.finding_id);
+
+      // ─── MAT-F02B: Canonical evidence admission gate ───────────────────────
+      // Process ALL evidence entries through the admission gate BEFORE
+      // they can influence claim-linkage disposition, comparison, or eligibility.
+      const rawEvidenceEntries: LegacyEvidenceEntry[] =
+        Array.isArray(finding?.evidence) ? finding.evidence : [];
+
+      let evidenceAdmission: CandidateEvidenceAdmissionResult | null = null;
+      if (rawEvidenceEntries.length > 0) {
+        // Resolve the claim entity for entity-applicability checks
+        // Use the claim from the first resolved claim_id
+        const primaryClaimId = finding?.originating_claim_id ??
+          (finding?.claim_ids?.[0] ?? null);
+        const resolvedClaim = primaryClaimId ? claimMap.get(primaryClaimId) : null;
+
+        evidenceAdmission = admitCandidateEvidence(
+          rawEvidenceEntries,
+          {
+            claim_entity: resolvedClaim?.entity ?? resolvedClaim?.scope_qualifier ?? "SCG",
+            claim_source_document_id: resolvedClaim?.ic_document_id ?? null,
+            proposition_type: resolvedClaim?.claim_category ?? resolvedClaim?.claim_type ?? finding?.claim_type ?? "unclassified",
+            candidate_reference: candidate.finding_id,
+            // Source text validation deferred to full-text availability
+            source_text: "",
+          },
+          {
+            finding_kind: finding?.finding_kind,
+            finding_id: candidate.finding_id,
+          },
+        );
+
+        evidenceAdmissionResults.push(evidenceAdmission);
+      }
+      // ─── End MAT-F02B evidence admission ────────────────────────────────────
 
       const result = classifyClaimLinkage(
         {
@@ -419,6 +465,20 @@ export default api({
     // 7. Accounting — strict: every input must have exactly one output
     const silentLosses = totalCandidates - linkageResults.length;
 
+    // 7b. MAT-F02B: Log evidence admission diagnostics
+    const totalAdmitted = evidenceAdmissionResults.reduce((sum, r) => sum + r.admitted.length, 0);
+    const totalRejected = evidenceAdmissionResults.reduce((sum, r) => sum + r.rejected.length, 0);
+    const totalEvidenceProcessed = evidenceAdmissionResults.reduce((sum, r) => sum + r.total_processed, 0);
+    console.log(
+      `[ReplayClaimLinkage][MAT-F02B] Evidence admission: ${totalEvidenceProcessed} entries processed, ` +
+      `${totalAdmitted} admitted, ${totalRejected} rejected across ${evidenceAdmissionResults.length} candidates`
+    );
+
+    // Serialize evidence admission ledgers for persistence
+    const evidenceAdmissionLedgers = evidenceAdmissionResults.map(r =>
+      serializeEvidenceAdmissionLedger(r)
+    );
+
     // 8. Persist Q3 replay at tree_level=96
     const q3Payload = JSON.stringify({
       _replay_metadata: {
@@ -426,17 +486,26 @@ export default api({
         module_id: moduleId,
         replay_type: "Q3_claim_linkage_strict",
         replay_timestamp: new Date().toISOString(),
-        schema_version: "3.0.0",
+        schema_version: "3.1.0",
         total_candidates: totalCandidates,
         q4_eligible_count: q4EligibleCount,
         q4_ineligible_count: q4IneligibleCount,
         silent_losses: silentLosses,
         eligibility_breakdown: eligibilityBreakdown,
         evidence_snapshots_count: evidenceSnapshots.length,
+        // MAT-F02B: Evidence admission summary
+        evidence_admission: {
+          total_processed: totalEvidenceProcessed,
+          total_admitted: totalAdmitted,
+          total_rejected: totalRejected,
+          candidates_with_evidence: evidenceAdmissionResults.length,
+        },
       },
       linkage_by_disposition: dispositionCounts,
       results: linkageResults,
       evidence_snapshots: evidenceSnapshots,
+      // MAT-F02B: Full evidence admission ledger (admitted + rejected records)
+      evidence_admission_ledgers: evidenceAdmissionLedgers,
     });
 
     const UpsertSchema = z.object({ id: z.string() });
