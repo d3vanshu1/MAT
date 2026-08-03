@@ -73,6 +73,7 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
   const eligibleQ3 = input.q3Results.filter(r => r.q4_eligible);
 
   // Build the finding objects for groupIntoCanonicalFamilies
+  // Pass structured_proposition from Q2 so Q4 groups by F04 proposition key, not title/detail
   const findingsForGrouping = eligibleQ3.map((q3r, idx) => {
     const candidate = input.candidates.find(c => c.candidate_id === q3r.candidate_id);
     return {
@@ -89,6 +90,17 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
       claim_ids: candidate?.canonical_claim_id ? [candidate.canonical_claim_id] : null,
       source_docs: candidate?.source_docs ?? null,
       claim_type: null as string | null,
+      // F04 structured proposition key — takes priority over title/detail regex
+      structured_proposition: candidate ? {
+        metric: candidate.metric,
+        period: candidate.period,
+        entity_or_segment: candidate.entity_segment,
+        scope: candidate.scope_qualifier,
+        unit: candidate.unit,
+        actual_or_forecast: candidate.actual_or_forecast,
+        accounting_basis: candidate.accounting_basis,
+        comparison_basis: candidate.comparison_basis,
+      } : null,
     };
   });
 

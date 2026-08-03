@@ -520,7 +520,71 @@ export function deriveCanonicalKey(finding: {
   claim_ids?: string[] | null;
   source_docs?: string[] | null;
   claim_type?: string | null;
+  /** F04 structured override — when present, these fields take priority over title/detail parsing */
+  structured_proposition?: {
+    metric?: string | null;
+    period?: string | null;
+    entity_or_segment?: string | null;
+    scope?: string | null;
+    unit?: string | null;
+    actual_or_forecast?: string | null;
+    accounting_basis?: string | null;
+    comparison_basis?: string | null;
+  } | null;
 }): CanonicalKey | null {
+  // =========================================================================
+  // F04 structured override — bypass title/detail regex when structured fields available
+  // =========================================================================
+  const sp = finding.structured_proposition;
+  if (sp && sp.metric && sp.period && (sp.metric !== "unknown" || sp.period !== "unknown")) {
+    // Use structured proposition key fields directly
+    const metricNorm = (sp.metric ?? "unknown").toLowerCase().replace(/[\s_-]+/g, "_");
+    const periodNorm = (sp.period ?? "unknown").toLowerCase().replace(/[\s_-]+/g, "_");
+    const entityNorm = (sp.entity_or_segment ?? "unknown").toLowerCase().replace(/[\s_-]+/g, "_");
+    const scopeNorm = sp.scope ? sp.scope.toLowerCase().replace(/[\s_-]+/g, "_") : null;
+    const unitNorm = sp.unit ? sp.unit.toLowerCase().replace(/[\s_-]+/g, "_") : null;
+    const aofNorm = (sp.actual_or_forecast ?? "unknown") as ActualOrForecast;
+    const accountingNorm = sp.accounting_basis ? sp.accounting_basis.toLowerCase().replace(/[\s_-]+/g, "_") : null;
+    const compBasisNorm = (sp.comparison_basis ?? "unknown") as ComparisonBasis;
+
+    // Issue domain derived from metric for structured path
+    let issue_domain: IssueDomain = "unknown";
+    if (/revenue|ebitda|margin|cost|capex|opex|cash|debt|leverage/.test(metricNorm)) {
+      issue_domain = "financial";
+    } else if (/retention|churn|customer/.test(metricNorm)) {
+      issue_domain = "commercial";
+    } else if (/calls|lines|operational|volume/.test(metricNorm)) {
+      issue_domain = "operational";
+    } else if (/irr|return|mom|exit/.test(metricNorm)) {
+      issue_domain = "returns";
+    }
+
+    // Issue type from finding_kind
+    let issue_type: IssueType = "unknown";
+    const fk = (finding.finding_kind ?? "").toLowerCase();
+    if (fk.includes("adjustment") || fk.includes("add_back")) issue_type = "adjustment_change";
+    else if (fk.includes("revision") || fk.includes("forecast")) issue_type = "forecast_revision";
+    else if (fk.includes("diverge") || fk.includes("gap") || fk === "data_divergence") issue_type = "memo_model_gap";
+    else if (fk.includes("decline") || fk.includes("segment")) issue_type = "segment_decline";
+
+    return {
+      issue_domain,
+      issue_type,
+      metric: metricNorm,
+      period: periodNorm,
+      entity_or_segment: entityNorm,
+      scope: scopeNorm,
+      unit: unitNorm,
+      actual_or_forecast: aofNorm,
+      accounting_basis: accountingNorm,
+      comparison_basis: compBasisNorm,
+      direction_of_difference: "unknown",
+    };
+  }
+
+  // =========================================================================
+  // Legacy path — derive from title/detail regex parsing
+  // =========================================================================
   const title = (finding.title ?? "").toLowerCase();
   const detail = (finding.detail ?? finding.full_analysis ?? "").toLowerCase();
   const text = `${title} ${detail}`;

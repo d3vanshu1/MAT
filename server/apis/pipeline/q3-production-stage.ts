@@ -54,6 +54,12 @@ export interface Q2CandidateInput {
   comparison_basis: string | null;
   verification_evidence: unknown;
   comparison_inputs: unknown;
+  /** Q2-level disposition for terminal mapping of candidates that never enter Q3 */
+  q2_disposition?: string | null;
+  /** Q2-level reason for non-reportability */
+  q2_reason?: string | null;
+  /** Whether Q2 deemed this candidate reportable */
+  q2_reportable?: boolean;
 }
 
 export interface Q3ResultRow {

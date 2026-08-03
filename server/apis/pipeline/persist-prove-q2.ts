@@ -270,6 +270,38 @@ export default api({
     const sourceClaimsArtifactId = claimsRows[0].id;
 
     // =========================================================================
+    // STEP 1b: Load F04 canonical finding records from prior Q3 (tree_level=96)
+    //   These are produced by ReplayClaimLinkage and contain the lossless
+    //   canonical finding records with real finding IDs, semantic hashes,
+    //   admitted evidence IDs, and proposition keys.
+    // =========================================================================
+    const F04Row = z.object({ merged_json: z.any() });
+    const f04Rows = await ctx.integrations.db.query(
+      `SELECT merged_json FROM merge_checkpoints
+       WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
+       ORDER BY updated_at DESC LIMIT 1`,
+      F04Row, [runId],
+      { label: "Load prior Q3 with F04 canonical findings (tree_level=96)" }
+    );
+    // F04 records may not exist (fresh run without ReplayClaimLinkage)
+    const f04RecordsByCandidate = new Map<string, any>();
+    if (f04Rows.length > 0) {
+      const f04Payload = typeof f04Rows[0].merged_json === "string"
+        ? JSON.parse(f04Rows[0].merged_json) : f04Rows[0].merged_json;
+      const f04Findings: any[] = f04Payload?.canonical_findings || [];
+      // Index by the claim_id which maps to Q2 candidate via claim resolution
+      for (const cfr of f04Findings) {
+        if (cfr?.identity?.finding_id) {
+          // Try to find corresponding Q2 candidate by claim_id match
+          const claimId = cfr.claim?.claim_id;
+          if (claimId) {
+            f04RecordsByCandidate.set(claimId, cfr);
+          }
+        }
+      }
+    }
+
+    // =========================================================================
     // STEP 2: Build COLLISION-SAFE claim indexes (Map<key, Claim[]>)
     // =========================================================================
     const claimById = new Map<string, any>();
@@ -770,8 +802,8 @@ export default api({
     const { executeQ5Stage } = await import("./q5-production-stage.js");
     const { executeTerminalAccounting, reconcileAllStages } = await import("./terminal-accounting-stage.js");
 
-    // Map reportable candidates to Q2CandidateInput shape
-    const q2CandidatesForChain = reportable.map(c => ({
+    // Map ALL persisted Q2 candidates (221) to Q2CandidateInput shape
+    const mapCandidateToInput = (c: typeof candidates[number]) => ({
       candidate_id: c.candidate_id,
       canonical_claim_id: c.claim_id || null,
       admitted_evidence_ids: c.verification_evidence
@@ -797,11 +829,21 @@ export default api({
       comparison_basis: c.comparison_inputs?.comparison_method || null,
       verification_evidence: c.verification_evidence,
       comparison_inputs: c.comparison_inputs,
-    }));
+      // Carry Q2-level disposition for terminal mapping of non-Q3 candidates
+      q2_disposition: c.disposition || null,
+      q2_reason: c.reason || null,
+      q2_reportable: c.reportable ?? false,
+    });
 
-    // Q3: Real claim linkage classification
+    // ALL Q2 candidates (terminal accounting uses this — 221 rows)
+    const allQ2Candidates = candidates.map(mapCandidateToInput);
+
+    // Only Q3-admission candidates (12 reportable rows) — Q3 input unchanged
+    const q3AdmissionCandidates = reportable.map(mapCandidateToInput);
+
+    // Q3: Real claim linkage classification (only admission subset)
     const q3Output = executeQ3Stage({
-      candidates: q2CandidatesForChain,
+      candidates: q3AdmissionCandidates,
       claimMap: claimById,
       ambiguousRefs: undefined,
       canonicalLedger: null,
@@ -814,7 +856,7 @@ export default api({
         replay_timestamp: new Date().toISOString(),
         schema_version: "5.0.0",
         source_q2_artifact_id: q2ArtifactId,
-        total_candidates: q2CandidatesForChain.length,
+        total_candidates: q3AdmissionCandidates.length,
         q4_eligible_count: q3Output.eligible_count,
         q4_ineligible_count: q3Output.ineligible_count,
         silent_losses: 0,
@@ -834,7 +876,7 @@ export default api({
     );
 
     // Gate: Q3 input = persisted Q2 reportable count
-    const q3InputCount = q2CandidatesForChain.length;
+    const q3InputCount = q3AdmissionCandidates.length;
     if (q3InputCount !== reportable.length) {
       failedGates.push(`q3_input (${q3InputCount}) != q2_reportable (${reportable.length})`);
     }
@@ -844,7 +886,7 @@ export default api({
     // =========================================================================
     const q4Output = executeQ4Stage({
       q3Results: q3Output.results,
-      candidates: q2CandidatesForChain,
+      candidates: q3AdmissionCandidates,
     });
 
     const q4Payload = {
@@ -886,10 +928,18 @@ export default api({
     // =========================================================================
     // STEP 10: Run Q5 using REAL production stage runner
     // =========================================================================
+    // Build candidate→F04 record map using claim_id cross-reference
+    const f04ByCandidateId = new Map<string, any>();
+    for (const cand of q3AdmissionCandidates) {
+      const claimId = cand.canonical_claim_id;
+      if (claimId && f04RecordsByCandidate.has(claimId)) {
+        f04ByCandidateId.set(cand.candidate_id, f04RecordsByCandidate.get(claimId));
+      }
+    }
+
     const q5Output = executeQ5Stage({
-      families: q4Output.families,
-      q3Results: q3Output.results,
-      candidates: q2CandidatesForChain,
+      q4Output,
+      f04RecordsByCandidate: f04ByCandidateId,
     });
 
     const q5CanonicalPayload = {
@@ -924,7 +974,8 @@ export default api({
     // STEP 10b: Run Terminal Accounting using REAL production stage runner
     // =========================================================================
     const terminalOutput = executeTerminalAccounting({
-      candidates: q2CandidatesForChain,
+      allQ2Candidates,
+      q3AdmissionCandidates,
       q3Results: q3Output.results,
       q4Output,
       q5Findings: q5Output.findings,
@@ -958,7 +1009,7 @@ export default api({
     // STEP 11: Cross-stage reconciliation + chain integrity
     // =========================================================================
     const reconciliation = reconcileAllStages(
-      q2CandidatesForChain,
+      allQ2Candidates,
       q3Output.results,
       q4Output,
       q5Output.findings,

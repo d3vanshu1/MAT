@@ -1,8 +1,15 @@
 /**
  * MAT-F07 Stage 4: Terminal Accounting
  *
- * Produces one terminal record for EVERY Q2 candidate.
+ * Produces one terminal record for EVERY Q2 candidate (all 221, not just 12).
  * No silent losses. No candidate may disappear.
+ *
+ * Two explicit input sets:
+ *   allQ2Candidates       — all persisted Q2 rows (221)
+ *   q3AdmissionCandidates — only rows that attempted Q3 (12)
+ *
+ * Candidates excluded before Q3 receive deterministic terminal rows based
+ * on their persisted Q2 disposition/reason — NOT a generic catch-all status.
  *
  * 12+ statuses from Terminal Status Taxonomy (MAT-F07 §E):
  *   reportable_finding, confirmed_non_adverse, supporting_only,
@@ -53,7 +60,7 @@ export type TerminalStatus = typeof TERMINAL_STATUSES[number];
 export interface TerminalRecord {
   candidate_id: string;
   terminal_status: TerminalStatus;
-  terminal_stage: "q3" | "q4" | "q5";
+  terminal_stage: "q2" | "q3" | "q4" | "q5";
   canonical_finding_id: string | null;
   family_id: string | null;
   reason_codes: string[];
@@ -62,7 +69,10 @@ export interface TerminalRecord {
 }
 
 export interface TerminalAccountingInput {
-  candidates: Q2CandidateInput[];
+  /** ALL persisted Q2 candidates (221 rows) */
+  allQ2Candidates: Q2CandidateInput[];
+  /** Only the subset that attempted Q3 (12 rows) */
+  q3AdmissionCandidates: Q2CandidateInput[];
   q3Results: Q3ResultRow[];
   q4Output: Q4StageOutput;
   q5Findings: Q5Finding[];
@@ -80,12 +90,18 @@ export interface TerminalAccountingOutput {
 /**
  * Produce one terminal record for EVERY Q2 candidate.
  * No silent losses. No candidate may disappear.
+ *
+ * Candidates excluded before Q3 receive deterministic terminal rows
+ * based on their Q2 disposition — not a generic catch-all.
  */
 export function executeTerminalAccounting(input: TerminalAccountingInput): TerminalAccountingOutput {
   const records: TerminalRecord[] = [];
   const processedCandidateIds = new Set<string>();
 
-  // Build lookup maps
+  // Build set of Q3-admission candidate IDs
+  const q3AdmissionIds = new Set(input.q3AdmissionCandidates.map(c => c.candidate_id));
+
+  // Build lookup maps from Q3/Q4/Q5 results
   const q3ByCandidate = new Map<string, Q3ResultRow>();
   for (const r of input.q3Results) {
     q3ByCandidate.set(r.candidate_id, r);
@@ -106,24 +122,32 @@ export function executeTerminalAccounting(input: TerminalAccountingInput): Termi
     }
   }
 
-  // Process every Q2 candidate
-  for (const candidate of input.candidates) {
+  // Process EVERY Q2 candidate (all 221)
+  for (const candidate of input.allQ2Candidates) {
     const cid = candidate.candidate_id;
     if (processedCandidateIds.has(cid)) continue;
     processedCandidateIds.add(cid);
 
+    // Was this candidate admitted to Q3?
+    if (!q3AdmissionIds.has(cid)) {
+      // This candidate NEVER entered Q3 — terminal at Q2 level
+      const terminalRecord = deriveQ2TerminalRecord(candidate);
+      records.push(terminalRecord);
+      continue;
+    }
+
+    // Candidate was admitted to Q3 — derive terminal from Q3/Q4/Q5 progression
     const q3 = q3ByCandidate.get(cid);
     const familyId = candidateFamilyMap.get(cid) ?? null;
     const findingId = candidateFindingMap.get(cid) ?? null;
 
-    // Determine terminal status
-    const terminalRecord = deriveTerminalRecord(candidate, q3, familyId, findingId, input);
+    const terminalRecord = deriveQ3PlusTerminalRecord(candidate, q3, familyId, findingId, input);
     records.push(terminalRecord);
   }
 
   // Validate invariants
   const invariant_violations: string[] = [];
-  const uniqueCandidateIds = new Set(input.candidates.map(c => c.candidate_id));
+  const uniqueCandidateIds = new Set(input.allQ2Candidates.map(c => c.candidate_id));
   const uniqueTerminalIds = new Set(records.map(r => r.candidate_id));
 
   // Check: count(unique Q2 candidate IDs) = count(unique terminal candidate IDs)
@@ -160,6 +184,7 @@ export function executeTerminalAccounting(input: TerminalAccountingInput): Termi
 export interface ReconciliationResult {
   q2_unique_ids: number;
   q2_duplicate_count: number;
+  q3_admission_count: number;
   q3_row_count: number;
   q3_unresolved_references: number;
   q4_family_count: number;
@@ -178,7 +203,7 @@ export interface ReconciliationResult {
 }
 
 export function reconcileAllStages(
-  candidates: Q2CandidateInput[],
+  allQ2Candidates: Q2CandidateInput[],
   q3Results: Q3ResultRow[],
   q4Output: Q4StageOutput,
   q5Findings: Q5Finding[],
@@ -186,12 +211,12 @@ export function reconcileAllStages(
 ): ReconciliationResult {
   const violations: string[] = [];
 
-  // Q2 stats
-  const q2Ids = candidates.map(c => c.candidate_id);
+  // Q2 stats — all candidates
+  const q2Ids = allQ2Candidates.map(c => c.candidate_id);
   const q2UniqueIds = new Set(q2Ids);
   const q2DuplicateCount = q2Ids.length - q2UniqueIds.size;
 
-  // Q3 reference validation
+  // Q3 reference validation — Q3 results must reference real Q2 candidates
   let q3UnresolvedRefs = 0;
   for (const r of q3Results) {
     if (!q2UniqueIds.has(r.candidate_id)) {
@@ -224,7 +249,7 @@ export function reconcileAllStages(
     }
   }
 
-  // Terminal validation
+  // Terminal validation — must cover ALL Q2 candidates
   const terminalCandidateIds = terminalRecords.map(r => r.candidate_id);
   const terminalUniqueIds = new Set(terminalCandidateIds);
   const terminalDuplicateIds = terminalCandidateIds.length - terminalUniqueIds.size;
@@ -250,9 +275,15 @@ export function reconcileAllStages(
     }
   }
 
+  // Q3 admission count
+  const q3AdmissionCount = q3Results.length > 0
+    ? new Set(q3Results.map(r => r.candidate_id)).size
+    : 0;
+
   return {
     q2_unique_ids: q2UniqueIds.size,
     q2_duplicate_count: q2DuplicateCount,
+    q3_admission_count: q3AdmissionCount,
     q3_row_count: q3Results.length,
     q3_unresolved_references: q3UnresolvedRefs,
     q4_family_count: q4Output.families.length,
@@ -272,13 +303,115 @@ export function reconcileAllStages(
 }
 
 // ===========================================================================
-// Internal Helpers
+// Internal Helpers — Q2-level terminal (never entered Q3)
 // ===========================================================================
 
 /**
- * Derive terminal record for a candidate based on its progression through stages.
+ * Derive terminal record for a candidate that was excluded BEFORE Q3.
+ * Maps the Q2-level disposition to a specific terminal status — not a generic catch-all.
  */
-function deriveTerminalRecord(
+function deriveQ2TerminalRecord(candidate: Q2CandidateInput): TerminalRecord {
+  const cid = candidate.candidate_id;
+  const q2Disposition = candidate.q2_disposition ?? "";
+  const q2Reason = candidate.q2_reason ?? "";
+
+  const status = mapQ2DispositionToTerminalStatus(q2Disposition, q2Reason);
+
+  return {
+    candidate_id: cid,
+    terminal_status: status,
+    terminal_stage: "q2",
+    canonical_finding_id: null,
+    family_id: null,
+    reason_codes: buildQ2ReasonCodes(q2Disposition, q2Reason),
+    reportable: false,
+    terminal_rule_version: "f07-terminal-v2",
+  };
+}
+
+/**
+ * Map Q2-level disposition + reason to a specific terminal status.
+ * Each Q2 disposition maps to a distinct terminal status — no generic fallthrough.
+ */
+function mapQ2DispositionToTerminalStatus(disposition: string, reason: string): TerminalStatus {
+  // Duplicate candidates
+  if (disposition === "duplicate_candidate_identity" || reason === "duplicate_candidate_identity" ||
+      disposition === "duplicate_candidate_id" || reason === "duplicate_candidate_id") {
+    return "duplicate_suppressed";
+  }
+
+  // Missing or invalid claim linkage
+  if (reason === "no_claim_linkage" || reason === "unresolved_claim" ||
+      reason === "missing_claim" || disposition === "missing_claim") {
+    return "missing_ic_claim";
+  }
+
+  // Unverifiable — no structured evidence
+  if (reason === "no_structured_verification" || reason === "missing_evidence" ||
+      disposition === "unverifiable" || reason === "unverifiable") {
+    return "unverifiable";
+  }
+
+  // Invalid evidence authority
+  if (reason === "invalid_evidence_authority" || reason === "no_evidence_authority" ||
+      disposition === "invalid_evidence_authority") {
+    return "invalid_evidence_authority";
+  }
+
+  // Incompatible claim/evidence
+  if (reason === "incompatible_claim_evidence" || disposition === "incompatible_claim_evidence") {
+    return "incompatible_claim_evidence";
+  }
+
+  // Process diagnostic / non-reportable
+  if (disposition === "process_diagnostic" || reason === "process_diagnostic" ||
+      reason === "wrong_module" || reason === "source_recommendation" ||
+      reason === "scope_limitation" || reason === "non_reportable_finding_kind") {
+    return "q3_ineligible";
+  }
+
+  // Non-reportable generic
+  if (disposition === "non_reportable" || disposition === "non-reportable") {
+    // Try to determine more specific status from reason
+    if (reason.includes("claim")) return "missing_ic_claim";
+    if (reason.includes("evidence")) return "invalid_evidence_authority";
+    if (reason.includes("duplicate")) return "duplicate_suppressed";
+    if (reason.includes("diagnostic") || reason.includes("process")) return "q3_ineligible";
+    return "unverifiable";
+  }
+
+  // Confirmed/supporting
+  if (disposition === "confirmed" || disposition === "claim_linked_confirmed") {
+    return "confirmed_non_adverse";
+  }
+  if (disposition === "supporting_only" || disposition === "supporting_evidence_only") {
+    return "supporting_only";
+  }
+
+  // Fallback — should not happen, but defensive
+  return "q3_ineligible";
+}
+
+/**
+ * Build descriptive reason codes for Q2-terminated candidates.
+ */
+function buildQ2ReasonCodes(disposition: string, reason: string): string[] {
+  const codes: string[] = [];
+  if (disposition) codes.push(`q2_disposition:${disposition}`);
+  if (reason && reason !== disposition) codes.push(`q2_reason:${reason}`);
+  codes.push("terminal_at_q2");
+  return codes;
+}
+
+// ===========================================================================
+// Internal Helpers — Q3+ terminal (entered Q3 pathway)
+// ===========================================================================
+
+/**
+ * Derive terminal record for a candidate that was admitted to Q3.
+ * Based on its progression through Q3→Q4→Q5 stages.
+ */
+function deriveQ3PlusTerminalRecord(
   candidate: Q2CandidateInput,
   q3: Q3ResultRow | undefined,
   familyId: string | null,
@@ -297,7 +430,7 @@ function deriveTerminalRecord(
       family_id: null,
       reason_codes: ["no_q3_result"],
       reportable: false,
-      terminal_rule_version: "f07-terminal-v1",
+      terminal_rule_version: "f07-terminal-v2",
     };
   }
 
@@ -312,7 +445,7 @@ function deriveTerminalRecord(
       family_id: null,
       reason_codes: q3.rejection_reason_codes,
       reportable: false,
-      terminal_rule_version: "f07-terminal-v1",
+      terminal_rule_version: "f07-terminal-v2",
     };
   }
 
@@ -326,7 +459,7 @@ function deriveTerminalRecord(
       family_id: null,
       reason_codes: ["q4_unassigned"],
       reportable: false,
-      terminal_rule_version: "f07-terminal-v1",
+      terminal_rule_version: "f07-terminal-v2",
     };
   }
 
@@ -343,7 +476,7 @@ function deriveTerminalRecord(
         family_id: familyId,
         reason_codes: ["q4_grouped_non_representative"],
         reportable: false,
-        terminal_rule_version: "f07-terminal-v1",
+        terminal_rule_version: "f07-terminal-v2",
       };
     }
   }
@@ -361,7 +494,7 @@ function deriveTerminalRecord(
           family_id: familyId,
           reason_codes: [],
           reportable: true,
-          terminal_rule_version: "f07-terminal-v1",
+          terminal_rule_version: "f07-terminal-v2",
         };
       }
       // Q5 finding exists but not reportable
@@ -374,7 +507,7 @@ function deriveTerminalRecord(
         family_id: familyId,
         reason_codes: finding.disposition.reason_codes,
         reportable: false,
-        terminal_rule_version: "f07-terminal-v1",
+        terminal_rule_version: "f07-terminal-v2",
       };
     }
   }
@@ -388,7 +521,7 @@ function deriveTerminalRecord(
     family_id: familyId,
     reason_codes: ["q5_finding_not_produced"],
     reportable: false,
-    terminal_rule_version: "f07-terminal-v1",
+    terminal_rule_version: "f07-terminal-v2",
   };
 }
 
