@@ -54,6 +54,12 @@
  */
 
 import { z } from "@superblocksteam/sdk-api";
+import {
+  type CanonicalIcClaim,
+  type CanonicalClaimLedger,
+  admitCandidate,
+  type CandidateRejectionReason,
+} from "./canonical-ic-claim.js";
 
 // ---------------------------------------------------------------------------
 // Document-Level Authority Classes
@@ -636,8 +642,44 @@ export function classifyClaimLinkage(
   },
   claimMap: Map<string, any>,
   ambiguousRefs?: ReadonlySet<string>,
+  /** MAT-F01: Optional canonical ledger for claim-first admission enforcement */
+  canonicalLedger?: CanonicalClaimLedger | null,
 ): ClaimLinkageResult {
   const { finding_id, corpus_index, title } = finding;
+
+  // --- MAT-F01: Claim-first admission gate (when canonical ledger is available) ---
+  if (canonicalLedger && canonicalLedger.claims.length > 0) {
+    const primaryClaimId = finding.originating_claim_id ||
+                           (finding.claim_ids && finding.claim_ids.length > 0 ? finding.claim_ids[0] : null);
+
+    const admissionResult = admitCandidate({
+      candidate_claim_id: primaryClaimId,
+      candidate_claim_ids: finding.claim_ids,
+      candidate_topic: finding.finding_kind,
+      ledger: canonicalLedger,
+    });
+
+    if (!admissionResult.admitted) {
+      // Map canonical rejection reason to Q3 disposition
+      const disposition = mapCanonicalRejectionToDisposition(admissionResult.rejection_reason!);
+      const authorityClass = deriveAuthorityClass(finding.source_tag ?? null, finding.doc_filename ?? null, finding.doc_type ?? null);
+
+      return {
+        finding_id,
+        corpus_index,
+        title,
+        claim_linkage_disposition: disposition,
+        q4_eligible: false,
+        claim_provenance: null,
+        authority_class: authorityClass,
+        authority_valid: false,
+        authority_rationale: `Canonical admission gate: ${admissionResult.rejection_detail}`,
+        reason: admissionResult.rejection_detail ?? "Canonical claim-first admission failed",
+        evidence_source_type: finding.source_tag ?? null,
+      };
+    }
+    // Admitted — proceed to standard Q3 classification with full provenance
+  }
 
   // Step 1: Determine the primary claim_id to resolve
   const primaryClaimId = finding.originating_claim_id ||
@@ -916,4 +958,53 @@ function deriveNotLinkedReason(finding: {
     return "Legal DD observation without originating IC claim — legal DD cannot independently generate contradiction findings";
   }
   return `No originating IC claim found — source: ${sourceTag}, kind: ${kind ?? "unspecified"}`;
+}
+
+// ---------------------------------------------------------------------------
+// MAT-F01: Map canonical rejection reasons to Q3 dispositions
+// ---------------------------------------------------------------------------
+
+function mapCanonicalRejectionToDisposition(reason: CandidateRejectionReason): ClaimLinkageDisposition {
+  switch (reason) {
+    case "missing_ic_claim":
+      return "not_linked_to_IC_claim";
+    case "ambiguous_ic_claim":
+      return "ambiguous_reconciliation";
+    case "invalid_claim_coordinate":
+      return "invalid_or_unresolved_claim_reference";
+    case "claim_text_not_found":
+      return "invalid_or_unresolved_claim_reference";
+    case "topic_only_linkage":
+      return "not_linked_to_IC_claim";
+    case "claim_reference_not_resolved":
+      return "invalid_or_unresolved_claim_reference";
+    default:
+      return "invalid_or_unresolved_claim_reference";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MAT-F01: Build canonical ledger from ClaimsLedger checkpoint for admission
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconstruct a CanonicalClaimLedger from the canonical_claims array persisted
+ * on the ClaimsLedger checkpoint. This is the production entry point for the
+ * admission gate — called in pipeline-core before Q3 classification.
+ */
+export function buildCanonicalLedgerFromCheckpoint(
+  canonicalClaims: CanonicalIcClaim[] | undefined | null,
+): CanonicalClaimLedger | null {
+  if (!canonicalClaims || canonicalClaims.length === 0) return null;
+
+  const claimMap = new Map<string, CanonicalIcClaim>();
+  for (const claim of canonicalClaims) {
+    claimMap.set(claim.claim_id, claim);
+  }
+
+  return {
+    schema_version: "ic-claim-v1",
+    claims: canonicalClaims,
+    claimMap,
+  };
 }

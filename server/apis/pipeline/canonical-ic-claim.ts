@@ -148,14 +148,21 @@ export const EXTRACTOR_VERSION = "mat-f01-v1.0.0";
 /**
  * Generate a deterministic claim ID using SHA-256 over canonical identity inputs.
  *
- * Identity inputs:
+ * Identity inputs (all included to ensure atomic uniqueness):
  *   - source document ID
  *   - memo version
  *   - exact claim text (normalized whitespace, trimmed)
  *   - page/slide coordinate
  *   - claim type
+ *   - atomic proposition discriminator (metric OR qualitative_proposition)
+ *   - scope
+ *   - stated_value
+ *   - unit/currency/scale
  *
- * Format: `ic-{schema_version_short}-{first 32 hex chars of SHA-256}`
+ * Two atomic claims from the same source sentence (e.g. £194m revenue and
+ * £57m cash EBITDA) receive DIFFERENT IDs because metric/scope/value differ.
+ *
+ * Format: `ic-v1-{first 32 hex chars of SHA-256}`
  *
  * Reprocessing unchanged source content produces identical claim IDs.
  */
@@ -165,12 +172,27 @@ export function generateCanonicalClaimId(params: {
   exact_claim_text: string;
   page_or_slide: number | string;
   claim_type: "quantitative" | "qualitative";
+  /** Atomic proposition discriminator — metric name or qualitative proposition */
+  proposition_key?: string | null;
+  /** Scope qualifier — disambiguates same metric at different scopes */
+  scope?: string | null;
+  /** Stated value — disambiguates same metric/scope at different values */
+  stated_value?: number | string | null;
+  /** Unit/currency/scale combined — disambiguates unit differences */
+  unit_key?: string | null;
 }): string {
   // Normalize text: collapse whitespace, trim, lowercase for identity
   const normalizedText = params.exact_claim_text
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+
+  // Build atomic proposition discriminator — ensures two claims from the same
+  // sentence get different IDs when they have different metrics/propositions
+  const propKey = (params.proposition_key ?? "").trim().toLowerCase();
+  const scopeKey = (params.scope ?? "").trim().toLowerCase();
+  const valueKey = params.stated_value != null ? String(params.stated_value).trim() : "";
+  const unitKey = (params.unit_key ?? "").trim().toLowerCase();
 
   const identityPayload = [
     `schema=${IC_CLAIM_SCHEMA_VERSION}`,
@@ -179,6 +201,10 @@ export function generateCanonicalClaimId(params: {
     `page=${String(params.page_or_slide)}`,
     `type=${params.claim_type}`,
     `text=${normalizedText}`,
+    `prop=${propKey}`,
+    `scope=${scopeKey}`,
+    `value=${valueKey}`,
+    `unit=${unitKey}`,
   ].join("|");
 
   const hash = sha256hex(identityPayload);
@@ -290,6 +316,10 @@ export function buildCanonicalClaim(params: {
     exact_claim_text: params.exact_claim_text,
     page_or_slide: params.page_or_slide,
     claim_type: params.claim_type,
+    proposition_key: params.metric || params.qualitative_proposition,
+    scope: params.scope,
+    stated_value: params.stated_value,
+    unit_key: [params.unit, params.currency, params.scale].filter(Boolean).join("/"),
   });
 
   return {

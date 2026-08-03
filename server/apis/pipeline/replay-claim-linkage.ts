@@ -29,6 +29,7 @@ import {
   Q4_ELIGIBLE_ALL,
   CLAIM_LINKAGE_DISPOSITIONS,
   ClaimProvenanceSchema,
+  buildCanonicalLedgerFromCheckpoint,
 } from "./claim-linkage.js";
 import {
   buildEvidenceSnapshot,
@@ -294,6 +295,26 @@ export default api({
     }
 
     // 5. Process each candidate through strict claim-linkage
+    // MAT-F01: Build canonical ledger from pipeline_checkpoints for admission gate
+    const canonicalLedgerRows = await ctx.integrations.db.query(
+      `SELECT payload FROM pipeline_checkpoints
+       WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'
+       ORDER BY updated_at DESC LIMIT 1`,
+      z.object({ payload: z.any() }),
+      [runId],
+      { label: "Load canonical claims for admission gate" }
+    );
+    let canonicalLedger = null;
+    if (canonicalLedgerRows.length > 0) {
+      const cpPayload = typeof canonicalLedgerRows[0].payload === "string"
+        ? JSON.parse(canonicalLedgerRows[0].payload)
+        : canonicalLedgerRows[0].payload;
+      canonicalLedger = buildCanonicalLedgerFromCheckpoint(cpPayload?.canonical_claims);
+      if (canonicalLedger) {
+        console.log(`[ReplayClaimLinkage][MAT-F01] Canonical admission gate active: ${canonicalLedger.claims.length} validated claims`);
+      }
+    }
+
     const linkageResults: ClaimLinkageResult[] = [];
     const evidenceSnapshots: EvidenceSnapshot[] = [];
     const dispositionCounts: Record<string, number> = {};
@@ -321,6 +342,7 @@ export default api({
         },
         claimMap,
         ambiguousRefs,
+        canonicalLedger,
       );
 
       linkageResults.push(result);

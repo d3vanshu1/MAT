@@ -21,6 +21,12 @@ import { z } from "@superblocksteam/sdk-api";
 import { callLLMWithHeadroom, MessageResponseSchema, type LLMResponse } from "./call-llm.js";
 import { SONNET_MODEL } from "./model-config.js";
 import type { PipelineContext } from "./pipeline-config.js";
+import {
+  type CanonicalIcClaim,
+  fromLegacyClaim,
+  buildClaimLedger as buildCanonicalLedger,
+  type CanonicalClaimLedger,
+} from "./canonical-ic-claim.js";
 
 // ---------------------------------------------------------------------------
 // Claim Schema — the typed ledger
@@ -118,6 +124,13 @@ export interface ClaimsLedger {
     /** Consecutive zero-progress invocations (for adaptive work-unit sizing) */
     consecutive_no_progress?: number;
   };
+  /**
+   * MAT-F01: Canonical claim records produced by converting legacy Claim[] through
+   * source validation. This is the production canonical ledger — used by the
+   * claim-first admission gate. Persisted alongside the legacy claims for
+   * backward compatibility. Only populated after conversion step completes.
+   */
+  canonical_claims?: CanonicalIcClaim[];
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +690,53 @@ export async function runClaimsExtraction(
     `Elapsed: ${Math.round((Date.now() - phaseStart) / 1000)}s`
   );
 
+  // --- MAT-F01: Convert to canonical claims with source validation ---
+  // Build a memo text lookup for source validation
+  const memoTextMap = new Map<string, string>();
+  for (const memo of memos) {
+    if (memo.parsed_text) {
+      memoTextMap.set(memo.file_name, memo.parsed_text);
+      memoTextMap.set(memo.id, memo.parsed_text);
+    }
+  }
+
+  // Convert ALL claims to canonical format (both retained + new)
+  const canonicalClaims: CanonicalIcClaim[] = [];
+  for (const claim of allClaims) {
+    const sourceText = memoTextMap.get(claim.source_doc) ?? "";
+    // Derive document_id from memo lookup
+    const matchedMemo = memos.find(m => m.file_name === claim.source_doc);
+    const documentId = matchedMemo?.id ?? claim.source_doc;
+    const documentName = claim.source_doc;
+
+    // Derive memo version heuristic from filename
+    const memoVersion = deriveMemoVersion(documentName);
+
+    try {
+      const canonical = fromLegacyClaim({
+        legacyClaim: claim,
+        document_id: documentId,
+        document_name: documentName,
+        memo_version: memoVersion,
+        source_text: sourceText,
+      });
+      canonicalClaims.push(canonical);
+    } catch (err) {
+      // Non-fatal — skip claims that can't be converted
+      console.warn(`[ClaimsExtraction][canonical] Failed to convert claim "${claim.metric}/${claim.scope_qualifier}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Deduplicate by claim_id (deterministic — same source = same ID)
+  const canonicalLedger = buildCanonicalLedger(canonicalClaims);
+  ledger.canonical_claims = canonicalLedger.claims;
+
+  console.log(
+    `[ClaimsExtraction][canonical] Converted ${canonicalClaims.length} → ` +
+    `${canonicalLedger.claims.length} unique canonical claims ` +
+    `(${canonicalLedger.claims.filter(c => c.source_validation.exact_text_found).length} source-validated)`
+  );
+
   return ledger;
 }
 
@@ -754,4 +814,23 @@ export function parseClaimsResponse(responseText: string, sourceFile: string): P
   }
 
   return { claims: validClaims, failed: false };
+}
+
+// ---------------------------------------------------------------------------
+// Memo version derivation from filename
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive memo version from document filename.
+ * Used for canonical claim identity — must be deterministic.
+ */
+function deriveMemoVersion(filename: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.includes("3rd") || lower.includes("third")) return "3rd_ic";
+  if (lower.includes("2nd") || lower.includes("second")) return "2nd_ic";
+  if (lower.includes("1st") || lower.includes("first")) return "1st_ic";
+  if (lower.includes("update")) return "ic_update";
+  if (lower.includes("screening")) return "screening";
+  if (lower.includes("cim")) return "cim";
+  return "ic_memo";
 }
