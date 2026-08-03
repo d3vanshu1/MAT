@@ -103,6 +103,8 @@ export interface SemanticHashInput {
   /** Diagnostic decisions that affect output */
   excluded_finding_ids: string[];
   narrative_rejection_ids: string[];
+  /** Normalized digest of final report markdown — ensures report content changes the hash */
+  report_content_digest: string;
   /** Schema/version identifiers */
   schema_version: string;
   hash_version: string;
@@ -132,6 +134,7 @@ export function computeSemanticHash(input: SemanticHashInput): string {
     narrative_digests: sortObjectKeys(input.narrative_digests),
     excluded_finding_ids: [...input.excluded_finding_ids].sort(),
     narrative_rejection_ids: [...input.narrative_rejection_ids].sort(),
+    report_content_digest: input.report_content_digest,
   };
 
   const payload = JSON.stringify(stable);
@@ -153,7 +156,8 @@ export function buildSemanticHashInput(
   findings: any[],
   reportableFindingIds: string[],
   diagnostics: CanonicalFinalArtifact["diagnostics"],
-  moduleType: string
+  moduleType: string,
+  reportMarkdown?: string
 ): SemanticHashInput {
   const findingIds: string[] = [];
   const findingSemanticHashes: string[] = [];
@@ -174,6 +178,11 @@ export function buildSemanticHashInput(
     narrativeDigests[id] = createHash("sha256").update(title + "|" + detail, "utf8").digest("hex").slice(0, 16);
   }
 
+  // Compute deterministic report digest — covers final markdown content in the hash
+  const reportDigest = reportMarkdown
+    ? createHash("sha256").update(reportMarkdown, "utf8").digest("hex").slice(0, 32)
+    : "empty";
+
   return {
     finding_ids: findingIds,
     finding_semantic_hashes: findingSemanticHashes,
@@ -184,6 +193,7 @@ export function buildSemanticHashInput(
     narrative_rejection_ids: diagnostics.narrative_validation
       .filter(n => n.status === "rejected")
       .map(n => n.finding_id),
+    report_content_digest: reportDigest,
     schema_version: CANONICAL_FINAL_ARTIFACT_VERSION,
     hash_version: SEMANTIC_HASH_VERSION,
     module_type: moduleType,

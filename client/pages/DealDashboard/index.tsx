@@ -1615,12 +1615,38 @@ export default function DealDashboardPage() {
         if (!stored?.output) {
           throw new Error("Pipeline completed but no result returned and no persisted output found");
         }
-        // Use the persisted output directly — it already has findings + fullReport
-        await saveModuleResult(moduleId, {
-          executiveHeader: stored.output.executiveHeader,
-          findings: stored.output.findings as MergeNode["findings"],
-          fullReport: stored.output.fullReport,
-        }, pipelineResult.runId);
+        // MAT-F06 §4: Server-pipeline runs are already persisted by the canonical finalizer.
+        // Just update local UI state — do NOT call SaveModuleResult (eliminates second-save).
+        const storedOutput = stored.output!;
+        setStatuses((prev) => ({
+          ...prev,
+          [moduleId]: {
+            moduleId,
+            latestRun: {
+              id: pipelineResult.runId,
+              deal_id: dealId!,
+              module_id: moduleId,
+              status: "completed",
+              triggered_at: new Date().toISOString(),
+              completed_at: new Date().toISOString(),
+              documents_included: uploadedFiles.length > 0
+                ? uploadedFiles.map((f) => f.name)
+                : docs.map((d) => d.file_name),
+              findings_count: storedOutput.findings.length,
+              critical_count: storedOutput.findings.filter(
+                (f: any) => f.severity === "critical"
+              ).length,
+            },
+            latestOutput: {
+              id: crypto.randomUUID(),
+              module_run_id: pipelineResult.runId,
+              executive_header: storedOutput.executiveHeader,
+              findings: storedOutput.findings as MergeNode["findings"],
+              full_report_markdown: storedOutput.fullReport,
+              created_at: new Date().toISOString(),
+            },
+          },
+        }));
         toast.success(`${displayName} complete!`);
         return;
       }
@@ -1643,15 +1669,41 @@ export default function DealDashboardPage() {
         fullReport = await generateReport(moduleId, finalMerge, totalMergeRounds + 1, coverageLine, numericReport);
       }
 
-      await saveModuleResult(moduleId, {
-        executiveHeader: finalMerge.executiveHeader,
-        findings: finalMerge.findings,
-        fullReport,
-      }, runId);
+      // MAT-F06 §4: Server-pipeline runs are already persisted by the canonical finalizer.
+      // Just update local UI state — do NOT call SaveModuleResult (eliminates second-save).
+      setStatuses((prev) => ({
+        ...prev,
+        [moduleId]: {
+          moduleId,
+          latestRun: {
+            id: runId,
+            deal_id: dealId!,
+            module_id: moduleId,
+            status: "completed",
+            triggered_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+            documents_included: uploadedFiles.length > 0
+              ? uploadedFiles.map((f) => f.name)
+              : docs.map((d) => d.file_name),
+            findings_count: finalMerge.findings.length,
+            critical_count: finalMerge.findings.filter(
+              (f) => f.severity === "critical"
+            ).length,
+          },
+          latestOutput: {
+            id: crypto.randomUUID(),
+            module_run_id: runId,
+            executive_header: finalMerge.executiveHeader,
+            findings: finalMerge.findings,
+            full_report_markdown: fullReport,
+            created_at: new Date().toISOString(),
+          },
+        },
+      }));
 
       toast.success(`${displayName} complete!`);
     },
-    [dealId, useOpus, selectedSubjectIds, numericVerifyApi, runModulePipelineApi, getRunProgressApi, generateReport, saveModuleResult, setModuleProgress]
+    [dealId, useOpus, selectedSubjectIds, numericVerifyApi, runModulePipelineApi, getRunProgressApi, generateReport, setModuleProgress, uploadedFiles, docs, setStatuses]
   );
 
   // ---------------------------------------------------------------------------

@@ -62,10 +62,8 @@ export interface FinalizerPrerequisites {
   /** Extra degraded conditions to persist as diagnostics */
   degradedConditions?: string[];
   /**
-   * Pre-formatted report from LLM-based formatting (formatReportInline).
-   * When provided, this is used directly instead of the mechanical formatter.
-   * The semantic hash is still computed from finding-level content (not report text),
-   * so LLM formatting variation does not affect hash identity.
+   * @deprecated Ignored since MAT-F06 §1. Report is always rebuilt from
+   * canonical reportable records. Kept for call-site backward compatibility.
    */
   preFormattedReport?: string;
 }
@@ -84,13 +82,16 @@ export type FinalizerOutcome =
 
 /**
  * Keys that MUST be present:true in checkpointStatus for a credible contradiction audit.
- * These correspond to actual pipeline_checkpoints.checkpoint_key values written by pipeline-core.ts.
+ * These correspond to actual pipeline_checkpoints.checkpoint_key values written by pipeline-core.ts,
+ * plus synthetic keys derived from structured payload validation.
  * - claims_ledger: canonical claims extracted from IC memos
+ * - evidence_admission: F02B evidence admission ledger (stored inside Q3 merge checkpoint)
  * - reconciliation: claims reconciled against operating model evidence (verdict/comparisons)
  * - canonical_findings: synthetic entry derived from findings.length > 0 (checked in caller)
  */
 const REQUIRED_CHECKPOINTS_CONTRADICTION: string[] = [
   "claims_ledger",
+  "evidence_admission",
   "reconciliation",
   "canonical_findings",
 ];
@@ -387,20 +388,21 @@ export async function canonicalFinalize(
   };
 
   // ── STEP 6: Format report from reportable findings only ──────────────────
-  // Use pre-formatted LLM report if available (pipeline-core.ts main/fast path).
-  // Otherwise generate deterministic mechanical report.
-  const reportMarkdown = prereqs.preFormattedReport
-    ?? formatCanonicalReport(executiveHeader, reportableFindings, {
-      degradedConditions,
-      excludedCount: excludedFindings.length,
-    });
+  // ALWAYS rebuild report from canonical reportable records (MAT-F06 §1).
+  // preFormattedReport is never used as authoritative — it may contain excluded
+  // items, F05-rejected text, or unlinked entries that passed through LLM formatting.
+  const reportMarkdown = formatCanonicalReport(executiveHeader, reportableFindings, {
+    degradedConditions,
+    excludedCount: excludedFindings.length,
+  });
 
   // ── STEP 7: Compute semantic hash ─────────────────────────────────────────
   const hashInput = buildSemanticHashInput(
     reportableFindings,
     reportableFindingIds,
     diagnostics,
-    moduleType
+    moduleType,
+    reportMarkdown
   );
   const semanticHash = computeSemanticHash(hashInput);
 
@@ -596,6 +598,11 @@ export async function canonicalFinalize(
  * NOTE: `canonical_findings` is a synthetic key — it is not written to the DB.
  * Pass `hasParsedFindings=true` when the caller has already successfully parsed
  * findings from a merge checkpoint. It will be included as present:true.
+ *
+ * NOTE: `evidence_admission` is validated by checking the Q3 merge checkpoint payload
+ * (tree_level=96) for the `evidence_admission_ledgers` field with at least one entry.
+ * F02B stores evidence admission data inside the Q3 replay payload, not as a separate
+ * pipeline_checkpoints row.
  */
 export async function loadCheckpointStatus(
   db: { query: (...args: any[]) => Promise<any[]> },
@@ -603,7 +610,7 @@ export async function loadCheckpointStatus(
   moduleType: string,
   hasParsedFindings = false
 ): Promise<CheckpointStatusEntry[]> {
-  // DB keys actually written by pipeline-core.ts
+  // DB keys actually written by pipeline-core.ts to pipeline_checkpoints
   const dbKeys = CLAIMS_REQUIRED_MODULES.has(moduleType)
     ? ["claims_ledger", "reconciliation"]
     : [];
@@ -644,6 +651,42 @@ export async function loadCheckpointStatus(
     present: hasParsedFindings,
     status: hasParsedFindings ? "complete" : "missing",
   });
+
+  // Synthetic evidence_admission entry — derived from Q3 merge checkpoint payload
+  // F02B stores evidence_admission_ledgers inside merge_checkpoints at tree_level=96
+  if (CLAIMS_REQUIRED_MODULES.has(moduleType)) {
+    let hasEvidenceAdmission = false;
+    try {
+      const Q3Row = z.object({ merged_json: z.any() });
+      const q3Rows = await db.query(
+        `SELECT merged_json FROM merge_checkpoints
+         WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
+         LIMIT 1`,
+        Q3Row,
+        [runId],
+        { label: "loadCheckpointStatus: check Q3 evidence admission" }
+      );
+      if (q3Rows.length > 0) {
+        const payload = typeof q3Rows[0].merged_json === "string"
+          ? JSON.parse(q3Rows[0].merged_json)
+          : q3Rows[0].merged_json;
+        const ledgers = payload?.evidence_admission_ledgers;
+        if (Array.isArray(ledgers) && ledgers.length > 0) {
+          // Validate at least one ledger has admitted evidence
+          hasEvidenceAdmission = ledgers.some(
+            (l: any) => l?.schema_version === "evidence-admission-v1" && Array.isArray(l.admitted)
+          );
+        }
+      }
+    } catch {
+      // merge_checkpoints may not exist or Q3 not yet written — treat as missing
+    }
+    result.push({
+      key: "evidence_admission",
+      present: hasEvidenceAdmission,
+      status: hasEvidenceAdmission ? "complete" : "missing",
+    });
+  }
 
   return result;
 }

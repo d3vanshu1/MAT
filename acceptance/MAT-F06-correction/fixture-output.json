@@ -1,0 +1,74 @@
+{
+  "mat_feature": "MAT-F06-correction",
+  "title": "Report Filtering, Prerequisite Enforcement, Retrieval Parity",
+  "revision": "bounded-correction-1",
+  "frozen_assertions": {
+    "report_filtering": {
+      "preFormattedReport_ignored": true,
+      "report_always_rebuilt_from_reportable_findings": true,
+      "unlinked_items_excluded": true,
+      "f05_rejected_text_excluded": true,
+      "housekeeping_findings_excluded": true,
+      "report_content_digest_in_semantic_hash": true
+    },
+    "prerequisite_enforcement": {
+      "required_checkpoints_contradiction": [
+        "claims_ledger",
+        "evidence_admission",
+        "reconciliation",
+        "canonical_findings"
+      ],
+      "evidence_admission_source": "merge_checkpoints.tree_level=96.merged_json.evidence_admission_ledgers",
+      "missing_evidence_admission_blocks_completion": true,
+      "missing_writes_no_output": true,
+      "missing_leaves_run_uncompleted": true,
+      "deterministic_reason": "missing_prerequisite:evidence_admission"
+    },
+    "retrieval_parity": {
+      "GetRunOutput_returns_semantic_hash": true,
+      "GetRunOutput_returns_reportable_finding_ids": true,
+      "GetRunOutput_returns_schema_version": true,
+      "ExportFindings_returns_semantic_hash": true,
+      "ExportFindings_returns_reportable_finding_ids": true,
+      "direct_hash_equals_persisted_hash": true,
+      "persisted_hash_equals_api_hash": true,
+      "api_hash_equals_export_hash": true,
+      "report_content_covered_by_identity": true
+    },
+    "client_flow": {
+      "server_pipeline_does_not_call_SaveModuleResult": true,
+      "SaveModuleResult_retained_for_legacy_manual_flow": true,
+      "server_side_duplicate_write_guard_active": true,
+      "automated_client_save_call_count": 0
+    }
+  },
+  "reportable_finding_ids": ["derived_at_runtime_from_reportable_set"],
+  "excluded_finding_ids": ["derived_at_runtime_from_exclusion_rules"],
+  "final_report_digest": "computed_at_runtime_via_sha256_of_markdown",
+  "identity_hashes": {
+    "direct_finalizer": "sha256-v1:<computed>",
+    "persisted_module_outputs": "sha256-v1:<same_as_direct>",
+    "GetRunOutput_response": "sha256-v1:<same_as_direct>",
+    "ExportFindings_response": "sha256-v1:<same_as_direct>"
+  },
+  "missing_evidence_admission_result": {
+    "outcome": "blocked",
+    "reason": "missing_prerequisite",
+    "missing_keys": ["evidence_admission"],
+    "output_written": false,
+    "run_completed": false
+  },
+  "automated_client_save_call_count": 0,
+  "tests": [
+    { "id": 1, "name": "preformatted report with unlinked item cannot persist", "parent_fails": true },
+    { "id": 2, "name": "preformatted report with F05-rejected text cannot persist", "parent_fails": false },
+    { "id": 3, "name": "only reportable canonical findings in final markdown", "parent_fails": false },
+    { "id": 4, "name": "missing evidence-admission blocks completion", "parent_fails": true },
+    { "id": 5, "name": "GetRunOutput returns semantic hash and reportable IDs", "parent_fails": true },
+    { "id": 6, "name": "ExportFindings returns semantic hash and reportable IDs", "parent_fails": true },
+    { "id": 7, "name": "changing report markdown changes semantic hash", "parent_fails": true },
+    { "id": 8, "name": "direct/persisted/API/export hashes identical", "parent_fails": false },
+    { "id": 9, "name": "server-pipeline client flow does not invoke SaveModuleResult", "parent_fails": true },
+    { "id": 10, "name": "server-side duplicate-write guard functional", "parent_fails": false }
+  ]
+}

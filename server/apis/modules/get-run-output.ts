@@ -14,7 +14,26 @@ const RunOutputRowSchema = z.object({
   executive_header: z.string().nullable(),
   findings: z.any(), // JSONB — validated via canonical parser below
   full_report_markdown: z.string().nullable(),
+  semantic_hash: z.string().nullable(),
+  reportable_finding_ids: z.any(), // JSONB text[]
+  schema_version: z.coerce.number().nullable(),
 });
+
+/** Legacy schema — used when semantic_hash/reportable_finding_ids/schema_version columns don't exist yet */
+const RunOutputRowSchemaLegacy = z.object({
+  run_id: z.string(),
+  module_id: z.string(),
+  status: z.string(),
+  triggered_at: z.string(),
+  completed_at: z.string().nullable(),
+  documents_included: z.any(),
+  executive_header: z.string().nullable(),
+  findings: z.any(),
+  full_report_markdown: z.string().nullable(),
+});
+
+type OutputRow = z.infer<typeof RunOutputRowSchema>;
+type LegacyRow = z.infer<typeof RunOutputRowSchemaLegacy>;
 
 export default api({
   name: "GetRunOutput",
@@ -43,29 +62,68 @@ export default api({
       executiveHeader: z.string(),
       findings: z.array(CanonicalFindingSchema),
       fullReport: z.string(),
+      semanticHash: z.string().nullable(),
+      reportableFindingIds: z.array(z.string()).nullable(),
+      schemaVersion: z.number().nullable(),
     }).nullable(),
   }),
 
   async run(ctx, { runId }) {
-    const rows = await ctx.integrations.db.query(
-      `SELECT
-        mr.id AS run_id,
-        mr.module_id,
-        mr.status,
-        mr.triggered_at,
-        mr.completed_at,
-        mr.documents_included,
-        mo.executive_header,
-        mo.findings,
-        mo.full_report_markdown
-      FROM module_runs mr
-      LEFT JOIN module_outputs mo ON mo.module_run_id = mr.id
-      WHERE mr.id = $1
-      LIMIT 1`,
-      RunOutputRowSchema,
-      [runId],
-      { label: "Get run output by ID" }
-    );
+    // MAT-F06 §3: Try with identity columns first; fall back to legacy query
+    // if schema migration hasn't been applied yet (columns don't exist).
+    let rows: OutputRow[];
+    try {
+      rows = await ctx.integrations.db.query(
+        `SELECT
+          mr.id AS run_id,
+          mr.module_id,
+          mr.status,
+          mr.triggered_at,
+          mr.completed_at,
+          mr.documents_included,
+          mo.executive_header,
+          mo.findings,
+          mo.full_report_markdown,
+          mo.semantic_hash,
+          mo.reportable_finding_ids,
+          mo.schema_version
+        FROM module_runs mr
+        LEFT JOIN module_outputs mo ON mo.module_run_id = mr.id
+        WHERE mr.id = $1
+        LIMIT 1`,
+        RunOutputRowSchema,
+        [runId],
+        { label: "Get run output by ID" }
+      );
+    } catch {
+      // Column does not exist (schema not yet migrated) or other DB error —
+      // fall back without identity columns
+      const legacyRows: LegacyRow[] = await ctx.integrations.db.query(
+        `SELECT
+          mr.id AS run_id,
+          mr.module_id,
+          mr.status,
+          mr.triggered_at,
+          mr.completed_at,
+          mr.documents_included,
+          mo.executive_header,
+          mo.findings,
+          mo.full_report_markdown
+        FROM module_runs mr
+        LEFT JOIN module_outputs mo ON mo.module_run_id = mr.id
+        WHERE mr.id = $1
+        LIMIT 1`,
+        RunOutputRowSchemaLegacy,
+        [runId],
+        { label: "Get run output by ID (legacy)" }
+      );
+      rows = legacyRows.map(r => ({
+        ...r,
+        semantic_hash: null,
+        reportable_finding_ids: null,
+        schema_version: null,
+      }));
+    }
 
     if (rows.length === 0) {
       return { run: null, output: null };
@@ -114,6 +172,11 @@ export default api({
             executiveHeader: row.executive_header ?? "",
             findings,
             fullReport: row.full_report_markdown,
+            semanticHash: row.semantic_hash ?? null,
+            reportableFindingIds: Array.isArray(row.reportable_finding_ids)
+              ? row.reportable_finding_ids.map(String)
+              : null,
+            schemaVersion: row.schema_version ?? null,
           }
         : null,
     };

@@ -73,6 +73,9 @@ export default api({
     staleSchema: z.boolean().describe("true if persisted schema_version does not match current FINDING_SCHEMA_VERSION — indicates a pre-migration artifact that may lack newer fields"),
     /** Fix 19: explicit incomplete state when canonical artifact is missing */
     artifactStatus: z.enum(["canonical", "incomplete"]).describe("'canonical' = from module_outputs (post-quality). 'incomplete' = no canonical artifact exists for this run."),
+    /** MAT-F06 §3: persisted identity parity fields */
+    semanticHash: z.string().nullable().describe("F06 persisted semantic hash from module_outputs"),
+    reportableFindingIds: z.array(z.string()).nullable().describe("Reportable finding IDs from module_outputs"),
     idManifest: z.object({
       generatedAt: z.string(),
       totalCount: z.number(),
@@ -94,6 +97,8 @@ export default api({
       findings: z.any(),
       findings_bytes: z.coerce.number(),
       schema_version: z.coerce.number().nullable(),
+      semantic_hash: z.string().nullable(),
+      reportable_finding_ids: z.any(),
     });
 
     const CanonicalOutputRowLegacy = z.object({
@@ -105,6 +110,8 @@ export default api({
       findings: unknown;
       findings_bytes: number;
       schema_version: number | null;
+      semantic_hash: string | null;
+      reportable_finding_ids: string[] | null;
     };
 
     let row: ExportRow | null = null;
@@ -115,7 +122,9 @@ export default api({
       const canonRows = await ctx.integrations.db.query(
         `SELECT mo.findings,
                 octet_length(mo.findings::text) AS findings_bytes,
-                mo.schema_version
+                mo.schema_version,
+                mo.semantic_hash,
+                mo.reportable_finding_ids
          FROM module_outputs mo
          WHERE mo.module_run_id = $1
          LIMIT 1`,
@@ -125,7 +134,15 @@ export default api({
       );
       if (canonRows.length > 0) {
         const cr = canonRows[0];
-        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: cr.schema_version ?? null };
+        row = {
+          findings: cr.findings,
+          findings_bytes: cr.findings_bytes,
+          schema_version: cr.schema_version ?? null,
+          semantic_hash: cr.semantic_hash ?? null,
+          reportable_finding_ids: Array.isArray(cr.reportable_finding_ids)
+            ? cr.reportable_finding_ids.map(String)
+            : null,
+        };
       }
     } catch {
       // schema_version column may not exist (pre-migration) — retry without it
@@ -141,7 +158,7 @@ export default api({
       );
       if (legacyRows.length > 0) {
         const cr = legacyRows[0];
-        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: null };
+        row = { findings: cr.findings, findings_bytes: cr.findings_bytes, schema_version: null, semantic_hash: null, reportable_finding_ids: null };
       }
     }
 
@@ -167,6 +184,8 @@ export default api({
         corruptionDetected: false,
         staleSchema: false,
         artifactStatus: "incomplete" as const,
+        semanticHash: null,
+        reportableFindingIds: null,
       };
     }
 
@@ -205,6 +224,8 @@ export default api({
         corruptionDetected: true,
         staleSchema: isStaleSchema,
         artifactStatus: "canonical" as const,
+        semanticHash: row.semantic_hash,
+        reportableFindingIds: row.reportable_finding_ids,
       };
     }
 
@@ -253,6 +274,8 @@ export default api({
         corruptionDetected: false,
         staleSchema: isStaleSchema,
         artifactStatus: "canonical" as const,
+        semanticHash: row.semantic_hash,
+        reportableFindingIds: row.reportable_finding_ids,
         idManifest: {
           generatedAt: new Date().toISOString(),
           totalCount: allFindings.length,
@@ -289,6 +312,8 @@ export default api({
       corruptionDetected: false,
       staleSchema: isStaleSchema,
       artifactStatus: "canonical" as const,
+      semanticHash: row.semantic_hash,
+      reportableFindingIds: row.reportable_finding_ids,
     };
   },
 });
