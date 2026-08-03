@@ -32,6 +32,10 @@ import {
   buildCanonicalLedgerFromCheckpoint,
 } from "./claim-linkage.js";
 import {
+  executeQ3Stage,
+  type Q2CandidateInput as Q2CandInput,
+} from "./q3-production-stage.js";
+import {
   buildEvidenceSnapshot,
   type EvidenceSnapshot,
 } from "./finding-identity.js";
@@ -555,28 +559,66 @@ export default api({
       }
       // ─── End MAT-F02B gate enforcement ──────────────────────────────────────
 
-      const result = classifyClaimLinkage(
-        {
-          finding_id: candidate.finding_id,
-          corpus_index: candidate.corpus_index,
-          title: candidate.title,
-          detail: finding?.detail,
-          full_analysis: finding?.full_analysis,
-          severity: candidate.severity,
-          source_tag: filteredSourceTag,
-          source_docs: finding?.source_docs,
-          originating_claim_id: finding?.originating_claim_id,
-          claim_ids: finding?.claim_ids,
-          claim_type: finding?.claim_type,
-          finding_kind: finding?.finding_kind,
-          evidence: filteredEvidence,
-          doc_filename: filteredDocFilename,
-          doc_type: finding?.doc_type ?? null,
-        },
+      // ─── ROUTE PARITY: Delegate to executeQ3Stage (same function as proof) ──
+      // Build Q2CandidateInput for this candidate with replay adapter fields
+      const q3CandidateInput: Q2CandInput = {
+        candidate_id: candidate.finding_id,
+        canonical_claim_id: finding?.originating_claim_id ?? null,
+        admitted_evidence_ids: admittedEvidenceIds,
+        originating_run_id: runId,
+        originating_module_id: moduleId,
+        candidate_type: "contradiction_candidate",
+        creation_rule_version: "replay-v3",
+        title: candidate.title,
+        detail: finding?.detail ?? null,
+        finding_kind: finding?.finding_kind ?? null,
+        severity: candidate.severity ?? null,
+        source_tag: filteredSourceTag,
+        source_docs: finding?.source_docs ?? [],
+        metric: null,
+        period: null,
+        scope_qualifier: null,
+        entity_segment: null,
+        unit: null,
+        actual_or_forecast: null,
+        accounting_basis: null,
+        comparison_basis: null,
+        verification_evidence: null,
+        comparison_inputs: null,
+        // Replay adapter: pass enriched evidence through
+        _replay_evidence_text: filteredEvidence,
+        _replay_doc_filename: filteredDocFilename,
+        _replay_full_detail: finding?.detail ?? null,
+        _replay_full_analysis: finding?.full_analysis ?? null,
+        _replay_claim_ids: finding?.claim_ids ?? null,
+        _replay_claim_type: finding?.claim_type ?? null,
+        _replay_doc_type: finding?.doc_type ?? null,
+      };
+
+      // Call executeQ3Stage for this single candidate — same function proof uses
+      const q3SingleOutput = executeQ3Stage({
+        candidates: [q3CandidateInput],
         claimMap,
         ambiguousRefs,
         canonicalLedger,
-      );
+      });
+
+      // Map back to ClaimLinkageResult shape for downstream compatibility
+      const q3Row = q3SingleOutput.results[0];
+      const result: ClaimLinkageResult = {
+        finding_id: candidate.finding_id,
+        corpus_index: candidate.corpus_index,
+        title: candidate.title,
+        claim_linkage_disposition: q3Row.disposition as ClaimLinkageDisposition,
+        q4_eligible: q3Row.q4_eligible,
+        claim_provenance: q3Row.claim_provenance as any,
+        authority_class: q3Row.authority_class as any,
+        authority_valid: q3Row.authority_valid,
+        authority_rationale: q3Row.authority_rationale,
+        reason: q3Row.eligibility_reason,
+        evidence_source_type: candidate.source_tag ?? null,
+      };
+      // ─── End route parity delegation ─────────────────────────────────────────
 
       // ─── MAT-F03: Canonical comparison — CONTROLS production disposition ─────
       // For candidates with admitted evidence AND a resolved claim, run the

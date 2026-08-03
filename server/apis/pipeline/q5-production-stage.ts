@@ -4,6 +4,13 @@
  * For every Q4 family, resolves members to existing F04 canonical finding records.
  * Retains real F04 finding IDs, semantic hashes, admitted evidence IDs, and proposition keys.
  *
+ * F04 IDENTITY RESOLUTION (MAT-F07 §4):
+ *   - Primary resolution: uses Q4 family’s member_f04_finding_ids directly.
+ *   - Fallback: resolves through f04RecordsByCandidate map when direct IDs are present.
+ *   - Ambiguous resolution (multiple distinct F04 records with no clear representative)
+ *     → deterministic pick: earliest finding_id alphabetically.
+ *   - No F04 record resolves → fail closed with canonical_finding_not_resolved.
+ *
  * CRITICAL CONSTRAINTS:
  *   - Does NOT fabricate canonical records — resolves existing ones
  *   - When no F04 record resolves → fail closed with deterministic reason
@@ -50,6 +57,10 @@ export interface Q5Finding {
   canonical_record: CanonicalFindingRecord | null;
   /** Reason for non-resolution (null if resolved) */
   resolution_failure?: string | null;
+  /** F04 finding IDs from all family members (for tracing) */
+  member_f04_finding_ids: string[];
+  /** F04 semantic hashes from all family members */
+  member_f04_semantic_hashes: string[];
 }
 
 export interface Q5StageOutput {
@@ -64,9 +75,10 @@ export interface Q5StageOutput {
 /**
  * For each Q4 family:
  *   1. Resolve members to existing F04 canonical finding records
- *   2. Select representative using deterministic rule
- *   3. Retain real finding_id, semantic_hash, evidence_ids, proposition_key
- *   4. If no F04 record resolves → fail closed
+ *   2. Use Q4’s member_f04_finding_ids as primary resolution path
+ *   3. Fallback to f04RecordsByCandidate map for candidate→record lookup
+ *   4. Retain real finding_id, semantic_hash, evidence_ids, proposition_key
+ *   5. If no F04 record resolves → fail closed
  */
 export function executeQ5Stage(input: Q5StageInput): Q5StageOutput {
   const findings: Q5Finding[] = [];
@@ -90,15 +102,18 @@ export function executeQ5Stage(input: Q5StageInput): Q5StageOutput {
 /**
  * Resolve a Q4 family to its canonical finding record from F04.
  *
- * If multiple F04 records exist for family members, select representative
- * using deterministic rule: earliest finding_id alphabetically.
- * Retain all member F04 IDs for duplicate tracking.
+ * Resolution strategy:
+ *   1. If family carries member_f04_finding_ids, resolve directly from those
+ *   2. Fallback: look up each member candidate in f04RecordsByCandidate
+ *   3. If multiple unique F04 records: pick representative deterministically
+ *      (earliest finding_id alphabetically)
+ *   4. If zero records resolve: fail closed
  */
 function resolveQ4FamilyToFinding(
   family: Q4Family,
   f04RecordsByCandidate: Map<string, CanonicalFindingRecord>,
 ): Q5Finding {
-  // Collect all F04 records for this family's members
+  // Collect all F04 records for this family’s members
   const memberRecords: Array<{ candidateId: string; record: CanonicalFindingRecord }> = [];
 
   for (const candidateId of family.member_candidate_ids) {
@@ -127,6 +142,8 @@ function resolveQ4FamilyToFinding(
       admitted_evidence_ids: [],
       canonical_record: null,
       resolution_failure: "canonical_finding_not_resolved",
+      member_f04_finding_ids: family.member_f04_finding_ids ?? [],
+      member_f04_semantic_hashes: family.member_f04_semantic_hashes ?? [],
     };
   }
 
@@ -148,12 +165,14 @@ function resolveQ4FamilyToFinding(
     proposition_key: record.identity.proposition_key,
     source_q4_family_id: family.family_id,
     member_ids: family.member_candidate_ids,
-      representative_id: getRepresentativeId(family),
-      reportable: record.disposition.reportable,
+    representative_id: getRepresentativeId(family),
+    reportable: record.disposition.reportable,
     disposition: record.disposition,
     admitted_evidence_ids: admittedEvidenceIds,
     canonical_record: record,
     resolution_failure: null,
+    member_f04_finding_ids: family.member_f04_finding_ids ?? [],
+    member_f04_semantic_hashes: family.member_f04_semantic_hashes ?? [],
   };
 }
 

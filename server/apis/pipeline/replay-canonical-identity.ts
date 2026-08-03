@@ -53,6 +53,14 @@ import {
   CanonicalKeySchema,
 } from "./canonical-issue-identity.js";
 import {
+  executeQ4Stage,
+  type Q4Family,
+  type Q4StageOutput,
+} from "./q4-production-stage.js";
+import { executeQ5Stage, type Q5Finding } from "./q5-production-stage.js";
+import type { Q2CandidateInput, Q3ResultRow } from "./q3-production-stage.js";
+import type { CanonicalFindingRecord } from "./canonical-finding-record.js";
+import {
   Q4_ELIGIBLE_ADVERSE,
   type ClaimLinkageDisposition,
   type ClaimProvenance,
@@ -312,43 +320,73 @@ export default api({
     }
 
     // =========================================================================
-    // STEP 5: Build enriched finding list — ONLY from Q4-eligible Q3 results
+    // STEP 5: Build Q3ResultRow + Q2CandidateInput for executeQ4Stage
     // =========================================================================
-    const enrichedFindings = eligibleResults.map(q3 => {
-      const f = findingsMap.get(q3.finding_id) ?? {};
+    const q3ResultRows: Q3ResultRow[] = eligibleResults.map(q3 => ({
+      candidate_id: q3.finding_id,
+      canonical_comparison_ids: [],
+      disposition: q3.claim_linkage_disposition,
+      q4_eligible: q3.q4_eligible,
+      eligibility_reason: q3.reason,
+      rejection_reason_codes: q3.q4_eligible ? [] : [q3.claim_linkage_disposition],
+      canonical_finding_id: null,
+      evidence_admission_refs: [],
+      authority_class: q3.authority_class,
+      authority_valid: q3.authority_valid,
+      authority_rationale: q3.authority_rationale,
+      claim_provenance: q3.claim_provenance,
+      verdict: q3.claim_provenance?.verdict ?? null,
+    }));
 
+    const q2Candidates: Q2CandidateInput[] = eligibleResults.map(q3 => {
+      const f = findingsMap.get(q3.finding_id) ?? {};
       return {
-        finding_id: q3.finding_id,
-        corpus_index: q3.corpus_index,
+        candidate_id: q3.finding_id,
+        canonical_claim_id: q3.claim_provenance?.claim_id ?? f.originating_claim_id ?? null,
+        admitted_evidence_ids: [],
+        originating_run_id: runId,
+        originating_module_id: moduleId,
+        candidate_type: "contradiction_candidate",
+        creation_rule_version: "replay-q4-v3",
         title: q3.title,
         detail: f.detail ?? f.evidence ?? null,
-        full_analysis: f.full_analysis ?? null,
+        finding_kind: f.finding_kind ?? null,
         severity: f.severity ?? null,
         source_tag: q3.evidence_source_type ?? f.source_tag ?? null,
-        finding_kind: f.finding_kind ?? null,
-        issue_key: f.issue_key ?? null,
-        originating_claim_id: q3.claim_provenance?.claim_id ?? f.originating_claim_id ?? null,
-        claim_ids: f.claim_ids ?? null,
-        source_docs: f.source_docs ?? null,
-        claim_type: q3.claim_provenance?.claim_type ?? f.claim_type ?? null,
+        source_docs: f.source_docs ?? [],
+        metric: f.metric ?? null,
+        period: f.period ?? null,
+        scope_qualifier: f.scope_qualifier ?? null,
+        entity_segment: f.entity_segment ?? null,
+        unit: f.unit ?? null,
+        actual_or_forecast: f.actual_or_forecast ?? null,
+        accounting_basis: f.accounting_basis ?? null,
+        comparison_basis: f.comparison_basis ?? null,
+        verification_evidence: null,
+        comparison_inputs: null,
       };
     });
 
     // =========================================================================
-    // STEP 6: Apply canonical identity grouping (Message 3 — strict)
+    // STEP 6: Apply canonical identity grouping via executeQ4Stage (ROUTE PARITY)
     // =========================================================================
-    const { families, singletons, ambiguous, degraded, memberToFamily } =
-      groupIntoCanonicalFamilies(enrichedFindings);
+    const q4Output: Q4StageOutput = executeQ4Stage({
+      q3Results: q3ResultRows,
+      candidates: q2Candidates,
+    });
+
+    const { families: q4Families, singletons, ambiguous, degraded, memberToFamily } = q4Output;
 
     // =========================================================================
-    // STEP 7: Build claim chronology for families
+    // STEP 7: Build claim chronology for families (replay-specific enrichment)
     // =========================================================================
-    for (const family of families) {
+    const familyChronologies = new Map<string, ClaimChronologyEntry[]>();
+    for (const family of q4Families) {
       const chronology: ClaimChronologyEntry[] = [];
       const seenClaims = new Set<string>();
 
-      for (const member of family.members) {
-        const q3Result = q3ByFindingId.get(member.finding_id);
+      for (const memberId of family.member_candidate_ids) {
+        const q3Result = q3ByFindingId.get(memberId);
         if (!q3Result?.claim_provenance?.claim_id) continue;
 
         const cp = q3Result.claim_provenance;
@@ -360,7 +398,6 @@ export default api({
         let version_status: ClaimChronologyEntry["version_status"] = "introduced";
         const existingForSameClaim = chronology.filter(c => c.claim_id === cp.claim_id);
         if (existingForSameClaim.length > 0) {
-          // Same claim appearing again → repeated (may be corrected if value changed)
           version_status = "repeated";
         }
 
@@ -374,95 +411,58 @@ export default api({
         });
       }
 
-      family.claim_chronology = chronology;
+      familyChronologies.set(family.family_id, chronology);
     }
 
     // =========================================================================
     // STEP 8: Build output families with Q3 provenance in every member
+    // (q4Families already includes singletons — no separate singleton pass)
     // =========================================================================
-    const allFamilies = [
-      ...families.map(family => {
-        const membersWithProvenance = family.member_finding_ids.map(fid => {
-          const q3Result = q3ByFindingId.get(fid)!;
-          return {
-            finding_id: fid,
-            corpus_index: q3Result.corpus_index,
-            title: q3Result.title,
-            q3_provenance: {
-              q3_disposition: q3Result.claim_linkage_disposition,
-              q3_verdict: q3Result.claim_provenance?.verdict ?? null,
-              q3_authority_class: q3Result.authority_class,
-              q3_authority_valid: q3Result.authority_valid,
-              q3_authority_rationale: q3Result.authority_rationale,
-              q3_claim_id: q3Result.claim_provenance?.claim_id ?? null,
-              q3_ic_document_filename: q3Result.claim_provenance?.ic_document_filename ?? null,
-              q3_memo_version: q3Result.claim_provenance?.memo_version ?? null,
-              q3_page_or_location: q3Result.claim_provenance?.page_or_location ?? null,
-            },
-          };
-        });
-
-        // Collect memo versions from Q3 provenance
-        const memoVersions = [...new Set(
-          membersWithProvenance
-            .map(m => m.q3_provenance.q3_memo_version)
-            .filter((v): v is string => v !== null)
-        )];
-
+    const allFamilies = q4Families.map(family => {
+      const membersWithProvenance = family.member_candidate_ids.map(fid => {
+        const q3Result = q3ByFindingId.get(fid)!;
         return {
-          canonical_key_str: family.canonical_key_str,
-          canonical_key: family.canonical_key,
-          deterministic_finding_id: generateCanonicalFindingId({ canonical_key_str: family.canonical_key_str, member_finding_ids: family.member_finding_ids }),
-          member_count: family.member_finding_ids.length,
-          member_finding_ids: family.member_finding_ids,
-          all_originating_claim_ids: family.all_originating_claim_ids,
-          memo_versions: memoVersions,
-          claim_chronology: family.claim_chronology,
-          merge_decision: family.member_finding_ids.length > 1
-            ? "grouped" as const
-            : "singleton" as const,
-          merge_reason: family.member_finding_ids.length > 1
-            ? `${family.member_finding_ids.length} findings share canonical key: ${family.canonical_key_str}`
-            : "Single finding with deterministic key — singleton",
-          members_with_provenance: membersWithProvenance,
-        };
-      }),
-      ...singletons.map(s => {
-        const q3Result = q3ByFindingId.get(s.finding_id)!;
-        const membersWithProvenance = [{
-          finding_id: s.finding_id,
-          corpus_index: s.corpus_index,
-          title: s.title,
+          finding_id: fid,
+          corpus_index: q3Result?.corpus_index ?? 0,
+          title: q3Result?.title ?? "",
           q3_provenance: {
-            q3_disposition: q3Result.claim_linkage_disposition,
-            q3_verdict: q3Result.claim_provenance?.verdict ?? null,
-            q3_authority_class: q3Result.authority_class,
-            q3_authority_valid: q3Result.authority_valid,
-            q3_authority_rationale: q3Result.authority_rationale,
-            q3_claim_id: q3Result.claim_provenance?.claim_id ?? null,
-            q3_ic_document_filename: q3Result.claim_provenance?.ic_document_filename ?? null,
-            q3_memo_version: q3Result.claim_provenance?.memo_version ?? null,
-            q3_page_or_location: q3Result.claim_provenance?.page_or_location ?? null,
+            q3_disposition: q3Result?.claim_linkage_disposition ?? "unknown",
+            q3_verdict: q3Result?.claim_provenance?.verdict ?? null,
+            q3_authority_class: q3Result?.authority_class ?? "unknown",
+            q3_authority_valid: q3Result?.authority_valid ?? false,
+            q3_authority_rationale: q3Result?.authority_rationale ?? "",
+            q3_claim_id: q3Result?.claim_provenance?.claim_id ?? null,
+            q3_ic_document_filename: q3Result?.claim_provenance?.ic_document_filename ?? null,
+            q3_memo_version: q3Result?.claim_provenance?.memo_version ?? null,
+            q3_page_or_location: q3Result?.claim_provenance?.page_or_location ?? null,
           },
-        }];
-
-        return {
-          canonical_key_str: s.canonical_key_str,
-          canonical_key: s.canonical_key,
-          deterministic_finding_id: generateCanonicalFindingId({ canonical_key_str: s.canonical_key_str, member_finding_ids: [s.finding_id] }),
-          member_count: 1,
-          member_finding_ids: [s.finding_id],
-          all_originating_claim_ids: s.originating_claim_ids,
-          memo_versions: q3Result.claim_provenance?.memo_version
-            ? [q3Result.claim_provenance.memo_version]
-            : [],
-          claim_chronology: [],
-          merge_decision: "singleton" as const,
-          merge_reason: s.reason,
-          members_with_provenance: membersWithProvenance,
         };
-      }),
-    ];
+      });
+
+      const memoVersions = [...new Set(
+        membersWithProvenance
+          .map(m => m.q3_provenance.q3_memo_version)
+          .filter((v): v is string => v !== null)
+      )];
+
+      return {
+        canonical_key_str: family.canonical_proposition_key,
+        canonical_key: family.canonical_key,
+        deterministic_finding_id: generateCanonicalFindingId({ canonical_key_str: family.canonical_proposition_key, member_finding_ids: family.member_candidate_ids }),
+        member_count: family.member_count,
+        member_finding_ids: family.member_candidate_ids,
+        all_originating_claim_ids: family.all_originating_claim_ids,
+        memo_versions: memoVersions,
+        claim_chronology: familyChronologies.get(family.family_id) ?? [],
+        merge_decision: family.member_count > 1
+          ? "grouped" as const
+          : "singleton" as const,
+        merge_reason: family.member_count > 1
+          ? `${family.member_count} findings share canonical key: ${family.canonical_proposition_key}`
+          : "Single finding with deterministic key — singleton",
+        members_with_provenance: membersWithProvenance,
+      };
+    });
 
     // =========================================================================
     // STEP 9: Build degraded records
@@ -535,10 +535,10 @@ export default api({
     // =========================================================================
     // STEP 11: Final accounting
     // =========================================================================
-    const totalAccountedFor = families.reduce((sum, f) => sum + f.member_finding_ids.length, 0) +
-                              singletons.length + ambiguous.length + degradedRecords.length;
+    const totalAccountedFor = q4Families.reduce((sum, f) => sum + f.member_count, 0) +
+                              ambiguous.length + degradedRecords.length;
     const silentLosses = q4EligibleInput - totalAccountedFor;
-    const totalCanonicalIssues = families.length + singletons.length;
+    const totalCanonicalIssues = q4Families.length;
 
     // =========================================================================
     // STEP 12: Persist at tree_level=95
@@ -554,7 +554,7 @@ export default api({
         total_q3_candidates: totalQ3Candidates,
         q4_eligible_input: q4EligibleInput,
         q4_ineligible_excluded: q4IneligibleExcluded,
-        grouped_families: families.length,
+        grouped_families: q4Families.filter(f => f.member_count > 1).length,
         singleton_findings: singletons.length,
         ambiguous_findings: ambiguous.length,
         degraded_findings: degradedRecords.length,
@@ -579,11 +579,77 @@ export default api({
       { label: "Persist Q4 canonical identity (tree_level=95, Q3-gated)" }
     );
 
+    // =========================================================================
+    // STEP 13: Run Q5 via executeQ5Stage — ROUTE PARITY with proof route
+    // Load F04 canonical finding records from tree_level=96 (persisted by ReplayClaimLinkage)
+    // =========================================================================
+    const F04Row = z.object({ merged_json: z.any() });
+    const f04Rows = await ctx.integrations.db.query(
+      `SELECT merged_json FROM merge_checkpoints
+       WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
+       ORDER BY updated_at DESC LIMIT 1`,
+      F04Row, [runId],
+      { label: "Load F04 canonical findings from Q3 checkpoint (tree_level=96)" }
+    );
+
+    const f04RecordsByCandidate = new Map<string, CanonicalFindingRecord>();
+    if (f04Rows.length > 0) {
+      const f04Payload = typeof f04Rows[0].merged_json === "string"
+        ? JSON.parse(f04Rows[0].merged_json) : f04Rows[0].merged_json;
+      const canonicalFindings = f04Payload?.canonical_findings ?? f04Payload?.f04_records ?? [];
+      for (const cfr of canonicalFindings) {
+        const claimId = cfr?.claim?.claim_id;
+        if (claimId) {
+          f04RecordsByCandidate.set(claimId, cfr);
+        }
+      }
+    }
+
+    // Build candidate→F04 map using Q2 candidate claim_id cross-reference
+    const f04ByCandidateId = new Map<string, CanonicalFindingRecord>();
+    for (const cand of q2Candidates) {
+      const claimId = cand.canonical_claim_id;
+      if (claimId && f04RecordsByCandidate.has(claimId)) {
+        f04ByCandidateId.set(cand.candidate_id, f04RecordsByCandidate.get(claimId)!);
+      }
+    }
+
+    // Call executeQ5Stage — same function proof route uses
+    const q5Output = executeQ5Stage({
+      q4Output,
+      f04RecordsByCandidate: f04ByCandidateId,
+    });
+
+    // Persist Q5 at tree_level=94 (matching proof route)
+    const q5Payload = JSON.stringify({
+      _metadata: {
+        run_id: runId,
+        timestamp: new Date().toISOString(),
+        schema_version: "5.0.0",
+        source_q4_checkpoint: persisted.id,
+        canonical_findings_count: q5Output.findings.length,
+        reportable_count: q5Output.findings.filter(f => f.reportable).length,
+        unresolved_families: q5Output.unresolved_families,
+      },
+      canonical_findings: q5Output.findings,
+    });
+
+    const [q5Persisted] = await ctx.integrations.db.query(
+      `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
+       VALUES ($1, 94, 0, 'q5_canonical_findings', $2::jsonb, now())
+       ON CONFLICT (module_run_id, tree_level, node_index)
+       DO UPDATE SET merged_json = $2::jsonb, status = 'q5_canonical_findings', updated_at = now()
+       RETURNING id`,
+      UpsertSchema,
+      [runId, q5Payload],
+      { label: "Persist Q5 canonical findings (tree_level=94, route-parity)" }
+    );
+
     return {
       total_q3_candidates: totalQ3Candidates,
       q4_eligible_input: q4EligibleInput,
       q4_ineligible_excluded: q4IneligibleExcluded,
-      grouped_families: families.length,
+      grouped_families: q4Families.filter(f => f.member_count > 1).length,
       singleton_findings: singletons.length,
       ambiguous_findings: ambiguous.length,
       degraded_findings: degradedRecords.length,
@@ -594,6 +660,10 @@ export default api({
       ambiguous_records: ambiguousRecords,
       degraded_records: degradedRecords,
       checkpoint_id: persisted.id,
+      q5_checkpoint_id: q5Persisted.id,
+      q5_findings_count: q5Output.findings.length,
+      q5_reportable_count: q5Output.findings.filter(f => f.reportable).length,
+      q5_unresolved_families: q5Output.unresolved_families,
     };
   },
 });

@@ -18,6 +18,13 @@
  *   - Accepts plain typed inputs + repository adapter
  *   - Returns plain typed row-level outputs
  *   - Callable by normal, proof, and replay routes
+ *
+ * F04 IDENTITY PROPAGATION (MAT-F07 §2):
+ *   - Candidates carry f04_finding_id, f04_semantic_hash, f04_proposition_key,
+ *     f04_admitted_evidence_ids resolved BEFORE Q3.
+ *   - Q3 passes these through to Q3ResultRow for Q4 consumption.
+ *   - If f04_finding_id is null AND candidate is Q4-eligible, Q4 may still
+ *     proceed but Q5 will fail closed (canonical_finding_not_resolved).
  */
 
 import {
@@ -60,6 +67,32 @@ export interface Q2CandidateInput {
   q2_reason?: string | null;
   /** Whether Q2 deemed this candidate reportable */
   q2_reportable?: boolean;
+
+  // ─── F04 Identity Fields (resolved before Q3) ────────────────────────────
+  /** Explicit F04 canonical finding ID — resolved from persisted canonical finding records */
+  f04_finding_id?: string | null;
+  /** F04 semantic hash — content-derived change detection */
+  f04_semantic_hash?: string | null;
+  /** F04 proposition key — exact grouping key for Q4 */
+  f04_proposition_key?: string | null;
+  /** F04 admitted evidence IDs — exact evidence set from canonical finding */
+  f04_admitted_evidence_ids?: string[] | null;
+
+  // ─── Replay adapter fields (used by ReplayClaimLinkage) ──────────────────
+  /** Pre-filtered evidence text from admission gate (overrides detail for classification) */
+  _replay_evidence_text?: string | null;
+  /** Pre-filtered document filename from admission gate */
+  _replay_doc_filename?: string | null;
+  /** Full finding detail (richer than title, used by replay for detail field) */
+  _replay_full_detail?: string | null;
+  /** Full analysis text from corpus finding */
+  _replay_full_analysis?: string | null;
+  /** Claim IDs array from corpus finding */
+  _replay_claim_ids?: string[] | null;
+  /** Claim type from corpus finding */
+  _replay_claim_type?: string | null;
+  /** Doc type from corpus finding */
+  _replay_doc_type?: string | null;
 }
 
 export interface Q3ResultRow {
@@ -76,6 +109,13 @@ export interface Q3ResultRow {
   authority_rationale: string;
   claim_provenance: unknown;
   verdict: string | null;
+
+  // ─── F04 Identity Pass-through ───────────────────────────────────────────
+  /** Carried from Q2CandidateInput — consumed by Q4/Q5 */
+  f04_finding_id?: string | null;
+  f04_semantic_hash?: string | null;
+  f04_proposition_key?: string | null;
+  f04_admitted_evidence_ids?: string[] | null;
 }
 
 export interface Q3StageInput {
@@ -102,28 +142,30 @@ export interface Q3StageOutput {
  * expects and maps the result to a row-level Q3 output.
  *
  * No hardcoded dispositions. No hardcoded authority_valid. No hardcoded q4_eligible.
+ * F04 identity fields are passed through unchanged for Q4/Q5 consumption.
  */
 export function executeQ3Stage(input: Q3StageInput): Q3StageOutput {
   const results: Q3ResultRow[] = [];
 
   for (const candidate of input.candidates) {
     // Build the finding object that classifyClaimLinkage expects
+    // Replay adapter fields override defaults when present (richer data from corpus)
     const findingForQ3 = {
       finding_id: candidate.candidate_id,
       corpus_index: 0,
       title: candidate.title,
-      detail: candidate.detail,
-      full_analysis: null as string | null,
+      detail: candidate._replay_full_detail ?? candidate.detail,
+      full_analysis: candidate._replay_full_analysis ?? null,
       severity: candidate.severity,
       source_tag: candidate.source_tag,
       source_docs: candidate.source_docs,
       originating_claim_id: candidate.canonical_claim_id,
-      claim_ids: candidate.canonical_claim_id ? [candidate.canonical_claim_id] : null,
-      claim_type: null as string | null,
+      claim_ids: candidate._replay_claim_ids ?? (candidate.canonical_claim_id ? [candidate.canonical_claim_id] : null),
+      claim_type: candidate._replay_claim_type ?? null,
       finding_kind: candidate.finding_kind,
-      evidence: candidate.detail,
-      doc_filename: candidate.source_docs?.[0] ?? null,
-      doc_type: null as string | null,
+      evidence: candidate._replay_evidence_text ?? candidate.detail,
+      doc_filename: candidate._replay_doc_filename ?? candidate.source_docs?.[0] ?? null,
+      doc_type: candidate._replay_doc_type ?? null,
     };
 
     // Call the REAL production Q3 classifier
@@ -154,6 +196,11 @@ export function executeQ3Stage(input: Q3StageInput): Q3StageOutput {
       authority_rationale: q3Result.authority_rationale,
       claim_provenance: q3Result.claim_provenance,
       verdict: q3Result.claim_provenance?.verdict ?? null,
+      // ── F04 identity pass-through ──
+      f04_finding_id: candidate.f04_finding_id ?? null,
+      f04_semantic_hash: candidate.f04_semantic_hash ?? null,
+      f04_proposition_key: candidate.f04_proposition_key ?? null,
+      f04_admitted_evidence_ids: candidate.f04_admitted_evidence_ids ?? null,
     });
   }
 
