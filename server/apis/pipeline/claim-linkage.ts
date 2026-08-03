@@ -138,6 +138,7 @@ export const CLAIM_LINKAGE_DISPOSITIONS = [
   "ambiguous_reconciliation",
   "claim_from_non_ic_document",
   "invalid_evidence_authority",
+  "incompatible_claim_evidence", // MAT-F03: canonical comparison rejected — dimensions incompatible
   "supporting_evidence_only",
   "wrong_module",
   "process_diagnostic",
@@ -184,6 +185,7 @@ export const Q4_INELIGIBLE: ReadonlySet<ClaimLinkageDisposition> = new Set([
   "ambiguous_reconciliation",
   "claim_from_non_ic_document",
   "invalid_evidence_authority",
+  "incompatible_claim_evidence",
   "supporting_evidence_only",
   "wrong_module",
   "process_diagnostic",

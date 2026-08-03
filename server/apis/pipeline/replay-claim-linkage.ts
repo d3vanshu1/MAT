@@ -56,7 +56,105 @@ import {
   type CanonicalComparison,
   type ComparisonClaimInput,
   type ComparisonEvidenceInput,
+  type VerdictValue,
 } from "./canonical-comparison.js";
+
+// ===========================================================================
+// MAT-F03: Canonical Comparison → Production Disposition Aggregation
+// ===========================================================================
+
+/**
+ * Deterministic aggregation of canonical comparison results for a single candidate.
+ *
+ * Rules:
+ * 1. Separate comparisons into compatible (allowed=true) and rejected (allowed=false)
+ * 2. If ALL comparisons rejected → incompatible_claim_evidence (Q4 ineligible)
+ * 3. Among compatible comparisons, use WORST-ADVERSE-WINS priority:
+ *    contradicted > materially_changed > unverifiable > confirmed
+ * 4. Map canonical verdict to production disposition deterministically
+ * 5. Q4 eligibility derived ONLY from the canonical verdict, never from narrative text
+ */
+interface CanonicalDispositionOverride {
+  disposition: ClaimLinkageDisposition;
+  q4_eligible: boolean;
+  reason: string;
+}
+
+/** Priority order: higher = more adverse. Used for worst-adverse-wins aggregation. */
+const VERDICT_SEVERITY: Record<VerdictValue, number> = {
+  confirmed: 0,
+  partially_supported: 1,
+  unsupported: 2,
+  unverifiable: 3,
+  materially_changed: 4,
+  contradicted: 5,
+};
+
+/** Map canonical verdict to production disposition and eligibility */
+function mapVerdictToDisposition(verdict: VerdictValue): {
+  disposition: ClaimLinkageDisposition;
+  q4_eligible: boolean;
+} {
+  switch (verdict) {
+    case "confirmed":
+      return { disposition: "claim_linked_confirmed", q4_eligible: true };
+    case "contradicted":
+      return { disposition: "claim_linked_contradicted", q4_eligible: true };
+    case "materially_changed":
+      return { disposition: "claim_linked_materially_changed", q4_eligible: true };
+    case "unverifiable":
+      // Unverifiable from compatibility rejection → not reportable
+      return { disposition: "incompatible_claim_evidence", q4_eligible: false };
+    case "partially_supported":
+      return { disposition: "claim_linked_partially_supported", q4_eligible: true };
+    case "unsupported":
+      return { disposition: "claim_linked_unsupported", q4_eligible: true };
+  }
+}
+
+function aggregateCanonicalDisposition(
+  comparisons: CanonicalComparison[],
+): CanonicalDispositionOverride {
+  // Separate into compatible (allowed) vs rejected
+  const compatible = comparisons.filter(c => c.compatibility.allowed);
+  const rejected = comparisons.filter(c => !c.compatibility.allowed);
+
+  // Rule 3: If ALL rejected → incompatible_claim_evidence
+  if (compatible.length === 0) {
+    const rejectionReasons = rejected
+      .flatMap(r => r.compatibility.rejection_reasons)
+      .filter((v, i, a) => a.indexOf(v) === i) // dedupe
+      .join(", ");
+    return {
+      disposition: "incompatible_claim_evidence",
+      q4_eligible: false,
+      reason: `MAT-F03: All ${rejected.length} canonical comparisons rejected (${rejectionReasons})`,
+    };
+  }
+
+  // Rule 2: Among compatible comparisons, find worst-adverse verdict
+  let worstVerdict: VerdictValue = "confirmed";
+  let worstSeverity = 0;
+
+  for (const comp of compatible) {
+    const severity = VERDICT_SEVERITY[comp.verdict.value] ?? 0;
+    if (severity > worstSeverity) {
+      worstSeverity = severity;
+      worstVerdict = comp.verdict.value;
+    }
+  }
+
+  // Rule 4: Map to production disposition
+  const mapped = mapVerdictToDisposition(worstVerdict);
+
+  const reason = `MAT-F03: Canonical verdict=${worstVerdict} (${compatible.length} compatible, ${rejected.length} rejected)`;
+
+  return {
+    disposition: mapped.disposition,
+    q4_eligible: mapped.q4_eligible,
+    reason,
+  };
+}
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -455,13 +553,12 @@ export default api({
         canonicalLedger,
       );
 
-      linkageResults.push(result);
-      dispositionCounts[result.claim_linkage_disposition] =
-        (dispositionCounts[result.claim_linkage_disposition] ?? 0) + 1;
-
-      // ─── MAT-F03: Canonical comparison ──────────────────────────────────────
+      // ─── MAT-F03: Canonical comparison — CONTROLS production disposition ─────
       // For candidates with admitted evidence AND a resolved claim, run the
-      // deterministic comparison engine: compatibility → normalization → delta → verdict
+      // deterministic comparison engine. The canonical verdict OVERRIDES legacy
+      // linkage disposition and q4_eligible. Legacy result is preserved as metadata.
+      let candidateComparisons: CanonicalComparison[] = [];
+
       if (evidenceAdmission?.has_admitted_evidence && result.claim_provenance?.claim_id) {
         const resolvedClaim = claimMap.get(result.claim_provenance.claim_id);
         if (resolvedClaim) {
@@ -504,11 +601,36 @@ export default api({
             };
 
             const comparison = executeCanonicalComparison(compClaim, compEvidence);
+            candidateComparisons.push(comparison);
             canonicalComparisons.push(comparison);
           }
         }
       }
+
+      // ─── MAT-F03: Canonical comparison CONTROLS disposition ──────────────────
+      // Deterministic aggregation rule:
+      //   1. Only compatible comparisons (allowed=true) may influence disposition
+      //   2. Among compatible comparisons: worst-adverse wins
+      //      (contradicted > materially_changed > unverifiable > confirmed)
+      //   3. If ALL comparisons are rejected (allowed=false) → incompatible_claim_evidence
+      //   4. If no comparisons ran → preserve legacy linkage (no override)
+      //   5. Confirmed canonical overrides any adverse legacy (narrative text cannot alter)
+      if (candidateComparisons.length > 0) {
+        const canonicalOverride = aggregateCanonicalDisposition(candidateComparisons);
+        // Store legacy result as diagnostic metadata
+        const legacyDisposition = result.claim_linkage_disposition;
+        const legacyQ4 = result.q4_eligible;
+
+        // Override with canonical comparison result
+        result.claim_linkage_disposition = canonicalOverride.disposition;
+        result.q4_eligible = canonicalOverride.q4_eligible;
+        result.reason = `${canonicalOverride.reason} [legacy: ${legacyDisposition}, legacy_q4: ${legacyQ4}]`;
+      }
       // ─── End MAT-F03 ────────────────────────────────────────────────────────
+
+      linkageResults.push(result);
+      dispositionCounts[result.claim_linkage_disposition] =
+        (dispositionCounts[result.claim_linkage_disposition] ?? 0) + 1;
 
       // Build evidence snapshot if claim was resolved
       if (result.claim_provenance && result.claim_provenance.claim_id) {

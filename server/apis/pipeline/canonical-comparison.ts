@@ -174,6 +174,7 @@ export function evaluateCompatibility(
   // 4. Segment
   const segment = evaluateSegmentCompat(claim.segment, evidence.segment);
   if (segment === "incompatible") reasons.push("segment_incompatible");
+  if (segment === "unknown") reasons.push("segment_unknown");
 
   // 5. Scope
   const scope = evaluateScopeCompat(claim.scope, evidence.scope);
@@ -199,15 +200,17 @@ export function evaluateCompatibility(
 
   // 9. Accounting basis
   const accounting_basis = evaluateAccountingBasisCompat(
-    claim.accounting_basis, evidence.accounting_basis
+    claim.accounting_basis, evidence.accounting_basis, claim.metric
   );
   if (accounting_basis === "incompatible") reasons.push("accounting_basis_incompatible");
+  if (accounting_basis === "unknown") reasons.push("accounting_basis_unknown");
 
   // 10. Comparison basis
   const comparison_basis = evaluateComparisonBasisCompat(
     claim.comparison_basis, evidence.comparison_basis
   );
-  // comparison_basis incompatibility doesn't block — it changes the verdict category
+  if (comparison_basis === "incompatible") reasons.push("comparison_basis_incompatible");
+  if (comparison_basis === "unknown") reasons.push("comparison_basis_unknown");
 
   const allowed = reasons.length === 0;
 
@@ -309,7 +312,8 @@ const METRIC_CANONICAL_GROUPS: Record<string, string> = {
 
   "run_rate_ebitda": "run_rate_ebitda",
 
-  "ebitda": "cash_ebitda", // Plain "EBITDA" defaults to cash EBITDA in this deal context
+  // REMOVED: "ebitda" → "cash_ebitda" mapping. Unqualified EBITDA must remain unknown
+  // unless the source explicitly supplies its accounting basis.
   "ebitda_adjustments": "ebitda_adjustments", // DISTINCT from EBITDA itself
 
   // Market metrics — DISTINCT from company KPIs
@@ -566,30 +570,94 @@ function normalizeActualForecast(status: string): string | null {
 // Accounting Basis
 // ---------------------------------------------------------------------------
 
+/**
+ * EBITDA metrics that require explicit accounting basis for comparison.
+ * Unqualified "ebitda" without an explicit basis MUST block — it is unknown
+ * whether reported, adjusted, cash, or otherwise.
+ */
+const EBITDA_RELATED_METRICS = new Set([
+  "adjusted_ebitda", "reported_ebitda", "cash_ebitda",
+  "adjusted_cash_ebitda", "organic_ebitda", "run_rate_ebitda",
+  "ebitda_adjustments",
+]);
+
+function isMetricEbitdaRelated(metric: string | null): boolean {
+  if (!metric) return false;
+  const normalized = metric.trim().toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+  // Direct match or contains "ebitda"
+  return EBITDA_RELATED_METRICS.has(normalized) || normalized.includes("ebitda");
+}
+
 function evaluateAccountingBasisCompat(
   claimBasis: string | null,
   evidenceBasis: string | null,
+  claimMetric?: string | null,
 ): CompatibilityDecision {
-  if (!claimBasis && !evidenceBasis) return "not_applicable";
-  if (!claimBasis || !evidenceBasis) return "not_applicable"; // If one is absent, don't block
+  // Both absent: not_applicable only if the metric doesn't require accounting basis
+  if (!claimBasis && !evidenceBasis) {
+    // For EBITDA-related metrics, absence of basis on BOTH sides is unknown
+    if (isMetricEbitdaRelated(claimMetric ?? null)) return "unknown";
+    return "not_applicable";
+  }
+
+  // One absent when the metric is accounting-basis-sensitive → unknown (fail closed)
+  if (!claimBasis || !evidenceBasis) {
+    if (isMetricEbitdaRelated(claimMetric ?? null)) return "unknown";
+    return "not_applicable"; // Non-EBITDA metric where one side doesn't specify: allow
+  }
 
   const cn = claimBasis.trim().toLowerCase();
   const en = evidenceBasis.trim().toLowerCase();
   if (cn === en) return "compatible";
 
-  // Reported vs adjusted — INCOMPATIBLE
+  // Known categories
   const reported = ["reported", "statutory", "gaap", "ifrs"];
   const adjusted = ["adjusted", "non-gaap", "pro_forma", "underlying"];
+  const cash = ["cash", "cash_ebitda"];
+  const adjustedCash = ["adjusted_cash", "adjusted_cash_ebitda", "adj_cash"];
+  const organic = ["organic", "organic_ebitda"];
+  const runRate = ["run_rate", "run_rate_ebitda"];
+
   const cnIsReported = reported.some(t => cn.includes(t));
   const cnIsAdjusted = adjusted.some(t => cn.includes(t));
+  const cnIsCash = cash.some(t => cn.includes(t));
+  const cnIsAdjCash = adjustedCash.some(t => cn.includes(t));
+  const cnIsOrganic = organic.some(t => cn.includes(t));
+  const cnIsRunRate = runRate.some(t => cn.includes(t));
+
   const enIsReported = reported.some(t => en.includes(t));
   const enIsAdjusted = adjusted.some(t => en.includes(t));
+  const enIsCash = cash.some(t => en.includes(t));
+  const enIsAdjCash = adjustedCash.some(t => en.includes(t));
+  const enIsOrganic = organic.some(t => en.includes(t));
+  const enIsRunRate = runRate.some(t => en.includes(t));
 
-  if ((cnIsReported && enIsAdjusted) || (cnIsAdjusted && enIsReported)) {
-    return "incompatible";
-  }
+  // Cross-basis pairings are ALL incompatible — each basis is distinct
+  // reported ≠ adjusted ≠ cash ≠ adjusted_cash ≠ organic ≠ run_rate
+  const cnCategory = cnIsAdjCash ? "adj_cash" :
+    cnIsRunRate ? "run_rate" :
+    cnIsOrganic ? "organic" :
+    cnIsCash ? "cash" :
+    cnIsAdjusted ? "adjusted" :
+    cnIsReported ? "reported" : null;
 
-  return "compatible"; // Same or unknown basis — allow (don't fail closed on accounting basis alone)
+  const enCategory = enIsAdjCash ? "adj_cash" :
+    enIsRunRate ? "run_rate" :
+    enIsOrganic ? "organic" :
+    enIsCash ? "cash" :
+    enIsAdjusted ? "adjusted" :
+    enIsReported ? "reported" : null;
+
+  // Both classified into known categories but different → incompatible
+  if (cnCategory && enCategory && cnCategory !== enCategory) return "incompatible";
+
+  // One or both unclassified → unknown (fail closed)
+  if (!cnCategory || !enCategory) return "unknown";
+
+  return "compatible";
 }
 
 // ---------------------------------------------------------------------------
@@ -597,25 +665,59 @@ function evaluateAccountingBasisCompat(
 // ---------------------------------------------------------------------------
 
 /**
- * Determines the comparison basis:
- * - memo_vs_model: IC memo claim vs current financial model
- * - live_vs_reference: current model vs hardcoded/frozen model
- * - same_basis: both from same source type
+ * Valid comparison basis types the engine recognizes.
+ * Unknown/unrecognized types MUST fail closed.
  */
+const KNOWN_COMPARISON_BASES = new Set([
+  // IC memo claim vs model evidence
+  "memo_claim", "memo_vs_model", "ic_claim",
+  // Live model vs frozen/hardcoded reference
+  "current_model", "live", "live_model", "fs_summary",
+  "reference_forecast", "hardcoded", "frozen", "reference",
+  "fs_summary_hardcoded", "fs summary (hardcoded)",
+  // Same-basis pairs
+  "same_basis", "model_evidence",
+]);
+
 function evaluateComparisonBasisCompat(
   claimBasis: string | null,
   evidenceBasis: string | null,
 ): CompatibilityDecision {
-  // Comparison basis doesn't block — it changes verdict category
-  if (!claimBasis || !evidenceBasis) return "not_applicable";
+  // Both absent → not_applicable (no explicit basis declared)
+  if (!claimBasis && !evidenceBasis) return "not_applicable";
+
+  // One absent → unknown (fail closed — we cannot determine comparison type)
+  if (!claimBasis || !evidenceBasis) return "unknown";
 
   const cn = claimBasis.trim().toLowerCase();
   const en = evidenceBasis.trim().toLowerCase();
+
+  // Both must be recognized comparison types
+  if (!KNOWN_COMPARISON_BASES.has(cn)) return "unknown";
+  if (!KNOWN_COMPARISON_BASES.has(en)) return "unknown";
+
+  // Same basis → compatible
   if (cn === en) return "compatible";
 
-  // These represent different valid comparison types — "compatible" in the sense
-  // that a comparison can proceed, but verdict interpretation differs
-  return "compatible";
+  // Valid cross-basis comparisons: memo_claim vs model evidence types
+  const memoTerms = new Set(["memo_claim", "memo_vs_model", "ic_claim"]);
+  const modelTerms = new Set(["current_model", "live", "live_model", "fs_summary",
+    "reference_forecast", "hardcoded", "frozen", "reference",
+    "fs_summary_hardcoded", "fs summary (hardcoded)", "model_evidence"]);
+
+  const cnIsMemo = memoTerms.has(cn);
+  const cnIsModel = modelTerms.has(cn);
+  const enIsMemo = memoTerms.has(en);
+  const enIsModel = modelTerms.has(en);
+
+  // Memo vs model → valid comparison (compatible)
+  if ((cnIsMemo && enIsModel) || (cnIsModel && enIsMemo)) return "compatible";
+
+  // Model vs model (live vs reference) → valid comparison
+  if (cnIsModel && enIsModel) return "compatible";
+
+  // Any other unrecognized pairing → incompatible
+  return "incompatible";
 }
 
 // ===========================================================================

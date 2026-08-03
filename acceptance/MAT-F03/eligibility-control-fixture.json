@@ -1,0 +1,122 @@
+{
+  "_metadata": {
+    "fixture_type": "MAT-F03-surgical-correction",
+    "description": "Eligibility control enforcement — canonical comparison controls production disposition",
+    "schema_version": "comparison-v1",
+    "generated": "2026-08-03",
+    "test_file": "server/apis/pipeline/__tests__/mat-f03-eligibility-control.test.ts"
+  },
+  "test_cases": [
+    {
+      "id": 1,
+      "title": "reported EBITDA vs cash EBITDA → Q4-ineligible",
+      "claim_metric": "reported_ebitda",
+      "claim_accounting_basis": "reported",
+      "evidence_metric": "cash_ebitda",
+      "evidence_accounting_basis": "cash",
+      "expected_allowed": false,
+      "expected_disposition": "incompatible_claim_evidence",
+      "expected_q4_eligible": false,
+      "blocking_dimensions": ["metric_incompatible", "accounting_basis_incompatible"]
+    },
+    {
+      "id": 2,
+      "title": "unqualified EBITDA vs cash EBITDA → Q4-ineligible",
+      "claim_metric": "ebitda",
+      "claim_accounting_basis": null,
+      "evidence_metric": "cash_ebitda",
+      "evidence_accounting_basis": "cash",
+      "expected_allowed": false,
+      "expected_disposition": "incompatible_claim_evidence",
+      "expected_q4_eligible": false,
+      "blocking_dimensions": ["metric_unknown", "accounting_basis_unknown"]
+    },
+    {
+      "id": 3,
+      "title": "incompatible accounting basis → Q4-ineligible",
+      "claim_accounting_basis": "reported",
+      "evidence_accounting_basis": "adjusted",
+      "expected_allowed": false,
+      "expected_disposition": "incompatible_claim_evidence",
+      "expected_q4_eligible": false,
+      "blocking_dimensions": ["accounting_basis_incompatible"]
+    },
+    {
+      "id": 4,
+      "title": "unknown required segment → Q4-ineligible",
+      "claim_segment": "uk_operations",
+      "evidence_segment": null,
+      "expected_allowed": false,
+      "expected_disposition": "incompatible_claim_evidence",
+      "expected_q4_eligible": false,
+      "blocking_dimensions": ["segment_incompatible"]
+    },
+    {
+      "id": 5,
+      "title": "invalid comparison basis → Q4-ineligible",
+      "claim_comparison_basis": "fantasy_basis_xyz",
+      "evidence_comparison_basis": "current_model",
+      "expected_allowed": false,
+      "expected_disposition": "incompatible_claim_evidence",
+      "expected_q4_eligible": false,
+      "blocking_dimensions": ["comparison_basis_unknown"]
+    },
+    {
+      "id": 6,
+      "title": "percentage vs currency cannot retain adverse legacy disposition",
+      "claim_unit": "percentage",
+      "evidence_unit": "gbp_millions",
+      "expected_allowed": false,
+      "expected_disposition": "incompatible_claim_evidence",
+      "expected_q4_eligible": false,
+      "blocking_dimensions": ["unit_scale_incompatible"]
+    },
+    {
+      "id": 7,
+      "title": "£194m vs £184,391,535 compatible → contradicted + Q4 eligible",
+      "claim_value": "194m (£, millions)",
+      "evidence_value": "184,391,535 (£, raw)",
+      "expected_allowed": true,
+      "expected_verdict": "contradicted",
+      "expected_disposition": "claim_linked_contradicted",
+      "expected_q4_eligible": true,
+      "percentage_delta_approx": 5.21
+    },
+    {
+      "id": 8,
+      "title": "live vs hardcoded/reference → materially_changed",
+      "claim_comparison_basis": "current_model",
+      "evidence_comparison_basis": "reference_forecast",
+      "claim_value": "200m",
+      "evidence_value": "180m",
+      "expected_allowed": true,
+      "expected_verdict": "materially_changed",
+      "expected_disposition": "claim_linked_materially_changed",
+      "expected_q4_eligible": true
+    },
+    {
+      "id": 9,
+      "title": "confirmed canonical cannot remain adverse from legacy",
+      "claim_value": "194m",
+      "evidence_value": "194,000,000 (raw)",
+      "expected_allowed": true,
+      "expected_verdict": "confirmed",
+      "expected_disposition": "claim_linked_confirmed",
+      "expected_q4_eligible": true,
+      "note": "legacy 'claim_linked_contradicted' is overridden to 'claim_linked_confirmed'"
+    },
+    {
+      "id": 10,
+      "title": "narrative text does not alter production disposition",
+      "rule": "ComparisonClaimInput/ComparisonEvidenceInput have no text/narrative fields",
+      "expected_determinism": "identical numeric inputs → identical output regardless of narrative",
+      "expected_q4_eligible_unchanged": true
+    }
+  ],
+  "aggregation_rule": {
+    "method": "worst-adverse-wins among compatible comparisons",
+    "priority_order": "contradicted > materially_changed > unverifiable > confirmed",
+    "all_rejected_disposition": "incompatible_claim_evidence",
+    "all_rejected_q4_eligible": false
+  }
+}
