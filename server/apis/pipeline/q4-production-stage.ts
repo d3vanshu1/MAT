@@ -91,9 +91,50 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
   // CRITICAL: Only Q3-eligible candidates enter Q4
   const eligibleQ3 = input.q3Results.filter(r => r.q4_eligible);
 
+  // --- MAT-F07-H2: Enforce exact F04 proposition key ---
+  // When F04 records are associated with a candidate (f04_finding_id present),
+  // the f04_proposition_key MUST be present. Missing key = Q4-ineligible.
+  // Also validate projected dimensions vs F04 key — inconsistency = fail closed.
+  const q4Eligible: typeof eligibleQ3 = [];
+  const q4Rejected: Array<{ candidate_id: string; reason: string }> = [];
+
+  for (const q3r of eligibleQ3) {
+    const candidate = input.candidates.find(c => c.candidate_id === q3r.candidate_id);
+
+    // If this candidate has an F04 finding ID, the F04 proposition key is REQUIRED
+    if (q3r.f04_finding_id && !q3r.f04_proposition_key) {
+      q4Rejected.push({
+        candidate_id: q3r.candidate_id,
+        reason: "f04_proposition_key_missing",
+      });
+      continue;
+    }
+
+    // If F04 proposition key is present, validate projected dimensions consistency
+    if (q3r.f04_proposition_key && candidate) {
+      const inconsistency = validateProjectedDimensions(q3r.f04_proposition_key, candidate);
+      if (inconsistency) {
+        q4Rejected.push({
+          candidate_id: q3r.candidate_id,
+          reason: `f04_key_projection_inconsistent:${inconsistency}`,
+        });
+        continue;
+      }
+    }
+
+    q4Eligible.push(q3r);
+  }
+
+  if (q4Rejected.length > 0) {
+    console.log(
+      `[Q4Stage][F07-H2] Rejected ${q4Rejected.length} candidate(s) for F04 key violations: ` +
+      q4Rejected.map(r => `${r.candidate_id.slice(0, 12)}:${r.reason}`).join(", ")
+    );
+  }
+
   // Build the finding objects for groupIntoCanonicalFamilies
   // Pass structured_proposition from Q2 so Q4 groups by F04 proposition key, not title/detail
-  const findingsForGrouping = eligibleQ3.map((q3r, idx) => {
+  const findingsForGrouping = q4Eligible.map((q3r, idx) => {
     const candidate = input.candidates.find(c => c.candidate_id === q3r.candidate_id);
     return {
       finding_id: q3r.candidate_id,
@@ -128,7 +169,7 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
 
   // Build Q3→F04 lookup for enriching families
   const q3F04Lookup = new Map<string, Q3ResultRow>();
-  for (const q3r of eligibleQ3) {
+  for (const q3r of q4Eligible) {
     q3F04Lookup.set(q3r.candidate_id, q3r);
   }
 
@@ -228,4 +269,69 @@ export function executeQ4Stage(input: Q4StageInput): Q4StageOutput {
     degraded: groupResult.degraded,
     memberToFamily,
   };
+}
+
+// ===========================================================================
+// MAT-F07-H2: Validate projected dimensions against F04 proposition key
+// ===========================================================================
+
+/**
+ * Parse a pipe-separated F04 proposition key and validate that the candidate's
+ * projected dimensions are consistent with it.
+ *
+ * F04 proposition key format (pipe-separated):
+ *   category|kind|metric|period|entity|scope|unit|actual_forecast|accounting_basis|comparison_basis|...
+ *
+ * Returns null if consistent, or a string describing the inconsistency.
+ */
+function validateProjectedDimensions(
+  f04Key: string,
+  candidate: Q2CandidateInput,
+): string | null {
+  const parts = f04Key.split("|");
+  if (parts.length < 6) return null; // Insufficient key structure to validate
+
+  // Extract F04 dimensions from key
+  const f04Metric = parts[2] || null;
+  const f04Period = parts[3] || null;
+  const f04Entity = parts[4] || null;
+  const f04Scope = parts[5] || null;
+  const f04Unit = parts[6] || null;
+  const f04ActualForecast = parts[7] || null;
+  const f04AccountingBasis = parts[8] || null;
+  const f04ComparisonBasis = parts[9] || null;
+
+  // Validate projected dimensions where both are non-null
+  // Empty string in candidate = not projected, so skip
+  if (candidate.metric && f04Metric && normalize(candidate.metric) !== normalize(f04Metric)) {
+    return `metric:${candidate.metric}!=${f04Metric}`;
+  }
+  if (candidate.period && f04Period && normalize(candidate.period) !== normalize(f04Period)) {
+    return `period:${candidate.period}!=${f04Period}`;
+  }
+  if (candidate.entity_segment && f04Entity && normalize(candidate.entity_segment) !== normalize(f04Entity)) {
+    return `entity:${candidate.entity_segment}!=${f04Entity}`;
+  }
+  if (candidate.scope_qualifier && f04Scope && normalize(candidate.scope_qualifier) !== normalize(f04Scope)) {
+    return `scope:${candidate.scope_qualifier}!=${f04Scope}`;
+  }
+  if (candidate.unit && f04Unit && normalize(candidate.unit) !== normalize(f04Unit)) {
+    return `unit:${candidate.unit}!=${f04Unit}`;
+  }
+  if (candidate.actual_or_forecast && f04ActualForecast && normalize(candidate.actual_or_forecast) !== normalize(f04ActualForecast)) {
+    return `actual_forecast:${candidate.actual_or_forecast}!=${f04ActualForecast}`;
+  }
+  if (candidate.accounting_basis && f04AccountingBasis && normalize(candidate.accounting_basis) !== normalize(f04AccountingBasis)) {
+    return `accounting_basis:${candidate.accounting_basis}!=${f04AccountingBasis}`;
+  }
+  if (candidate.comparison_basis && f04ComparisonBasis && normalize(candidate.comparison_basis) !== normalize(f04ComparisonBasis)) {
+    return `comparison_basis:${candidate.comparison_basis}!=${f04ComparisonBasis}`;
+  }
+
+  return null; // Consistent
+}
+
+/** Normalize a dimension value for comparison (lowercase, trim whitespace) */
+function normalize(v: string): string {
+  return v.toLowerCase().trim().replace(/[\s_-]+/g, "_");
 }

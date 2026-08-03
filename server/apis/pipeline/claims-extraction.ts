@@ -24,9 +24,11 @@ import type { PipelineContext } from "./pipeline-config.js";
 import {
   type CanonicalIcClaim,
   fromLegacyClaim,
+  buildQualitativeClaim,
   buildClaimLedger as buildCanonicalLedger,
   type CanonicalClaimLedger,
 } from "./canonical-ic-claim.js";
+import { QUALITATIVE_EXTRACTION_PROMPT } from "./extract-canonical-claims.js";
 
 // ---------------------------------------------------------------------------
 // Claim Schema — the typed ledger
@@ -96,6 +98,8 @@ export interface TerminalResult {
  */
 export interface ExtractionResult {
   claims: Claim[];
+  /** Qualitative canonical claims extracted from the same memo */
+  qualitativeClaims: CanonicalIcClaim[];
   truncated: boolean;
   parseFailed: boolean;
   parseError?: string;
@@ -560,7 +564,16 @@ export async function runClaimsExtraction(
       `${parseResult.claims.filter(c => c.claim_category === "returns_projection").length} returns)` +
       `${parseResult.failed ? " [PARSE FAILED]" : ""}${truncated ? " [TRUNCATED]" : ""}`
     );
-    return { claims: parseResult.claims, truncated, parseFailed: parseResult.failed, parseError: parseResult.error };
+
+    // --- MAT-F01B: Qualitative extraction on the same memo ---
+    const qualitativeClaims = await extractQualitativeFromMemo(
+      ctx, memo, text, pipelineStartTime, options,
+    );
+    if (qualitativeClaims.length > 0) {
+      console.log(`[ClaimsExtraction][Qualitative] "${memo.file_name}": ${qualitativeClaims.length} qualitative claims`);
+    }
+
+    return { claims: parseResult.claims, qualitativeClaims, truncated, parseFailed: parseResult.failed, parseError: parseResult.error };
   };
 
   // Build job list for PENDING memos only (incremental — already-processed memos are retained)
@@ -570,7 +583,7 @@ export async function runClaimsExtraction(
     label: memo.file_name,
     execute: async (): Promise<ExtractionResult> => {
       if (!memo.parsed_text || memo.parsed_text.trim().length === 0) {
-        return { claims: [], truncated: false, parseFailed: true, parseError: `Empty or whitespace-only parsed_text for ${memo.file_name}` };
+        return { claims: [], qualitativeClaims: [], truncated: false, parseFailed: true, parseError: `Empty or whitespace-only parsed_text for ${memo.file_name}` };
       }
       return extractMemo(memo);
     },
@@ -590,12 +603,14 @@ export async function runClaimsExtraction(
 
   // Build terminal results and collect NEW claims from this invocation
   const newClaims: Claim[] = [];
+  const newQualitativeClaims: CanonicalIcClaim[] = [];
   const newTerminals: TerminalResult[] = [];
 
   for (const r of poolResult.results) {
     if (r.status === "fulfilled") {
       const extraction = r.value!;
       newClaims.push(...extraction.claims);
+      newQualitativeClaims.push(...extraction.qualitativeClaims);
 
       // Determine truthful terminal status
       let terminalStatus: TerminalStatus;
@@ -728,16 +743,206 @@ export async function runClaimsExtraction(
   }
 
   // Deduplicate by claim_id (deterministic — same source = same ID)
-  const canonicalLedger = buildCanonicalLedger(canonicalClaims);
+  // MAT-F01B: Include qualitative claims in the SAME canonical ledger
+  const allCanonicalWithQualitative = [...canonicalClaims, ...newQualitativeClaims];
+  const canonicalLedger = buildCanonicalLedger(allCanonicalWithQualitative);
   ledger.canonical_claims = canonicalLedger.claims;
 
+  const qualCount = canonicalLedger.claims.filter(c => c.claim_type === "qualitative").length;
+  const quantCount = canonicalLedger.claims.filter(c => c.claim_type === "quantitative").length;
   console.log(
-    `[ClaimsExtraction][canonical] Converted ${canonicalClaims.length} → ` +
+    `[ClaimsExtraction][canonical] Converted ${allCanonicalWithQualitative.length} → ` +
     `${canonicalLedger.claims.length} unique canonical claims ` +
-    `(${canonicalLedger.claims.filter(c => c.source_validation.exact_text_found).length} source-validated)`
+    `(${quantCount} quantitative, ${qualCount} qualitative, ` +
+    `${canonicalLedger.claims.filter(c => c.source_validation.exact_text_found).length} source-validated)`
   );
 
   return ledger;
+}
+
+// ---------------------------------------------------------------------------
+// MAT-F01B: Qualitative Extraction — live production path
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract qualitative propositions from a single IC memo.
+ *
+ * Uses the QUALITATIVE_EXTRACTION_PROMPT to find exact verbatim assertions about
+ * strategic dependencies, operating assumptions, risk disclosures, mitigants, etc.
+ *
+ * Each qualitative claim is source-validated against the original memo text.
+ * Invalid extractions (paraphrased, wrong coordinate, no exact text match) are rejected.
+ *
+ * Returns CanonicalIcClaim[] — these go directly into the same ledger as quantitative claims.
+ */
+async function extractQualitativeFromMemo(
+  ctx: PipelineContext,
+  memo: { id: string; file_name: string; parsed_text: string | null },
+  text: string,
+  pipelineStartTime: number,
+  options?: ClaimsExtractionOptions,
+): Promise<CanonicalIcClaim[]> {
+  const llmBody = {
+    model: SONNET_MODEL,
+    max_tokens: 8_192,
+    temperature: 0,
+    system: QUALITATIVE_EXTRACTION_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `## Document: ${memo.file_name}\n\nExtract all qualitative propositions from this IC memo:\n\n${text}`,
+      },
+    ],
+  };
+
+  let response: LLMResponse;
+  try {
+    if (options?.bypassHeadroom) {
+      response = await ctx.integrations.ai.apiRequest(
+        { method: "POST", path: "/v1/messages", body: llmBody },
+        { response: MessageResponseSchema },
+        { label: `QualitativeExtraction: ${memo.file_name}` },
+      );
+    } else {
+      response = await callLLMWithHeadroom(
+        ctx,
+        llmBody,
+        `QualitativeExtraction: ${memo.file_name}`,
+        { pipelineStartTime, maxPerCallTimeout: 120_000, retries: 1 },
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[ClaimsExtraction][Qualitative] LLM call failed for "${memo.file_name}": ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [];
+  }
+
+  const responseText = response.content[0]?.text ?? "";
+  const rawResults = parseQualitativeResponse(responseText);
+  if (rawResults.length === 0) return [];
+
+  // Derive memo version for identity
+  const memoVersion = deriveMemoVersion(memo.file_name);
+  const sourceText = memo.parsed_text ?? "";
+
+  // Convert to CanonicalIcClaim with source validation — fail closed on invalid
+  const validClaims: CanonicalIcClaim[] = [];
+  for (const raw of rawResults) {
+    try {
+      const claim = buildQualitativeClaim({
+        document_id: memo.id,
+        document_name: memo.file_name,
+        memo_version: memoVersion,
+        page_or_slide: raw.page_or_slide ?? "1",
+        section: raw.section,
+        exact_claim_text: raw.exact_text,
+        entity: raw.entity,
+        segment: raw.segment,
+        qualitative_proposition: raw.qualitative_proposition,
+        source_text: sourceText,
+      });
+
+      // FAIL CLOSED: Only admit source-validated claims
+      if (!claim.source_validation.exact_text_found) {
+        console.warn(
+          `[ClaimsExtraction][Qualitative] Rejected (text not found): "${raw.exact_text.slice(0, 80)}..."`
+        );
+        continue;
+      }
+      if (!claim.source_validation.coordinate_valid) {
+        console.warn(
+          `[ClaimsExtraction][Qualitative] Rejected (invalid coordinate): "${raw.exact_text.slice(0, 80)}..."`
+        );
+        continue;
+      }
+
+      validClaims.push(claim);
+    } catch (err) {
+      console.warn(
+        `[ClaimsExtraction][Qualitative] Build failed: "${raw.exact_text?.slice(0, 60) ?? "?"}" — ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  return validClaims;
+}
+
+/**
+ * Parse qualitative extraction LLM response into structured records.
+ */
+function parseQualitativeResponse(responseText: string): Array<{
+  exact_text: string;
+  page_or_slide: string | number | null;
+  section?: string;
+  entity: string | null;
+  segment: string | null;
+  qualitative_proposition: string;
+  category: string;
+}> {
+  let jsonStr = responseText.trim();
+  if (!jsonStr) return [];
+
+  // Strip markdown fences
+  const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    jsonStr = fenceMatch[1].trim();
+  } else if (jsonStr.startsWith("```")) {
+    jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```$/, "");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    // Attempt repair for truncated JSON
+    const lastObj = jsonStr.lastIndexOf("}");
+    if (lastObj > 0) {
+      try {
+        parsed = JSON.parse(jsonStr.slice(0, lastObj + 1) + "]");
+      } catch {
+        return [];
+      }
+    } else {
+      return [];
+    }
+  }
+
+  const rawArray = Array.isArray(parsed) ? parsed :
+    (parsed && typeof parsed === "object" && "claims" in (parsed as any) && Array.isArray((parsed as any).claims))
+      ? (parsed as any).claims : null;
+
+  if (!rawArray) return [];
+
+  const results: Array<{
+    exact_text: string;
+    page_or_slide: string | number | null;
+    section?: string;
+    entity: string | null;
+    segment: string | null;
+    qualitative_proposition: string;
+    category: string;
+  }> = [];
+
+  for (const item of rawArray) {
+    if (!item || typeof item !== "object") continue;
+    const exactText = (item as any).exact_text;
+    const proposition = (item as any).qualitative_proposition;
+    if (!exactText || typeof exactText !== "string" || exactText.trim().length === 0) continue;
+    if (!proposition || typeof proposition !== "string" || proposition.trim().length === 0) continue;
+
+    results.push({
+      exact_text: exactText,
+      page_or_slide: (item as any).page_or_slide ?? null,
+      section: (item as any).section ?? undefined,
+      entity: (item as any).entity ?? null,
+      segment: (item as any).segment ?? null,
+      qualitative_proposition: proposition,
+      category: (item as any).category ?? "strategic_assertion",
+    });
+  }
+
+  return results;
 }
 
 // ---------------------------------------------------------------------------

@@ -61,6 +61,10 @@ export interface Q5Finding {
   member_f04_finding_ids: string[];
   /** F04 semantic hashes from all family members */
   member_f04_semantic_hashes: string[];
+  /** MAT-F07-H1: Reason codes when ambiguous F04 resolution fails closed */
+  ambiguity_reason_codes?: string[];
+  /** MAT-F07-H1: All conflicting F04 IDs when resolution is ambiguous */
+  conflicting_f04_ids?: string[];
 }
 
 export interface Q5StageOutput {
@@ -147,9 +151,41 @@ function resolveQ4FamilyToFinding(
     };
   }
 
-  // Select representative F04 record deterministically:
-  // If multiple unique F04 records, pick the one with the earliest finding_id (alphabetical)
+  // Deduplicate F04 records by finding_id (multiple candidates may reference the same record)
   const uniqueRecords = deduplicateF04Records(memberRecords);
+
+  // MAT-F07-H1: If multiple unique F04 records, determine if they are
+  // true duplicates (safe to select representative) or materially distinct (fail closed)
+  if (uniqueRecords.length > 1) {
+    const ambiguityResult = checkMaterialAmbiguity(uniqueRecords);
+    if (ambiguityResult.isAmbiguous) {
+      // FAIL CLOSED — materially distinct F04 records
+      return {
+        canonical_finding_id: `ambiguous-${family.family_id}`,
+        semantic_hash: null,
+        proposition_key: null,
+        source_q4_family_id: family.family_id,
+        member_ids: family.member_candidate_ids,
+        representative_id: getRepresentativeId(family),
+        reportable: false,
+        disposition: {
+          verdict: "unverifiable",
+          reportable: false,
+          reason_codes: ["canonical_finding_ambiguous"],
+          rule_version: "f07-h1-v1",
+        },
+        admitted_evidence_ids: [],
+        canonical_record: null,
+        resolution_failure: "canonical_finding_ambiguous",
+        member_f04_finding_ids: uniqueRecords.map(r => r.record.identity.finding_id),
+        member_f04_semantic_hashes: uniqueRecords.map(r => r.record.identity.semantic_hash),
+        ambiguity_reason_codes: ambiguityResult.reasonCodes,
+        conflicting_f04_ids: uniqueRecords.map(r => r.record.identity.finding_id),
+      };
+    }
+  }
+
+  // Select representative F04 record deterministically (true duplicates or single record)
   const representative = uniqueRecords.sort((a, b) =>
     a.record.identity.finding_id.localeCompare(b.record.identity.finding_id)
   )[0];
@@ -200,4 +236,98 @@ function deduplicateF04Records(
 function getRepresentativeId(family: Q4Family): string {
   const rep = family.duplicate_decisions.find(d => d.decision === "representative");
   return rep ? rep.candidate_id : family.member_candidate_ids[0];
+}
+
+// ===========================================================================
+// MAT-F07-H1: Material Ambiguity Check
+// ===========================================================================
+
+interface AmbiguityCheckResult {
+  isAmbiguous: boolean;
+  reasonCodes: string[];
+}
+
+/**
+ * Determine whether multiple unique F04 records are materially distinct
+ * (fail closed) or true duplicates (safe to pick representative).
+ *
+ * TRUE DUPLICATES (allowed): All records share:
+ *   - Same exact proposition key
+ *   - Compatible canonical dimensions (accounting basis)
+ *   - Equivalent comparison basis
+ *   - Equivalent deterministic verdict
+ *   - No materially different evidence proposition
+ *
+ * MATERIALLY DISTINCT (fail closed): Any of:
+ *   - Different proposition keys
+ *   - Different accounting basis
+ *   - Different comparison basis (e.g. memo_vs_model vs memo_vs_reference)
+ *   - Different/contradictory verdicts (e.g. confirmed vs contradicted)
+ *   - Materially different evidence sets indicating different propositions
+ */
+function checkMaterialAmbiguity(
+  records: Array<{ candidateId: string; record: CanonicalFindingRecord }>,
+): AmbiguityCheckResult {
+  const reasonCodes: string[] = [];
+  const first = records[0].record;
+
+  for (let i = 1; i < records.length; i++) {
+    const other = records[i].record;
+
+    // Check proposition key
+    if (first.identity.proposition_key !== other.identity.proposition_key) {
+      reasonCodes.push("different_proposition_key");
+    }
+
+    // Check accounting basis (embedded in proposition key or comparisons)
+    const firstBasis = extractAccountingBasis(first);
+    const otherBasis = extractAccountingBasis(other);
+    if (firstBasis && otherBasis && firstBasis !== otherBasis) {
+      reasonCodes.push("different_accounting_basis");
+    }
+
+    // Check comparison basis
+    const firstCompBasis = extractComparisonBasis(first);
+    const otherCompBasis = extractComparisonBasis(other);
+    if (firstCompBasis && otherCompBasis && firstCompBasis !== otherCompBasis) {
+      reasonCodes.push("different_comparison_basis");
+    }
+
+    // Check verdict compatibility
+    const firstVerdict = first.disposition.verdict;
+    const otherVerdict = other.disposition.verdict;
+    if (firstVerdict !== otherVerdict) {
+      // Contradictory verdicts are always materially distinct
+      reasonCodes.push("contradictory_verdict");
+    }
+  }
+
+  // Deduplicate reason codes
+  const uniqueReasons = [...new Set(reasonCodes)];
+  return {
+    isAmbiguous: uniqueReasons.length > 0,
+    reasonCodes: uniqueReasons,
+  };
+}
+
+/**
+ * Extract accounting basis from a canonical finding record.
+ * Looks in the proposition key structure (pipe-separated fields).
+ */
+function extractAccountingBasis(record: CanonicalFindingRecord): string | null {
+  const key = record.identity.proposition_key;
+  if (!key) return null;
+  // Proposition key format: category|kind|metric|period|entity|scope|unit|actual_forecast|accounting_basis|comparison_basis|...
+  const parts = key.split("|");
+  return parts.length >= 9 ? (parts[8] || null) : null;
+}
+
+/**
+ * Extract comparison basis from a canonical finding record.
+ */
+function extractComparisonBasis(record: CanonicalFindingRecord): string | null {
+  const key = record.identity.proposition_key;
+  if (!key) return null;
+  const parts = key.split("|");
+  return parts.length >= 10 ? (parts[9] || null) : null;
 }
