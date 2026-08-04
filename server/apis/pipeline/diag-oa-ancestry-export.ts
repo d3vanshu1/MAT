@@ -1,58 +1,26 @@
 /**
- * OA-01: Full ancestry ledger exporter
+ * OA-01: Full ancestry ledger exporter (JSONL)
  *
- * Produces JSONL-format ancestry ledger for every finding at every stage.
- * Each row represents ONE finding occurrence at ONE stage/node.
- *
- * Every row contains the complete field set:
- * - Unique occurrence locator (stage:nodeIndex:findingId:occurrenceIndex)
- * - finding_id, all direct parent IDs, all child IDs
- * - All reachable L1/leaf ancestor IDs (deduplicated, sorted)
- * - first_stage_appeared, lineage_status
- * - proposition, normalized_proposition_hash, persisted_canonical_key, canonical_key_origin
- * - evidence, claim, disclosure, source-document, coordinate fields
- * - severity, reportability, merge_level
- * - degraded flag, actual persisted group ID (node-level)
- * - terminal descendant IDs
- * - representative/member relationship
- * - complete machine-readable missing-field reasons
+ * Uses the shared oa-ancestry-service.ts for all computation.
+ * Emits one complete row per finding occurrence at every stage.
  *
  * SAFE: read-only, does NOT write any persisted records.
  */
 
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import type { CanonicalFinding } from "./canonical-finding.js";
-import { buildAncestryGraph, type AncestryRow } from "./diag-oa-ancestry.js";
+import {
+  buildOccurrenceGraph, buildAncestryLedgerRow, isDegraded, fnv1a,
+  type NodeInput,
+} from "./oa-ancestry-service.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
-
-/** Simple FNV-1a hash */
-function fnv1a(input: string): string {
-  let h = 0x811c9dc5 >>> 0;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return (h >>> 0).toString(16).padStart(8, "0");
-}
-
-function normalize(text: string | null | undefined): string {
-  if (!text) return "";
-  return text.toLowerCase().trim().replace(/\s+/g, " ");
-}
-
-function isDegraded(f: CanonicalFinding): boolean {
-  return (f as any)._recovery_status === "degraded_fallback" ||
-         (f as any)._recovery_status === "merge_contract_fallback";
-}
 
 export default api({
   name: "DiagOaAncestryExport",
   description: "OA-01: Exports full JSONL ancestry ledger for a run (read-only)",
 
-  integrations: {
-    db: postgres(IC_DILIGENCE_DB),
-  },
+  integrations: { db: postgres(IC_DILIGENCE_DB) },
 
   input: z.object({
     runId: z.string(),
@@ -72,7 +40,7 @@ export default api({
   async run(ctx, { runId, moduleId, dealId }) {
     const db = ctx.integrations.db;
 
-    // Load merge checkpoints LEVEL BY LEVEL (gRPC 4MB limit)
+    // Load checkpoints level by level
     const LevelListSchema = z.object({ tree_level: z.coerce.number() });
     const levelRows = await db.query(
       `SELECT DISTINCT tree_level FROM merge_checkpoints
@@ -80,183 +48,102 @@ export default api({
       LevelListSchema, [runId], { label: "OA-01 export: list levels" }
     );
 
-    const CheckpointSchema = z.object({ tree_level: z.coerce.number(), node_index: z.coerce.number(), findings_json: z.string() });
-    interface CpRow { tree_level: number; node_index: number; findings_json: string; }
-    const checkpoints: CpRow[] = [];
+    const CpSchema = z.object({
+      tree_level: z.coerce.number(), node_index: z.coerce.number(),
+      findings_json: z.string(), checkpoint_id: z.string().nullable(),
+    });
+
+    const findingsByLevel = new Map<number, NodeInput[]>();
+    let maxLevel = 0;
 
     for (const { tree_level } of levelRows) {
-      const lvlCps = await db.query(
+      const rows = await db.query(
         `SELECT tree_level, node_index,
-                COALESCE(merged_json->'findings', '[]'::jsonb)::text AS findings_json
+                COALESCE(merged_json->'findings', '[]'::jsonb)::text AS findings_json,
+                id AS checkpoint_id
          FROM merge_checkpoints
          WHERE module_run_id = $1 AND tree_level = $2 AND COALESCE(status, 'complete') = 'complete'
          ORDER BY node_index`,
-        CheckpointSchema, [runId, tree_level], { label: `OA-01 export: load L${tree_level}` }
+        CpSchema, [runId, tree_level], { label: `OA-01 export: L${tree_level}` }
       );
-      checkpoints.push(...lvlCps);
+      if (tree_level > maxLevel) maxLevel = tree_level;
+      const nodes: NodeInput[] = [];
+      for (const r of rows) {
+        let findings: CanonicalFinding[] = [];
+        try { findings = JSON.parse(r.findings_json); } catch {}
+        nodes.push({ nodeIndex: r.node_index, findings, checkpointId: r.checkpoint_id });
+      }
+      findingsByLevel.set(tree_level, nodes);
     }
 
     // Load terminal output
     const OutputSchema = z.object({ id: z.string(), findings_json: z.string() });
     const outputRows = await db.query(
       `SELECT mo.id, COALESCE(mo.findings, '[]'::jsonb)::text AS findings_json
-       FROM module_outputs mo JOIN module_runs mr ON mr.id = mo.module_run_id
-       WHERE mr.id = $1 LIMIT 1`,
-      OutputSchema, [runId], { label: "OA-01 export: load terminal output" }
+       FROM module_outputs mo JOIN module_runs mr ON mr.id = mo.module_run_id WHERE mr.id = $1 LIMIT 1`,
+      OutputSchema, [runId], { label: "OA-01 export: terminal" }
     );
 
-    // Count leaf analysis outputs
+    let terminalFindings: CanonicalFinding[] = [];
+    if (outputRows.length > 0) {
+      try { terminalFindings = JSON.parse(outputRows[0].findings_json); } catch {}
+    }
+
+    // Leaf count
     const countRows = await db.query(
       `SELECT COUNT(*)::int AS cnt FROM pipeline_analysis WHERE run_id = $1`,
-      z.object({ cnt: z.coerce.number() }), [runId], { label: "OA-01 export: count leaf outputs" }
+      z.object({ cnt: z.coerce.number() }), [runId], { label: "OA-01 export: leaf count" }
     );
     const leafCount = countRows[0]?.cnt ?? 0;
 
-    // Parse into level map
-    const findingsByLevel = new Map<number, Array<{ nodeIndex: number; findings: CanonicalFinding[] }>>();
-    let maxLevel = 0;
-    for (const cp of checkpoints) {
-      if (cp.tree_level > maxLevel) maxLevel = cp.tree_level;
-      let levelArr = findingsByLevel.get(cp.tree_level);
-      if (!levelArr) { levelArr = []; findingsByLevel.set(cp.tree_level, levelArr); }
-      try {
-        const parsed = JSON.parse(cp.findings_json) as CanonicalFinding[];
-        levelArr.push({ nodeIndex: cp.node_index, findings: parsed });
-      } catch {
-        levelArr.push({ nodeIndex: cp.node_index, findings: [] });
-      }
-    }
+    // Build graph (shared service)
+    const graph = buildOccurrenceGraph(findingsByLevel, terminalFindings);
 
-    let terminalFindings: CanonicalFinding[] = [];
-    let terminalOutputId: string | null = null;
-    if (outputRows.length > 0) {
-      terminalOutputId = outputRows[0].id;
-      try { terminalFindings = JSON.parse(outputRows[0].findings_json) as CanonicalFinding[]; } catch {}
-    }
-
-    // Build the ancestry graph
-    const graph = buildAncestryGraph(findingsByLevel, terminalFindings);
-
-    // Track first_stage_appeared per finding_id
-    const firstStageMap = new Map<string, string>();
-    for (const [fid, locs] of graph.globalIndex) {
-      const sorted = [...locs].sort((a, b) => a.level - b.level);
-      if (sorted.length > 0) firstStageMap.set(fid, sorted[0].stage);
-    }
-
-    // ═══ Build complete rows for every occurrence at every stage ═══
+    // Build a ledger row for EVERY occurrence
     const allRows: any[] = [];
-    let globalOccurrenceIdx = 0;
+    let globalIdx = 0;
 
-    // Helper to build a complete row for a finding at a specific location
-    function buildRow(f: CanonicalFinding, stage: string, nodeIndex: number, level: number): any {
-      const fid = f.finding_id;
-      const { leafIds, cycleDetected, missingParents } = graph.traceAllLeaves(fid);
-      const classification = graph.classifyFinding(fid);
-      const parents = [...(graph.childToParents.get(fid) ?? [])];
-      const children = [...(graph.parentToChildren.get(fid) ?? [])];
-      const termDescendants = graph.getTerminalDescendants(fid);
-      const degraded = isDegraded(f);
-      const firstStage = firstStageMap.get(fid) ?? stage;
-
-      // Determine degraded group (node-level)
-      let degradedGroupId: string | null = null;
-      if (degraded) degradedGroupId = `L${level}:N${nodeIndex}`;
-
-      // Representative/member
-      let representativeMember: string | null = null;
-      if (parents.length > 0) representativeMember = "representative";
-      // Check if this finding is listed as a member in another's merged_from
-      if (graph.parentToChildren.has(fid) && (graph.parentToChildren.get(fid)?.size ?? 0) > 0) {
-        if (!representativeMember) representativeMember = "member";
-      }
-
-      // Missing field reasons
-      const missingReasons: Record<string, string> = {};
-      if (leafIds.length === 0 && classification !== "traces_to_leaf") missingReasons.all_leaf_ancestor_ids = "no_leaf_ancestor_traced";
-      if (!f.issue_key) missingReasons.persisted_canonical_key = "not_assigned_by_llm";
-      if (!(f.evidence?.length)) missingReasons.evidence_ids = "evidence_array_not_populated";
-      if (cycleDetected) missingReasons.cycle = "cycle_detected_in_ancestry";
-      if (missingParents.length > 0) missingReasons.missing_parents = `ids:${missingParents.join(",")}`;
-      if (!(f.claim_ids?.length)) missingReasons.claim_ids = "claim_ids_not_populated";
-      if (!(f.source_docs?.length)) missingReasons.source_document_ids = "source_docs_not_populated";
-
-      const occId = `${stage}:N${nodeIndex}:${fid}:${globalOccurrenceIdx}`;
-      const row = {
-        run_id: runId,
-        deal_id: dealId ?? null,
-        module_id: moduleId,
-        stage,
-        analysis_node_id: `L${level}:N${nodeIndex}`,
-        stage_occurrence_id: occId,
-        occurrence_index: globalOccurrenceIdx,
-        finding_id: fid,
-        all_leaf_ancestor_ids: leafIds,
-        source_proposition: f.title ?? null,
-        normalized_proposition_hash: fnv1a(normalize(f.title)),
-        persisted_canonical_key: f.issue_key ?? null,
-        canonical_key_origin: f.issue_key ? "legacy" : "missing",
-        claim_ids: f.claim_ids ?? [],
-        disclosure_ids: f.evidence_docs ?? [],
-        evidence_ids: (f.evidence ?? []).map(e => e.figure),
-        source_document_ids: f.source_docs ?? [],
-        source_coordinates: (f.evidence ?? []).map(e => e.cell_coordinate).filter(Boolean),
-        severity: f.severity,
-        reportability: "reportable",
-        parent_ids: parents,
-        child_ids: children,
-        merge_level: level,
-        representative_member: representativeMember,
-        first_stage_appeared: firstStage,
-        degraded_fallback_flag: degraded,
-        degraded_fallback_group_id: degradedGroupId,
-        terminal_descendant_ids: termDescendants,
-        raw_payload_hash: fnv1a(JSON.stringify(f)),
-        lineage_status: classification,
-        missing_field_reasons: missingReasons,
-      };
-      globalOccurrenceIdx++;
-      return row;
-    }
-
-    // Emit rows for every merge level
     for (let level = 1; level <= maxLevel; level++) {
-      const stage = level === maxLevel ? "root" : `L${level}`;
-      const nodesAtLevel = findingsByLevel.get(level) ?? [];
-      for (const node of nodesAtLevel) {
+      const nodes = findingsByLevel.get(level) ?? [];
+      for (const node of nodes) {
         for (const f of node.findings) {
-          allRows.push(buildRow(f, stage, node.nodeIndex, level));
+          const occ = graph.allOccurrences.find(o =>
+            o.key.level === level && o.key.nodeIndex === node.nodeIndex && o.key.findingId === f.finding_id && o.finding === f
+          );
+          if (occ) {
+            allRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, globalIdx, node.checkpointId ?? null));
+            globalIdx++;
+          }
         }
       }
     }
 
-    // Emit rows for terminal findings
-    for (const f of terminalFindings) {
-      allRows.push(buildRow(f, "terminal", 0, maxLevel + 1));
+    // Terminal rows
+    const termOccs = graph.allOccurrences.filter(o => o.key.stage === "terminal");
+    for (const occ of termOccs) {
+      allRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, globalIdx, null));
+      globalIdx++;
     }
 
     // Build JSONL
     const jsonl = allRows.map(r => JSON.stringify(r)).join("\n");
     const checksum = fnv1a(jsonl);
 
-    // Build stage reconciliation CSV
+    // Stage reconciliation CSV
     const levelStats = new Map<string, { rows: number; unique: Set<string>; degraded: number; containers: number }>();
-
-    for (const cp of checkpoints) {
-      const stage = cp.tree_level === maxLevel ? "root" : `L${cp.tree_level}`;
+    for (const [level, nodes] of findingsByLevel) {
+      const stage = level === maxLevel ? "root" : `L${level}`;
       let s = levelStats.get(stage);
       if (!s) { s = { rows: 0, unique: new Set(), degraded: 0, containers: 0 }; levelStats.set(stage, s); }
-      try {
-        const parsed = JSON.parse(cp.findings_json) as CanonicalFinding[];
-        s.rows += parsed.length;
+      for (const node of nodes) {
         s.containers++;
-        for (const f of parsed) {
+        for (const f of node.findings) {
+          s.rows++;
           s.unique.add(f.finding_id);
           if (isDegraded(f)) s.degraded++;
         }
-      } catch {}
+      }
     }
-
     levelStats.set("leaf", { rows: 0, unique: new Set(), degraded: 0, containers: leafCount });
     const termStats = { rows: terminalFindings.length, unique: new Set(terminalFindings.map(f => f.finding_id)), degraded: terminalFindings.filter(isDegraded).length, containers: outputRows.length };
     levelStats.set("terminal", termStats);
