@@ -47,6 +47,7 @@ const MAX_TOKENS_LEVEL1 = 8000;
 const PERSISTENCE_RESERVE_MS = 25_000; // Time reserved for DB writes at end
 const MIN_WORK_BUDGET_MS = 45_000; // Minimum time needed to attempt one merge call
 const PER_CALL_TIMEOUT_MS = 120_000; // Max timeout for a single LLM call
+const CLAIM_EXPIRY_MINUTES = 10; // Claims older than this can be reclaimed by another worker
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,6 +60,7 @@ interface NodeMeta {
   payloadBytes: number;
   updatedAt: string;
   truncationCount: number;
+  checkpointVersion: number;
 }
 
 interface WorkUnit {
@@ -68,6 +70,8 @@ interface WorkUnit {
   inputFindingsCount: number;
   inputPayloadBytes: number;
   action: "merge" | "split" | "pass_through" | "degraded_fallback" | "level1_merge";
+  claimedVersion: number; // checkpoint_version at time of claim — used for CAS
+  attemptId: string; // unique attempt identifier for this invocation
 }
 
 interface InvocationDiagnostics {
@@ -100,6 +104,7 @@ const MetadataRowSchema = z.object({
   payload_bytes: z.coerce.number(),
   updated_at: z.string().nullable(),
   truncation_count: z.coerce.number(),
+  checkpoint_version: z.coerce.number(),
 });
 
 const ChildPayloadSchema = z.object({
@@ -259,7 +264,8 @@ export default api({
               jsonb_array_length(COALESCE(merged_json->'findings', '[]'::jsonb)) AS findings_count,
               octet_length(merged_json::text) AS payload_bytes,
               updated_at::text AS updated_at,
-              COALESCE((merged_json->>'truncation_count')::int, 0) AS truncation_count
+              COALESCE((merged_json->>'truncation_count')::int, 0) AS truncation_count,
+              checkpoint_version
        FROM merge_checkpoints
        WHERE module_run_id = $1 AND node_index >= 0
        ORDER BY tree_level, node_index`,
@@ -276,6 +282,7 @@ export default api({
       payloadBytes: r.payload_bytes,
       updatedAt: r.updated_at ?? "",
       truncationCount: r.truncation_count,
+      checkpointVersion: r.checkpoint_version,
     }));
 
     // Build lookup maps
@@ -397,6 +404,9 @@ export default api({
           inputFindings <= 1 ? "pass_through" :
           inputFindings <= MAX_FINDINGS_PER_CALL ? "merge" : "split";
 
+        // Record the checkpoint_version we observed for CAS
+        const observedVersion = existing?.checkpointVersion ?? 0;
+
         workUnit = {
           level: lvl,
           nodeIndex: ni,
@@ -404,6 +414,8 @@ export default api({
           inputFindingsCount: inputFindings,
           inputPayloadBytes: inputBytes,
           action,
+          claimedVersion: observedVersion,
+          attemptId: `recovery_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
         };
       }
     }
@@ -414,6 +426,46 @@ export default api({
       diag.elapsedMs = Date.now() - startTime;
       return { status: "complete" as const, diagnostics: diag, waterfall };
     }
+
+    // ─── Step 3.5: Atomic claim ─────────────────────────────────────────
+    // Atomically claim the node. This prevents concurrent workers from
+    // processing the same node. The claim succeeds only if:
+    //   (a) The node is not already complete
+    //   (b) No other worker holds an unexpired claim
+    //   (c) The checkpoint_version still matches our observed version
+    //
+    // If the node doesn't exist yet (level1_merge first time), we INSERT it
+    // with an empty placeholder payload in 'claimed' status.
+    const claimResult = await ctx.integrations.db.query(
+      `INSERT INTO merge_checkpoints
+         (module_run_id, tree_level, node_index, merged_json, status, claimed_by, claimed_at, checkpoint_version)
+       VALUES ($1, $2, $3, '{}'::jsonb, 'claimed', $4, now(), 1)
+       ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE
+         SET claimed_by = $4,
+             claimed_at = now(),
+             checkpoint_version = merge_checkpoints.checkpoint_version + 1
+         WHERE merge_checkpoints.status <> 'complete'
+           AND (
+             merge_checkpoints.claimed_by IS NULL
+             OR merge_checkpoints.claimed_at < now() - make_interval(mins => ${CLAIM_EXPIRY_MINUTES})
+           )
+           AND merge_checkpoints.checkpoint_version = $5
+       RETURNING checkpoint_version`,
+      z.object({ checkpoint_version: z.coerce.number() }),
+      [runId, workUnit.level, workUnit.nodeIndex, workUnit.attemptId, workUnit.claimedVersion],
+      { label: `Atomic claim L${workUnit.level}:N${workUnit.nodeIndex} (attempt ${workUnit.attemptId})` }
+    );
+
+    if (claimResult.length === 0) {
+      // Claim failed — node was concurrently completed, already claimed by another worker,
+      // or version changed. This is expected and safe — just report and exit.
+      diag.elapsedMs = Date.now() - startTime;
+      diag.checkpointStatus = "claim_rejected";
+      return { status: "progress" as const, diagnostics: diag, waterfall: null };
+    }
+
+    // Update the claimed version for the CAS final write
+    workUnit.claimedVersion = claimResult[0].checkpoint_version;
 
     diag.selectedNode = `${workUnit.level}:${workUnit.nodeIndex}`;
     diag.childIds = workUnit.childIds;
@@ -432,7 +484,6 @@ export default api({
 
     // ─── Step 5: Execute work unit ──────────────────────────────────────
     let resultFindings: CanonicalFinding[] = [];
-    let checkpointStatus = "pending";
 
     try {
       if (workUnit.action === "pass_through") {
@@ -454,7 +505,6 @@ export default api({
             : childPayloads[0].merged_json;
           resultFindings = (data.findings ?? []) as CanonicalFinding[];
         }
-        checkpointStatus = "complete";
         diag.attemptNumber = 0;
 
       } else if (workUnit.action === "level1_merge") {
@@ -462,7 +512,6 @@ export default api({
         resultFindings = await processLevel1Node(
           ctx, runId, workUnit, model, currentVersion, startTime, diag
         );
-        checkpointStatus = "complete";
 
       } else if (workUnit.action === "merge") {
         // Direct merge: ≤6 input findings
@@ -471,7 +520,6 @@ export default api({
         resultFindings = await consolidateFindings(
           ctx, childFindings, model, workUnit, startTime, diag
         );
-        checkpointStatus = "complete";
 
       } else if (workUnit.action === "split") {
         // Split into bounded sub-groups, process each
@@ -480,35 +528,41 @@ export default api({
         resultFindings = await processSplitNode(
           ctx, childFindings, model, workUnit, startTime, diag
         );
-        checkpointStatus = "complete";
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[ResumeMergeRecovery] Error processing L${workUnit.level}:N${workUnit.nodeIndex}: ${msg}`);
 
-      // On error: DO NOT persist as complete. Mark as failed_retryable if budget allows
-      checkpointStatus = "failed_retryable";
+      // On error: DO NOT persist as complete. Mark diagnostic and persist guarded error
       diag.checkpointStatus = `error: ${msg.slice(0, 200)}`;
       diag.elapsedMs = Date.now() - startTime;
 
-      // Persist error checkpoint for diagnostics
+      // Guarded error persist: only write error if node is NOT already complete
+      // and we still hold the claim (claimed_by = attemptId)
       await ctx.integrations.db.execute(
-        `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
-         VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'error')
-         ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE
-           SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = 'error'`,
+        `UPDATE merge_checkpoints
+         SET merged_json = $4::jsonb,
+             model_used = $5,
+             prompt_version = $6,
+             status = 'error',
+             claimed_by = NULL,
+             claimed_at = NULL
+         WHERE module_run_id = $1
+           AND tree_level = $2
+           AND node_index = $3
+           AND status <> 'complete'
+           AND claimed_by = $7`,
         [runId, workUnit.level, workUnit.nodeIndex,
          JSON.stringify({ error: msg.slice(0, 1000), timestamp: new Date().toISOString() }),
-         model, currentVersion],
-        { label: `Persist error checkpoint L${workUnit.level}:N${workUnit.nodeIndex}` }
+         model, currentVersion, workUnit.attemptId],
+        { label: `Guarded error persist L${workUnit.level}:N${workUnit.nodeIndex}` }
       );
 
       return { status: "progress" as const, diagnostics: diag, waterfall: null };
     }
 
-    // ─── Step 6: Persist result ─────────────────────────────────────────
+    // ─── Step 6: CAS Persist result ───────────────────────────────────
     diag.resultFindingCount = resultFindings.length;
-    diag.checkpointStatus = checkpointStatus;
 
     const checkpointJson = JSON.stringify({
       findings: resultFindings,
@@ -518,15 +572,39 @@ export default api({
       timestamp: new Date().toISOString(),
     });
 
-    await ctx.integrations.db.execute(
-      `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'complete')
-       ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE
-         SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = 'complete', updated_at = now()`,
-      [runId, workUnit.level, workUnit.nodeIndex, checkpointJson, model, currentVersion],
-      { label: `Persist complete checkpoint L${workUnit.level}:N${workUnit.nodeIndex}` }
+    // Compare-and-swap: only finalize if we still own the claim
+    // (claimed_by = attemptId AND checkpoint_version = claimedVersion)
+    const finalizeResult = await ctx.integrations.db.query(
+      `UPDATE merge_checkpoints
+       SET merged_json = $4::jsonb,
+           model_used = $5,
+           prompt_version = $6,
+           status = 'complete',
+           updated_at = now(),
+           claimed_by = NULL,
+           claimed_at = NULL,
+           checkpoint_version = checkpoint_version + 1,
+           payload_hash = md5(($4::jsonb)::text)
+       WHERE module_run_id = $1
+         AND tree_level = $2
+         AND node_index = $3
+         AND claimed_by = $7
+         AND checkpoint_version = $8
+       RETURNING checkpoint_version`,
+      z.object({ checkpoint_version: z.coerce.number() }),
+      [runId, workUnit.level, workUnit.nodeIndex, checkpointJson, model, currentVersion,
+       workUnit.attemptId, workUnit.claimedVersion],
+      { label: `CAS finalize complete L${workUnit.level}:N${workUnit.nodeIndex}` }
     );
 
+    if (finalizeResult.length === 0) {
+      // CAS failed — our claim was superseded or version changed
+      diag.checkpointStatus = "cas_rejected_stale_attempt";
+      diag.elapsedMs = Date.now() - startTime;
+      return { status: "progress" as const, diagnostics: diag, waterfall: null };
+    }
+
+    diag.checkpointStatus = "complete";
     diag.lastDurableProgressAt = new Date().toISOString();
 
     // Refresh heartbeat so auto-resume doesn't conflict
@@ -546,6 +624,7 @@ export default api({
       payloadBytes: checkpointJson.length,
       updatedAt: new Date().toISOString(),
       truncationCount: 0,
+      checkpointVersion: finalizeResult[0].checkpoint_version,
     });
 
     // Check if there's more work

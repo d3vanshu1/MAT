@@ -88,6 +88,17 @@ import DiagnoseSaveFailure from './pipeline/diagnose-save-failure.js';
 import RunMigration016 from './pipeline/run-migration-016.js';
 import FinalizePipelineOutput from './pipeline/finalize-pipeline-output.js';
 import CompleteMergeTree from './pipeline/complete-merge-tree.js';
+import PromoteRootFindings from './pipeline/promote-root-findings.js';
+import DiagCheckpointInspect from './pipeline/diag-checkpoint-inspect.js';
+import FenceRun from './pipeline/fence-run.js';
+import RunMigration017 from './pipeline/run-migration-017.js';
+import RunMigration018 from './pipeline/run-migration-018.js';
+import DiagSchemaVerify from './pipeline/diag-schema-verify.js';
+import TestConcurrencyGuards from './pipeline/test-concurrency-guards.js';
+import DiagClaimExpiryCheck from './pipeline/diag-claim-expiry-check.js';
+import DiagOaAncestry from './pipeline/diag-oa-ancestry.js';
+import DiagOaAncestryExport from './pipeline/diag-oa-ancestry-export.js';
+import TestOaAncestry from './pipeline/test-oa-ancestry.js';
 
 // Database setup
 import SetupSchema from './db/setup-schema.js';
@@ -163,7 +174,11 @@ const apis = {
   AnalyzeChunk, UniversalExtract, MergeFindings, FormatReport, WebResearch,
   SaveModuleResult, LoadModuleResults, GetRunHistory, GetRunOutput,
   // Server-side pipeline
-  RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,   ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact, ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings,   ReplayPopulateClaimsLedger, DiagSaintReconciliation, GetSaintReconciliationPage, DiagReconciliationFindings, RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree,
+  RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,     ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact,
+  ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings, ReplayPopulateClaimsLedger, DiagSaintReconciliation, GetSaintReconciliationPage, DiagReconciliationFindings,
+  RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree, PromoteRootFindings,
+  DiagCheckpointInspect, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
+  DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
