@@ -28,6 +28,7 @@ import { callLLMWithHeadroom, type LLMResponse } from "./call-llm.js";
 import { getModuleModel } from "./model-config.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { parseCanonicalFindings, type CanonicalFinding } from "./canonical-finding.js";
+import { validateMergeContract } from "./merge-contract-validator.js";
 import type { PipelineContext } from "./pipeline-config.js";
 import { EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS } from "./pipeline-config.js";
 
@@ -847,21 +848,37 @@ async function consolidateFindings(
       truncated: false,
     });
 
-    // Safety: ensure no finding_ids from input are lost
-    const outputIds = new Set(parseResult.findings.flatMap(f =>
+    // ─── OA-02: Non-generative merge contract enforcement ─────────────
+    // For L2+ merge stages, validate that the LLM output is strictly
+    // non-generative: all IDs, evidence, claims, source docs, coordinates,
+    // and numeric values must trace to the direct input findings.
+    const contractResult = validateMergeContract(findings, parseResult.findings);
+    if (!contractResult.valid) {
+      // Fail-closed: reject LLM output, preserve original input findings
+      console.warn(
+        `[ResumeMergeRecovery] OA-02 merge contract REJECTED L${workUnit.level}:N${workUnit.nodeIndex}: ` +
+        `${contractResult.validationErrors.length} violation(s) — [${contractResult.violationCodes.join(", ")}]`
+      );
+      // Tag input findings as degraded_fallback so downstream knows contract was enforced
+      return findings.map(f => ({ ...f, _recovery_status: "merge_contract_fallback" } as any));
+    }
+
+    // Contract passed — use validated output.
+    // Additional safety: ensure no finding_ids from input are lost
+    // (belt-and-suspenders with the contract validator's own checks)
+    const outputIds = new Set(contractResult.acceptedFindings.flatMap(f =>
       [f.finding_id, ...(f.merged_from_finding_ids ?? [])]
     ));
     const inputIds = findings.map(f => f.finding_id);
     const missing = inputIds.filter(id => !outputIds.has(id));
 
     if (missing.length > 0) {
-      // Carry forward missing findings — safety invariant
       console.warn(`[ResumeMergeRecovery] ${missing.length} input finding_ids not accounted for — carrying forward`);
       const missingFindings = findings.filter(f => missing.includes(f.finding_id));
-      parseResult.findings.push(...missingFindings);
+      contractResult.acceptedFindings.push(...missingFindings);
     }
 
-    return parseResult.findings;
+    return contractResult.acceptedFindings;
   } catch {
     return findings;
   }
