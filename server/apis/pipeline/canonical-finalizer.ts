@@ -344,13 +344,7 @@ export async function canonicalFinalize(
     semantic_hash: z.string().nullable(),
     executive_header: z.string().nullable(),
   });
-  const ExistingOutputSchemaLegacy = z.object({
-    id: z.string(),
-    executive_header: z.string().nullable(),
-  });
-
   let existingOutputs: { id: string; semantic_hash: string | null; executive_header: string | null }[];
-  let hasExtendedSchema = true;
   try {
     existingOutputs = await db.query(
       `SELECT id, semantic_hash, executive_header FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
@@ -359,16 +353,18 @@ export async function canonicalFinalize(
       { label: "canonicalFinalize: check existing output" }
     );
   } catch {
-    // semantic_hash column does not exist — use legacy schema
-    hasExtendedSchema = false;
-    const legacyRows = await db.query(
-      `SELECT id, executive_header FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
-      ExistingOutputSchemaLegacy,
-      [runId],
-      { label: "canonicalFinalize: check existing output (legacy)" }
+    // semantic_hash column (or another canonical column) does not exist.
+    // CANONICAL_SCHEMA_MIGRATION_REQUIRED: run Migration 018/019 before finalising.
+    console.error(
+      `[canonicalFinalize] BLOCKED: canonical schema columns missing for run ${runId}. ` +
+      `Run RunMigration018 / RunMigration019 and retry.`
     );
-    existingOutputs = legacyRows.map(r => ({ id: r.id, semantic_hash: null, executive_header: r.executive_header }));
-    console.log(`[canonicalFinalize] Extended schema columns not available — using legacy persist path`);
+    return {
+      status: "canonical_migration_required" as any,
+      message:
+        "CANONICAL_SCHEMA_MIGRATION_REQUIRED: semantic_hash or companion columns do not exist. " +
+        "Execute RunMigration018 and RunMigration019 before attempting finalization.",
+    };
   }
 
   // Invalidated partial artifacts should NOT be updated in place — insert a new row.
@@ -572,9 +568,8 @@ export async function canonicalFinalize(
 
     if (existingOutputs.length > 0) {
       artifactId = existingOutputs[0].id;
-      // Update existing row — schema-adaptive
-      if (hasExtendedSchema) {
-        await db.execute(
+      // Update existing row — canonical schema only (legacy paths removed)
+      await db.execute(
           `UPDATE module_outputs
            SET executive_header       = $2,
                findings               = $3::jsonb,
@@ -597,52 +592,28 @@ export async function canonicalFinalize(
           ],
           { label: "canonicalFinalize: persist artifact (update)" }
         );
-      } else {
-        await db.execute(
-          `UPDATE module_outputs
-           SET executive_header     = $2,
-               findings             = $3::jsonb,
-               full_report_markdown = $4
-           WHERE id = $1`,
-          [artifactId, executiveHeader, allFindingsJson, reportMarkdown],
-          { label: "canonicalFinalize: persist artifact (update, legacy)" }
-        );
-      }
     } else {
-      // Insert new row — schema-adaptive
-      if (hasExtendedSchema) {
-        const insertedRows = await db.query(
-          `INSERT INTO module_outputs
-             (module_run_id, executive_header, findings, full_report_markdown,
-              schema_version, finalized_at, semantic_hash, reportable_finding_ids, f06_diagnostics)
-           VALUES ($1, $2, $3::jsonb, $4, 2, $5::timestamptz, $6, $7::jsonb, $8::jsonb)
-           RETURNING id`,
-          z.object({ id: z.string() }),
-          [
-            runId,
-            executiveHeader,
-            allFindingsJson,
-            reportMarkdown,
-            finalizedAt,
-            semanticHash,
-            reportableFindingIdsJson,
-            diagnosticsJson,
-          ],
-          { label: "canonicalFinalize: persist artifact (insert)" }
-        );
-        artifactId = insertedRows[0].id;
-      } else {
-        const insertedRows = await db.query(
-          `INSERT INTO module_outputs
-             (module_run_id, executive_header, findings, full_report_markdown)
-           VALUES ($1, $2, $3::jsonb, $4)
-           RETURNING id`,
-          z.object({ id: z.string() }),
-          [runId, executiveHeader, allFindingsJson, reportMarkdown],
-          { label: "canonicalFinalize: persist artifact (insert, legacy)" }
-        );
-        artifactId = insertedRows[0].id;
-      }
+      // Insert new row — canonical schema only (legacy paths removed)
+      const insertedRows = await db.query(
+        `INSERT INTO module_outputs
+           (module_run_id, executive_header, findings, full_report_markdown,
+            schema_version, finalized_at, semantic_hash, reportable_finding_ids, f06_diagnostics)
+         VALUES ($1, $2, $3::jsonb, $4, 2, $5::timestamptz, $6, $7::jsonb, $8::jsonb)
+         RETURNING id`,
+        z.object({ id: z.string() }),
+        [
+          runId,
+          executiveHeader,
+          allFindingsJson,
+          reportMarkdown,
+          finalizedAt,
+          semanticHash,
+          reportableFindingIdsJson,
+          diagnosticsJson,
+        ],
+        { label: "canonicalFinalize: persist artifact (insert)" }
+      );
+      artifactId = insertedRows[0].id;
     }
 
     // Bump deal updated_at
@@ -654,65 +625,34 @@ export async function canonicalFinalize(
 
     console.log(
       `[canonicalFinalize] Persisted artifact ${artifactId} — ` +
-      `hash=${semanticHash}, reportable=${reportableFindings.length}, excluded=${excludedFindings.length}` +
-      (hasExtendedSchema ? "" : " (legacy schema)")
+      `hash=${semanticHash}, reportable=${reportableFindings.length}, excluded=${excludedFindings.length}`
     );
 
     // ── STEP 11: Verify persistence succeeded ─────────────────────────────
-    if (hasExtendedSchema) {
-      const VerifySchema = z.object({ id: z.string(), semantic_hash: z.string().nullable() });
-      const verifyRows = await db.query(
-        `SELECT id, semantic_hash FROM module_outputs WHERE id = $1 LIMIT 1`,
-        VerifySchema,
-        [artifactId],
-        { label: "canonicalFinalize: verify persistence" }
-      );
-      if (verifyRows.length === 0 || verifyRows[0].semantic_hash !== semanticHash) {
-        return {
-          status: "persist_failed",
-          error: `Persistence verification failed — artifact ${artifactId} not readable or hash mismatch`,
-        };
-      }
-    } else {
-      // Legacy: just verify the row exists
-      const VerifyLegacySchema = z.object({ id: z.string() });
-      const verifyRows = await db.query(
-        `SELECT id FROM module_outputs WHERE id = $1 LIMIT 1`,
-        VerifyLegacySchema,
-        [artifactId],
-        { label: "canonicalFinalize: verify persistence (legacy)" }
-      );
-      if (verifyRows.length === 0) {
-        return {
-          status: "persist_failed",
-          error: `Persistence verification failed — artifact ${artifactId} not readable`,
-        };
-      }
+    const VerifySchema = z.object({ id: z.string(), semantic_hash: z.string().nullable() });
+    const verifyRows = await db.query(
+      `SELECT id, semantic_hash FROM module_outputs WHERE id = $1 LIMIT 1`,
+      VerifySchema,
+      [artifactId],
+      { label: "canonicalFinalize: verify persistence" }
+    );
+    if (verifyRows.length === 0 || verifyRows[0].semantic_hash !== semanticHash) {
+      return {
+        status: "persist_failed",
+        error: `Persistence verification failed — artifact ${artifactId} not readable or hash mismatch`,
+      };
     }
 
     // ── STEP 12: Mark run completed AFTER artifact is durable ─────────────
-    // Schema-adaptive: try with semantic_hash first, fall back without
-    if (hasExtendedSchema) {
-      await db.execute(
-        `UPDATE module_runs
-         SET status       = 'completed'::module_status,
-             completed_at = now(),
-             semantic_hash = $2
-         WHERE id = $1 AND status = 'running'::module_status`,
-        [runId, semanticHash],
-        { label: "canonicalFinalize: mark run completed (guarded)" }
-      );
-    } else {
-      // Legacy: update without semantic_hash; also handle 'failed' status (recovery case)
-      await db.execute(
-        `UPDATE module_runs
-         SET status       = 'completed'::module_status,
-             completed_at = now()
-         WHERE id = $1 AND status IN ('running'::module_status, 'failed'::module_status)`,
-        [runId],
-        { label: "canonicalFinalize: mark run completed (legacy, guarded)" }
-      );
-    }
+    await db.execute(
+      `UPDATE module_runs
+       SET status       = 'completed'::module_status,
+           completed_at = now(),
+           semantic_hash = $2
+       WHERE id = $1 AND status = 'running'::module_status`,
+      [runId, semanticHash],
+      { label: "canonicalFinalize: mark run completed (guarded)" }
+    );
 
     console.log(`[canonicalFinalize] Run ${runId} marked completed with hash ${semanticHash}`);
 

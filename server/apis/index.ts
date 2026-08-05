@@ -104,6 +104,7 @@ import TestOaMergeContract from './pipeline/test-oa-merge-contract.js';
 import TestOaFamilyDedup from './pipeline/test-oa-family-dedup.js';
 import TestOaEvidenceAdmissionSynthesis from './pipeline/test-oa-evidence-admission-synthesis.js';
 import RecoverRun7bbeab48 from './pipeline/recover-run-7bbeab48.js';
+import RunMigration019 from './pipeline/run-migration-019.js';
 import AdaptiveMergeRecovery from './pipeline/adaptive-merge-recovery.js';
 import ValidateTreeRoot from './pipeline/validate-tree-root.js';
 import FindingReductionGate from './pipeline/finding-reduction-gate.js';
@@ -187,7 +188,7 @@ const apis = {
   RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree, PromoteRootFindings,
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
-  RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate,
+  RunMigration019, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

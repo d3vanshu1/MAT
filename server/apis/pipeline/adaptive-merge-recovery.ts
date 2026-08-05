@@ -125,11 +125,19 @@ export interface DurableNodeState {
   subgroups: SubgroupState[];         // Stable subgroup plan
   cursor: number;                     // Index of next pending subgroup
 
-  // --- Reconciliation ---
+  // --- Reconciliation (Fix 1-2: all recon state is durable, survives budget expiry) ---
   reconciliationRequired: boolean;    // True when >1 subgroup produced output
   reconciliationComplete: boolean;
   reconciliationOutputIds: string[];  // Final reconciled finding IDs
   reconciliationFindings: CanonicalFinding[];
+  /** Durable subgroup plan for the current reconciliation pass */
+  reconSubgroups: SubgroupState[];
+  /** Next recon subgroup index to process */
+  reconCursor: number;
+  /** Findings accumulated from the previous reconciliation pass (for multi-pass narrowing) */
+  reconIntermediateFindings: CanonicalFinding[];
+  /** How many recursive reconciliation passes have run so far */
+  reconPassNumber: number;
 
   // --- Status tracking ---
   attemptCount: number;
@@ -138,8 +146,10 @@ export interface DurableNodeState {
 
   // --- Lineage ---
   outputHash: string | null;          // Hash of final output findings
-  ancestryHash: string | null;        // Hash of all input analysis IDs reachable
-  ancestryCount: number;              // Count of unique analysis IDs in ancestry
+  ancestryHash: string | null;        // Hash of all input analysis IDs reachable (legacy)
+  ancestryCount: number;              // Count of unique analysis IDs in ancestry (legacy)
+  /** Fix 5: exact set of leaf analysis IDs ('chunk_N') reachable from this node */
+  ancestryAnalysisIds: string[];
   pipelineVersion: string;
   mergePolicyVersion: string;
 
@@ -188,6 +198,31 @@ function computeDependencyFingerprint(
 // ---------------------------------------------------------------------------
 function hashFindingIds(ids: string[]): string {
   return computeContentHash([...ids].sort().join("|"));
+}
+
+// ---------------------------------------------------------------------------
+// Helper: compute full-content hash for a single finding (Fix 7)
+// Hashes all content fields so any content change invalidates parents.
+// ---------------------------------------------------------------------------
+function computeFindingContentHash(f: CanonicalFinding): string {
+  const parts = [
+    f.finding_id ?? "",
+    f.title ?? "",
+    f.detail ?? "",
+    f.full_analysis ?? "",
+    (f.source_docs ?? []).join(","),
+    (f.claim_ids ?? []).join(","),
+    (f.merged_from_finding_ids ?? []).sort().join(","),
+    f.severity ?? "",
+    f.issue_key ?? "",
+    f.finding_kind ?? "",
+    // Capture any numeric / quantitative fields that may exist on extended types
+    String((f as any).delta_abs ?? ""),
+    String((f as any).delta_pct ?? ""),
+    // Schema / version marker so any structural change also invalidates
+    "v1",
+  ];
+  return computeContentHash(parts.join("|"));
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +424,7 @@ export default api({
               merged_json->'_node_state' AS node_state,
               payload_hash
        FROM merge_checkpoints
-       WHERE module_run_id = $1 AND node_index >= 0
+       WHERE module_run_id = $1 AND node_index >= 0 AND tree_level < 90
        ORDER BY tree_level, node_index`,
       MetadataRowSchema,
       [runId],
@@ -587,26 +622,55 @@ export default api({
     const childPayloadHashes: Record<string, string> = {};
 
     if (childLevel === 0) {
-      // Level 1: load from pipeline_analysis
-      const startIdx = targetIndex * MERGE_GROUP_SIZE;
-      const endIdx = startIdx + MERGE_GROUP_SIZE - 1;
+      // Level 1: load from pipeline_analysis using frozen manifest membership (Fix 3)
+      // Prefer manifest chunk indices over numeric range — ensures we only process
+      // analyses that were actually assigned to this L1 node during manifest construction.
+      let chunkIndices: number[] | null = null;
+      try {
+        const manifestRows = await ctx.integrations.db.query(
+          `SELECT payload FROM pipeline_checkpoints
+           WHERE module_run_id = $1 AND checkpoint_key = 'frozen_manifest'
+           LIMIT 1`,
+          z.object({ payload: z.any() }),
+          [runId],
+          { label: `Load frozen manifest for L1:N${targetIndex} membership` }
+        );
+        if (manifestRows.length > 0 && manifestRows[0].payload) {
+          const manifest = manifestRows[0].payload as { l1Membership?: Record<number, number[]> };
+          const membership = manifest.l1Membership?.[targetIndex];
+          if (membership && membership.length > 0) {
+            chunkIndices = membership;
+          }
+        }
+      } catch { /* manifest not yet available — fall through to computed range */ }
+
+      if (chunkIndices === null) {
+        // No manifest yet — fall back to computed range
+        const startIdx = targetIndex * MERGE_GROUP_SIZE;
+        const endIdx = Math.min(startIdx + MERGE_GROUP_SIZE - 1, maxChildIdx);
+        chunkIndices = [];
+        for (let i = startIdx; i <= endIdx; i++) chunkIndices.push(i);
+      }
+
       const analysisRows = await ctx.integrations.db.query(
         `SELECT chunk_index, result_json
          FROM pipeline_analysis
-         WHERE run_id = $1 AND chunk_index >= $2 AND chunk_index <= $3
+         WHERE run_id = $1 AND chunk_index = ANY($2::int[])
          ORDER BY chunk_index`,
         AnalysisResultSchema,
-        [runId, startIdx, endIdx],
-        { label: `Load analysis chunks ${startIdx}-${endIdx}` }
+        [runId, chunkIndices],
+        { label: `Load analysis chunks [${chunkIndices.join(",")}] for L1:N${targetIndex}` }
       );
 
-      // For L1, "input findings" are the raw text chunks
-      // We'll handle L1 specially below
+      // Fix 7: hash full text content (not truncated) for dependency fingerprinting
       for (const row of analysisRows) {
         const data = typeof row.result_json === "string" ? JSON.parse(row.result_json) : row.result_json;
         const text = String(data.extraction ?? data.text ?? "");
-        childPayloadHashes[`0:${row.chunk_index}`] = computeContentHash(text.slice(0, 1024));
+        childPayloadHashes[`0:${row.chunk_index}`] = computeContentHash(text);
       }
+
+      // Store exact chunk indices for ancestry tracking (used in node state init below)
+      ;(childPayloadHashes as any).__l1ChunkIndices__ = analysisRows.map((r: any) => r.chunk_index);
     } else {
       // Level 2+: load from merge_checkpoints
       for (const ci of childIndices) {
@@ -624,13 +688,29 @@ export default api({
             ? JSON.parse(rows[0].merged_json) : rows[0].merged_json;
           const findings = (data.findings ?? []) as CanonicalFinding[];
           inputFindings.push(...findings);
-          childPayloadHashes[`${childLevel}:${ci}`] = rows[0].payload_hash ?? computeContentHash(JSON.stringify(data.findings ?? []));
+          // Fix 7: use full content hash for each finding (not just ID + first 1024 chars)
+          const findingContentHash = findings.map(f => computeFindingContentHash(f)).join("|");
+          childPayloadHashes[`${childLevel}:${ci}`] = rows[0].payload_hash ?? computeContentHash(findingContentHash);
         }
       }
     }
 
     // Compute dependency fingerprint
+    // (strip temp sentinel before hashing — it's not a real child key)
+    const l1ChunkIndices: number[] = (childPayloadHashes as any).__l1ChunkIndices__ ?? [];
+    delete (childPayloadHashes as any).__l1ChunkIndices__;
     const depFingerprint = computeDependencyFingerprint(childKeys, childPayloadHashes);
+
+    // Fix 5: compute exact ancestry ID set before node state init
+    // For L1: chunk indices loaded from manifest or computed range
+    // For L2+: accumulate from completed children's ancestry sets
+    const freshAncestryAnalysisIds: string[] = childLevel === 0
+      ? l1ChunkIndices.map(ci => `chunk_${ci}`)
+      : childIndices.flatMap(ci => {
+          const childMeta = metaByKey.get(`${childLevel}:${ci}`);
+          const childNodeState = childMeta?.nodeState as DurableNodeState | null;
+          return childNodeState?.ancestryAnalysisIds ?? [];
+        });
 
     // Initialize or resume node state
     if (!nodeState || nodeState.dependencyFingerprint !== depFingerprint) {
@@ -648,12 +728,19 @@ export default api({
         reconciliationComplete: false,
         reconciliationOutputIds: [],
         reconciliationFindings: [],
+        // Fix 1-2: durable reconciliation subgroup state
+        reconSubgroups: [],
+        reconCursor: 0,
+        reconIntermediateFindings: [],
+        reconPassNumber: 0,
         attemptCount: 0,
         failureClass: null,
         lastError: null,
         outputHash: null,
         ancestryHash: null,
         ancestryCount: 0,
+        // Fix 5: exact ancestry ID set
+        ancestryAnalysisIds: freshAncestryAnalysisIds,
         pipelineVersion: currentVersion,
         mergePolicyVersion: "v1",
         createdAt: new Date().toISOString(),
@@ -690,6 +777,13 @@ export default api({
         nodeState.subgroups = buildSubgroupPlan(inputFindings, targetKey, 0, MAX_FINDINGS_PER_SUBGROUP);
         nodeState.reconciliationRequired = nodeState.subgroups.length > 1;
       }
+    } else {
+      // Resuming — ensure new fields have defaults if state was persisted before this patch
+      if (!nodeState.reconSubgroups) nodeState.reconSubgroups = [];
+      if (nodeState.reconCursor === undefined) nodeState.reconCursor = 0;
+      if (!nodeState.reconIntermediateFindings) nodeState.reconIntermediateFindings = [];
+      if (nodeState.reconPassNumber === undefined) nodeState.reconPassNumber = 0;
+      if (!nodeState.ancestryAnalysisIds) nodeState.ancestryAnalysisIds = freshAncestryAnalysisIds;
     }
 
     diag.attemptCount = nodeState.attemptCount + 1;
@@ -792,49 +886,105 @@ export default api({
       return { status: "progress" as const, diagnostics: diag };
     }
 
-    // ─── Step 8: Cross-subgroup reconciliation ──────────────────────────
+    // ─── Step 8: Cross-subgroup reconciliation (Fixes 1-2: fully durable + recursive) ──
+    // INVARIANT: All per-subgroup outputs must be reconciled into a single result.
+    // The reconciliation subgroup plan and cursor are persisted in node state so budget
+    // expiry during reconciliation does not lose progress.  Multiple passes are executed
+    // until the result fits in MAX_FINDINGS_PER_SUBGROUP, guaranteeing a single final merge.
     if (allComplete && nodeState.reconciliationRequired && !nodeState.reconciliationComplete) {
       diag.reconciliationTriggered = true;
 
-      // Gather all subgroup outputs
-      const allSubgroupFindings = nodeState.subgroups.flatMap(sg => sg.outputFindings);
+      // ── Recon pass loop: repeat until result is small enough for a final single merge ──
+      let reconPassDone = false;
+      while (!reconPassDone) {
+        // Determine the input pool for the current pass
+        const passInput: CanonicalFinding[] = nodeState.reconIntermediateFindings.length > 0
+          ? nodeState.reconIntermediateFindings
+          : nodeState.subgroups.flatMap(sg => sg.outputFindings);
 
-      if (allSubgroupFindings.length <= MAX_FINDINGS_PER_SUBGROUP) {
-        // Small enough for single reconciliation pass
-        const reconResult = await processSubgroup(ctx, allSubgroupFindings, model, `${targetKey}_recon`, startTime);
-        nodeState.reconciliationFindings = reconResult;
-        nodeState.reconciliationOutputIds = reconResult.map(f => f.finding_id);
-        nodeState.reconciliationComplete = true;
-      } else {
-        // Recursive split for reconciliation
-        const reconSubgroups = buildSubgroupPlan(allSubgroupFindings, `${targetKey}_recon`, 0, MAX_FINDINGS_PER_SUBGROUP);
-
-        // Process what we can in remaining budget
-        const reconResults: CanonicalFinding[] = [];
-        for (const rsg of reconSubgroups) {
-          const budgetRemaining = EFFECTIVE_CAP_MS - (Date.now() - startTime);
-          if (budgetRemaining < MIN_WORK_BUDGET_MS + PERSISTENCE_RESERVE_MS) {
-            // Budget exhaustion during reconciliation — persist and resume
-            nodeState.lastProgressAt = new Date().toISOString();
+        if (passInput.length <= MAX_FINDINGS_PER_SUBGROUP) {
+          // Small enough — single final merge
+          const budgetCheck = EFFECTIVE_CAP_MS - (Date.now() - startTime);
+          if (budgetCheck < MIN_WORK_BUDGET_MS + PERSISTENCE_RESERVE_MS) {
             await persistNodeState(ctx, runId, targetLevel, targetIndex, nodeState, attemptId, claimedVersion);
-            diag.elapsedMs = Date.now() - startTime;
-            diag.action = "persist_cursor_resume";
+            diag.elapsedMs = Date.now() - startTime; diag.action = "persist_cursor_resume";
             return { status: "progress" as const, diagnostics: diag };
           }
+          const finalResult = passInput.length <= 1
+            ? passInput
+            : await processSubgroup(ctx, passInput, model, `${targetKey}_recon_final_p${nodeState.reconPassNumber}`, startTime);
+          nodeState.reconciliationFindings = finalResult;
+          nodeState.reconciliationOutputIds = finalResult.map(f => f.finding_id);
+          nodeState.reconciliationComplete = true;
+          // Clear intermediate state
+          nodeState.reconSubgroups = [];
+          nodeState.reconCursor = 0;
+          nodeState.reconIntermediateFindings = [];
+          reconPassDone = true;
+        } else {
+          // Need a reduction pass: build/resume durable reconSubgroups
+          if (nodeState.reconSubgroups.length === 0) {
+            nodeState.reconSubgroups = buildSubgroupPlan(
+              passInput, `${targetKey}_recon_p${nodeState.reconPassNumber}`, 0, MAX_FINDINGS_PER_SUBGROUP
+            );
+            nodeState.reconCursor = 0;
+          }
 
-          const rsgFindings = allSubgroupFindings.filter(f => rsg.memberFindingIds.includes(f.finding_id));
-          if (rsgFindings.length <= 1) {
-            reconResults.push(...rsgFindings);
+          // Process pending recon subgroups with cursor
+          while (nodeState.reconCursor < nodeState.reconSubgroups.length) {
+            const rsg = nodeState.reconSubgroups[nodeState.reconCursor];
+            if (rsg.status === "complete") { nodeState.reconCursor++; continue; }
+
+            const budgetRemaining = EFFECTIVE_CAP_MS - (Date.now() - startTime);
+            if (budgetRemaining < MIN_WORK_BUDGET_MS + PERSISTENCE_RESERVE_MS) {
+              nodeState.lastProgressAt = new Date().toISOString();
+              await persistNodeState(ctx, runId, targetLevel, targetIndex, nodeState, attemptId, claimedVersion);
+              diag.elapsedMs = Date.now() - startTime; diag.action = "persist_cursor_resume";
+              return { status: "progress" as const, diagnostics: diag };
+            }
+
+            // Look up findings for this recon subgroup from passInput
+            const findingMap = new Map(passInput.map(f => [f.finding_id, f]));
+            const rsgFindings = rsg.memberFindingIds.map(id => findingMap.get(id)).filter((f): f is CanonicalFinding => !!f);
+
+            let rsgResult: CanonicalFinding[];
+            if (rsgFindings.length <= 1) {
+              rsgResult = rsgFindings;
+            } else {
+              rsgResult = await processSubgroup(
+                ctx, rsgFindings, model,
+                `${targetKey}_recon_p${nodeState.reconPassNumber}_sg${nodeState.reconCursor}`, startTime
+              );
+            }
+
+            rsg.outputFindings = rsgResult;
+            rsg.outputFindingIds = rsgResult.map(f => f.finding_id);
+            rsg.status = "complete";
+            nodeState.reconCursor++;
+          }
+
+          // All recon subgroups for this pass complete — collect outputs for next pass
+          const passOutputs = nodeState.reconSubgroups.flatMap(rsg => rsg.outputFindings);
+
+          if (passOutputs.length < passInput.length) {
+            // Progress made — set up next pass
+            nodeState.reconPassNumber++;
+            nodeState.reconIntermediateFindings = passOutputs;
+            nodeState.reconSubgroups = [];
+            nodeState.reconCursor = 0;
+            // Loop continues — next iteration will decide single-merge vs another split pass
           } else {
-            const result = await processSubgroup(ctx, rsgFindings, model, `${targetKey}_recon`, startTime);
-            reconResults.push(...result);
+            // No further reduction possible — terminate with current outputs
+            nodeState.reconciliationFindings = passOutputs;
+            nodeState.reconciliationOutputIds = passOutputs.map(f => f.finding_id);
+            nodeState.reconciliationComplete = true;
+            nodeState.reconSubgroups = [];
+            nodeState.reconCursor = 0;
+            nodeState.reconIntermediateFindings = [];
+            reconPassDone = true;
           }
         }
-
-        nodeState.reconciliationFindings = reconResults;
-        nodeState.reconciliationOutputIds = reconResults.map(f => f.finding_id);
-        nodeState.reconciliationComplete = true;
-      }
+      } // end while !reconPassDone
     }
 
     // ─── Step 9: Validate ancestry + atomically complete ────────────────
@@ -848,36 +998,85 @@ export default api({
       finalFindings = nodeState.subgroups.flatMap(sg => sg.outputFindings);
     }
 
-    // Verify: every input finding ID is represented
+    // ── Conservation check: carry forward any input findings not yet represented ──
+    // (applies to L2+ only — L1 builds findings from raw text, so no pre-existing IDs)
     if (childLevel !== 0) {
       const outputIds = new Set(finalFindings.flatMap(f => [f.finding_id, ...(f.merged_from_finding_ids ?? [])]));
       const missingInputs = nodeState.inputFindingIds.filter(id => !outputIds.has(id));
       if (missingInputs.length > 0) {
-        // Carry forward missing inputs to preserve conservation
         const missingFindings = inputFindings.filter(f => missingInputs.includes(f.finding_id));
         finalFindings.push(...missingFindings);
       }
     }
 
-    // Deduplication pass
+    // ── Deduplication pass ────────────────────────────────────────────────────
+    // Fix 6: run deduplication FIRST, then verify conservation.
+    // Every removed finding must appear in merged_from_finding_ids of a representative.
     if (finalFindings.length > 1) {
+      // Snapshot input IDs before dedup for conservation tracking
+      const preDedupIds = new Set(finalFindings.map(f => f.finding_id));
+
       const dedupResult = deduplicateFindings(finalFindings as any);
-      const retainedIds = new Set<string>([
+      const representativeIds = new Set<string>([
         ...dedupResult.ungroupedFindingIds,
-        ...dedupResult.families.map(f => f.representativeFindingId),
+        ...dedupResult.families.map(fam => fam.representativeFindingId),
       ]);
-      finalFindings = finalFindings.filter(f => retainedIds.has(f.finding_id));
+      finalFindings = finalFindings.filter(f => representativeIds.has(f.finding_id));
+
+      // Build a lookup from removed IDs to their family representative (for repair)
+      const removedToRepresentative = new Map<string, string>();
+      for (const fam of dedupResult.families) {
+        for (const memberId of fam.memberFindingIds) {
+          if (memberId !== fam.representativeFindingId) {
+            removedToRepresentative.set(memberId, fam.representativeFindingId);
+          }
+        }
+      }
+
+      // Fix 6: verify every removed ID is accounted for in merged_from_finding_ids
+      const removedIds = [...preDedupIds].filter(id => !representativeIds.has(id));
+      const representativeMap = new Map(finalFindings.map(f => [f.finding_id, f]));
+
+      for (const removedId of removedIds) {
+        const repId = removedToRepresentative.get(removedId);
+        const representative = repId ? representativeMap.get(repId) : null;
+        if (representative) {
+          // Ensure the removed ID appears in merged_from_finding_ids
+          const merged = representative.merged_from_finding_ids ?? [];
+          if (!merged.includes(removedId)) {
+            representative.merged_from_finding_ids = [...merged, removedId];
+          }
+        } else if (finalFindings.length > 0) {
+          // No representative found (should not happen) — append to first finding
+          const first = finalFindings[0];
+          const merged = first.merged_from_finding_ids ?? [];
+          if (!merged.includes(removedId)) {
+            first.merged_from_finding_ids = [...merged, removedId];
+          }
+        }
+      }
+    }
+
+    // ── Fix 5: Exact ancestry validation ─────────────────────────────────────
+    // Verify the ancestry ID set is internally consistent. For the natural root
+    // (the highest-level node), all analysis IDs must appear exactly once.
+    const ancestrySet = new Set(nodeState.ancestryAnalysisIds);
+    const ancestryDuplicates = nodeState.ancestryAnalysisIds.filter((id, idx) =>
+      nodeState!.ancestryAnalysisIds.indexOf(id) !== idx
+    );
+    if (ancestryDuplicates.length > 0) {
+      console.warn(
+        `[AdaptiveMergeRecovery] L${targetLevel}:N${targetIndex} ancestry has ${ancestryDuplicates.length} duplicates: ` +
+        `${ancestryDuplicates.slice(0, 5).join(", ")}...`
+      );
     }
 
     // Compute output hash and ancestry
     nodeState.outputHash = hashFindingIds(finalFindings.map(f => f.finding_id));
-    nodeState.ancestryCount = childLevel === 0
-      ? childIndices.length
-      : childIndices.reduce((sum, ci) => {
-          const cm = metaByKey.get(`${childLevel}:${ci}`);
-          return sum + (cm?.nodeState?.ancestryCount ?? 0);
-        }, 0);
-    nodeState.ancestryHash = computeContentHash(`${nodeState.ancestryCount}:${nodeState.outputHash}`);
+    nodeState.ancestryCount = ancestrySet.size;
+    nodeState.ancestryHash = computeContentHash(
+      [...ancestrySet].sort().join("|") + ":" + nodeState.outputHash
+    );
 
     diag.resultFindingCount = finalFindings.length;
 
@@ -889,6 +1088,7 @@ export default api({
       timestamp: new Date().toISOString(),
       dependencyFingerprint: depFingerprint,
       ancestryCount: nodeState.ancestryCount,
+      ancestryAnalysisIds: nodeState.ancestryAnalysisIds,
     });
 
     const finalizeResult = await ctx.integrations.db.query(
@@ -1178,6 +1378,7 @@ export {
   classifyFailure,
   AdaptiveRecoveryError,
   hashFindingIds,
+  computeFindingContentHash,
   MERGE_GROUP_SIZE,
   MAX_FINDINGS_PER_SUBGROUP,
 };

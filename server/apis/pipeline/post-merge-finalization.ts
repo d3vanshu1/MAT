@@ -36,6 +36,7 @@ import {
 import type { CanonicalFinalArtifact } from "./canonical-final-artifact.js";
 import type { MergedFinding } from "../modules/build-merged-text.js";
 import { computeContentHash } from "./source-snapshot.js";
+import { applyReductionGates } from "./finding-reduction-gate.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -548,6 +549,53 @@ export async function runPostMergeFinalizationStages(
     console.error(`${LOG_PREFIX} post_merge: FAILED: ${err?.message}`);
     stageStates.push({ stage: "post_merge", status: "failed", detail: err?.message });
     return buildResult("failed", "post_merge", stageStates, completedStages, progressAdvanced, [`Post-merge processing failed: ${err?.message}`]);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // FINDING REDUCTION GATE — applied after post_merge, before absence_verify
+  // Replaces postMergeFindings with primary findings; secondary/suppressed
+  // findings are recorded in diagnostics but do NOT enter the IC-facing report.
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    const reductionResult = applyReductionGates(postMergeFindings as any[]);
+    const beforeCount = postMergeFindings.length;
+    const afterCount = reductionResult.primaryFindings.length;
+
+    console.log(
+      `${LOG_PREFIX} finding_reduction_gate: ${beforeCount} → ${afterCount} primary ` +
+      `(${reductionResult.secondaryObservations.length} secondary, ` +
+      `${reductionResult.suppressedLedger.length} suppressed, ` +
+      `ground_truth=[${reductionResult.groundTruthSignals.join(",")}])`
+    );
+
+    // Persist reduction ledger as a pipeline checkpoint for audit / diagnostics
+    try {
+      await input.ctx.integrations.db.execute(
+        `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+         VALUES ($1, 'finding_reduction_gate', $2::jsonb, 'complete', $3)
+         ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE
+           SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
+        [
+          runId,
+          JSON.stringify({
+            primaryCount: afterCount,
+            secondaryCount: reductionResult.secondaryObservations.length,
+            suppressedCount: reductionResult.suppressedLedger.length,
+            suppressedLedger: reductionResult.suppressedLedger,
+            gateStats: reductionResult.gateStats,
+            groundTruthSignals: reductionResult.groundTruthSignals,
+          }),
+          pipelineVersion,
+        ],
+        { label: `${LOG_PREFIX} Persist finding_reduction_gate ledger` },
+      );
+      progressAdvanced = true;
+    } catch (e: any) {
+      console.warn(`${LOG_PREFIX} finding_reduction_gate: ledger persist failed (non-fatal): ${e?.message}`);
+    }
+
+    // Replace findings: only primary findings proceed into absence_verify and F06
+    postMergeFindings = reductionResult.primaryFindings as any;
   }
 
   // ─────────────────────────────────────────────────────────────────────────

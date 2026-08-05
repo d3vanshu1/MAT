@@ -466,24 +466,40 @@ export default api({
       findings = inputFindings;
     } else {
       // Load findings from the active artifact
-      const artifactRows = await ctx.integrations.db.query(
-        `SELECT output_json
-         FROM module_outputs
-         WHERE run_id = $1
-           AND COALESCE((output_json->>'artifact_status'), 'active') = 'active'
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        z.object({ output_json: z.any() }),
-        [runId],
-        { label: "Load active artifact findings" }
-      );
+      // Note: artifact_status column may not exist pre-migration-019.
+      // Use a sub-select that gracefully handles missing column.
+      let artifactRows: { findings?: any }[];
+      try {
+        artifactRows = await ctx.integrations.db.query(
+          `SELECT findings
+           FROM module_outputs
+           WHERE module_run_id = $1
+             AND COALESCE(artifact_status, 'active') = 'active'
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          z.object({ findings: z.any() }),
+          [runId],
+          { label: "Load active artifact findings (post-migration)" }
+        );
+      } catch {
+        // Fallback: artifact_status column doesn't exist yet (pre-migration-019)
+        artifactRows = await ctx.integrations.db.query(
+          `SELECT findings
+           FROM module_outputs
+           WHERE module_run_id = $1
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          z.object({ findings: z.any() }),
+          [runId],
+          { label: "Load active artifact findings (pre-migration)" }
+        );
+      }
 
       if (artifactRows.length === 0) {
         return { result: { error: "No active artifact found for run", primaryFindings: [], suppressedLedger: [] } };
       }
 
-      const artifact = artifactRows[0].output_json;
-      findings = artifact?.canonical_findings ?? artifact?.findings ?? [];
+      findings = artifactRows[0].findings ?? [];
     }
 
     const result = applyReductionGates(findings);
