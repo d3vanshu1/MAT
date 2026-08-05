@@ -51,7 +51,7 @@ function makeRevenueFamily(count: number, baseId = "rev"): CanonicalFinding[] {
     makeFinding({
       finding_id: `${baseId}-${String(i).padStart(3, "0")}`,
       title: `Revenue recognition timing discrepancy ${i}`,
-      issue_key: "revenue_recognition_timing",
+      issue_key: "revenue_basis_discrepancy",
       finding_kind: "data_divergence",
       evidence: [
         {
@@ -78,6 +78,7 @@ interface TestResult {
   id: string;
   name: string;
   passed: boolean;
+  skipped?: boolean;
   detail: string;
 }
 
@@ -150,14 +151,14 @@ function runT3(): TestResult {
     makeFinding({
       finding_id: "wc-001",
       title: "Working capital adjustment needed",
-      issue_key: "working_capital_adjustment",
+      issue_key: "nwc_negative_trend_and_seasonality",
       finding_kind: "data_divergence",
       evidence: [{ figure: "£200k", source_doc: "model.xlsx", verbatim_snippet: "NWC of £200k", verified: true }],
     }),
     makeFinding({
       finding_id: "wc-002",
       title: "Working capital peg discrepancy",
-      issue_key: "wc_adjustment",
+      issue_key: "working_capital_surgery_connect_structural_tension",
       finding_kind: "cross_version",
       evidence: [{ figure: "£150k", source_doc: "spa.pdf", verbatim_snippet: "WC target £150k", verified: false }],
     }),
@@ -265,14 +266,14 @@ function runT6(): TestResult {
     makeFinding({
       finding_id: "cust-001",
       title: "Top customer accounts for 60% of revenue",
-      issue_key: "customer_concentration",
+      issue_key: "change_of_control_customer_termination_rights",
       finding_kind: "data_divergence",
       detail: "Revenue concentration on key customer accounts",
     }),
     makeFinding({
       finding_id: "cust-002",
       title: "Client dependency risk in revenue concentration",
-      issue_key: "customer_concentration",
+      issue_key: "change_of_control_customer_termination_rights",
       finding_kind: "source_stated_risk",
       detail: "Key client represents majority of revenue",
     }),
@@ -282,14 +283,14 @@ function runT6(): TestResult {
     makeFinding({
       finding_id: "supp-001",
       title: "Single supplier provides 80% of raw materials",
-      issue_key: "supplier_concentration",
+      issue_key: "gamma_telecom_supplier_concentration",
       finding_kind: "source_stated_risk",
       detail: "Supply chain vendor dependency",
     }),
     makeFinding({
       finding_id: "supp-002",
       title: "Supplier dependency in procurement",
-      issue_key: "supplier_concentration",
+      issue_key: "gamma_telecom_supplier_concentration",
       finding_kind: "data_divergence",
       detail: "Key supplier accounts for bulk of supply",
     }),
@@ -319,14 +320,14 @@ function runT6(): TestResult {
   const regTM = makeFinding({
     finding_id: "ip-reg-001",
     title: "Registered trademark ownership gap",
-    issue_key: "ip_ownership_chain",
+    issue_key: "unregistered_trade_marks",
     finding_kind: "absence_claim",
     detail: "The registered trademark registration shows incomplete assignment chain",
   });
   const unregTM = makeFinding({
     finding_id: "ip-unreg-001",
     title: "Unregistered common law mark risk",
-    issue_key: "ip_ownership_chain",
+    issue_key: "unregistered_trade_marks",
     finding_kind: "absence_claim",
     detail: "Unregistered trademark ™ has no chain of title",
   });
@@ -365,12 +366,12 @@ function runT7(): TestResult {
       title: "Finding without issue_key",
       finding_kind: "source_stated_risk",
     }),
-    // Finding kind mismatch: revenue key but ineligible kind
+    // Finding kind mismatch: FCA key but ineligible kind
     makeFinding({
       finding_id: "kindmismatch-001",
-      title: "Revenue timing with wrong kind",
-      issue_key: "revenue_recognition_timing",
-      finding_kind: "process_observation", // Not eligible for revenue family
+      title: "FCA authorisation revocation data",
+      issue_key: "dataphone_fca_authorisation_revocation",
+      finding_kind: "data_divergence", // Not eligible for fca_permissions_gap (needs absence_claim|source_stated_risk|process_observation)
     }),
   ];
 
@@ -408,21 +409,21 @@ function runT8(): TestResult {
       finding_id: "sev-001",
       title: "Critical revenue timing issue",
       severity: "critical",
-      issue_key: "revenue_recognition_timing",
+      issue_key: "revenue_basis_discrepancy",
       finding_kind: "data_divergence",
     }),
     makeFinding({
       finding_id: "sev-002",
       title: "Info-level revenue timing note",
       severity: "info",
-      issue_key: "revenue_recognition_timing",
+      issue_key: "revenue_basis_discrepancy",
       finding_kind: "cross_version",
     }),
     makeFinding({
       finding_id: "sev-003",
       title: "Warning revenue timing discrepancy",
       severity: "warning",
-      issue_key: "revenue_cutoff",
+      issue_key: "contracted_vs_variable_revenue_split",
       finding_kind: "data_divergence",
     }),
   ];
@@ -466,13 +467,13 @@ function runT9(): TestResult {
     makeFinding({
       finding_id: "earn-001",
       title: "Earn-out contingency underestimated",
-      issue_key: "earn_out_contingency",
+      issue_key: "contingent_consideration_liability",
       finding_kind: "data_divergence",
     }),
     makeFinding({
       finding_id: "earn-002",
       title: "Contingent consideration risk not disclosed",
-      issue_key: "contingent_consideration",
+      issue_key: "earnout_obligations_unquantified",
       finding_kind: "source_stated_risk",
     }),
   ];
@@ -509,75 +510,147 @@ function runT9(): TestResult {
 }
 
 async function runT10(ctx: any): Promise<TestResult> {
-  // T10: Bounded SCG replay — before/after counts by family
-  try {
-    const rawRows = await ctx.integrations.db.query(
-      `SELECT result_json
-       FROM module_outputs
-       WHERE module_run_id = $1
-       LIMIT 5`,
-      z.object({ result_json: z.any() }),
-      [SCG_RUN_ID],
-      { label: "T10: Load SCG module_outputs for family dedup" }
-    );
+  // T10: Bounded SCG replay — run persisted SCG artifact through real production family service.
+  // Proves Stage 3 output has expected family IDs, members, evidence, and hashes.
+  const rawRows = await ctx.integrations.db.query(
+    `SELECT COALESCE(mo.findings, '[]'::jsonb)::text AS findings_json
+     FROM module_outputs mo
+     WHERE mo.module_run_id = $1
+     LIMIT 1`,
+    z.object({ findings_json: z.string() }),
+    [SCG_RUN_ID],
+    { label: "T10: Load SCG module_outputs.findings for family dedup" }
+  );
 
-    if (rawRows.length === 0) {
-      return {
-        id: "T10",
-        name: "SCG bounded replay: before/after counts by family",
-        passed: true,
-        detail: "No module_outputs rows found for SCG run (diagnostic — passed by convention)",
-      };
-    }
-
-    // Parse findings from module_outputs
-    let allFindings: CanonicalFinding[] = [];
-    for (const row of rawRows) {
-      const resultJson = typeof row.result_json === "string" ? JSON.parse(row.result_json) : row.result_json;
-      const findings = resultJson?.findings ?? resultJson?.canonical_findings ?? [];
-      if (Array.isArray(findings)) {
-        for (const f of findings) {
-          if (f && f.finding_id && f.title && f.severity) {
-            allFindings.push(f as CanonicalFinding);
-          }
-        }
-      }
-    }
-
-    if (allFindings.length === 0) {
-      return {
-        id: "T10",
-        name: "SCG bounded replay: before/after counts by family",
-        passed: true,
-        detail: "No valid findings in SCG module_outputs (diagnostic — passed by convention)",
-      };
-    }
-
-    // Run dedup
-    const result = deduplicateFindings(allFindings);
-    const completeness = verifyCompleteness(
-      allFindings.map((f) => f.finding_id),
-      result
-    );
-
-    const familySummary = result.families
-      .map((f) => `${f.familyId}(${f.memberFindingIds.length})`)
-      .join(", ");
-
-    return {
-      id: "T10",
-      name: "SCG bounded replay: before/after counts by family",
-      passed: completeness.complete,
-      detail: `Input: ${allFindings.length} findings → ${result.totalFamiliesCreated} families [${familySummary || "none"}], ${result.ungroupedFindingIds.length} ungrouped, ${result.totalSuppressed} suppressed. Complete: ${completeness.complete}${completeness.missing.length > 0 ? `, missing: ${completeness.missing.length}` : ""}`,
-    };
-  } catch (err: any) {
+  if (rawRows.length === 0) {
     return {
       id: "T10",
       name: "SCG bounded replay: before/after counts by family",
       passed: false,
-      detail: `SCG integration failed: ${err.message?.slice(0, 100) ?? "error"}`,
+      detail: "FAILED: No module_outputs rows found for SCG run — cannot verify OA-03 production integration",
     };
   }
+
+  // Parse findings from the persisted jsonb column
+  let parsedFindings: unknown[];
+  try {
+    parsedFindings = JSON.parse(rawRows[0].findings_json);
+  } catch (parseErr: any) {
+    return {
+      id: "T10",
+      name: "SCG bounded replay: before/after counts by family",
+      passed: false,
+      detail: `FAILED: Unparsable findings JSON — ${parseErr.message?.slice(0, 80)}`,
+    };
+  }
+
+  if (!Array.isArray(parsedFindings) || parsedFindings.length === 0) {
+    return {
+      id: "T10",
+      name: "SCG bounded replay: before/after counts by family",
+      passed: false,
+      detail: "FAILED: module_outputs.findings is empty — no canonical findings to verify",
+    };
+  }
+
+  // Validate each finding has required canonical shape
+  const allFindings: CanonicalFinding[] = [];
+  let unparsableCount = 0;
+  for (const f of parsedFindings) {
+    if (f && typeof f === "object" && "finding_id" in f && "title" in f && "severity" in f) {
+      allFindings.push(f as CanonicalFinding);
+    } else {
+      unparsableCount++;
+    }
+  }
+
+  if (allFindings.length === 0) {
+    return {
+      id: "T10",
+      name: "SCG bounded replay: before/after counts by family",
+      passed: false,
+      detail: `FAILED: ${parsedFindings.length} entries in findings but 0 have valid canonical shape (finding_id + title + severity)`,
+    };
+  }
+
+  // Run real production family service (deduplicateFindings from canonical-family-dedup)
+  const result = deduplicateFindings(allFindings);
+
+  // Run completeness verification — no member may vanish silently
+  const completeness = verifyCompleteness(
+    allFindings.map((f) => f.finding_id),
+    result
+  );
+
+  // Run determinism verification — second pass must produce identical output
+  const result2 = deduplicateFindings(allFindings);
+  const deterministic =
+    result.families.length === result2.families.length &&
+    result.totalSuppressed === result2.totalSuppressed &&
+    result.families.every((f, i) =>
+      f.familyId === result2.families[i]?.familyId &&
+      f.representativeFindingId === result2.families[i]?.representativeFindingId &&
+      JSON.stringify(f.memberFindingIds) === JSON.stringify(result2.families[i]?.memberFindingIds)
+    );
+
+  // Build per-family evidence/hash summary
+  const familyDetails = result.families.map((f) => ({
+    familyId: f.familyId,
+    members: f.memberFindingIds.length,
+    representative: f.representativeFindingId,
+    evidenceCount: f.allEvidenceIds.length,
+    hash: computeFamilyHash(f.memberFindingIds, f.familyId),
+  }));
+
+  const familySummary = familyDetails
+    .map((fd) => `${fd.familyId}(${fd.members}m/${fd.evidenceCount}ev/${fd.hash})`)
+    .join(", ");
+
+  // Collect all assertions
+  const checks: string[] = [];
+  const warnings: string[] = [];
+  if (!completeness.complete) {
+    if (completeness.missing.length > 0) {
+      // Hard fail: findings vanished from output
+      checks.push(`completeness failed: ${completeness.missing.length} findings missing from output`);
+    }
+    if (completeness.duplicated.length > 0) {
+      // Warn only: duplicate finding_ids in input is upstream data quality, not family dedup failure
+      warnings.push(`${completeness.duplicated.length} duplicate finding_ids in input (upstream data quality)`);
+    }
+  }
+  if (!deterministic) {
+    checks.push("non-deterministic: second pass differs from first");
+  }
+  if (result.families.length === 0 && allFindings.length > 5) {
+    // Diagnostic: extract distinct issue_keys to calibrate family rules
+    const issueKeyCounts: Record<string, number> = {};
+    for (const f of allFindings) {
+      const key = (f as any).issue_key ?? "(no issue_key)";
+      issueKeyCounts[key] = (issueKeyCounts[key] || 0) + 1;
+    }
+    const topKeys = Object.entries(issueKeyCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 30)
+      .map(([k, c]) => `${k}(${c})`)
+      .join(", ");
+    checks.push(`zero families from ${allFindings.length} findings — family rules may not match SCG issue_keys. DISTINCT issue_keys: [${topKeys}]`);
+  }
+  if (unparsableCount > 0) {
+    checks.push(`${unparsableCount} entries lacked canonical shape`);
+  }
+
+  const passed = checks.length === 0;
+  const warningsSuffix = warnings.length > 0 ? ` Warnings: ${warnings.join("; ")}.` : "";
+
+  return {
+    id: "T10",
+    name: "SCG bounded replay: before/after counts by family",
+    passed,
+    detail: passed
+      ? `Input: ${allFindings.length} findings → ${result.totalFamiliesCreated} families [${familySummary || "none"}], ${result.ungroupedFindingIds.length} ungrouped, ${result.totalSuppressed} suppressed. Deterministic=true, complete=true.${warningsSuffix}`
+      : `FAILED: ${checks.join("; ")}. Input: ${allFindings.length} findings, families=${result.totalFamiliesCreated}, ungrouped=${result.ungroupedFindingIds.length}${warningsSuffix}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +677,7 @@ export default api({
         id: z.string(),
         name: z.string(),
         passed: z.boolean(),
+        skipped: z.boolean().optional(),
         detail: z.string(),
       })
     ),
@@ -629,20 +703,22 @@ export default api({
       results.push({
         id: "T10",
         name: "SCG bounded replay: before/after counts by family",
-        passed: true,
-        detail: "Skipped (runScgIntegrationTests=false)",
+        passed: false,
+        skipped: true,
+        detail: "SKIPPED: runScgIntegrationTests=false — disabled integration tests counted as skipped, not green",
       });
     }
 
-    const passed = results.filter((r) => r.passed).length;
-    const failed = results.filter((r) => !r.passed).length;
+    const passed = results.filter((r) => r.passed && !r.skipped).length;
+    const failed = results.filter((r) => !r.passed && !r.skipped).length;
+    const skipped = results.filter((r) => r.skipped).length;
 
     return {
-      summary: `OA-03 Family Dedup: ${passed}/${results.length} passed`,
+      summary: `OA-03 Family Dedup: ${passed}/${results.length} passed${skipped > 0 ? `, ${skipped} skipped` : ""}${failed > 0 ? `, ${failed} failed` : ""}`,
       total: results.length,
       passed,
       failed,
-      skipped: 0,
+      skipped,
       results,
     };
   },
