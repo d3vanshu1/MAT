@@ -17,6 +17,8 @@
  * It is NOT a final artifact.
  */
 
+import { z } from "@superblocksteam/sdk-api";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -344,8 +346,6 @@ export async function loadExpectedAnalysisPopulation(
   db: { query: (...args: any[]) => Promise<any[]> },
   runId: string,
 ): Promise<{ ids: string[]; found: boolean }> {
-  const z = await import("@superblocksteam/sdk-api").then(m => m.z);
-
   // Load routing diagnostics (persisted by pipeline-core at routing time)
   const [routingCp] = await db.query(
     `SELECT payload FROM pipeline_checkpoints
@@ -364,10 +364,12 @@ export async function loadExpectedAnalysisPopulation(
     ? JSON.parse(routingCp.payload)
     : routingCp.payload;
 
-  // The routing diagnostic entries contain document_id + chunk_index for routed items
+  // The routing diagnostic entries contain document_id + chunk_index for routed items.
+  // Use the array position (global index) as the canonical ID, since pipeline_analysis
+  // stores chunk_index as the global position in the routed array.
   if (payload.entries && Array.isArray(payload.entries)) {
     const routedEntries = payload.entries.filter((e: any) => e.allowed);
-    const ids = routedEntries.map((e: any) => `${e.document_id}:${e.chunk_index}`);
+    const ids = routedEntries.map((_: any, idx: number) => String(idx));
     return { ids, found: true };
   }
 
@@ -376,24 +378,24 @@ export async function loadExpectedAnalysisPopulation(
 
 /**
  * Load completed analysis IDs from pipeline_analysis for this run.
+ * Returns global chunk indices (matching the position-based IDs from loadExpectedAnalysisPopulation).
  */
 export async function loadCompletedAnalysisIds(
   db: { query: (...args: any[]) => Promise<any[]> },
   runId: string,
 ): Promise<string[]> {
-  const z = await import("@superblocksteam/sdk-api").then(m => m.z);
 
   const rows = await db.query(
-    `SELECT document_id, chunk_index
+    `SELECT chunk_index
      FROM pipeline_analysis
      WHERE run_id = $1
-     ORDER BY document_id, chunk_index`,
-    z.object({ document_id: z.string(), chunk_index: z.coerce.number() }),
+     ORDER BY chunk_index`,
+    z.object({ chunk_index: z.coerce.number() }),
     [runId],
     { label: "TreeValidator: load completed analysis IDs" }
   );
 
-  return rows.map(r => `${r.document_id}:${r.chunk_index}`);
+  return rows.map(r => String(r.chunk_index));
 }
 
 /**
@@ -403,7 +405,6 @@ export async function loadMergeNodeRecords(
   db: { query: (...args: any[]) => Promise<any[]> },
   runId: string,
 ): Promise<MergeNodeRecord[]> {
-  const z = await import("@superblocksteam/sdk-api").then(m => m.z);
 
   const rows = await db.query(
     `SELECT tree_level, node_index, status

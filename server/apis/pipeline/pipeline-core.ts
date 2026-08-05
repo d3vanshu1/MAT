@@ -2429,6 +2429,21 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             } else {
             const findings = fpParseResult.findings;
 
+            // ── Pre-check: verify quality-stage prerequisites exist before fast-path finalization ──
+            // The fast-path skips quality stages (Q3 evidence admission, claims, reconciliation).
+            // If these haven't been run yet (e.g. after recovery clears tree_level>=1), we must
+            // fall through to the normal path which runs them. Without this check, the fast-path
+            // would loop forever: detect complete tree → try finalize → prerequisites_missing → in_progress → repeat.
+            const fpPrereqCheck = await loadCheckpointStatus(
+              ctx.integrations.db, runId, moduleId, findings.length > 0
+            );
+            const fpMissingPrereqs = fpPrereqCheck.filter(s => !s.present).map(s => s.key);
+            let fastPathPrereqAbort = false;
+            if (fpMissingPrereqs.length > 0) {
+              console.warn(`[pipeline:fast-path] Quality-stage prerequisites missing: ${fpMissingPrereqs.join(", ")} — falling through to normal path to run quality stages`);
+              fastPathPrereqAbort = true;
+            }
+
             // Reconstruct housekeeping findings from checkpoint merged_json if available
             let fastPathHousekeeping: MergedFinding[] = [];
             let fastPathHousekeepingAbort = false;
@@ -2465,8 +2480,8 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               }
             }
 
-            // If housekeeping is corrupt or unloadable, abort fast path entirely
-            if (fastPathHousekeepingAbort) {
+            // If housekeeping is corrupt or unloadable, or quality-stage prerequisites missing, abort fast path entirely
+            if (fastPathHousekeepingAbort || fastPathPrereqAbort) {
               // Fall through to normal merge path — do not format or persist
             } else {
 
