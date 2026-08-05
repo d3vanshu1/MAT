@@ -3,6 +3,7 @@ import { MERGE_PROMPTS, FINDINGS_RULE_FINAL } from "../modules/merge-findings.js
 import { parseCanonicalFindings } from "./canonical-finding.js";
 import { getModuleModel } from "./model-config.js";
 import { enforceNarrativeBoundary } from "./narrative-enforcement.js";
+import { validateMergeContract } from "./merge-contract-validator.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -174,6 +175,20 @@ export default api({
         });
         findings = parseResult.findings;
       } catch { /* use empty findings */ }
+    }
+
+    // OA-02: Merge contract enforcement (omission_audit only)
+    if (moduleId === "omission_audit" && findings.length > 0) {
+      const inputFindings = topNodes.flatMap(n => {
+        try { return JSON.parse(n.findings_json); } catch { return []; }
+      });
+      const contractResult = validateMergeContract(inputFindings, findings);
+      if (!contractResult.valid) {
+        console.warn(`[CompleteMerge][OA-02] Merge contract REJECTED: ${contractResult.violationCodes.join(",")}. Preserving ${inputFindings.length} input findings.`);
+        findings = contractResult.acceptedFindings;
+      } else {
+        console.log(`[CompleteMerge][OA-02] Merge contract passed for ${findings.length} findings.`);
+      }
     }
 
     console.log(`[CompleteMerge] Parsed ${findings.length} findings, executive header: ${executiveHeader.slice(0, 100)}...`);

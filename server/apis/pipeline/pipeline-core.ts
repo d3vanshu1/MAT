@@ -64,6 +64,7 @@ import { NUMERIC_MODULES } from "../modules/constants.js";
 import { SUB_AGENT_PROMPTS } from "../modules/analyze-chunk.js";
 import { MERGE_PROMPTS, FINDINGS_RULE_FINAL, FINDINGS_RULE_INTERMEDIATE } from "../modules/merge-findings.js";
 import { runPostCompletionAudit } from "./post-completion-audit.js";
+import { validateMergeContract } from "./merge-contract-validator.js";
 import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
@@ -4778,6 +4779,20 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             }
           }
           // --- End observability ---
+
+          // OA-02: Merge contract enforcement (omission_audit only)
+          if (moduleId === "omission_audit" && findings.length > 0) {
+            const inputFindingsForContract = group.members.flatMap(m => m.findings ?? []);
+            if (inputFindingsForContract.length > 0) {
+              const contractResult = validateMergeContract(inputFindingsForContract, findings);
+              if (!contractResult.valid) {
+                console.warn(`[pipeline][OA-02] Merge contract REJECTED at R${currentRound}:G${group.idx}: ${contractResult.violationCodes.join(",")}. Preserving ${inputFindingsForContract.length} input findings.`);
+                findings = contractResult.acceptedFindings as MergedFinding[];
+              } else {
+                console.log(`[pipeline][OA-02] Merge contract passed for R${currentRound}:G${group.idx} (${findings.length} findings).`);
+              }
+            }
+          }
 
           // Fallback: if findings are empty (model failed to extract), union input
           // members' findings — degrades to unconsolidated duplicates rather than

@@ -833,7 +833,7 @@ export interface OaRuntimePath {
   isPostLeafMergePath: boolean;
   enforcesOa02: boolean;
   enforcesOa03: boolean;
-  oa02VerificationMethod: "import_present" | "call_verified" | "not_enforced";
+  oa02VerificationMethod: "import_present" | "call_verified" | "caller_enforced" | "not_applicable" | "not_enforced";
   oa03VerificationMethod: "import_present" | "call_verified" | "not_enforced";
   description: string;
 }
@@ -859,44 +859,44 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     sourceFile: "pipeline/complete-merge-tree.ts",
     entrypoint: "CompleteMergeTree",
     isPostLeafMergePath: true,
-    enforcesOa02: false,
+    enforcesOa02: true,
     enforcesOa03: false,
-    oa02VerificationMethod: "not_enforced",
+    oa02VerificationMethod: "call_verified",
     oa03VerificationMethod: "not_enforced",
-    description: "Merges remaining top-level nodes into root. OA-02 NOT yet wired.",
+    description: "Merges remaining top-level nodes into root. OA-02 wired post-parse.",
   },
   {
     pathId: "pipeline_core_merge",
     sourceFile: "pipeline/pipeline-core.ts",
     entrypoint: "RunModulePipeline (post-L1 merge loop)",
     isPostLeafMergePath: true,
-    enforcesOa02: false,
+    enforcesOa02: true,
     enforcesOa03: false,
-    oa02VerificationMethod: "not_enforced",
+    oa02VerificationMethod: "call_verified",
     oa03VerificationMethod: "not_enforced",
-    description: "Main pipeline merge consolidation loop. OA-02 and OA-03 NOT yet wired.",
+    description: "Main pipeline merge consolidation loop. OA-02 wired before fallback and accounting.",
   },
   {
     pathId: "merge_findings_module",
     sourceFile: "modules/merge-findings.ts",
     entrypoint: "MergeFindings (module API)",
     isPostLeafMergePath: true,
-    enforcesOa02: false,
+    enforcesOa02: true,
     enforcesOa03: false,
-    oa02VerificationMethod: "not_enforced",
+    oa02VerificationMethod: "caller_enforced",
     oa03VerificationMethod: "not_enforced",
-    description: "Standalone merge findings module. OA-02 NOT yet wired.",
+    description: "Standalone merge findings module. OA-02 enforced at caller (pipeline-core, resume-merge-recovery).",
   },
   {
     pathId: "promote_root_findings",
     sourceFile: "pipeline/promote-root-findings.ts",
     entrypoint: "PromoteRootFindings",
     isPostLeafMergePath: true,
-    enforcesOa02: false,
+    enforcesOa02: true,
     enforcesOa03: false,
-    oa02VerificationMethod: "not_enforced",
+    oa02VerificationMethod: "not_applicable",
     oa03VerificationMethod: "not_enforced",
-    description: "Saves root checkpoint to module_outputs. No merge occurs, only promotion.",
+    description: "Saves root checkpoint to module_outputs. No merge occurs — OA-02 N/A (no LLM output to validate).",
   },
 ];
 
