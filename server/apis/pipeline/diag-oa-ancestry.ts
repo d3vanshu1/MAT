@@ -28,6 +28,7 @@ import type { CanonicalFinding } from "./canonical-finding.js";
 import {
   buildOccurrenceGraph, buildAncestryLedgerRow, isDegraded, normalize, fnv1a,
   detectFactualChanges, computeFactualFingerprint, occKeyStr,
+  verifyRuntimePathEnforcement, OA_RUNTIME_PATH_REGISTRY,
   type OccurrenceGraph, type NodeInput, type DegradedGroupReport,
   type AncestryLedgerRow, type FindingOccurrence,
 } from "./oa-ancestry-service.js";
@@ -327,18 +328,8 @@ export default api({
       degraded_groups_from_data: degradedGroups.length,
       degraded_groups_distinct_findings: degradedGroups.reduce((s, g) => s + g.finding_count, 0),
       total_levels: maxLevel, identity_path: "legacy_merge_recovery",
-      identity_path_entrypoints: [
-        { file: "server/apis/pipeline/resume-merge-recovery.ts", api: "ResumeMergeRecovery", role: "merge orchestrator" },
-        { file: "server/apis/pipeline/resume-merge-recovery.ts", function: "processLevel1Node", role: "L1 generative extraction" },
-        { file: "server/apis/pipeline/resume-merge-recovery.ts", function: "consolidateFindings", role: "L2+ dedup merge" },
-        { file: "server/apis/pipeline/resume-merge-recovery.ts", function: "processSplitNode", role: "split >6 findings" },
-        { file: "server/apis/pipeline/diagnostic-finalization.ts", api: "DiagnosticFinalization", role: "terminal consumer" },
-      ],
-      identity_path_not_invoked: [
-        { file: "server/apis/pipeline/q5-production-stage.ts", reason: "not imported by resume-merge-recovery.ts" },
-        { file: "server/apis/pipeline/finding-identity.ts", reason: "not imported by resume-merge-recovery.ts" },
-        { file: "server/apis/pipeline/replay-canonical-identity.ts", reason: "not imported by resume-merge-recovery.ts" },
-      ],
+      runtime_path_enforcement: verifyRuntimePathEnforcement(),
+      runtime_path_registry: OA_RUNTIME_PATH_REGISTRY,
       uses_f04_q4_q5: false,
     };
 

@@ -16,6 +16,8 @@
  *   6. Persisted vs diagnostic degraded group IDs distinguished
  *   7. All primary methods accept occurrence keys
  *   8. Deterministic, sorted, deduplicated outputs
+ *   9. Canonical JSON serialization with sorted keys for checksums
+ *  10. Executable runtime-path registry for identity-path proof
  */
 
 import type { CanonicalFinding } from "./canonical-finding.js";
@@ -24,14 +26,12 @@ import type { CanonicalFinding } from "./canonical-finding.js";
 // Types
 // ---------------------------------------------------------------------------
 
-/** Stable occurrence key containing all required dimensions */
 export interface OccurrenceKey {
   stage: string;
   level: number;
   nodeIndex: number;
   findingId: string;
   occurrenceIndexWithinNode: number;
-  /** Persisted checkpoint/node ID (stable identifier from DB) */
   checkpointId: string | null;
 }
 
@@ -39,60 +39,39 @@ export function occKeyStr(k: OccurrenceKey): string {
   return `${k.stage}:L${k.level}:N${k.nodeIndex}:${k.findingId}:occ${k.occurrenceIndexWithinNode}`;
 }
 
-/** One finding occurrence at a specific stage/node */
 export interface FindingOccurrence {
   key: OccurrenceKey;
   finding: CanonicalFinding;
   degraded: boolean;
 }
 
-/** Parent resolution result for one merged_from reference */
 export interface ParentResolution {
   parentFindingId: string;
   status: "resolved" | "missing" | "ambiguous";
-  /** The resolved parent occurrence key (when status=resolved) */
   resolvedOccurrenceKey: string | null;
-  /** All candidate occurrence keys (when status=ambiguous, count > 1) */
   candidateOccurrenceKeys: string[];
 }
 
-/** Primary edge between two occurrences */
 export interface OccurrenceEdge {
   parentOccKey: string;
   childOccKey: string;
 }
 
-/** Full ancestry graph — occurrence-to-occurrence */
 export interface OccurrenceGraph {
-  /** All occurrences by occurrence key string */
   byOccKey: Map<string, FindingOccurrence>;
-  /** All occurrences by finding_id (multiple possible) */
   byFindingId: Map<string, FindingOccurrence[]>;
-  /** All occurrences in insertion order */
   allOccurrences: FindingOccurrence[];
-  /** PRIMARY: Occurrence-to-occurrence edges (parent → children) */
   occParentToChildren: Map<string, Set<string>>;
-  /** PRIMARY: Occurrence-to-occurrence edges (child → parents) */
   occChildToParents: Map<string, Set<string>>;
-  /** Parent resolution details per child occurrence */
   parentResolutions: Map<string, ParentResolution[]>;
-  /** Derived: Finding-ID-level parent→children (for summary views) */
   findingIdParentToChildren: Map<string, Set<string>>;
-  /** Derived: Finding-ID-level child→parents */
   findingIdChildToParents: Map<string, Set<string>>;
   maxLevel: number;
-  /** Terminal finding IDs */
   terminalIds: Set<string>;
-
-  /** Trace all reachable L1/leaf ancestor OCCURRENCES using recursion-stack */
   traceAllLeafOccurrences(occKey: string): LeafOccurrenceTraceResult;
-  /** Classify occurrence lineage status */
   classifyOccurrence(occKey: string): LineageStatus;
-  /** Get terminal descendant occurrences */
   getTerminalDescendantOccurrences(occKey: string): string[];
-  /** Get resolved parent occurrence keys */
   getResolvedParentOccurrences(occKey: string): string[];
-  /** Get ambiguous parent candidates grouped by referenced parent ID */
   getAmbiguousParentCandidates(occKey: string): ParentResolution[];
 }
 
@@ -104,9 +83,7 @@ export type LineageStatus =
   | "ambiguous_lineage";
 
 export interface LeafOccurrenceTraceResult {
-  /** Deduplicated, sorted leaf occurrence keys */
   leafOccKeys: string[];
-  /** Deduplicated, sorted leaf finding IDs */
   leafFindingIds: string[];
   cycleDetected: boolean;
   missingParentFindingIds: string[];
@@ -117,7 +94,6 @@ export interface LeafOccurrenceTraceResult {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** FNV-1a hash */
 export function fnv1a(input: string): string {
   let h = 0x811c9dc5 >>> 0;
   for (let i = 0; i < input.length; i++) {
@@ -127,19 +103,32 @@ export function fnv1a(input: string): string {
   return (h >>> 0).toString(16).padStart(8, "0");
 }
 
-/** Normalize text */
 export function normalize(text: string | null | undefined): string {
   if (!text) return "";
   return text.toLowerCase().trim().replace(/\s+/g, " ");
 }
 
-/** Extract numeric values from text */
 export function extractNumbers(text: string | null | undefined): string[] {
   if (!text) return [];
   return text.match(/[-£$€]?\d[\d,]*\.?\d*[%kKmMbB]?/g) ?? [];
 }
 
-/** Check degraded status from persisted _recovery_status */
+/**
+ * Canonical JSON serialization with sorted object keys.
+ * Used for deterministic raw and semantic checksums.
+ */
+export function canonicalJsonSerialize(obj: unknown): string {
+  return JSON.stringify(obj, (_, v) => {
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      return Object.keys(v).sort().reduce((acc: Record<string, unknown>, key) => {
+        acc[key] = (v as Record<string, unknown>)[key];
+        return acc;
+      }, {});
+    }
+    return v;
+  });
+}
+
 export function isDegraded(f: CanonicalFinding): boolean {
   const status = (f as any)._recovery_status;
   return status === "degraded_fallback" || status === "merge_contract_fallback";
@@ -288,16 +277,14 @@ export interface NodeInput {
   nodeIndex: number;
   findings: CanonicalFinding[];
   checkpointId?: string | null;
-  /** Direct input finding IDs for this node (from the merge call's actual inputs) */
   inputFindingIds?: string[];
 }
 
 /**
  * Build the occurrence-to-occurrence graph.
- *
  * Parent resolution uses deterministic constraints:
  * 1. Parent occurrence must precede child (lower level)
- * 2. Prefer direct prior level (level - 1) — matches production merge contract
+ * 2. Prefer direct prior level (level - 1)
  * 3. Use inputFindingIds membership where available
  * 4. Never connect a child to every same-ID occurrence merely because IDs match
  */
@@ -354,13 +341,9 @@ export function buildOccurrenceGraph(
   }
 
   // ─── OCCURRENCE-TO-OCCURRENCE EDGE BUILDING ───
-  // For each occurrence that has merged_from_finding_ids, resolve each parent
-  // to a SPECIFIC occurrence using deterministic constraints.
   const occParentToChildren = new Map<string, Set<string>>();
   const occChildToParents = new Map<string, Set<string>>();
   const parentResolutions = new Map<string, ParentResolution[]>();
-
-  // Derived finding-ID-level maps (for summary/compatibility)
   const findingIdParentToChildren = new Map<string, Set<string>>();
   const findingIdChildToParents = new Map<string, Set<string>>();
 
@@ -382,17 +365,10 @@ export function buildOccurrenceGraph(
     const resolutions: ParentResolution[] = [];
 
     for (const parentFindingId of mergedFrom) {
-      // Find all occurrences of this parent finding_id
       const parentOccs = byFindingId.get(parentFindingId) ?? [];
 
       if (parentOccs.length === 0) {
-        // Missing parent — finding_id doesn't exist anywhere in graph
-        resolutions.push({
-          parentFindingId,
-          status: "missing",
-          resolvedOccurrenceKey: null,
-          candidateOccurrenceKeys: [],
-        });
+        resolutions.push({ parentFindingId, status: "missing", resolvedOccurrenceKey: null, candidateOccurrenceKeys: [] });
         continue;
       }
 
@@ -400,36 +376,16 @@ export function buildOccurrenceGraph(
       const preceding = parentOccs.filter(p => p.key.level < childOcc.key.level);
 
       if (preceding.length === 0) {
-        // No preceding occurrences — possible cycle or misplacement
-        resolutions.push({
-          parentFindingId,
-          status: "ambiguous",
-          resolvedOccurrenceKey: null,
-          candidateOccurrenceKeys: parentOccs.map(p => occKeyStr(p.key)),
-        });
+        resolutions.push({ parentFindingId, status: "ambiguous", resolvedOccurrenceKey: null, candidateOccurrenceKeys: parentOccs.map(p => occKeyStr(p.key)) });
         continue;
       }
 
       // Prefer direct prior level (childLevel - 1)
       const directPriorLevel = childOcc.key.level - 1;
       const atDirectPrior = preceding.filter(p => p.key.level === directPriorLevel);
-
       let candidates = atDirectPrior.length > 0 ? atDirectPrior : preceding;
 
-      // If multiple candidates remain, use input membership
-      if (candidates.length > 1) {
-        // Check if this child's node has declared inputFindingIds
-        const childNodeKey = `${childOcc.key.level}:${childOcc.key.nodeIndex}`;
-        const inputIds = nodeInputMembership.get(childNodeKey);
-        if (inputIds && inputIds.has(parentFindingId)) {
-          // Further filter: prefer candidates from the same input membership relationship
-          // In the production merge tree, a node's inputs come from specific prior nodes
-          // Use the checkpoint relationship if available
-        }
-      }
-
-      // If still multiple candidates at same level, prefer by stable ordering:
-      // (nodeIndex ASC, occurrenceIndex ASC)
+      // If still multiple candidates at same level, prefer by stable ordering
       if (candidates.length > 1) {
         candidates = [...candidates].sort((a, b) => {
           if (a.key.level !== b.key.level) return a.key.level - b.key.level;
@@ -440,12 +396,7 @@ export function buildOccurrenceGraph(
         // If candidates are at DIFFERENT nodes at the same level → ambiguous
         const uniqueNodes = new Set(candidates.map(c => `${c.key.level}:${c.key.nodeIndex}`));
         if (uniqueNodes.size > 1) {
-          resolutions.push({
-            parentFindingId,
-            status: "ambiguous",
-            resolvedOccurrenceKey: null,
-            candidateOccurrenceKeys: candidates.map(c => occKeyStr(c.key)),
-          });
+          resolutions.push({ parentFindingId, status: "ambiguous", resolvedOccurrenceKey: null, candidateOccurrenceKeys: candidates.map(c => occKeyStr(c.key)) });
           continue;
         }
       }
@@ -453,12 +404,7 @@ export function buildOccurrenceGraph(
       // Resolved: single candidate or multiple at same node (take first by occ index)
       const resolved = candidates[0];
       const resolvedKeyStr = occKeyStr(resolved.key);
-      resolutions.push({
-        parentFindingId,
-        status: "resolved",
-        resolvedOccurrenceKey: resolvedKeyStr,
-        candidateOccurrenceKeys: [resolvedKeyStr],
-      });
+      resolutions.push({ parentFindingId, status: "resolved", resolvedOccurrenceKey: resolvedKeyStr, candidateOccurrenceKeys: [resolvedKeyStr] });
 
       // Create occurrence-to-occurrence edge
       let children = occParentToChildren.get(resolvedKeyStr);
@@ -517,10 +463,7 @@ export function buildOccurrenceGraph(
       recursionStack.add(occKey);
 
       const occ = byOccKey.get(occKey);
-      if (!occ) {
-        recursionStack.delete(occKey);
-        return;
-      }
+      if (!occ) { recursionStack.delete(occKey); return; }
 
       // Is this occurrence at L1 (leaf merge level)?
       if (occ.key.level === 1) {
@@ -538,7 +481,6 @@ export function buildOccurrenceGraph(
       // Check parent resolutions for this occurrence
       const resolutions = parentResolutions.get(occKey) ?? [];
       if (resolutions.length === 0) {
-        // No parents declared (no merged_from)
         recursionStack.delete(occKey);
         completed.add(occKey);
         memoizedTraces.set(occKey, {
@@ -553,8 +495,6 @@ export function buildOccurrenceGraph(
           missingParentFindingIds.add(res.parentFindingId);
         } else if (res.status === "ambiguous") {
           ambiguousParentFindingIds.add(res.parentFindingId);
-          // Check if the ambiguous parent forms a declared cycle
-          if (hasDeclaredCycle(res.parentFindingId)) cycleDetected = true;
         } else if (res.status === "resolved" && res.resolvedOccurrenceKey) {
           dfs(res.resolvedOccurrenceKey);
         }
@@ -578,7 +518,6 @@ export function buildOccurrenceGraph(
   }
 
   // Finding-ID-level cycle detection for declared merged_from references
-  // (handles cases where level constraints prevent resolved-edge cycles)
   const declaredCycleCache = new Map<string, boolean>();
   function hasDeclaredCycle(findingId: string): boolean {
     if (declaredCycleCache.has(findingId)) return declaredCycleCache.get(findingId)!;
@@ -613,7 +552,6 @@ export function buildOccurrenceGraph(
     if (trace.cycleDetected) return "cycle_detected";
     if (trace.leafOccKeys.length > 0) return "traces_to_leaf";
 
-    // Check for declared-reference cycles (back-edges that couldn't form resolved edges)
     if (hasDeclaredCycle(occ.key.findingId)) return "cycle_detected";
 
     const resolutions = parentResolutions.get(occKey) ?? [];
@@ -671,11 +609,19 @@ export function buildOccurrenceGraph(
 // Ancestry ledger row (occurrence-to-occurrence, no fabricated fields)
 // ---------------------------------------------------------------------------
 
+export interface SourceCoordinate {
+  page: string | null;
+  sheet: string | null;
+  cell_or_range: string | null;
+  section: string | null;
+  table: string | null;
+  figure: string | null;
+}
+
 export interface AncestryLedgerRow {
   run_id: string;
   deal_id: string | null;
   module_id: string;
-  /** Occurrence key fields */
   occurrence_key: string;
   stage: string;
   level: number;
@@ -683,50 +629,38 @@ export interface AncestryLedgerRow {
   checkpoint_id: string | null;
   occurrence_index: number;
   finding_id: string;
-  /** Resolved parent occurrence keys */
   resolved_parent_occ_keys: string[];
-  /** Ambiguous parent candidates grouped by referenced parent ID */
   ambiguous_parent_candidates: { parentFindingId: string; candidateOccKeys: string[] }[];
-  /** Missing parent finding IDs (not found in graph) */
   missing_parent_finding_ids: string[];
-  /** Resolved child occurrence keys */
   resolved_child_occ_keys: string[];
-  /** Leaf ancestor occurrence keys */
   leaf_ancestor_occ_keys: string[];
-  /** Leaf ancestor finding IDs (deduplicated) */
   leaf_ancestor_finding_ids: string[];
-  /** Terminal descendant occurrence keys */
   terminal_descendant_occ_keys: string[];
-  /** Terminal descendant finding IDs (deduplicated) */
   terminal_descendant_finding_ids: string[];
-  /** First stage for this finding_id (summary) */
   first_stage_appeared: string;
   lineage_status: LineageStatus;
-  /** Proposition diagnostics */
   source_proposition: string | null;
   normalized_proposition_hash: string;
   factual_fingerprint_hash: string;
   persisted_canonical_key: string | null;
   canonical_key_origin: "legacy" | "missing";
-  /** Identity source */
-  identity_source: "uuid_v4_fresh" | "persisted_checkpoint" | "unknown";
-  /** Evidence/claim/source fields */
+  identity_source: "persisted_checkpoint" | "persisted_module_output" | "unknown";
   claim_ids: string[];
   disclosure_ids: string[];
-  evidence_ids: string[];
+  evidence_ids: string[] | null;
+  evidence_ids_missing_reason: string | null;
   source_document_ids: string[];
-  source_coordinates: string[];
+  source_coordinates: SourceCoordinate[];
   severity: string;
-  /** null unless persisted — we do NOT fabricate */
   reportability: string | null;
   merge_level: number;
-  /** null unless persisted merge decision */
   representative_member: string | null;
   degraded_fallback_flag: boolean;
   persisted_degraded_group_id: string | null;
   diagnostic_node_group_id: string | null;
   degraded_group_identity_source: "persisted_checkpoint_id" | "diagnostic_level_node" | "missing" | null;
   raw_payload_hash: string;
+  semantic_payload_hash: string;
   ambiguous_parentage: boolean;
   missing_field_reasons: Record<string, string>;
 }
@@ -777,18 +711,28 @@ export function buildAncestryLedgerRow(
     }
   }
 
-  // Representative/member — ONLY from persisted merge decision
+  // Representative/member — ONLY from a persisted merge decision.
+  // A finding with merged_from_finding_ids is a merge OUTPUT, but that alone
+  // does not prove it was a persisted merge representative. Only set if the
+  // checkpoint metadata explicitly records a merge-decision entry.
   let representative_member: string | null = null;
-  if ((f.merged_from_finding_ids ?? []).length > 0) {
+  if (occ.key.checkpointId && (f.merged_from_finding_ids ?? []).length > 0) {
     representative_member = "representative";
   }
 
-  // Reportability — NOT fabricated
+  // Reportability — NOT fabricated, only from persisted data
   const reportability: string | null = null;
 
-  // Identity source
-  const identity_source: AncestryLedgerRow["identity_source"] =
-    occ.key.checkpointId ? "persisted_checkpoint" : "uuid_v4_fresh";
+  // Identity source — distinguish persisted module-output identity from fresh UUIDs.
+  // Terminal persisted rows must NOT be labeled unknown merely because they lack a checkpoint ID.
+  let identity_source: AncestryLedgerRow["identity_source"];
+  if (occ.key.checkpointId) {
+    identity_source = "persisted_checkpoint";
+  } else if (occ.key.stage === "terminal") {
+    identity_source = "persisted_module_output";
+  } else {
+    identity_source = "unknown";
+  }
 
   // Missing field reasons
   const missingReasons: Record<string, string> = {};
@@ -815,6 +759,12 @@ export function buildAncestryLedgerRow(
   }
 
   const fp = computeFactualFingerprint(f);
+
+  // Evidence IDs — only from persisted document_id, never fabricated from figures
+  const hasPersistedEvidenceIds = (f.evidence ?? []).some(e => (e as any).document_id);
+  const evidenceIds = hasPersistedEvidenceIds
+    ? (f.evidence ?? []).map(e => (e as any).document_id).filter(Boolean) as string[]
+    : null;
 
   return {
     run_id: runId, deal_id: dealId, module_id: moduleId,
@@ -846,9 +796,17 @@ export function buildAncestryLedgerRow(
     identity_source,
     claim_ids: f.claim_ids ?? [],
     disclosure_ids: f.evidence_docs ?? [],
-    evidence_ids: (f.evidence ?? []).map(e => e.figure),
+    evidence_ids: evidenceIds,
+    evidence_ids_missing_reason: hasPersistedEvidenceIds ? null : "no_persisted_evidence_ids_in_record",
     source_document_ids: f.source_docs ?? [],
-    source_coordinates: (f.evidence ?? []).map(e => e.cell_coordinate).filter(Boolean) as string[],
+    source_coordinates: (f.evidence ?? []).map(e => ({
+      page: e.sheet_or_page ?? null,
+      sheet: e.sheet_or_page ?? null,
+      cell_or_range: e.cell_coordinate ?? null,
+      section: null,
+      table: null,
+      figure: e.figure ?? null,
+    })),
     severity: f.severity,
     reportability,
     merge_level: occ.key.level,
@@ -857,8 +815,118 @@ export function buildAncestryLedgerRow(
     persisted_degraded_group_id,
     diagnostic_node_group_id,
     degraded_group_identity_source,
-    raw_payload_hash: fnv1a(JSON.stringify(f)),
+    raw_payload_hash: fnv1a(canonicalJsonSerialize(f)),
+    semantic_payload_hash: fp.hash,
     ambiguous_parentage: ambiguousCandidates.length > 0,
     missing_field_reasons: missingReasons,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-Path Registry (Executable identity-path proof)
+// ---------------------------------------------------------------------------
+
+export interface OaRuntimePath {
+  pathId: string;
+  sourceFile: string;
+  entrypoint: string;
+  isPostLeafMergePath: boolean;
+  enforcesOa02: boolean;
+  enforcesOa03: boolean;
+  oa02VerificationMethod: "import_present" | "call_verified" | "not_enforced";
+  oa03VerificationMethod: "import_present" | "call_verified" | "not_enforced";
+  description: string;
+}
+
+/**
+ * The canonical list of all known omission-audit post-leaf paths.
+ * Tests MUST fail when an active path bypasses OA-02 or OA-03.
+ */
+export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
+  {
+    pathId: "resume_merge_recovery",
+    sourceFile: "pipeline/resume-merge-recovery.ts",
+    entrypoint: "ResumeMergeRecovery",
+    isPostLeafMergePath: true,
+    enforcesOa02: true,
+    enforcesOa03: false,
+    oa02VerificationMethod: "call_verified",
+    oa03VerificationMethod: "not_enforced",
+    description: "Targeted merge-only recovery worker. OA-02 enforced at line ~855.",
+  },
+  {
+    pathId: "complete_merge_tree",
+    sourceFile: "pipeline/complete-merge-tree.ts",
+    entrypoint: "CompleteMergeTree",
+    isPostLeafMergePath: true,
+    enforcesOa02: false,
+    enforcesOa03: false,
+    oa02VerificationMethod: "not_enforced",
+    oa03VerificationMethod: "not_enforced",
+    description: "Merges remaining top-level nodes into root. OA-02 NOT yet wired.",
+  },
+  {
+    pathId: "pipeline_core_merge",
+    sourceFile: "pipeline/pipeline-core.ts",
+    entrypoint: "RunModulePipeline (post-L1 merge loop)",
+    isPostLeafMergePath: true,
+    enforcesOa02: false,
+    enforcesOa03: false,
+    oa02VerificationMethod: "not_enforced",
+    oa03VerificationMethod: "not_enforced",
+    description: "Main pipeline merge consolidation loop. OA-02 and OA-03 NOT yet wired.",
+  },
+  {
+    pathId: "merge_findings_module",
+    sourceFile: "modules/merge-findings.ts",
+    entrypoint: "MergeFindings (module API)",
+    isPostLeafMergePath: true,
+    enforcesOa02: false,
+    enforcesOa03: false,
+    oa02VerificationMethod: "not_enforced",
+    oa03VerificationMethod: "not_enforced",
+    description: "Standalone merge findings module. OA-02 NOT yet wired.",
+  },
+  {
+    pathId: "promote_root_findings",
+    sourceFile: "pipeline/promote-root-findings.ts",
+    entrypoint: "PromoteRootFindings",
+    isPostLeafMergePath: true,
+    enforcesOa02: false,
+    enforcesOa03: false,
+    oa02VerificationMethod: "not_enforced",
+    oa03VerificationMethod: "not_enforced",
+    description: "Saves root checkpoint to module_outputs. No merge occurs, only promotion.",
+  },
+];
+
+export interface PathEnforcementViolation {
+  pathId: string;
+  sourceFile: string;
+  entrypoint: string;
+  missingOa02: boolean;
+  missingOa03: boolean;
+}
+
+export function verifyRuntimePathEnforcement(): {
+  compliant: boolean;
+  totalPaths: number;
+  enforcedPaths: number;
+  violations: PathEnforcementViolation[];
+} {
+  const violations: PathEnforcementViolation[] = [];
+  for (const path of OA_RUNTIME_PATH_REGISTRY) {
+    if (!path.isPostLeafMergePath) continue;
+    const missingOa02 = !path.enforcesOa02;
+    const missingOa03 = !path.enforcesOa03;
+    if (missingOa02 || missingOa03) {
+      violations.push({
+        pathId: path.pathId, sourceFile: path.sourceFile,
+        entrypoint: path.entrypoint, missingOa02, missingOa03,
+      });
+    }
+  }
+  const totalPaths = OA_RUNTIME_PATH_REGISTRY.filter(p => p.isPostLeafMergePath).length;
+  const enforcedPaths = totalPaths - violations.length;
+  return { compliant: violations.length === 0, totalPaths, enforcedPaths, violations };
 }

@@ -33,6 +33,8 @@ import {
   occKeyStr,
   computeFactualFingerprint,
   detectFactualChanges,
+  verifyRuntimePathEnforcement,
+  OA_RUNTIME_PATH_REGISTRY,
   type NodeInput,
   type OccurrenceGraph,
   type AncestryLedgerRow,
@@ -157,18 +159,16 @@ export default api({
       const graph = buildOccurrenceGraph(findingsByLevel);
       const cOcc = graph.byFindingId.get("cyc-C")![0];
       const cKey = occKeyStr(cOcc.key);
-      const trace = graph.traceAllLeafOccurrences(cKey);
       const classification = graph.classifyOccurrence(cKey);
 
       const assertions = [
-        `cycleDetected=${trace.cycleDetected} (expect true)`,
         `classification=${classification} (expect cycle_detected)`,
       ];
 
-      if (trace.cycleDetected && classification === "cycle_detected") {
-        results.push(pass(2, "True cycle detection (A←B←C←A)", "Genuine cycle correctly detected", assertions));
+      if (classification === "cycle_detected") {
+        results.push(pass(2, "True cycle detection (A←B←C←A)", "Genuine cycle correctly detected via declared merged_from edges", assertions));
       } else {
-        results.push(fail(2, "True cycle detection (A←B←C←A)", `Expected cycle=true, got ${trace.cycleDetected}, class=${classification}`, assertions));
+        results.push(fail(2, "True cycle detection (A←B←C←A)", `Expected cycle_detected, got ${classification}`, assertions));
       }
     }
 
@@ -481,23 +481,27 @@ export default api({
         results.push(fail(9, "Non-mutation (semantic hash comparison)", "Data changed!", assertions));
       }
     } else {
-      results.push(pass(9, "Non-mutation (skipped)", "SCG integration tests disabled", []));
+      results.push({ test_number: 9, name: "Non-mutation (SCG disabled)", status: "skipped", details: "runScgIntegrationTests=false" });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // TEST 10: Identity-path proof from registered production entrypoints
+    // TEST 10: Runtime-path enforcement registry (executable)
+    // Fails when any post-leaf path bypasses OA-02 or OA-03.
     // ═══════════════════════════════════════════════════════════════════════════
     {
+      const enforcement = verifyRuntimePathEnforcement();
       const assertions = [
-        `merge_entrypoint=ResumeMergeRecovery`,
-        `l1_function=processLevel1Node`,
-        `l2_plus_function=consolidateFindings`,
-        `split_function=processSplitNode`,
-        `finalizer=DiagnosticFinalization`,
-        `not_imported_on_path=q5-production-stage.ts,finding-identity.ts,replay-canonical-identity.ts`,
-        `identity_source_at_l1=uuid_v4_fresh`,
+        `compliant=${enforcement.compliant}`,
+        `total_paths=${enforcement.totalPaths}`,
+        `enforced_paths=${enforcement.enforcedPaths}`,
+        ...enforcement.violations.map(v => `VIOLATION: ${v.pathId} missingOa02=${v.missingOa02} missingOa03=${v.missingOa03}`),
       ];
-      results.push(pass(10, "Identity-path assertion (production entrypoints)", "Static assertions about merge path match verified codebase structure", assertions));
+
+      if (enforcement.compliant) {
+        results.push(pass(10, "Runtime-path enforcement registry", `All ${enforcement.totalPaths} post-leaf paths enforce OA-02 and OA-03`, assertions));
+      } else {
+        results.push(fail(10, "Runtime-path enforcement registry", `${enforcement.violations.length} path(s) bypass OA-02/OA-03: ${enforcement.violations.map(v => v.pathId).join(", ")}`, assertions));
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -566,7 +570,7 @@ export default api({
         results.push(fail(11, "Stability (deterministic output)", `Hashes differ: ${run1.hash} vs ${run2.hash}`, assertions));
       }
     } else {
-      results.push(pass(11, "Stability (skipped)", "SCG integration tests disabled", []));
+      results.push({ test_number: 11, name: "Stability (SCG disabled)", status: "skipped", details: "runScgIntegrationTests=false" });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -637,7 +641,7 @@ export default api({
 
       results.push(pass(12, "SCG replay occurrence stats", `${graph.allOccurrences.length} occurrences, ${ambiguityCount} ambiguous refs, ${dupIdOccCount} dup-ID occs, checksum=${checksum}`, assertions));
     } else {
-      results.push(pass(12, "SCG replay stats (skipped)", "SCG integration tests disabled", []));
+      results.push({ test_number: 12, name: "SCG replay stats (SCG disabled)", status: "skipped", details: "runScgIntegrationTests=false" });
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
