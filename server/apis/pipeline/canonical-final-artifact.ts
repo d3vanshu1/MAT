@@ -83,7 +83,36 @@ export interface CanonicalFinalArtifact {
 
   // Operational (excluded from semantic hash)
   finalized_at: string;
+
+  // --- Artifact lifecycle (Commit 3) ---
+  /** Lifecycle status: active = current, invalidated_partial = superseded partial, superseded = replaced */
+  artifact_status?: "active" | "invalidated_partial" | "superseded";
+  /** If superseded, the output_id of the replacement artifact */
+  superseded_by_output_id?: string | null;
+  /** Reason for invalidation (if artifact_status != active) */
+  invalidation_reason?: string | null;
+  /** Timestamp of invalidation */
+  invalidation_timestamp?: string | null;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Artifact Lifecycle helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ArtifactStatus = "active" | "invalidated_partial" | "superseded";
+
+export interface ArtifactLifecycleFields {
+  artifact_status: ArtifactStatus;
+  superseded_by_output_id: string | null;
+  invalidation_reason: string | null;
+  invalidation_timestamp: string | null;
+}
+
+/**
+ * Sentinel for canonical schema migration required.
+ * When critical columns are missing, finalization returns this instead of writing.
+ */
+export const CANONICAL_SCHEMA_MIGRATION_REQUIRED = "CANONICAL_SCHEMA_MIGRATION_REQUIRED" as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Semantic hash
