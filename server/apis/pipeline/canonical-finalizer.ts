@@ -338,23 +338,29 @@ export async function canonicalFinalize(
 
   // ── STEP 1: Validate prerequisites ────────────────────────────────────────
   // Check if an output already exists — if so, verify idempotency
-  // Schema-adaptive: try with semantic_hash first, fall back to legacy if column missing.
+  // Fix 10: Use artifact_status lifecycle columns (requires migration 019).
+  // Fix 11: Fail closed when artifact_status column doesn't exist.
   const ExistingOutputSchema = z.object({
     id: z.string(),
     semantic_hash: z.string().nullable(),
     executive_header: z.string().nullable(),
+    artifact_status: z.string().nullable(),
   });
-  let existingOutputs: { id: string; semantic_hash: string | null; executive_header: string | null }[];
+  let existingOutputs: { id: string; semantic_hash: string | null; executive_header: string | null; artifact_status: string | null }[];
   try {
     existingOutputs = await db.query(
-      `SELECT id, semantic_hash, executive_header FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
+      `SELECT id, semantic_hash, executive_header, artifact_status
+       FROM module_outputs
+       WHERE module_run_id = $1 AND artifact_status = 'active'
+       ORDER BY created_at DESC
+       LIMIT 1`,
       ExistingOutputSchema,
       [runId],
-      { label: "canonicalFinalize: check existing output" }
+      { label: "canonicalFinalize: check existing active output" }
     );
   } catch {
-    // semantic_hash column (or another canonical column) does not exist.
-    // CANONICAL_SCHEMA_MIGRATION_REQUIRED: run Migration 018/019 before finalising.
+    // artifact_status column (or another canonical column) does not exist.
+    // FAIL CLOSED: Migration 018/019 must be applied before finalization.
     console.error(
       `[canonicalFinalize] BLOCKED: canonical schema columns missing for run ${runId}. ` +
       `Run RunMigration018 / RunMigration019 and retry.`
@@ -362,17 +368,24 @@ export async function canonicalFinalize(
     return {
       status: "canonical_migration_required" as any,
       message:
-        "CANONICAL_SCHEMA_MIGRATION_REQUIRED: semantic_hash or companion columns do not exist. " +
+        "CANONICAL_SCHEMA_MIGRATION_REQUIRED: artifact_status or companion columns do not exist. " +
         "Execute RunMigration018 and RunMigration019 before attempting finalization.",
     };
   }
 
-  // Invalidated partial artifacts should NOT be updated in place — insert a new row.
-  // This preserves the invalidated row as audit evidence.
+  // Fix 10: Detect invalidated partial artifacts via artifact_status, not header text.
+  // If an active row's status is somehow 'invalidated_partial', treat as no active artifact.
+  // Also check for any pre-existing invalidated rows that need lifecycle transition.
+  let invalidatedPartialId: string | null = null;
   const isInvalidatedPartial = existingOutputs.length > 0 &&
-    existingOutputs[0].executive_header?.startsWith("[INVALIDATED_PARTIAL]");
+    (existingOutputs[0].artifact_status === 'invalidated_partial' ||
+     existingOutputs[0].executive_header?.startsWith("[INVALIDATED_PARTIAL]"));
   if (isInvalidatedPartial) {
-    console.log(`[canonicalFinalize] Existing output ${existingOutputs[0].id} is invalidated partial — will INSERT new row`);
+    invalidatedPartialId = existingOutputs[0].id;
+    console.log(
+      `[canonicalFinalize] Existing output ${invalidatedPartialId} is invalidated partial — ` +
+      `will INSERT new active row and mark old as superseded`
+    );
     existingOutputs = [];
   }
 
@@ -593,12 +606,13 @@ export async function canonicalFinalize(
           { label: "canonicalFinalize: persist artifact (update)" }
         );
     } else {
-      // Insert new row — canonical schema only (legacy paths removed)
+      // Insert new row — canonical schema with artifact lifecycle (Fix 10)
       const insertedRows = await db.query(
         `INSERT INTO module_outputs
            (module_run_id, executive_header, findings, full_report_markdown,
-            schema_version, finalized_at, semantic_hash, reportable_finding_ids, f06_diagnostics)
-         VALUES ($1, $2, $3::jsonb, $4, 2, $5::timestamptz, $6, $7::jsonb, $8::jsonb)
+            schema_version, finalized_at, semantic_hash, reportable_finding_ids,
+            f06_diagnostics, artifact_status)
+         VALUES ($1, $2, $3::jsonb, $4, 2, $5::timestamptz, $6, $7::jsonb, $8::jsonb, 'active')
          RETURNING id`,
         z.object({ id: z.string() }),
         [
@@ -614,6 +628,20 @@ export async function canonicalFinalize(
         { label: "canonicalFinalize: persist artifact (insert)" }
       );
       artifactId = insertedRows[0].id;
+
+      // Fix 10: If there was an invalidated partial, mark its lifecycle transition
+      if (invalidatedPartialId) {
+        await db.execute(
+          `UPDATE module_outputs
+           SET artifact_status = 'invalidated_partial',
+               superseded_by_output_id = $2,
+               invalidated_at = now(),
+               invalidation_reason = 'superseded_by_complete_artifact'
+           WHERE id = $1`,
+          [invalidatedPartialId, artifactId],
+          { label: "canonicalFinalize: mark old partial as superseded" }
+        );
+      }
     }
 
     // Bump deal updated_at

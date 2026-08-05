@@ -32,6 +32,12 @@ import { validateMergeContract } from "./merge-contract-validator.js";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
 import { computeContentHash } from "./source-snapshot.js";
 import { EFFECTIVE_CAP_MS } from "./pipeline-config.js";
+import {
+  requireFrozenManifest,
+  getValidMergeTreeLevels,
+  type FrozenManifest,
+  PipelinePrerequisiteError,
+} from "./pipeline-prerequisites.js";
 
 // ---------------------------------------------------------------------------
 // Integration IDs
@@ -413,6 +419,10 @@ export default api({
       reconciliationTriggered: false,
     };
 
+    // ─── Step 0: Load frozen manifest (fail-closed if missing) ────────
+    const frozenManifest = await requireFrozenManifest(ctx.integrations.db, runId);
+    const validLevels = getValidMergeTreeLevels(frozenManifest);
+
     // ─── Step 1: Load lightweight metadata ──────────────────────────────
     const metadata = await ctx.integrations.db.query(
       `SELECT tree_level, node_index,
@@ -424,11 +434,11 @@ export default api({
               merged_json->'_node_state' AS node_state,
               payload_hash
        FROM merge_checkpoints
-       WHERE module_run_id = $1 AND node_index >= 0 AND tree_level < 90
+       WHERE module_run_id = $1 AND node_index >= 0 AND tree_level = ANY($2::int[])
        ORDER BY tree_level, node_index`,
       MetadataRowSchema,
-      [runId],
-      { label: "Load merge checkpoint metadata" }
+      [runId, validLevels],
+      { label: "Load merge checkpoint metadata (manifest-scoped levels)" }
     );
 
     const nodeMetas: NodeMeta[] = metadata.map(r => ({
@@ -623,34 +633,16 @@ export default api({
 
     if (childLevel === 0) {
       // Level 1: load from pipeline_analysis using frozen manifest membership (Fix 3)
-      // Prefer manifest chunk indices over numeric range — ensures we only process
-      // analyses that were actually assigned to this L1 node during manifest construction.
-      let chunkIndices: number[] | null = null;
-      try {
-        const manifestRows = await ctx.integrations.db.query(
-          `SELECT payload FROM pipeline_checkpoints
-           WHERE module_run_id = $1 AND checkpoint_key = 'frozen_manifest'
-           LIMIT 1`,
-          z.object({ payload: z.any() }),
-          [runId],
-          { label: `Load frozen manifest for L1:N${targetIndex} membership` }
+      // The manifest is immutable and REQUIRED — no fallback to computed range.
+      const membership = frozenManifest.l1Membership?.[targetIndex];
+      if (!membership || membership.length === 0) {
+        throw new PipelinePrerequisiteError(
+          "MANIFEST_MEMBERSHIP_MISSING",
+          `Frozen manifest has no L1 membership for node index ${targetIndex}. ` +
+          `Cannot proceed without exact membership — range fallback is prohibited.`
         );
-        if (manifestRows.length > 0 && manifestRows[0].payload) {
-          const manifest = manifestRows[0].payload as { l1Membership?: Record<number, number[]> };
-          const membership = manifest.l1Membership?.[targetIndex];
-          if (membership && membership.length > 0) {
-            chunkIndices = membership;
-          }
-        }
-      } catch { /* manifest not yet available — fall through to computed range */ }
-
-      if (chunkIndices === null) {
-        // No manifest yet — fall back to computed range
-        const startIdx = targetIndex * MERGE_GROUP_SIZE;
-        const endIdx = Math.min(startIdx + MERGE_GROUP_SIZE - 1, maxChildIdx);
-        chunkIndices = [];
-        for (let i = startIdx; i <= endIdx; i++) chunkIndices.push(i);
       }
+      const chunkIndices = membership;
 
       const analysisRows = await ctx.integrations.db.query(
         `SELECT chunk_index, result_json
@@ -662,15 +654,36 @@ export default api({
         { label: `Load analysis chunks [${chunkIndices.join(",")}] for L1:N${targetIndex}` }
       );
 
-      // Fix 7: hash full text content (not truncated) for dependency fingerprinting
+      // Fix 8: Verify requested vs returned membership — block on mismatch
+      const returnedIndices = new Set(analysisRows.map((r: any) => r.chunk_index as number));
+      const missingIndices = chunkIndices.filter(ci => !returnedIndices.has(ci));
+      const unexpectedIndices = [...returnedIndices].filter(ci => !chunkIndices.includes(ci));
+
+      if (missingIndices.length > 0) {
+        throw new PipelinePrerequisiteError(
+          "L1_MEMBERSHIP_MISMATCH",
+          `L1:N${targetIndex} requested ${chunkIndices.length} analyses but ` +
+          `${missingIndices.length} are missing from pipeline_analysis: [${missingIndices.join(",")}]. ` +
+          `Recovery blocked — cannot proceed with incomplete membership.`
+        );
+      }
+      if (unexpectedIndices.length > 0) {
+        throw new PipelinePrerequisiteError(
+          "L1_MEMBERSHIP_UNEXPECTED",
+          `L1:N${targetIndex} received ${unexpectedIndices.length} unexpected analyses: [${unexpectedIndices.join(",")}]. ` +
+          `Recovery blocked — membership integrity violated.`
+        );
+      }
+
+      // Fix 4: hash full text content (not truncated) for dependency fingerprinting
       for (const row of analysisRows) {
         const data = typeof row.result_json === "string" ? JSON.parse(row.result_json) : row.result_json;
         const text = String(data.extraction ?? data.text ?? "");
         childPayloadHashes[`0:${row.chunk_index}`] = computeContentHash(text);
       }
 
-      // Store exact chunk indices for ancestry tracking (used in node state init below)
-      ;(childPayloadHashes as any).__l1ChunkIndices__ = analysisRows.map((r: any) => r.chunk_index);
+      // Store exact chunk indices for ancestry tracking
+      ;(childPayloadHashes as any).__l1ChunkIndices__ = chunkIndices;
     } else {
       // Level 2+: load from merge_checkpoints
       for (const ci of childIndices) {
@@ -800,9 +813,10 @@ export default api({
         let subgroupOutput: CanonicalFinding[];
 
         if (childLevel === 0) {
-          // L1 merge from raw text
+          // L1 merge from raw text — pass manifest membership
+          const l1Membership = frozenManifest.l1Membership?.[targetIndex] ?? [];
           subgroupOutput = await processLevel1Subgroup(
-            ctx, runId, targetIndex, model, currentVersion, startTime
+            ctx, runId, targetIndex, model, currentVersion, startTime, l1Membership
           );
         } else if (subgroup.memberFindingIds.length <= 1) {
           // Pass-through single finding
@@ -974,7 +988,25 @@ export default api({
             nodeState.reconCursor = 0;
             // Loop continues — next iteration will decide single-merge vs another split pass
           } else {
-            // No further reduction possible — terminate with current outputs
+            // No further reduction in partitioned passes.
+            // Fix 5: Before declaring complete, ensure all outputs have been compared
+            // through at least one global pass. If the total exceeds MAX_FINDINGS_PER_SUBGROUP
+            // and no reduction occurred, this is an irreducible population — BLOCK rather than
+            // falsely marking complete.
+            if (passOutputs.length > MAX_FINDINGS_PER_SUBGROUP) {
+              // Irreducible oversized population — cannot fit in a single merge request
+              // and partitioned passes produced no reduction. Block explicitly.
+              nodeState.lastError =
+                `Reconciliation irreducible: ${passOutputs.length} findings cannot be reduced below ` +
+                `${MAX_FINDINGS_PER_SUBGROUP}. Cross-partition duplicates may exist but partitioned ` +
+                `reduction produced no convergence after ${nodeState.reconPassNumber + 1} passes.`;
+              nodeState.failureClass = "unknown";
+              await persistNodeState(ctx, runId, targetLevel, targetIndex, nodeState, attemptId, claimedVersion);
+              diag.elapsedMs = Date.now() - startTime;
+              diag.action = "block";
+              return { status: "blocked" as const, diagnostics: diag };
+            }
+            // Small enough for a final single merge — this guarantees global comparison
             nodeState.reconciliationFindings = passOutputs;
             nodeState.reconciliationOutputIds = passOutputs.map(f => f.finding_id);
             nodeState.reconciliationComplete = true;
@@ -1057,22 +1089,48 @@ export default api({
       }
     }
 
-    // ── Fix 5: Exact ancestry validation ─────────────────────────────────────
-    // Verify the ancestry ID set is internally consistent. For the natural root
-    // (the highest-level node), all analysis IDs must appear exactly once.
+    // ── Fix 7: Exact ancestry validation — mismatches BLOCK completion ────────
+    // Verify the ancestry ID set is internally consistent.
     const ancestrySet = new Set(nodeState.ancestryAnalysisIds);
     const ancestryDuplicates = nodeState.ancestryAnalysisIds.filter((id, idx) =>
       nodeState!.ancestryAnalysisIds.indexOf(id) !== idx
     );
     if (ancestryDuplicates.length > 0) {
-      console.warn(
-        `[AdaptiveMergeRecovery] L${targetLevel}:N${targetIndex} ancestry has ${ancestryDuplicates.length} duplicates: ` +
-        `${ancestryDuplicates.slice(0, 5).join(", ")}...`
-      );
+      // BLOCK: duplicate ancestry IDs are a tree construction error
+      nodeState.lastError = `Ancestry has ${ancestryDuplicates.length} duplicate IDs: ${ancestryDuplicates.slice(0, 5).join(", ")}`;
+      nodeState.failureClass = "unknown";
+      await persistNodeState(ctx, runId, targetLevel, targetIndex, nodeState, attemptId, claimedVersion);
+      diag.elapsedMs = Date.now() - startTime;
+      diag.action = "block";
+      diag.failureClass = "unknown";
+      return { status: "blocked" as const, diagnostics: diag };
     }
 
-    // Compute output hash and ancestry
-    nodeState.outputHash = hashFindingIds(finalFindings.map(f => f.finding_id));
+    // For the natural root (top level), verify ancestry covers the full manifest
+    const isNaturalRoot = targetLevel === Math.max(...validLevels) &&
+      targetIndex === 0 &&
+      !diag.nextUnresolved; // Will be checked after completion
+    if (isNaturalRoot) {
+      const expectedAnalysisIds = new Set(frozenManifest.eligibleAnalysisIds);
+      const missingFromAncestry = [...expectedAnalysisIds].filter(id => !ancestrySet.has(id));
+      const unexpectedInAncestry = [...ancestrySet].filter(id => !expectedAnalysisIds.has(id));
+
+      if (missingFromAncestry.length > 0 || unexpectedInAncestry.length > 0) {
+        nodeState.lastError =
+          `Root ancestry mismatch: ${missingFromAncestry.length} missing, ${unexpectedInAncestry.length} unexpected. ` +
+          `Missing: [${missingFromAncestry.slice(0, 5).join(",")}]. Unexpected: [${unexpectedInAncestry.slice(0, 5).join(",")}]`;
+        nodeState.failureClass = "unknown";
+        await persistNodeState(ctx, runId, targetLevel, targetIndex, nodeState, attemptId, claimedVersion);
+        diag.elapsedMs = Date.now() - startTime;
+        diag.action = "block";
+        return { status: "blocked" as const, diagnostics: diag };
+      }
+    }
+
+    // Compute output hash using full finding content (Fix 6: not just finding IDs)
+    // Any content change with identical IDs must still invalidate parents.
+    const findingContentHashes = finalFindings.map(f => computeFindingContentHash(f));
+    nodeState.outputHash = computeContentHash(findingContentHashes.sort().join("|"));
     nodeState.ancestryCount = ancestrySet.size;
     nodeState.ancestryHash = computeContentHash(
       [...ancestrySet].sort().join("|") + ":" + nodeState.outputHash
@@ -1177,19 +1235,28 @@ async function processLevel1Subgroup(
   model: string,
   currentVersion: string,
   startTime: number,
+  manifestMembership: number[],
 ): Promise<CanonicalFinding[]> {
-  const startIdx = nodeIndex * MERGE_GROUP_SIZE;
-  const endIdx = startIdx + MERGE_GROUP_SIZE - 1;
-
+  // Fix 2: Use exact manifest membership — no range-based queries
   const analysisRows = await ctx.integrations.db.query(
     `SELECT chunk_index, result_json
      FROM pipeline_analysis
-     WHERE run_id = $1 AND chunk_index >= $2 AND chunk_index <= $3
+     WHERE run_id = $1 AND chunk_index = ANY($2::int[])
      ORDER BY chunk_index`,
     AnalysisResultSchema,
-    [runId, startIdx, endIdx],
-    { label: `Load analysis chunks ${startIdx}-${endIdx} for L1` }
+    [runId, manifestMembership],
+    { label: `Load analysis chunks [${manifestMembership.join(",")}] for L1:N${nodeIndex} (manifest)` }
   );
+
+  // Fix 8: Verify returned matches requested
+  if (analysisRows.length !== manifestMembership.length) {
+    const returned = new Set(analysisRows.map((r: any) => r.chunk_index));
+    const missing = manifestMembership.filter(ci => !returned.has(ci));
+    throw new AdaptiveRecoveryError(
+      "missing_stale_child",
+      `L1:N${nodeIndex} processSubgroup: manifest expects ${manifestMembership.length} analyses, got ${analysisRows.length}. Missing: [${missing.join(",")}]`
+    );
+  }
 
   if (analysisRows.length === 0) return [];
 
@@ -1198,7 +1265,7 @@ async function processLevel1Subgroup(
     return String(data.extraction ?? data.text ?? "");
   });
 
-  const mergeInput = texts.map((t: string, i: number) => `## Analysis Chunk ${startIdx + i}\n\n${t.slice(0, 50_000)}`).join("\n\n---\n\n");
+  const mergeInput = texts.map((t: string, i: number) => `## Analysis Chunk ${manifestMembership[i]}\n\n${t.slice(0, 50_000)}`).join("\n\n---\n\n");
 
   const result = await callLLMWithHeadroom(ctx, {
     model,
@@ -1381,4 +1448,5 @@ export {
   computeFindingContentHash,
   MERGE_GROUP_SIZE,
   MAX_FINDINGS_PER_SUBGROUP,
+  PipelinePrerequisiteError,
 };

@@ -148,30 +148,113 @@ function gateEvidenceCompleteness(f: any): GateResult {
   return { passed: true, gate: "evidence_completeness" };
 }
 
-/** Gate 2: Correct authoritative source */
+/** Gate 2: Correct authoritative source — must cite a recognized document class */
+const VALID_DOCUMENT_CLASSES = new Set([
+  "im", "cim", "management_presentation", "financial_model",
+  "data_room", "vendor_due_diligence", "management_accounts",
+  "annual_report", "statutory_accounts", "board_minutes",
+  "operating_model", "forecast_model", "budget",
+  "memo", "ic_memo", "term_sheet",
+]);
+
 function gateAuthoritativeSource(f: any): GateResult {
-  // Findings must cite actual diligence documents, not process artifacts
   const sourceDocs = f.source_docs ?? [];
   const evidence = f.evidence ?? [];
-  const allSources = [...sourceDocs, ...evidence.map((e: any) => e.source_doc ?? "")];
-  const hasSource = allSources.some((s: any) => s && typeof s === "string" && s.length > 0);
-  if (!hasSource) {
-    return { passed: false, gate: "authoritative_source", reason: "No authoritative source cited" };
+  const allSources = [
+    ...sourceDocs.map((s: any) => typeof s === "object" ? s : { doc_class: "", name: String(s) }),
+    ...evidence.map((e: any) => ({ doc_class: e.doc_class ?? "", name: e.source_doc ?? "" })),
+  ];
+
+  if (allSources.length === 0) {
+    return { passed: false, gate: "authoritative_source", reason: "No source documents cited" };
   }
+
+  // Must have at least one source with a recognized document class
+  const hasRecognizedClass = allSources.some((s: any) => {
+    const docClass = (s.doc_class ?? "").toLowerCase().replace(/[\s-]/g, "_");
+    return VALID_DOCUMENT_CLASSES.has(docClass);
+  });
+
+  if (!hasRecognizedClass) {
+    // If no structured doc_class, require at minimum a named source document
+    const hasNamedSource = allSources.some((s: any) => {
+      const name = (s.name ?? "").trim();
+      return name.length > 3 && !name.startsWith("[process");
+    });
+    if (!hasNamedSource) {
+      return {
+        passed: false,
+        gate: "authoritative_source",
+        reason: "No recognized authoritative document class or named source"
+      };
+    }
+    // Named source but no class — send to secondary (needs-review)
+    return {
+      passed: false,
+      gate: "authoritative_source",
+      reason: `Sources lack structured doc_class — cannot verify authority: ${allSources.map(s => s.name).filter(Boolean).slice(0,3).join(", ")}`
+    };
+  }
+
   return { passed: true, gate: "authoritative_source" };
 }
 
-/** Gate 3: Period compatibility */
+/** Gate 3: Period compatibility — exact period and period_type validation */
 function gatePeriodCompatibility(f: any): GateResult {
   const evidence = f.evidence ?? [];
   if (evidence.length < 2) return { passed: true, gate: "period_compatibility" };
 
-  const periods = evidence.map((e: any) => e.period ?? "").filter((p: string) => p.length > 0);
-  if (periods.length < 2) return { passed: true, gate: "period_compatibility" };
+  // Extract structured period data from evidence
+  const periodEntries = evidence
+    .map((e: any) => ({
+      period: (e.period ?? "").trim(),
+      period_type: (e.period_type ?? "").trim().toLowerCase(),
+    }))
+    .filter((p: any) => p.period.length > 0);
 
-  // Check that compared values are from comparable periods
-  // FY24 vs FY26 without adjustment is suspicious but not auto-reject
-  // Reject: comparing actuals from different fiscal years without disclosure
+  if (periodEntries.length < 2) {
+    // Insufficient structured period metadata — fail closed to needs-review
+    if (evidence.length >= 2) {
+      return {
+        passed: false,
+        gate: "period_compatibility",
+        reason: "Evidence has multiple entries but insufficient structured period metadata to validate compatibility"
+      };
+    }
+    return { passed: true, gate: "period_compatibility" };
+  }
+
+  // Check period_type consistency (FY vs HY vs Q vs monthly)
+  const periodTypes = [...new Set(periodEntries.map((p: any) => p.period_type).filter(Boolean))];
+  if (periodTypes.length > 1) {
+    return {
+      passed: false,
+      gate: "period_compatibility",
+      reason: `Incompatible period types compared: ${periodTypes.join(" vs ")}`
+    };
+  }
+
+  // Check for cross-year comparison without explicit revision context
+  const years = periodEntries
+    .map((p: any) => {
+      const match = p.period.match(/(20\d{2}|FY\d{2})/i);
+      return match ? match[0].replace(/FY/i, "20") : null;
+    })
+    .filter(Boolean);
+  const uniqueYears = [...new Set(years)];
+  if (uniqueYears.length > 1) {
+    // Cross-year comparison — valid only for revision/trend findings
+    const kind = (f.finding_kind ?? "").toLowerCase();
+    const isRevision = kind.includes("revision") || kind.includes("change") || kind.includes("trend");
+    if (!isRevision) {
+      return {
+        passed: false,
+        gate: "period_compatibility",
+        reason: `Cross-year comparison (${uniqueYears.join(" vs ")}) without revision/trend classification`
+      };
+    }
+  }
+
   return { passed: true, gate: "period_compatibility" };
 }
 
@@ -250,20 +333,36 @@ function gateActualForecast(f: any): GateResult {
   return { passed: true, gate: "actual_forecast" };
 }
 
-/** Gate 8: Genuine contradiction or material change */
+/** Gate 8: Genuine contradiction — requires structured disclosure state + numeric delta */
 function gateGenuineContradiction(f: any): GateResult {
   const kind = (f.finding_kind ?? "").toLowerCase();
   const severity = (f.severity ?? "").toLowerCase();
 
-  // Info-only observations are not contradictions
-  if (severity === "info" && !kind.includes("contradiction") && !kind.includes("discrepancy")) {
-    return { passed: false, gate: "genuine_contradiction", reason: "Informational observation — not a genuine contradiction" };
+  // Info-only observations without structured contradiction classification
+  if (severity === "info" && !kind.includes("contradiction") && !kind.includes("discrepancy") && !kind.includes("gap")) {
+    return { passed: false, gate: "genuine_contradiction", reason: "Informational observation — no contradiction/discrepancy classification" };
   }
 
-  // Disclosed/acknowledged issues are not findings
-  const text = `${f.title ?? ""} ${f.detail ?? ""}`.toLowerCase();
-  if (text.includes("disclosed") && text.includes("acknowledged")) {
-    return { passed: false, gate: "genuine_contradiction", reason: "Already disclosed/acknowledged issue" };
+  // Require structured disclosure_status field for genuine determination
+  const disclosureStatus = (f.disclosure_status ?? "").toLowerCase();
+  if (disclosureStatus === "disclosed" || disclosureStatus === "acknowledged") {
+    return { passed: false, gate: "genuine_contradiction", reason: `Finding has disclosure_status='${disclosureStatus}' — not undisclosed` };
+  }
+
+  // For contradiction findings, require a numeric delta to prove the inconsistency
+  if (kind.includes("contradiction") || kind.includes("discrepancy")) {
+    const deltaAbs = (f as any).delta_abs;
+    const deltaPct = (f as any).delta_pct;
+    const hasNumericDelta = (deltaAbs != null && deltaAbs !== 0) || (deltaPct != null && deltaPct !== 0);
+    const hasComparisonBasis = f.comparison_basis != null && String(f.comparison_basis).length > 0;
+
+    if (!hasNumericDelta && !hasComparisonBasis) {
+      return {
+        passed: false,
+        gate: "genuine_contradiction",
+        reason: "Contradiction finding lacks numeric delta and comparison_basis — cannot verify genuine inconsistency"
+      };
+    }
   }
 
   return { passed: true, gate: "genuine_contradiction" };
@@ -275,13 +374,45 @@ function gateDeduplication(_f: any): GateResult {
   return { passed: true, gate: "deduplication" };
 }
 
-/** Gate 10: Materiality/severity */
+/** Gate 10: Materiality — requires quantifiable threshold or explicit severity justification */
 function gateMateriality(f: any): GateResult {
   const severity = (f.severity ?? "info").toLowerCase();
 
-  // Info findings can only be secondary observations
+  // Info findings are always secondary observations
   if (severity === "info") {
     return { passed: false, gate: "materiality", reason: "Info-severity findings are secondary observations only" };
+  }
+
+  // For warning/critical findings, require structured materiality evidence:
+  // Either a numeric delta that exceeds a threshold, or an explicit materiality_basis
+  const deltaAbs = (f as any).delta_abs;
+  const deltaPct = (f as any).delta_pct;
+  const materialityBasis = (f.materiality_basis ?? "").trim();
+
+  if (severity === "critical") {
+    // Critical must have quantifiable delta OR explicit materiality basis
+    const hasQuantifiedDelta = (deltaAbs != null && Math.abs(Number(deltaAbs)) > 0) ||
+      (deltaPct != null && Math.abs(Number(deltaPct)) > 0);
+    if (!hasQuantifiedDelta && !materialityBasis) {
+      return {
+        passed: false,
+        gate: "materiality",
+        reason: "Critical finding lacks quantified delta and materiality_basis — cannot verify material impact"
+      };
+    }
+  }
+
+  if (severity === "warning") {
+    // Warning: require at least one of: numeric delta, materiality_basis, or multiple evidence entries
+    const hasAnyQuantification = (deltaAbs != null) || (deltaPct != null) || materialityBasis;
+    const evidence = f.evidence ?? [];
+    if (!hasAnyQuantification && evidence.length < 2) {
+      return {
+        passed: false,
+        gate: "materiality",
+        reason: "Warning finding has no quantification, no materiality_basis, and insufficient evidence"
+      };
+    }
   }
 
   return { passed: true, gate: "materiality" };
@@ -303,13 +434,80 @@ const GATES = [
 
 // ---------------------------------------------------------------------------
 // Ground-truth signals (SCG-specific expected findings)
+// Validated using structured fields: issue_key, finding_kind, evidence data.
+// Title/detail regex used only as SECONDARY confirmation signal, not primary gate.
 // ---------------------------------------------------------------------------
 const GROUND_TRUTH_SIGNALS = [
-  { id: "fy26_revenue_revision", match: (f: any) => /fy.?26.*revenue.*revis/i.test(`${f.title} ${f.detail}`) },
-  { id: "fy26_ebitda_revision", match: (f: any) => /fy.?26.*ebitda.*revis/i.test(`${f.title} ${f.detail}`) },
-  { id: "widening_adjustments", match: (f: any) => /widen.*adjust/i.test(`${f.title} ${f.detail}`) },
-  { id: "memo_vs_model_revenue", match: (f: any) => /memo.*model.*revenue|revenue.*memo.*model/i.test(`${f.title} ${f.detail}`) },
-  { id: "calls_lines_fy26_decline", match: (f: any) => /call.*line.*declin|declin.*call.*line/i.test(`${f.title} ${f.detail}`) },
+  {
+    id: "fy26_revenue_revision",
+    match: (f: any) => {
+      const key = (f.issue_key ?? "").toLowerCase();
+      const kind = (f.finding_kind ?? "").toLowerCase();
+      // Primary: structured field match
+      if (key.includes("fy26") && key.includes("revenue") && kind.includes("revision")) return true;
+      // Secondary: evidence period + metric type
+      const evidence = f.evidence ?? [];
+      const hasFY26 = evidence.some((e: any) => (e.period ?? "").includes("FY26") || (e.period ?? "").includes("2026"));
+      const hasRevenue = evidence.some((e: any) => (e.metric ?? "").toLowerCase().includes("revenue"));
+      if (hasFY26 && hasRevenue && kind.includes("revision")) return true;
+      return false;
+    },
+  },
+  {
+    id: "fy26_ebitda_revision",
+    match: (f: any) => {
+      const key = (f.issue_key ?? "").toLowerCase();
+      const kind = (f.finding_kind ?? "").toLowerCase();
+      if (key.includes("fy26") && key.includes("ebitda") && kind.includes("revision")) return true;
+      const evidence = f.evidence ?? [];
+      const hasFY26 = evidence.some((e: any) => (e.period ?? "").includes("FY26") || (e.period ?? "").includes("2026"));
+      const hasEBITDA = evidence.some((e: any) => (e.metric ?? "").toLowerCase().includes("ebitda"));
+      if (hasFY26 && hasEBITDA && kind.includes("revision")) return true;
+      return false;
+    },
+  },
+  {
+    id: "widening_adjustments",
+    match: (f: any) => {
+      const key = (f.issue_key ?? "").toLowerCase();
+      if (key.includes("widen") && key.includes("adjust")) return true;
+      const kind = (f.finding_kind ?? "").toLowerCase();
+      const hasAdjustmentType = kind.includes("adjustment") || kind.includes("gap");
+      const evidence = f.evidence ?? [];
+      const hasMultiplePeriods = new Set(evidence.map((e: any) => e.period).filter(Boolean)).size > 1;
+      if (hasAdjustmentType && hasMultiplePeriods) return true;
+      return false;
+    },
+  },
+  {
+    id: "memo_vs_model_revenue",
+    match: (f: any) => {
+      const key = (f.issue_key ?? "").toLowerCase();
+      if (key.includes("memo") && key.includes("model") && key.includes("revenue")) return true;
+      // Check evidence sources for memo vs model comparison
+      const evidence = f.evidence ?? [];
+      const docClasses = evidence.map((e: any) => (e.doc_class ?? "").toLowerCase());
+      const hasMemo = docClasses.some((d: string) => d.includes("memo") || d.includes("ic_memo"));
+      const hasModel = docClasses.some((d: string) => d.includes("model") || d.includes("financial_model"));
+      if (hasMemo && hasModel) return true;
+      return false;
+    },
+  },
+  {
+    id: "calls_lines_fy26_decline",
+    match: (f: any) => {
+      const key = (f.issue_key ?? "").toLowerCase();
+      if (key.includes("call") && key.includes("line") && key.includes("declin")) return true;
+      // Structured: metric=calls/lines + negative delta + FY26 period
+      const evidence = f.evidence ?? [];
+      const hasCallsMetric = evidence.some((e: any) => (e.metric ?? "").toLowerCase().includes("call"));
+      const hasFY26 = evidence.some((e: any) => (e.period ?? "").includes("FY26") || (e.period ?? "").includes("2026"));
+      const deltaPct = (f as any).delta_pct;
+      const hasDecline = deltaPct != null && Number(deltaPct) < 0;
+      if (hasCallsMetric && hasFY26 && hasDecline) return true;
+      return false;
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -465,34 +663,35 @@ export default api({
     if (inputFindings && inputFindings.length > 0) {
       findings = inputFindings;
     } else {
-      // Load findings from the active artifact
-      // Note: artifact_status column may not exist pre-migration-019.
-      // Use a sub-select that gracefully handles missing column.
+      // Load findings from the active artifact.
+      // Fix 11: FAIL CLOSED — requires migration 019 (artifact_status column).
+      // Do not silently select a row under the legacy lifecycle schema.
       let artifactRows: { findings?: any }[];
       try {
         artifactRows = await ctx.integrations.db.query(
           `SELECT findings
            FROM module_outputs
            WHERE module_run_id = $1
-             AND COALESCE(artifact_status, 'active') = 'active'
+             AND artifact_status = 'active'
            ORDER BY created_at DESC
            LIMIT 1`,
           z.object({ findings: z.any() }),
           [runId],
-          { label: "Load active artifact findings (post-migration)" }
+          { label: "Load active artifact findings (requires migration 019)" }
         );
       } catch {
-        // Fallback: artifact_status column doesn't exist yet (pre-migration-019)
-        artifactRows = await ctx.integrations.db.query(
-          `SELECT findings
-           FROM module_outputs
-           WHERE module_run_id = $1
-           ORDER BY created_at DESC
-           LIMIT 1`,
-          z.object({ findings: z.any() }),
-          [runId],
-          { label: "Load active artifact findings (pre-migration)" }
-        );
+        // artifact_status column does not exist — FAIL CLOSED.
+        // Do NOT fallback to legacy query which could select an invalidated partial.
+        return {
+          result: {
+            error: "MIGRATION_REQUIRED: artifact_status column missing. " +
+              "Run RunMigration019 before invoking FindingReductionGate in production. " +
+              "Legacy lifecycle schema cannot guarantee the correct artifact is selected.",
+            primaryFindings: [],
+            suppressedLedger: [],
+            migrationRequired: true,
+          }
+        };
       }
 
       if (artifactRows.length === 0) {

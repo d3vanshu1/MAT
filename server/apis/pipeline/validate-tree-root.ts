@@ -18,29 +18,19 @@ import {
   type LeafNode,
 } from "./merge-root-manifest.js";
 import { computeContentHash } from "./source-snapshot.js";
-import { getPipelineVersion } from "./pipeline-version.js";
+import {
+  loadFrozenManifest,
+  persistFrozenManifest,
+  getValidMergeTreeLevels,
+  type FrozenManifest,
+} from "./pipeline-prerequisites.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const MERGE_GROUP_SIZE = 4;
 
 // ---------------------------------------------------------------------------
-// Types
+// Types (FrozenManifest imported from pipeline-prerequisites)
 // ---------------------------------------------------------------------------
-export interface FrozenManifest {
-  version: number;
-  /** All eligible analysis IDs in deterministic order */
-  eligibleAnalysisIds: string[];
-  /** L1 membership: maps L1 node index → array of analysis chunk_indices */
-  l1Membership: Record<number, number[]>;
-  /** Excluded IDs and reasons */
-  excluded: Array<{ analysisId: string; reason: string }>;
-  /** Source manifest fingerprint */
-  sourceFingerprint: string;
-  /** Expected topology */
-  expectedTopology: { l1: number; l2: number; l3: number; l4: number; total: number };
-  /** Computed at validation time */
-  createdAt: string;
-}
 
 export interface RootAcceptanceResult {
   accepted: boolean;
@@ -147,19 +137,25 @@ export default api({
       naturalRoot: null,
     };
 
-    // ─── Step 1: Load all analysis results (eligible membership) ────────
+    // ─── Step 1: Check for existing immutable manifest ──────────────────
+    // Fix 3: If a manifest already exists, use it as the authoritative source.
+    // Do NOT reconstruct from mutable pipeline_analysis rows.
+    let frozenManifest = await loadFrozenManifest(ctx.integrations.db, runId);
+
+    // Load analysis results (needed for fingerprinting if no manifest exists)
+    // Fix 4: Hash FULL content, not LEFT(..., 1024) truncation
     const analysisRows = await ctx.integrations.db.query(
       `SELECT chunk_index,
-              COALESCE(LEFT(COALESCE(result_json->>'extraction', result_json->>'text', ''), 1024), '') AS text_sample
+              COALESCE(result_json->>'extraction', result_json->>'text', '') AS full_text
        FROM pipeline_analysis
        WHERE run_id = $1
        ORDER BY chunk_index`,
       z.object({
         chunk_index: z.coerce.number(),
-        text_sample: z.string(),
+        full_text: z.string(),
       }),
       [runId],
-      { label: "Load all analysis results for manifest" }
+      { label: "Load all analysis results for manifest validation" }
     );
 
     const analysisCount = analysisRows.length;
@@ -180,18 +176,7 @@ export default api({
       4: expectedL4,
     };
 
-    // ─── Step 2: Build frozen manifest ──────────────────────────────────
-    // Deterministic L1 membership from chunk indices
-    const l1Membership: Record<number, number[]> = {};
-    for (let ni = 0; ni < expectedL1; ni++) {
-      const start = ni * MERGE_GROUP_SIZE;
-      const end = Math.min(start + MERGE_GROUP_SIZE - 1, analysisCount - 1);
-      l1Membership[ni] = [];
-      for (let ci = start; ci <= end; ci++) {
-        l1Membership[ni].push(ci);
-      }
-    }
-
+    // ─── Step 2: Build or validate frozen manifest ──────────────────────
     // Source fingerprint from extraction metadata
     const extractions = analysisRows.map(r => ({
       documentId: `run_${runId}`,
@@ -199,28 +184,52 @@ export default api({
     }));
     const sourceFingerprint = computeSourceFingerprint(extractions);
 
-    // Build leaf nodes for fingerprint
+    // Fix 4: Use full content hash for leaf fingerprinting (not truncated)
     const leafNodes: LeafNode[] = analysisRows.map(r => ({
       leafId: `${runId}:${r.chunk_index}`,
-      contentHash: computeContentHash(r.text_sample),
+      contentHash: computeContentHash(r.full_text),
     }));
     const leafSetFingerprint = computeLeafSetFingerprint(leafNodes);
 
-    const frozenManifest: FrozenManifest = {
-      version: 1,
-      eligibleAnalysisIds: analysisIds,
-      l1Membership,
-      excluded: [], // No exclusions in current implementation
-      sourceFingerprint,
-      expectedTopology: {
-        l1: expectedL1,
-        l2: expectedL2,
-        l3: expectedL3,
-        l4: expectedL4,
-        total: expectedL1 + expectedL2 + expectedL3 + expectedL4,
-      },
-      createdAt: new Date().toISOString(),
-    };
+    if (frozenManifest) {
+      // Existing manifest found — validate it against current state
+      if (frozenManifest.sourceFingerprint !== sourceFingerprint) {
+        result.rejectionReasons.push(
+          `Existing frozen manifest sourceFingerprint mismatch: ` +
+          `manifest=${frozenManifest.sourceFingerprint}, current=${sourceFingerprint}. ` +
+          `Analysis set may have changed since manifest was created.`
+        );
+      }
+      // Use existing manifest as authoritative (immutable)
+    } else {
+      // No existing manifest — construct from current state with provenance
+      // Build L1 membership from actual ordered chunk indices
+      const l1Membership: Record<number, number[]> = {};
+      for (let ni = 0; ni < expectedL1; ni++) {
+        l1Membership[ni] = chunkIndices.slice(
+          ni * MERGE_GROUP_SIZE,
+          Math.min((ni + 1) * MERGE_GROUP_SIZE, chunkIndices.length)
+        );
+      }
+
+      frozenManifest = {
+        version: 1,
+        eligibleAnalysisIds: analysisIds,
+        l1Membership,
+        excluded: [],
+        sourceFingerprint,
+        expectedTopology: {
+          l1: expectedL1,
+          l2: expectedL2,
+          l3: expectedL3,
+          l4: expectedL4,
+          total: expectedL1 + expectedL2 + expectedL3 + expectedL4,
+        },
+        createdAt: new Date().toISOString(),
+        provenance: "validation_snapshot",
+        eligibleCount: analysisCount,
+      };
+    }
 
     result.frozenManifest = frozenManifest;
 
@@ -251,8 +260,9 @@ export default api({
       { label: "Load all merge checkpoints for validation" }
     );
 
-    // Exclude synthetic quality checkpoints (tree_level >= 90)
-    const dataCheckpoints = checkpoints.filter(c => c.tree_level < 90);
+    // Fix 9: Explicit checkpoint kind — filter using manifest topology levels, not numeric threshold
+    const validLevels = getValidMergeTreeLevels(frozenManifest);
+    const dataCheckpoints = checkpoints.filter(c => validLevels.includes(c.tree_level));
 
     // ─── Step 4: Per-level validation ───────────────────────────────────
     for (let lvl = 1; lvl <= maxLevel; lvl++) {
@@ -281,7 +291,7 @@ export default api({
 
     // ─── Step 5: Diagnose partial/failed nodes ──────────────────────────
     const partialNodes = dataCheckpoints.filter(c =>
-      c.status && c.status !== "complete" && c.tree_level < 90
+      c.status && c.status !== "complete"
     );
 
     for (const pn of partialNodes) {
@@ -329,7 +339,7 @@ export default api({
       // For each L1 node that's complete, add its chunk indices to coverage
       const l1Nodes = dataCheckpoints.filter(c => c.tree_level === 1 && (c.status ?? "complete") === "complete");
       for (const l1 of l1Nodes) {
-        const membership = l1Membership[l1.node_index] ?? [];
+        const membership = frozenManifest.l1Membership[l1.node_index] ?? [];
         for (const ci of membership) {
           if (coveredChunkIndices.has(ci)) {
             result.ancestryDetails.duplicateIds.push(`chunk_${ci}`);
@@ -379,22 +389,16 @@ export default api({
       result.rejectionReasons.push(`Multiple nodes at root level ${rootLevel}: ${rootLevelNodes.length}`);
     }
 
-    // ─── Step 8: Persist frozen manifest ────────────────────────────────
+    // ─── Step 8: Persist frozen manifest (immutable — won't overwrite different content) ──
     if (result.rejectionReasons.length === 0) {
       result.accepted = true;
 
-      // Persist manifest as checkpoint
-      try {
-        await ctx.integrations.db.execute(
-          `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-           VALUES ($1, 'frozen_manifest', $2::jsonb, 'complete', $3)
-           ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE
-             SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-          [runId, JSON.stringify(frozenManifest), getPipelineVersion()],
-          { label: "Persist frozen manifest" }
-        );
-      } catch (e: any) {
-        console.warn(`[ValidateTreeRoot] Failed to persist manifest: ${e?.message}`);
+      // Persist manifest using shared utility (respects immutability)
+      const persistResult = await persistFrozenManifest(ctx.integrations.db, runId, frozenManifest);
+      if (!persistResult.persisted && persistResult.reason) {
+        // Manifest already exists with different fingerprint — this is informational
+        // The acceptance result is still valid since we validated against the existing manifest
+        console.warn(`[ValidateTreeRoot] Manifest persistence skipped: ${persistResult.reason}`);
       }
     }
 
