@@ -2395,11 +2395,16 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
         if (isFinalNode) {
           // Check if output already exists (if so, skip — run should have been marked completed)
+          // Exclude invalidated partial artifacts (prefixed with [INVALIDATED_PARTIAL]) — these
+          // are leftovers from recovery and must be replaced by a fresh finalization pass.
           const [outputCheck] = await ctx.integrations.db.query(
-            `SELECT 1 AS exists FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
+            `SELECT 1 AS exists FROM module_outputs
+             WHERE module_run_id = $1
+               AND executive_header NOT LIKE '[INVALIDATED_PARTIAL]%'
+             LIMIT 1`,
             z.object({ exists: z.coerce.number() }),
             [runId],
-            { label: "Fast-path: check module_outputs" }
+            { label: "Fast-path: check module_outputs (excl. invalidated)" }
           );
 
           if (!outputCheck) {
