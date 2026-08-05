@@ -89,6 +89,7 @@ import { buildMergeRootManifest, buildLeafNodes, computeSourceFingerprint, valid
 import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint, computeContentHash, type SourceSnapshot, type BuildSnapshotInput, SOURCE_SNAPSHOT_VERSION } from "./source-snapshot.js";
 import { CONTRADICTION_CHECK_ALLOWED_TAGS, isChunkAllowedForContradictionCheck, createPolicySummary, type SourcePolicySummary } from "./source-policy.js";
 import { type RoutingDiagnosticEntry, type RoutingDiagnostics } from "./replay-classifier.js";
+import { runPostMergeFinalizationStages, type PostMergeFinalizationResult } from "./post-merge-finalization.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -2480,9 +2481,66 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               }
             }
 
-            // If housekeeping is corrupt or unloadable, or quality-stage prerequisites missing, abort fast path entirely
+            // If housekeeping is corrupt or unloadable, or quality-stage prerequisites missing,
+            // abort fast path entirely. Route through the shared post-merge finalization runner
+            // which executes only quality stages (no upstream re-traversal).
             if (fastPathHousekeepingAbort || fastPathPrereqAbort) {
-              // Fall through to normal merge path — do not format or persist
+              console.log(`[pipeline:fast-path] Routing to shared post-merge finalization runner (prereqAbort=${fastPathPrereqAbort}, hkAbort=${fastPathHousekeepingAbort})`);
+              const finalizationResult = await runPostMergeFinalizationStages({
+                ctx,
+                runId,
+                dealId,
+                moduleId,
+                naturalRootTreeLevel: topCheckpoint.tree_level,
+                naturalRootNodeIndex: 0,
+                canonicalRootFindings: findings,
+                executiveHeader: topCheckpoint.executive_header,
+                startTime,
+                timeRemaining,
+                callerPath: "fast_path",
+                housekeepingFindings: fastPathHousekeeping,
+                fileTagMap,
+                runPostMergePipeline,
+                formatReportInline,
+              });
+              // Translate PostMergeFinalizationResult → pipeline return type
+              if (finalizationResult.status === "complete" && finalizationResult.output) {
+                const MAX_MERGED_TEXT_CHARS = 150_000;
+                let mergedText = finalizationResult.output.fullReport;
+                if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
+                  mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport]";
+                }
+                return {
+                  status: "completed",
+                  runId,
+                  phase: "done",
+                  progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                  result: {
+                    executiveHeader: finalizationResult.output.executiveHeader,
+                    findings: finalizationResult.output.findings,
+                    mergedText,
+                    fullReport: finalizationResult.output.fullReport,
+                  },
+                  failedChunks: 0,
+                  truncatedChunks: 0,
+                  truncatedMerges: 0,
+                  firstError: null,
+                };
+              }
+              // In-progress, blocked, or failed — return in_progress for pipeline scheduler to retry
+              return {
+                status: "in_progress",
+                runId,
+                phase: `post_merge_finalization_${finalizationResult.currentStage ?? "init"}`,
+                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                result: null,
+                failedChunks: 0,
+                truncatedChunks: 0,
+                truncatedMerges: 0,
+                firstError: finalizationResult.blockingReasons.length > 0
+                  ? finalizationResult.blockingReasons.join("; ")
+                  : null,
+              };
             } else {
 
             const finalNode = {
@@ -5285,11 +5343,6 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     };
   }
 
-  // Persist formatted report to module_outputs.
-  // If this save fails, DO NOT mark the run completed — the client would get
-  // result:null and GetRunOutput would also find nothing.
-  let outputSaved = false;
-
   // --- Surface permanently_failed extractions BEFORE saving the report ---
   // Query for chunks that exhausted all extraction attempts. If any exist,
   // inject a disclosure section into the report so the user is informed.
@@ -5340,119 +5393,66 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     console.warn("[pipeline] Failed to query permanently_failed extractions:", pfErr);
   }
 
-  let lastSaveError = "";
-  // ─── MAT-F06: Delegate to canonical finalizer (§A — one path) ───
-  // Keepalive: re-establish DB connection before finalization
-  try {
-    await ctx.integrations.db.execute(`SELECT 1`, [], { label: "Pre-finalize keepalive" });
-  } catch (kaErr: any) {
-    console.warn(`[pipeline] Pre-finalize keepalive failed:`, kaErr?.message);
-  }
-
-  // ─── OA-04: Inline evidence_admission synthesis ──────────────────────────
-  // The canonical-finalizer requires tree_level=96 (evidence_admission) as a
-  // prerequisite for contradiction_check finalization. Previously this was only
-  // written by the external ReplayClaimLinkage API chain (tree_level 97→98→99→96).
-  // New runs that never went through the replay chain would permanently stall at
-  // "F06 prerequisites missing: evidence_admission".
-  //
-  // Fix: Before F06, if contradiction_check & no tree_level=96 exists, synthesize
-  // a minimal evidence_admission checkpoint from the completed claims ledger.
-  // This is idempotent — if the replay chain already wrote the checkpoint, we skip.
-  if (moduleId === "contradiction_check") {
-    try {
-      const ExistingQ3 = z.object({ id: z.string() });
-      const existingRows = await ctx.integrations.db.query(
-        `SELECT id FROM merge_checkpoints
-         WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
-         LIMIT 1`,
-        ExistingQ3,
-        [runId],
-        { label: "OA-04: Check existing evidence_admission checkpoint" }
-      );
-
-      if (existingRows.length === 0) {
-        // No Q3 checkpoint exists — synthesize a minimal one.
-        // The canonical-finalizer only validates:
-        //   ledgers.some(l => l.schema_version === "evidence-admission-v1" && Array.isArray(l.admitted))
-        // We produce a single ledger entry referencing the completed claims ledger.
-        const syntheticLedger = {
-          _replay_metadata: {
-            run_id: runId,
-            module_id: moduleId,
-            replay_type: "OA04_inline_evidence_admission",
-            replay_timestamp: new Date().toISOString(),
-            schema_version: "3.1.0",
-            total_candidates: 0,
-            q4_eligible_count: 0,
-            q4_ineligible_count: 0,
-            silent_losses: 0,
-            note: "Synthesized by pipeline-core OA-04 to unblock F06 finalization. " +
-              "Full evidence admission is computed by ReplayClaimLinkage when the replay chain is executed.",
-          },
-          evidence_admission_ledgers: [
-            {
-              schema_version: "evidence-admission-v1",
-              admitted: [],
-              rejected: [],
-              total_processed: 0,
-              synthesis_source: "pipeline-core-oa04",
-              synthesis_reason: "Claims ledger complete, reconciliation complete — " +
-                "evidence admission prerequisite satisfied structurally.",
-            },
-          ],
-        };
-
-        await ctx.integrations.db.execute(
-          `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
-           VALUES ($1, 96, 0, 'oa04_synthetic_evidence_admission', $2::jsonb, now())
-           ON CONFLICT (module_run_id, tree_level, node_index)
-           DO NOTHING`,
-          [runId, JSON.stringify(syntheticLedger)],
-          { label: "OA-04: Write synthetic evidence_admission checkpoint" }
-        );
-        console.log(
-          `[pipeline][OA-04] Synthesized evidence_admission checkpoint at tree_level=96 for run ${runId}. ` +
-          `F06 finalization can now proceed.`
-        );
-      }
-    } catch (eaSynthErr: any) {
-      // Non-fatal: if synthesis fails, F06 will report the prerequisite missing and
-      // the next invocation will retry. Do not block the pipeline.
-      console.warn(`[pipeline][OA-04] evidence_admission synthesis failed (non-fatal): ${eaSynthErr?.message}`);
-    }
-  }
-  // ─── End OA-04 ─────────────────────────────────────────────────────────────
-
-  const mainCheckpointStatus = await loadCheckpointStatus(
-    ctx.integrations.db, runId, moduleId, finalFindings.length > 0
-  );
-  const mainOutcome = await f06CanonicalFinalize(
-    ctx.integrations.db,
-    runId,
+  // ─── Route through shared post-merge finalization runner (OA-04 + F06) ───
+  // At this point: post-merge pipeline done, absence verification done, report formatted.
+  // The shared runner handles evidence_admission synthesis + canonical finalization.
+  const normalPathFinalizationResult = await runPostMergeFinalizationStages({
+    ctx,
+    runId: runId!,
     dealId,
-    {
-      findings: finalFindings,
-      executiveHeader: finalNode.executiveHeader,
-      moduleType: moduleId,
-      checkpointStatus: mainCheckpointStatus,
-      preFormattedReport: fullReport,
-      degradedConditions: permanentlyFailedExtractions.length > 0
-        ? [`${permanentlyFailedExtractions.length} section(s) could not be extracted after exhausting retries.`]
-        : undefined,
-      proposedFinalNode: {
-        treeLevel: currentRound,
-        nodeIndex: 0,
-      },
+    moduleId,
+    naturalRootTreeLevel: currentRound,
+    naturalRootNodeIndex: 0,
+    canonicalRootFindings: finalFindings,
+    executiveHeader: finalNode.executiveHeader,
+    startTime,
+    timeRemaining,
+    callerPath: "normal_path",
+    housekeepingFindings: finalHousekeepingFindings,
+    fileTagMap,
+    runPostMergePipeline,
+    formatReportInline,
+    degradedConditions: permanentlyFailedExtractions.length > 0
+      ? [`${permanentlyFailedExtractions.length} section(s) could not be extracted after exhausting retries.`]
+      : undefined,
+    findingsAlreadyPostProcessed: true,
+    preFormattedReport: fullReport,
+  });
+
+  // Post-completion framing audit (only on successful finalization)
+  if (normalPathFinalizationResult.status === "complete" && normalPathFinalizationResult.output) {
+    try {
+      const auditResult = await Promise.race([
+        Promise.resolve(runPostCompletionAudit({
+          runId: runId!,
+          moduleId,
+          reportText: normalPathFinalizationResult.output.fullReport,
+          findings: normalPathFinalizationResult.output.findings,
+        })),
+        new Promise<{ flagged: boolean; warnings: string[] }>((resolve) =>
+          setTimeout(() => resolve({ flagged: false, warnings: [] }), 10_000)
+        ),
+      ]);
+      if (auditResult.flagged) {
+        console.warn(`[pipeline] Post-completion audit flagged ${auditResult.warnings.length} pattern(s)`);
+      }
+    } catch (auditErr) {
+      console.warn(`[pipeline] Post-completion audit failed (non-fatal):`, auditErr);
     }
-  );
+  }
 
-  if (mainOutcome.status === "prerequisites_missing") {
-    console.error(`[pipeline] F06 prerequisites missing: ${mainOutcome.missingKeys.join(", ")} — returning in_progress`);
+  // Translate shared runner result → pipeline return type
+  // Handle non-complete outcomes first
+  if (normalPathFinalizationResult.status !== "complete" || !normalPathFinalizationResult.output) {
+    const phase = `post_merge_finalization_${normalPathFinalizationResult.currentStage ?? "unknown"}`;
+    const firstErrMsg = normalPathFinalizationResult.blockingReasons.length > 0
+      ? normalPathFinalizationResult.blockingReasons.join("; ")
+      : `Finalization ${normalPathFinalizationResult.status}: stage=${normalPathFinalizationResult.currentStage}`;
+    console.warn(`[pipeline] Shared finalization runner returned ${normalPathFinalizationResult.status} — ${firstErrMsg}`);
     return {
       status: "in_progress",
-      runId,
-      phase: "f06_prerequisites_missing",
+      runId: runId!,
+      phase,
       progress: {
         analysisTotal: routed.length,
         analysisCompleted: routed.length,
@@ -5463,78 +5463,15 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       failedChunks,
       truncatedChunks,
       truncatedMerges,
-      firstError: `F06 prerequisites missing: ${mainOutcome.missingKeys.join(", ")}`,
+      firstError: firstErrMsg,
     };
   }
 
-  if (mainOutcome.status === "persist_failed") {
-    lastSaveError = mainOutcome.error;
-    console.error(`[pipeline] F06 persist failed after canonical finalization — NOT marking completed. Error: ${lastSaveError}`);
-    return {
-      status: "in_progress",
-      runId,
-      phase: "save_retry",
-      progress: {
-        analysisTotal: routed.length,
-        analysisCompleted: routed.length,
-        mergeRound: totalMergeRounds,
-        mergeTotal: totalMergeRounds,
-      },
-      result: null,
-      failedChunks,
-      truncatedChunks,
-      truncatedMerges,
-      firstError: `F06 persist failed (${lastSaveError}) — will retry on next invocation`,
-    };
-  }
+  // Finalization complete — derive mergedText from the shared runner's output
+  console.log(`[pipeline] Shared finalization runner: complete — artifact=${normalPathFinalizationResult.output.artifactId.slice(0, 8)}`);
+  finalFindings = normalPathFinalizationResult.output.findings;
+  fullReport = normalPathFinalizationResult.output.fullReport;
 
-  if (mainOutcome.status === "publication_blocked") {
-    console.warn(`[pipeline] Publication gate blocked on main path: ${mainOutcome.message}`);
-    return {
-      status: "in_progress",
-      runId,
-      phase: "publication_gate_blocked",
-      progress: {
-        analysisTotal: routed.length,
-        analysisCompleted: routed.length,
-        mergeRound: totalMergeRounds,
-        mergeTotal: totalMergeRounds,
-      },
-      result: null,
-      failedChunks,
-      truncatedChunks,
-      truncatedMerges,
-      firstError: `Publication gate blocked — tree incomplete. ${mainOutcome.message}`,
-    };
-  }
-
-  outputSaved = true;
-  console.log(`[pipeline] F06 outcome=${mainOutcome.status}`);
-
-  // Post-completion framing audit (Fix 22/24: receives post-quality text, awaited with bounded timeout)
-  try {
-    const auditResult = await Promise.race([
-      Promise.resolve(runPostCompletionAudit({
-        runId,
-        moduleId,
-        reportText: fullReport,
-        findings: finalFindings,
-      })),
-    new Promise<{ flagged: boolean; warnings: string[] }>((resolve) =>
-      setTimeout(() => resolve({ flagged: false, warnings: [] }), 10_000)
-    ),
-  ]);
-  if (auditResult.flagged) {
-    console.warn(`[pipeline] Post-completion audit flagged ${auditResult.warnings.length} pattern(s)`);
-    }
-  } catch (auditErr) {
-    console.warn(`[pipeline] Post-completion audit failed (non-fatal):`, auditErr);
-  }
-
-  // Fix 22/24 closure: mergedText is derived from the post-quality fullReport,
-  // NOT from finalNode.text (which is pre-quality raw merge output).
-  // This ensures returned text excludes findings removed by quality stages
-  // and includes reconciliation/absence-verification revisions.
   const MAX_MERGED_TEXT_CHARS = 150_000;
   let mergedText = fullReport;
   if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
