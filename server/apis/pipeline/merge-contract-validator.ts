@@ -32,8 +32,11 @@ export type ViolationCode =
   | "fabricated_numeric_value"
   | "source_authority_changed"
   | "severity_changed"
+  | "reportability_changed"
   | "proposition_split"
+  | "proposition_rewrite"
   | "orphaned_output_proposition"
+  | "contradictory_membership"
   | "output_count_exceeds_input";
 
 export interface MergeContractViolation {
@@ -392,6 +395,43 @@ export function validateMergeContract(
         });
       }
     }
+
+    // --- Check 11b: No reportability assigned/changed ---
+    if (inputRepresentative) {
+      const inRep = (inputRepresentative as any).reportability ?? null;
+      const outRep = (out as any).reportability ?? null;
+      if (inRep !== outRep) {
+        violations.push({
+          code: "reportability_changed",
+          outputFindingId: outId,
+          detail: `reportability changed from "${inRep}" to "${outRep}"`,
+          offendingValue: String(outRep),
+        });
+      }
+    }
+
+    // --- Check 11c: Proposition rewrite (title or issue_key semantically changed) ---
+    if (inputRepresentative) {
+      // Title must not be materially changed (normalized comparison)
+      const inTitle = (inputRepresentative.title ?? "").trim().toLowerCase();
+      const outTitle = (out.title ?? "").trim().toLowerCase();
+      if (inTitle && outTitle && inTitle !== outTitle) {
+        // Allow minor whitespace/punctuation normalization but not content change
+        const inNorm = inTitle.replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ");
+        const outNorm = outTitle.replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ");
+        if (inNorm !== outNorm) {
+          violations.push({
+            code: "proposition_rewrite",
+            outputFindingId: outId,
+            detail: `Title rewritten: was "${inputRepresentative.title}", now "${out.title}"`,
+            offendingValue: out.title,
+          });
+        }
+      }
+    }
+
+    // --- Check 11d: Contradictory membership (same finding appears in multiple groups) ---
+    // Tracked after the loop below
   }
 
   // --- Check 12: No input proposition split into multiple output propositions ---
@@ -413,8 +453,6 @@ export function validateMergeContract(
   }
 
   // --- Check 13: No output proposition lacks traceable input membership ---
-  // Every output finding must have at least one member (itself or merged_from)
-  // that exists in the input set.
   for (const out of mergeOutput) {
     const memberIds = [out.finding_id, ...(out.merged_from_finding_ids ?? [])];
     const anyInInput = memberIds.some(id => inputIds.has(id));
@@ -423,6 +461,26 @@ export function validateMergeContract(
         code: "orphaned_output_proposition",
         outputFindingId: out.finding_id,
         detail: `Output finding has no traceable membership in input findings`,
+      });
+    }
+  }
+
+  // --- Check 14: Contradictory membership (same member in multiple output groups) ---
+  const memberAssignments = new Map<string, string[]>();
+  for (const out of mergeOutput) {
+    for (const mid of out.merged_from_finding_ids ?? []) {
+      const existing = memberAssignments.get(mid) ?? [];
+      existing.push(out.finding_id);
+      memberAssignments.set(mid, existing);
+    }
+  }
+  for (const [mid, reps] of memberAssignments) {
+    if (reps.length > 1) {
+      violations.push({
+        code: "contradictory_membership",
+        outputFindingId: reps[0],
+        detail: `Finding "${mid}" assigned as member to multiple groups: [${reps.join(", ")}]`,
+        offendingValue: mid,
       });
     }
   }
