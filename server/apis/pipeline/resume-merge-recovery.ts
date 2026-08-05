@@ -460,10 +460,10 @@ export default api({
 
     if (claimResult.length === 0) {
       // Claim failed — node was concurrently completed, already claimed by another worker,
-      // or version changed. This is expected and safe — just report and exit.
+      // or version changed. Return blocked so the caller doesn't infinitely retry.
       diag.elapsedMs = Date.now() - startTime;
       diag.checkpointStatus = "claim_rejected";
-      return { status: "progress" as const, diagnostics: diag, waterfall: null };
+      return { status: "blocked" as const, diagnostics: diag, waterfall: null };
     }
 
     // Update the claimed version for the CAS final write
@@ -481,7 +481,9 @@ export default api({
     if (remaining < MIN_WORK_BUDGET_MS + PERSISTENCE_RESERVE_MS) {
       diag.elapsedMs = Date.now() - startTime;
       diag.checkpointStatus = "budget_exhausted_before_work";
-      return { status: "progress" as const, diagnostics: diag, waterfall: null };
+      // No durable progress was made — return blocked so caller knows to retry
+      // with a fresh invocation rather than looping within this one.
+      return { status: "blocked" as const, diagnostics: diag, waterfall: null };
     }
 
     // ─── Step 5: Execute work unit ──────────────────────────────────────
@@ -560,7 +562,7 @@ export default api({
         { label: `Guarded error persist L${workUnit.level}:N${workUnit.nodeIndex}` }
       );
 
-      return { status: "progress" as const, diagnostics: diag, waterfall: null };
+      return { status: "blocked" as const, diagnostics: diag, waterfall: null };
     }
 
     // ─── Step 6: CAS Persist result ───────────────────────────────────
@@ -603,7 +605,7 @@ export default api({
       // CAS failed — our claim was superseded or version changed
       diag.checkpointStatus = "cas_rejected_stale_attempt";
       diag.elapsedMs = Date.now() - startTime;
-      return { status: "progress" as const, diagnostics: diag, waterfall: null };
+      return { status: "blocked" as const, diagnostics: diag, waterfall: null };
     }
 
     diag.checkpointStatus = "complete";
