@@ -2687,6 +2687,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 moduleType: moduleId,
                 checkpointStatus: fpCheckpointStatus,
                 preFormattedReport: fullReport,
+                proposedFinalNode: {
+                  treeLevel: topCheckpoint.tree_level,
+                  nodeIndex: topCheckpoint.node_index,
+                },
               }
             );
 
@@ -2717,6 +2721,21 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 truncatedChunks: 0,
                 truncatedMerges: 0,
                 firstError: `F06 persist failed: ${fpOutcome.error}`,
+              };
+            }
+
+            if (fpOutcome.status === "publication_blocked") {
+              console.warn(`[pipeline:fast-path] Publication gate blocked: ${fpOutcome.message}`);
+              return {
+                status: "in_progress",
+                runId,
+                phase: "publication_gate_blocked",
+                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+                result: null,
+                failedChunks: 0,
+                truncatedChunks: 0,
+                truncatedMerges: 0,
+                firstError: `Publication gate blocked — tree incomplete. ${fpOutcome.message}`,
               };
             }
 
@@ -5406,6 +5425,10 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       degradedConditions: permanentlyFailedExtractions.length > 0
         ? [`${permanentlyFailedExtractions.length} section(s) could not be extracted after exhausting retries.`]
         : undefined,
+      proposedFinalNode: {
+        treeLevel: currentRound,
+        nodeIndex: 0,
+      },
     }
   );
 
@@ -5447,6 +5470,26 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       truncatedChunks,
       truncatedMerges,
       firstError: `F06 persist failed (${lastSaveError}) — will retry on next invocation`,
+    };
+  }
+
+  if (mainOutcome.status === "publication_blocked") {
+    console.warn(`[pipeline] Publication gate blocked on main path: ${mainOutcome.message}`);
+    return {
+      status: "in_progress",
+      runId,
+      phase: "publication_gate_blocked",
+      progress: {
+        analysisTotal: routed.length,
+        analysisCompleted: routed.length,
+        mergeRound: totalMergeRounds,
+        mergeTotal: totalMergeRounds,
+      },
+      result: null,
+      failedChunks,
+      truncatedChunks,
+      truncatedMerges,
+      firstError: `Publication gate blocked — tree incomplete. ${mainOutcome.message}`,
     };
   }
 

@@ -38,6 +38,11 @@ import {
   type NarrativeDiagnostic,
   type CheckpointStatusEntry,
 } from "./canonical-final-artifact.js";
+import {
+  runPublicationGate,
+  toCompactDiagnostic,
+  type CompactCompletionDiagnostic,
+} from "./tree-completion-validator.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -66,6 +71,21 @@ export interface FinalizerPrerequisites {
    * canonical reportable records. Kept for call-site backward compatibility.
    */
   preFormattedReport?: string;
+  /**
+   * Proposed final node — the merge checkpoint that produced the findings.
+   * REQUIRED for the publication gate. If omitted, gate will attempt to
+   * auto-detect from the highest complete checkpoint.
+   */
+  proposedFinalNode?: {
+    treeLevel: number;
+    nodeIndex: number;
+  };
+  /**
+   * If true, skip the publication gate. ONLY for administrative recovery
+   * operations that explicitly re-build the tree to completion first.
+   * This flag is audited in logs.
+   */
+  bypassPublicationGate?: boolean;
 }
 
 export type FinalizerOutcome =
@@ -74,7 +94,8 @@ export type FinalizerOutcome =
   | { status: "rejected_overwrite"; existingHash: string; newHash: string; message: string }
   | { status: "prerequisites_missing"; missingKeys: string[]; message: string }
   | { status: "persist_failed"; error: string }
-  | { status: "already_completed" };
+  | { status: "already_completed" }
+  | { status: "publication_blocked"; diagnostic: CompactCompletionDiagnostic; message: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Required prerequisites per module type
@@ -275,6 +296,45 @@ export async function canonicalFinalize(
 ): Promise<FinalizerOutcome> {
 
   const { moduleType, executiveHeader, checkpointStatus, canonicalRecordMap } = prereqs;
+
+  // ── STEP 0: Publication Gate (fail-closed) ─────────────────────────────────
+  // A module run may ONLY be published when the tree is fully complete and the
+  // proposed final node is the natural root. Sub-root checkpoints are resumable
+  // state, not publishable artifacts.
+  if (prereqs.bypassPublicationGate) {
+    console.warn(
+      `[canonicalFinalize] ⚠️ Publication gate BYPASSED for run ${runId} — ` +
+      `administrative override active. This is auditable.`
+    );
+  } else {
+    const proposedLevel = prereqs.proposedFinalNode?.treeLevel ?? null;
+    const proposedIndex = prereqs.proposedFinalNode?.nodeIndex ?? null;
+
+    const gateResult = await runPublicationGate(db, runId, proposedLevel, proposedIndex);
+
+    if (!gateResult.eligible) {
+      const compact = toCompactDiagnostic(gateResult.diagnostic);
+      console.warn(
+        `[canonicalFinalize] PUBLICATION BLOCKED for run ${runId} — ` +
+        `reasons: ${compact.blocking_reasons.join("; ")}`
+      );
+      return {
+        status: "publication_blocked",
+        diagnostic: compact,
+        message:
+          `Publication gate failed: ${compact.blocking_reasons.join("; ")}. ` +
+          `Coverage: ${compact.coverage_pct}% (${compact.completed_analysis_count}/${compact.expected_analysis_count}). ` +
+          `Tree: ${compact.total_complete_nodes}/${compact.total_expected_nodes} nodes complete. ` +
+          `Run remains in_progress and is resumable.`,
+      };
+    }
+
+    console.log(
+      `[canonicalFinalize] Publication gate PASSED for run ${runId} — ` +
+      `coverage=${gateResult.diagnostic.completed_analysis_count}/${gateResult.diagnostic.expected_analysis_count}, ` +
+      `tree ${gateResult.diagnostic.total_complete_nodes}/${gateResult.diagnostic.total_expected_nodes} nodes`
+    );
+  }
 
   // ── STEP 1: Validate prerequisites ────────────────────────────────────────
   // Check if an output already exists — if so, verify idempotency

@@ -1,5 +1,6 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
+import { runPublicationGate, toCompactDiagnostic } from "./tree-completion-validator.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -53,6 +54,18 @@ export default api({
 
     const root = rootNodes[0];
     console.log(`[PromoteRootFindings] Found root at L${root.tree_level}:N${root.node_index} with ${root.finding_count} findings`);
+
+    // Publication Gate: block promotion of sub-root checkpoints
+    const gateResult = await runPublicationGate(ctx.integrations.db, runId, root.tree_level, root.node_index);
+    if (!gateResult.eligible) {
+      const compact = toCompactDiagnostic(gateResult.diagnostic);
+      return {
+        success: false,
+        message: `Publication gate BLOCKED: ${compact.blocking_reasons.join("; ")}. Coverage: ${compact.coverage_pct}%`,
+        findingCount: 0,
+        outputId: null,
+      };
+    }
 
     // OA-03: For omission_audit, run family dedup on the raw root findings
     // and persist the family artifact alongside findings.

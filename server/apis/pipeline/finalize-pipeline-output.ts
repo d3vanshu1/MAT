@@ -166,6 +166,10 @@ export default api({
         moduleType: moduleId,
         canonicalRecordMap,
         checkpointStatus,
+        proposedFinalNode: {
+          treeLevel: topNode.tree_level,
+          nodeIndex: topNode.node_index,
+        },
       }
     );
 
@@ -234,6 +238,17 @@ export default api({
           reportLength: 0,
           findingsCount: 0,
           error: outcome.error,
+        };
+
+      case "publication_blocked":
+        return {
+          success: false,
+          phase: "publication_blocked",
+          outputId: null,
+          semanticHash: null,
+          reportLength: 0,
+          findingsCount: 0,
+          error: outcome.message,
         };
     }
   },
