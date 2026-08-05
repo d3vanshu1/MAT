@@ -193,17 +193,21 @@ export default api({
     }
 
     // OA-03: Canonical family dedup (omission_audit only)
+    // Preserves full family artifact for promotion
+    let familyDedupArtifact: ReturnType<typeof deduplicateFindings> | null = null;
     if (moduleId === "omission_audit" && findings.length > 1) {
       const preDedupCount = findings.length;
-      const familyResult = deduplicateFindings(findings as any);
+      familyDedupArtifact = deduplicateFindings(findings as any);
       const retainedIds = new Set<string>([
-        ...familyResult.ungroupedFindingIds,
-        ...familyResult.families.map(f => f.representativeFindingId),
+        ...familyDedupArtifact.ungroupedFindingIds,
+        ...familyDedupArtifact.families.map(f => f.representativeFindingId),
       ]);
       findings = findings.filter(f => retainedIds.has(f.finding_id));
       if (findings.length < preDedupCount) {
-        console.log(`[CompleteMerge][OA-03] Family dedup: ${preDedupCount} → ${findings.length} (families=${familyResult.totalFamiliesCreated})`);
+        console.log(`[CompleteMerge][OA-03] Family dedup: ${preDedupCount} → ${findings.length} (families=${familyDedupArtifact.totalFamiliesCreated})`);
       }
+      // Attach artifact for downstream preservation
+      (findings as any).__familyDedupArtifact = familyDedupArtifact;
     }
 
     console.log(`[CompleteMerge] Parsed ${findings.length} findings, executive header: ${executiveHeader.slice(0, 100)}...`);

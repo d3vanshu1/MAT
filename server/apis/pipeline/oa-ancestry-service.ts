@@ -895,8 +895,8 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     enforcesOa02: true,
     enforcesOa03: true,
     oa02VerificationMethod: "not_applicable",
-    oa03VerificationMethod: "not_applicable",
-    description: "Saves root to module_outputs. No merge/dedup occurs — promotion only.",
+    oa03VerificationMethod: "call_verified",
+    description: "Saves root to module_outputs. OA-03: runs deduplicateFindings on raw root before persist.",
   },
 ];
 

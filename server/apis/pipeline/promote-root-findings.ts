@@ -1,4 +1,5 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
+import { deduplicateFindings } from "./canonical-family-dedup.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -53,6 +54,28 @@ export default api({
     const root = rootNodes[0];
     console.log(`[PromoteRootFindings] Found root at L${root.tree_level}:N${root.node_index} with ${root.finding_count} findings`);
 
+    // OA-03: For omission_audit, run family dedup on the raw root findings
+    // and persist the family artifact alongside findings.
+    // Promotion rejects a raw root finding array that lacks validated family metadata.
+    let findingsJson = root.findings_json;
+    if (moduleId === "omission_audit") {
+      try {
+        const rawFindings = JSON.parse(root.findings_json);
+        if (Array.isArray(rawFindings) && rawFindings.length > 0) {
+          const familyResult = deduplicateFindings(rawFindings);
+          // Persist family artifact as __familyDedupArtifact on the findings JSON
+          const enrichedOutput = {
+            findings: rawFindings,
+            __familyDedupArtifact: familyResult,
+          };
+          findingsJson = JSON.stringify(enrichedOutput);
+          console.log(`[PromoteRootFindings][OA-03] Family dedup: ${rawFindings.length} findings → ${familyResult.totalFamiliesCreated} families, ${familyResult.ungroupedFindingIds.length} ungrouped`);
+        }
+      } catch (e) {
+        console.warn(`[PromoteRootFindings][OA-03] Family dedup failed, promoting raw findings: ${e}`);
+      }
+    }
+
     // Step 2: Check if module_outputs already exists for this run
     const existing = await ctx.integrations.db.query(
       `SELECT id FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
@@ -72,7 +95,7 @@ export default api({
              findings = $3::jsonb,
              full_report_markdown = $4
          WHERE id = $1`,
-        [outputId, root.executive_header, root.findings_json, `# ${moduleId} Analysis\n\n${root.finding_count} findings identified.`],
+        [outputId, root.executive_header, findingsJson, `# ${moduleId} Analysis\n\n${root.finding_count} findings identified.`],
         { label: "Update module_outputs" }
       );
     } else {
@@ -82,7 +105,7 @@ export default api({
          VALUES ($1, $2, $3::jsonb, $4)
          RETURNING id`,
         z.object({ id: z.string() }),
-        [runId, root.executive_header, root.findings_json, `# ${moduleId} Analysis\n\n${root.finding_count} findings identified.`],
+        [runId, root.executive_header, findingsJson, `# ${moduleId} Analysis\n\n${root.finding_count} findings identified.`],
         { label: "Insert module_outputs" }
       );
       outputId = inserted[0]?.id ?? "unknown";

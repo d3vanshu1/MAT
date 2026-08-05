@@ -880,17 +880,20 @@ async function consolidateFindings(
     }
 
     // OA-03: Canonical family dedup after merge contract passes
+    // Preserves full family artifact for downstream promotion
     if (contractResult.acceptedFindings.length > 1) {
-      const familyResult = deduplicateFindings(contractResult.acceptedFindings as any);
+      const familyDedupArtifact = deduplicateFindings(contractResult.acceptedFindings as any);
       const retainedIds = new Set<string>([
-        ...familyResult.ungroupedFindingIds,
-        ...familyResult.families.map(f => f.representativeFindingId),
+        ...familyDedupArtifact.ungroupedFindingIds,
+        ...familyDedupArtifact.families.map(f => f.representativeFindingId),
       ]);
       const preDedupCount = contractResult.acceptedFindings.length;
       contractResult.acceptedFindings = contractResult.acceptedFindings.filter(f => retainedIds.has(f.finding_id));
       if (contractResult.acceptedFindings.length < preDedupCount) {
         console.log(`[ResumeMergeRecovery][OA-03] Family dedup: ${preDedupCount} → ${contractResult.acceptedFindings.length}`);
       }
+      // Attach artifact for downstream preservation
+      (contractResult.acceptedFindings as any).__familyDedupArtifact = familyDedupArtifact;
     }
 
     return contractResult.acceptedFindings;

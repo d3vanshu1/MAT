@@ -722,19 +722,23 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
 
   // === Stage 3: Global Semantic Consolidation (Defect 1) ===
   // OA-03: For omission_audit, delegate to canonical family dedup service
+  // Preserves the full family artifact for downstream promotion
+  let familyDedupArtifact: ReturnType<typeof deduplicateFindings> | null = null;
   if (moduleId === "omission_audit") {
     const preConsolidationCount = findings.length;
-    const familyResult = deduplicateFindings(findings as any);
+    familyDedupArtifact = deduplicateFindings(findings as any);
     // Keep only retained findings (representatives + ungrouped)
     const retainedIds = new Set<string>([
-      ...familyResult.ungroupedFindingIds,
-      ...familyResult.families.map(f => f.representativeFindingId),
+      ...familyDedupArtifact.ungroupedFindingIds,
+      ...familyDedupArtifact.families.map(f => f.representativeFindingId),
     ]);
     findings = findings.filter(f => retainedIds.has(f.finding_id));
     const consolidatedCount = preConsolidationCount - findings.length;
     if (consolidatedCount > 0) {
-      console.log(`[pipeline:postMerge][OA-03] Canonical family dedup: ${preConsolidationCount} → ${findings.length} findings (collapsed ${consolidatedCount}, families=${familyResult.totalFamiliesCreated})`);
+      console.log(`[pipeline:postMerge][OA-03] Canonical family dedup: ${preConsolidationCount} → ${findings.length} findings (collapsed ${consolidatedCount}, families=${familyDedupArtifact.totalFamiliesCreated})`);
     }
+    // Attach family artifact to findings array for downstream preservation
+    (findings as any).__familyDedupArtifact = familyDedupArtifact;
   } else
   {
     const preConsolidationCount = findings.length;
