@@ -95,7 +95,7 @@ Result:
 
 ### Current commit
 
-`03302a68256edecea90886f2cae6e14ac7a4959b`
+`e7ac23d52434f5ad432613adf9d4ee707d873ec6`
 
 ### Files and areas inspected
 
@@ -137,4 +137,4 @@ Result:
 
 ### Candidate SHA, if ready
 
-`will be set after this commit`
+`e7ac23d52434f5ad432613adf9d4ee707d873ec6`
