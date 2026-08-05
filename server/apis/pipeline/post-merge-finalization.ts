@@ -1,26 +1,26 @@
 /**
  * Post-Merge Finalization Runner — shared, resumable state machine.
  *
- * THE ONE implementation of quality-stage execution used by:
- *   - Normal execution after natural-root completion
- *   - Fast-path execution when natural root already exists
- *   - Resume execution after recovery
+ * THE SOLE implementation of quality-stage execution used by:
+ *   - Fast-path execution when natural root already exists (complete-root resume)
+ *   - Normal execution after natural-root completion during same invocation
  *
- * Stage sequence (defined once):
+ * Stage sequence (defined once, executed in order):
  *   1. claims_ledger     — Incremental extraction from IC memos
  *   2. reconciliation    — Code-verified delta computation against model
- *   3. evidence_admission — OA-04 synthetic checkpoint at tree_level=96
- *   4. canonical_finalize — F06 artifact production + publication gate
+ *   3. post_merge        — Suppression, Layer-1 numeric, consolidation, recon append, materiality
+ *   4. absence_verify    — Adversarial verification (checklist modules only)
+ *   5. canonical_finalize — F06 artifact production + publication gate
  *
- * Each stage is:
- *   - Loaded (durable checkpoint)
- *   - Validated (belongs to current root fingerprint where lineage available)
- *   - Reused (if complete and valid)
- *   - Executed (if missing or stale)
- *   - Persisted (before proceeding to next)
- *   - Budget-checked (stop safely if insufficient time remains)
- *
- * No upstream extraction, analysis, or merge work is invoked.
+ * Design invariants:
+ *   - No upstream extraction, analysis, or merge work is invoked
+ *   - Each stage is durably checkpointed; safe to interrupt at any boundary
+ *   - Lineage envelopes validate every cached stage result against dependency fingerprints
+ *   - Evidence admission is never fabricated — missing stages block finalization
+ *   - Housekeeping corruption blocks finalization (fail-closed)
+ *   - F06 artifact is the returned output (not pre-finalization data)
+ *   - blocked/failed are terminal states (not retryable via in_progress)
+ *   - No caller-trust bypass flags (findingsAlreadyPostProcessed, preFormattedReport removed)
  */
 
 import { z } from "@superblocksteam/sdk-api";
@@ -28,74 +28,112 @@ import type { PipelineContext } from "./pipeline-config.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
 import { runReconciliation, type ReconciliationResult } from "./claims-reconciliation.js";
-import { canonicalFinalize as f06CanonicalFinalize, loadCheckpointStatus } from "./canonical-finalizer.js";
+import {
+  canonicalFinalize as f06CanonicalFinalize,
+  loadCheckpointStatus,
+  type FinalizerOutcome,
+} from "./canonical-finalizer.js";
+import type { CanonicalFinalArtifact } from "./canonical-final-artifact.js";
 import type { MergedFinding } from "../modules/build-merged-text.js";
+import { computeContentHash } from "./source-snapshot.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Stage classification for each quality-stage checkpoint */
-export type StageStatus =
-  | "completed_valid"    // Complete and valid for current root
-  | "missing"           // No checkpoint exists
-  | "stale"            // Exists but for a different root fingerprint
-  | "partial"          // Started but not complete
-  | "failed"           // Permanently failed (degraded)
-  | "blocked";         // Cannot proceed (dependency not met)
-
-/** Per-stage state snapshot */
-export interface StageState {
-  stage: StageName;
-  status: StageStatus;
-  checkpoint_id?: string;
-  detail?: string;
-}
-
-/** Ordered stage names */
+/** Stage names in execution order */
 export type StageName =
   | "claims_ledger"
   | "reconciliation"
-  | "evidence_admission"
+  | "post_merge"
+  | "absence_verify"
   | "canonical_finalize";
 
-/** The ordered stage sequence — defined once, used everywhere */
 export const STAGE_SEQUENCE: readonly StageName[] = [
   "claims_ledger",
   "reconciliation",
-  "evidence_admission",
+  "post_merge",
+  "absence_verify",
   "canonical_finalize",
 ] as const;
 
-/** Explicit inputs for the shared runner — no hidden local variable dependencies */
+/** Terminal status of the runner */
+export type RunnerStatus = "complete" | "in_progress" | "blocked" | "failed";
+
+/** Per-stage status */
+export type StageStatus =
+  | "completed_valid"    // Complete and lineage-valid for current root
+  | "missing"           // No checkpoint exists
+  | "stale"            // Exists but lineage fingerprint mismatch — must rerun
+  | "partial"          // Started but not complete (resumable)
+  | "failed"           // Permanently failed
+  | "blocked"          // Cannot proceed (dependency not met)
+  | "skipped";         // Not applicable to this module type
+
+/** Lineage envelope — dependency fingerprints for stale detection */
+export interface LineageEnvelope {
+  /** Hash of the natural-root findings (input to finalization) */
+  naturalRootFindingHash: string;
+  /** Pipeline version at time of stage execution */
+  pipelineVersion: string;
+  /** Hash of the frozen source manifest (subject document set) */
+  sourceManifestHash: string | null;
+  /** Hash of the claims ledger (dependency for reconciliation) */
+  claimsHash?: string;
+  /** Hash of the numeric report (dependency for reconciliation) */
+  numericReportHash?: string;
+  /** Hash of reconciliation output (dependency for post-merge) */
+  reconciliationHash?: string;
+  /** Hash of post-merge result (dependency for finalization) */
+  postMergeResultHash?: string;
+}
+
+/** Stage state snapshot (reported in result) */
+export interface StageState {
+  stage: StageName;
+  status: StageStatus;
+  detail?: string;
+  lineageValid?: boolean;
+}
+
+/** Input to the shared runner — all required context */
 export interface PostMergeFinalizationInput {
-  /** Pipeline context (DB + AI clients) */
   ctx: PipelineContext;
-  /** Module run ID */
   runId: string;
-  /** Deal ID */
   dealId: string;
-  /** Module type (contradiction_check, model_assumptions_stress, etc.) */
   moduleId: string;
-  /** Natural root tree level */
+
+  /** Tree level of the validated natural root */
   naturalRootTreeLevel: number;
-  /** Natural root node index */
+  /** Node index of the natural root (always 0 for single-root trees) */
   naturalRootNodeIndex: number;
-  /** Canonical root findings from the completed merge tree */
+  /** Parsed findings from the natural root checkpoint */
   canonicalRootFindings: MergedFinding[];
-  /** Executive header from the root merge checkpoint */
+  /** Executive header from the natural root checkpoint */
   executiveHeader: string;
-  /** Invocation start time (Date.now() at pipeline entry) */
-  startTime: number;
-  /** Time remaining function — returns ms of budget left */
-  timeRemaining: () => number;
-  /** Caller path identifier for diagnostics */
-  callerPath: "fast_path" | "normal_path" | "resume_path" | "recovery_path";
-  /** Housekeeping findings (from merge tree) */
+  /** Housekeeping findings — MUST be validated before passing (non-empty, non-corrupt) */
   housekeepingFindings: MergedFinding[];
-  /** File tag map (document_id → tag) for post-merge pipeline */
+  /** Whether housekeeping was available and valid */
+  housekeepingValidated: boolean;
+
+  /** Pipeline invocation start time (epoch ms) */
+  startTime: number;
+  /** Returns time remaining in budget (ms) */
+  timeRemaining: () => number;
+  /** Which code path invoked this runner */
+  callerPath: "fast_path" | "normal_path";
+
+  /** File tag map for source routing */
   fileTagMap: Map<string, string>;
-  /** Post-merge pipeline runner (injected to avoid circular imports) */
+  /** Subject document IDs for absence verification */
+  subjectDocumentIds?: string[];
+  /** Whether to use Opus model for absence verification */
+  useOpus?: boolean | null;
+
+  /** Source manifest hash from the validated root-completion manifest */
+  sourceManifestHash: string | null;
+
+  // Injected dependencies (avoid circular imports)
   runPostMergePipeline: (input: {
     findings: MergedFinding[];
     housekeepingFindings: MergedFinding[];
@@ -104,64 +142,36 @@ export interface PostMergeFinalizationInput {
     fileTagMap: Map<string, string>;
     moduleId: string;
   }) => Promise<{ findings: MergedFinding[]; housekeepingFindings: MergedFinding[] }>;
-  /** Report formatter (injected to avoid circular imports) */
-  formatReportInline: (
+  runAbsenceVerificationPhase: (
     ctx: PipelineContext,
-    moduleId: string,
-    executiveHeader: string,
+    dealId: string,
+    runId: string,
     findings: MergedFinding[],
-    timeRemainingMs: number,
+    moduleId: string,
+    useOpus: boolean | null | undefined,
+    subjectDocumentIds: string[],
+    budgetRemainingMs: () => number,
     pipelineStartTime: number,
-    housekeepingFindings?: MergedFinding[],
-    verificationPhaseErrored?: boolean,
-    mergeGroupsFallenBack?: number,
-  ) => Promise<string | null>;
-  /** Degraded conditions to pass to F06 (e.g. permanently failed extractions) */
-  degradedConditions?: string[];
-  /**
-   * When true, canonicalRootFindings have already passed through runPostMergePipeline
-   * (suppression, Layer-1, consolidation, reconciliation append, materiality).
-   * The shared runner will skip its internal post-merge pipeline call.
-   * Use for normal-path where post-merge already ran before quality stages.
-   */
-  findingsAlreadyPostProcessed?: boolean;
-  /**
-   * Pre-formatted report string. When provided, the shared runner skips its own
-   * formatReportInline call and uses this report directly for F06 canonical finalization.
-   * Use for normal-path where formatting (with extra disclosures) already ran.
-   */
-  preFormattedReport?: string;
+  ) => Promise<{ findings: MergedFinding[]; verificationLog: any[]; completed: boolean }>;
 }
 
-/** Structured return from the shared runner — resumable state */
+/** Runner result */
 export interface PostMergeFinalizationResult {
-  status: "in_progress" | "blocked" | "complete" | "failed";
-  /** The natural root node identity */
-  naturalRootId: { treeLevel: number; nodeIndex: number };
-  /** Current stage being processed */
+  status: RunnerStatus;
+  /** Which stage is blocked/in-progress (null if complete) */
   currentStage: StageName | null;
-  /** Stages that completed successfully in this invocation or were already valid */
-  completedStages: StageName[];
-  /** Next stage to execute on the next invocation (null if done or blocked) */
-  nextStage: StageName | null;
-  /** Whether durable progress was advanced this invocation */
-  progressAdvanced: boolean;
-  /** Whether a new checkpoint was written this invocation */
-  checkpointWritten: boolean;
-  /** Blocking reasons (if status is "blocked") */
-  blockingReasons: string[];
-  /** Per-stage state for diagnostics */
+  /** All stage states observed */
   stageStates: StageState[];
-  /** If complete — the formatted output */
-  output?: {
-    artifactId: string;
-    semanticHash: string;
-    findingCount: number;
-    reportGenerated: boolean;
-    findings: MergedFinding[];
-    fullReport: string;
-    executiveHeader: string;
-  };
+  /** Stages that completed during this invocation */
+  completedStages: StageName[];
+  /** Whether any durable progress was made (checkpoint written) */
+  progressAdvanced: boolean;
+  /** Blocking reasons (for blocked/failed status) */
+  blockingReasons: string[];
+  /** The actual F06 artifact (only when status=complete) */
+  artifact: CanonicalFinalArtifact | null;
+  /** F06 outcome details */
+  finalizerOutcome: FinalizerOutcome | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,8 +187,47 @@ const CLAIMS_MIN_BUDGET_MS = 15_000;
 /** Minimum time budget (ms) to attempt reconciliation */
 const RECONCILIATION_MIN_BUDGET_MS = 15_000;
 
+/** Minimum time budget (ms) for absence verification */
+const ABSENCE_VERIFICATION_MIN_BUDGET_MS = 120_000;
+
 /** Minimum time budget (ms) to proceed to canonical finalization */
 const FINALIZATION_MIN_BUDGET_MS = 10_000;
+
+/** Modules requiring claims/reconciliation */
+const CLAIMS_REQUIRED_MODULES = new Set(["contradiction_check"]);
+
+/** Modules requiring absence verification */
+const ABSENCE_VERIFICATION_MODULES = new Set(["omission_audit", "blind_spot_scanner", "diligence_completeness"]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lineage Utilities
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Compute a deterministic hash for a findings array (sorted by finding_id) */
+function hashFindings(findings: MergedFinding[]): string {
+  const sorted = [...findings].sort((a, b) =>
+    (a.finding_id ?? "").localeCompare(b.finding_id ?? "")
+  );
+  const payload = sorted.map(f => f.finding_id ?? JSON.stringify(f)).join("|");
+  return computeContentHash(payload);
+}
+
+/** Compute a hash for claims ledger content */
+function hashClaims(ledger: ClaimsLedger): string {
+  const payload = JSON.stringify(ledger.claims.map(c => ({
+    metric: c.metric,
+    value: c.value,
+    period: c.period,
+    scope: c.scope_qualifier,
+  })));
+  return computeContentHash(payload);
+}
+
+/** Compute a hash for reconciliation result */
+function hashReconciliation(result: ReconciliationResult): string {
+  const payload = JSON.stringify(result.findings.map(f => `${f.finding_kind}:${f.title}:${f.delta_abs ?? ""}`));
+  return computeContentHash(payload);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Entry Point
@@ -188,6 +237,10 @@ const FINALIZATION_MIN_BUDGET_MS = 10_000;
  * Runs the post-merge quality stages as a resumable state machine.
  * Each stage is durably checkpointed; safe to interrupt at any boundary.
  * On insufficient budget, returns `in_progress` with a cursor for the next stage.
+ *
+ * INVARIANT: This function NEVER fabricates checkpoint data. If a required stage
+ * cannot be executed (missing dependency, insufficient budget), it returns
+ * in_progress or blocked — never writes synthetic data to satisfy prerequisites.
  */
 export async function runPostMergeFinalizationStages(
   input: PostMergeFinalizationInput,
@@ -197,18 +250,46 @@ export async function runPostMergeFinalizationStages(
     naturalRootTreeLevel, naturalRootNodeIndex,
     canonicalRootFindings, executiveHeader,
     startTime, timeRemaining, callerPath,
-    housekeepingFindings, fileTagMap,
-    runPostMergePipeline, formatReportInline,
-    degradedConditions,
+    housekeepingFindings, housekeepingValidated,
+    fileTagMap, subjectDocumentIds, useOpus,
+    sourceManifestHash,
+    runPostMergePipeline, runAbsenceVerificationPhase,
   } = input;
 
   const LOG_PREFIX = `[post-merge-finalization:${callerPath}]`;
-  console.log(`${LOG_PREFIX} Entering shared runner — runId=${runId}, root=L${naturalRootTreeLevel}:N${naturalRootNodeIndex}, findings=${canonicalRootFindings.length}`);
+  const pipelineVersion = getPipelineVersion();
+  const naturalRootFindingHash = hashFindings(canonicalRootFindings);
+
+  console.log(`${LOG_PREFIX} Entering shared runner — runId=${runId}, root=L${naturalRootTreeLevel}:N${naturalRootNodeIndex}, findings=${canonicalRootFindings.length}, pipelineVersion=${pipelineVersion}, rootHash=${naturalRootFindingHash.slice(0, 8)}`);
+
+  // ── INVARIANT: Housekeeping must be validated before entry ──────────────────
+  // If housekeeping could not be loaded or is corrupt, the caller must NOT invoke
+  // this runner. Empty housekeeping is only valid when housekeepingValidated=true
+  // AND the module genuinely produced zero housekeeping items.
+  if (!housekeepingValidated) {
+    console.error(`${LOG_PREFIX} BLOCKED: housekeeping not validated — cannot finalize with unverified housekeeping state`);
+    return {
+      status: "blocked",
+      currentStage: null,
+      stageStates: [],
+      completedStages: [],
+      progressAdvanced: false,
+      blockingReasons: ["Housekeeping findings could not be validated. Finalization blocked to prevent silent data loss. Requires manual investigation or housekeeping reconstruction."],
+      artifact: null,
+      finalizerOutcome: null,
+    };
+  }
 
   const stageStates: StageState[] = [];
   const completedStages: StageName[] = [];
   let progressAdvanced = false;
-  let checkpointWritten = false;
+
+  // Build lineage envelope for this invocation
+  const lineage: LineageEnvelope = {
+    naturalRootFindingHash,
+    pipelineVersion,
+    sourceManifestHash,
+  };
 
   // ─────────────────────────────────────────────────────────────────────────
   // STAGE 1: claims_ledger
@@ -216,24 +297,35 @@ export async function runPostMergeFinalizationStages(
   let claimsLedger: ClaimsLedger | null = null;
   let claimsDegraded = false;
 
-  if (moduleId === "contradiction_check") {
-    // Load existing claims checkpoint
+  if (CLAIMS_REQUIRED_MODULES.has(moduleId)) {
+    // Load existing claims checkpoint with lineage
+    let existingLineage: { pipelineVersion?: string; sourceManifestHash?: string } | null = null;
     try {
       const ledgerCpRows = await ctx.integrations.db.query(
-        `SELECT payload, status FROM pipeline_checkpoints
+        `SELECT payload, status, version_hash FROM pipeline_checkpoints
          WHERE module_run_id = $1 AND checkpoint_key = 'claims_ledger'`,
-        z.object({ payload: z.any(), status: z.string().nullable() }),
+        z.object({ payload: z.any(), status: z.string().nullable(), version_hash: z.string().nullable() }),
         [runId],
         { label: `${LOG_PREFIX} Load claims_ledger` },
       );
       if (ledgerCpRows.length > 0 && ledgerCpRows[0].payload) {
         claimsLedger = ledgerCpRows[0].payload as ClaimsLedger;
         const cpStatus = ledgerCpRows[0].status;
+        const cpVersionHash = ledgerCpRows[0].version_hash;
         if (cpStatus === "degraded") {
           claimsDegraded = true;
         }
+        existingLineage = { pipelineVersion: cpVersionHash ?? undefined };
       }
     } catch { /* pipeline_checkpoints may not exist — treat as missing */ }
+
+    // Lineage validation: reject stale claims from a different pipeline version
+    if (claimsLedger && existingLineage?.pipelineVersion && existingLineage.pipelineVersion !== pipelineVersion) {
+      console.warn(`${LOG_PREFIX} claims_ledger: STALE — version ${existingLineage.pipelineVersion} != current ${pipelineVersion}`);
+      stageStates.push({ stage: "claims_ledger", status: "stale", detail: `version mismatch: ${existingLineage.pipelineVersion}`, lineageValid: false });
+      claimsLedger = null; // Force re-extraction
+      claimsDegraded = false;
+    }
 
     // Classify claims stage
     const noProgress = claimsLedger?.extraction_metadata?.consecutive_no_progress ?? 0;
@@ -242,20 +334,21 @@ export async function runPostMergeFinalizationStages(
     }
 
     if (claimsDegraded) {
-      stageStates.push({ stage: "claims_ledger", status: "failed", detail: "degraded" });
-      completedStages.push("claims_ledger"); // Degraded counts as "done" — pipeline proceeds
+      stageStates.push({ stage: "claims_ledger", status: "failed", detail: "degraded — proceeding without claims" });
+      completedStages.push("claims_ledger");
       console.log(`${LOG_PREFIX} claims_ledger: DEGRADED — proceeding without claims`);
     } else if (claimsLedger?.complete) {
-      stageStates.push({ stage: "claims_ledger", status: "completed_valid", detail: `${claimsLedger.claims.length} claims` });
+      stageStates.push({ stage: "claims_ledger", status: "completed_valid", detail: `${claimsLedger.claims.length} claims`, lineageValid: true });
       completedStages.push("claims_ledger");
+      lineage.claimsHash = hashClaims(claimsLedger);
       console.log(`${LOG_PREFIX} claims_ledger: COMPLETE — ${claimsLedger.claims.length} claims`);
     } else {
       // Needs work — check budget
       const claimsBudget = Math.min(120_000, Math.max(0, timeRemaining() - 30_000));
       if (claimsBudget < CLAIMS_MIN_BUDGET_MS) {
         stageStates.push({ stage: "claims_ledger", status: "partial", detail: `budget_insufficient (${Math.round(claimsBudget / 1000)}s)` });
-        console.log(`${LOG_PREFIX} claims_ledger: BUDGET INSUFFICIENT (${Math.round(claimsBudget / 1000)}s) — yielding`);
-        return buildResult("in_progress", "claims_ledger", "claims_ledger", stageStates, completedStages, progressAdvanced, checkpointWritten, input);
+        console.log(`${LOG_PREFIX} claims_ledger: BUDGET INSUFFICIENT — yielding`);
+        return buildResult("in_progress", "claims_ledger", stageStates, completedStages, progressAdvanced, []);
       }
 
       // Execute claims extraction
@@ -273,273 +366,53 @@ export async function runPostMergeFinalizationStages(
         if (completedThisInvocation === 0 && !claimsLedger.complete) {
           const newNoProgress = noProgress + 1;
           claimsLedger.extraction_metadata.consecutive_no_progress = newNoProgress;
-          if (newNoProgress >= CLAIMS_MAX_NO_PROGRESS) {
-            claimsDegraded = true;
-          }
+          if (newNoProgress >= CLAIMS_MAX_NO_PROGRESS) claimsDegraded = true;
         } else {
           claimsLedger.extraction_metadata.consecutive_no_progress = 0;
         }
 
-        // Persist
+        // Persist with lineage
         const cpStatus = claimsDegraded ? "degraded" : claimsLedger.complete ? "complete" : "partial";
         try {
           await ctx.integrations.db.execute(
             `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
              VALUES ($1, 'claims_ledger', $2::jsonb, $3, $4)
-             ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = $3, version_hash = $4`,
-            [runId, JSON.stringify(claimsLedger), cpStatus, getPipelineVersion()],
+             ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE
+               SET payload = EXCLUDED.payload, updated_at = now(), status = $3, version_hash = $4`,
+            [runId, JSON.stringify(claimsLedger), cpStatus, pipelineVersion],
             { label: `${LOG_PREFIX} Persist claims_ledger (${cpStatus})` },
           );
-          checkpointWritten = true;
           progressAdvanced = true;
-        } catch { /* non-fatal */ }
-
-        console.log(`${LOG_PREFIX} claims_ledger: executed — ${claimsLedger.claims.length} claims, complete=${claimsLedger.complete}, degraded=${claimsDegraded}`);
+        } catch (e: any) {
+          console.warn(`${LOG_PREFIX} claims_ledger: persist failed (non-fatal): ${e?.message}`);
+        }
 
         if (claimsLedger.complete || claimsDegraded) {
           stageStates.push({ stage: "claims_ledger", status: claimsDegraded ? "failed" : "completed_valid", detail: `${claimsLedger.claims.length} claims` });
           completedStages.push("claims_ledger");
+          if (claimsLedger.complete) lineage.claimsHash = hashClaims(claimsLedger);
         } else {
-          // Partial — need another invocation
           stageStates.push({ stage: "claims_ledger", status: "partial", detail: `${claimsLedger.extraction_metadata.pending} pending` });
-          return buildResult("in_progress", "claims_ledger", "claims_ledger", stageStates, completedStages, progressAdvanced, checkpointWritten, input);
+          return buildResult("in_progress", "claims_ledger", stageStates, completedStages, progressAdvanced, []);
         }
       } catch (err: any) {
         console.warn(`${LOG_PREFIX} claims_ledger: extraction error (non-fatal): ${err?.message}`);
         stageStates.push({ stage: "claims_ledger", status: "partial", detail: `error: ${err?.message}` });
-        return buildResult("in_progress", "claims_ledger", "claims_ledger", stageStates, completedStages, progressAdvanced, checkpointWritten, input);
+        return buildResult("in_progress", "claims_ledger", stageStates, completedStages, progressAdvanced, []);
       }
     }
   } else {
-    // Non-claims modules skip this stage entirely
-    stageStates.push({ stage: "claims_ledger", status: "completed_valid", detail: "not_required" });
+    stageStates.push({ stage: "claims_ledger", status: "skipped", detail: "not required for module" });
     completedStages.push("claims_ledger");
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // STAGE 2: reconciliation
   // ─────────────────────────────────────────────────────────────────────────
-  let reconciliation: ReconciliationResult | null = null;
+  let reconciliationResult: ReconciliationResult | null = null;
 
-  if (moduleId === "contradiction_check" && !claimsDegraded) {
-    // Load existing reconciliation checkpoint
-    try {
-      const reconCpRows = await ctx.integrations.db.query(
-        `SELECT payload FROM pipeline_checkpoints
-         WHERE module_run_id = $1 AND checkpoint_key = 'reconciliation'
-           AND COALESCE(status, 'complete') = 'complete'`,
-        z.object({ payload: z.any() }),
-        [runId],
-        { label: `${LOG_PREFIX} Load reconciliation` },
-      );
-      if (reconCpRows.length > 0 && reconCpRows[0].payload) {
-        reconciliation = reconCpRows[0].payload as ReconciliationResult;
-      }
-    } catch { /* non-fatal */ }
-
-    if (reconciliation) {
-      stageStates.push({ stage: "reconciliation", status: "completed_valid", detail: `${reconciliation.findings.length} findings` });
-      completedStages.push("reconciliation");
-      console.log(`${LOG_PREFIX} reconciliation: COMPLETE — ${reconciliation.findings.length} findings (loaded from checkpoint)`);
-    } else if (!claimsLedger?.complete || claimsLedger.claims.length === 0) {
-      // Cannot reconcile without complete claims
-      const reason = !claimsLedger?.complete ? "claims_incomplete" : "no_claims";
-      stageStates.push({ stage: "reconciliation", status: "blocked", detail: reason });
-      completedStages.push("reconciliation"); // Blocked but non-fatal — pipeline proceeds
-      console.log(`${LOG_PREFIX} reconciliation: BLOCKED (${reason}) — proceeding without`);
-    } else {
-      // Need to run reconciliation — load numeric report first
-      let numericReport: { figures: any[]; discrepancies: any[] } | null = null;
-      try {
-        const numCpRows = await ctx.integrations.db.query(
-          `SELECT payload FROM pipeline_checkpoints
-           WHERE module_run_id = $1 AND checkpoint_key = 'numeric_report'
-             AND COALESCE(status, 'complete') = 'complete'`,
-          z.object({ payload: z.any() }),
-          [runId],
-          { label: `${LOG_PREFIX} Load numeric_report` },
-        );
-        if (numCpRows.length > 0 && numCpRows[0].payload) {
-          const saved = numCpRows[0].payload as { figures: unknown[]; discrepancies: unknown[] };
-          if (saved.figures && saved.discrepancies) {
-            numericReport = { figures: saved.figures as any[], discrepancies: saved.discrepancies as any[] };
-          }
-        }
-      } catch { /* non-fatal */ }
-
-      if (!numericReport) {
-        stageStates.push({ stage: "reconciliation", status: "blocked", detail: "no_numeric_report" });
-        completedStages.push("reconciliation"); // Blocked but non-fatal
-        console.log(`${LOG_PREFIX} reconciliation: BLOCKED (no numeric report) — proceeding without`);
-      } else {
-        // Budget check
-        const reconBudget = Math.min(90_000, Math.max(0, timeRemaining() - 30_000));
-        if (reconBudget < RECONCILIATION_MIN_BUDGET_MS) {
-          stageStates.push({ stage: "reconciliation", status: "partial", detail: `budget_insufficient (${Math.round(reconBudget / 1000)}s)` });
-          console.log(`${LOG_PREFIX} reconciliation: BUDGET INSUFFICIENT — yielding`);
-          return buildResult("in_progress", "reconciliation", "reconciliation", stageStates, completedStages, progressAdvanced, checkpointWritten, input);
-        }
-
-        // Execute reconciliation
-        try {
-          reconciliation = await runReconciliation(
-            ctx,
-            claimsLedger!,
-            numericReport.figures,
-            numericReport.discrepancies,
-            startTime,
-            reconBudget,
-          );
-          console.log(`${LOG_PREFIX} reconciliation: executed — ${reconciliation.findings.length} findings`);
-
-          // Persist
-          try {
-            await ctx.integrations.db.execute(
-              `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
-               VALUES ($1, 'reconciliation', $2::jsonb, 'complete', $3)
-               ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-              [runId, JSON.stringify(reconciliation), getPipelineVersion()],
-              { label: `${LOG_PREFIX} Persist reconciliation` },
-            );
-            checkpointWritten = true;
-            progressAdvanced = true;
-          } catch { /* non-fatal */ }
-
-          stageStates.push({ stage: "reconciliation", status: "completed_valid", detail: `${reconciliation.findings.length} findings` });
-          completedStages.push("reconciliation");
-        } catch (err: any) {
-          console.warn(`${LOG_PREFIX} reconciliation: failed (non-fatal): ${err?.message}`);
-          stageStates.push({ stage: "reconciliation", status: "blocked", detail: `error: ${err?.message}` });
-          completedStages.push("reconciliation"); // Non-fatal — proceed without
-        }
-      }
-    }
-  } else {
-    // Non-claims modules or degraded claims skip reconciliation
-    const detail = claimsDegraded ? "claims_degraded" : "not_required";
-    stageStates.push({ stage: "reconciliation", status: "completed_valid", detail });
-    completedStages.push("reconciliation");
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // STAGE 3: evidence_admission (OA-04 synthetic checkpoint at tree_level=96)
-  // ─────────────────────────────────────────────────────────────────────────
-  if (moduleId === "contradiction_check") {
-    let hasEvidenceAdmission = false;
-
-    // Load and validate
-    try {
-      const Q3Row = z.object({ merged_json: z.any() });
-      const q3Rows = await ctx.integrations.db.query(
-        `SELECT merged_json FROM merge_checkpoints
-         WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
-         LIMIT 1`,
-        Q3Row,
-        [runId],
-        { label: `${LOG_PREFIX} Load evidence_admission` },
-      );
-      if (q3Rows.length > 0) {
-        const payload = typeof q3Rows[0].merged_json === "string"
-          ? JSON.parse(q3Rows[0].merged_json)
-          : q3Rows[0].merged_json;
-        const ledgers = payload?.evidence_admission_ledgers;
-        if (Array.isArray(ledgers) && ledgers.length > 0) {
-          hasEvidenceAdmission = ledgers.some(
-            (l: any) => l?.schema_version === "evidence-admission-v1" && Array.isArray(l.admitted)
-          );
-        }
-      }
-    } catch { /* non-fatal */ }
-
-    if (hasEvidenceAdmission) {
-      stageStates.push({ stage: "evidence_admission", status: "completed_valid", detail: "checkpoint_exists" });
-      completedStages.push("evidence_admission");
-      console.log(`${LOG_PREFIX} evidence_admission: VALID checkpoint exists`);
-    } else {
-      // Synthesize the evidence_admission checkpoint
-      console.log(`${LOG_PREFIX} evidence_admission: MISSING — synthesizing`);
-      try {
-        const syntheticLedger = {
-          _replay_metadata: {
-            run_id: runId,
-            module_id: moduleId,
-            replay_type: "OA04_shared_post_merge_runner",
-            replay_timestamp: new Date().toISOString(),
-            schema_version: "3.1.0",
-            total_candidates: 0,
-            q4_eligible_count: 0,
-            q4_ineligible_count: 0,
-            silent_losses: 0,
-            note: `Synthesized by runPostMergeFinalizationStages (caller: ${callerPath}).`,
-          },
-          evidence_admission_ledgers: [{
-            schema_version: "evidence-admission-v1",
-            admitted: [],
-            rejected: [],
-            total_processed: 0,
-            synthesis_source: "post-merge-finalization-runner",
-            synthesis_reason: "Evidence admission prerequisite satisfied structurally via shared runner.",
-          }],
-        };
-
-        await ctx.integrations.db.execute(
-          `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json, updated_at)
-           VALUES ($1, 96, 0, 'oa04_synthetic_evidence_admission', $2::jsonb, now())
-           ON CONFLICT (module_run_id, tree_level, node_index)
-           DO UPDATE SET status = 'oa04_synthetic_evidence_admission', merged_json = $2::jsonb, updated_at = now()`,
-          [runId, JSON.stringify(syntheticLedger)],
-          { label: `${LOG_PREFIX} Write synthetic evidence_admission` },
-        );
-        checkpointWritten = true;
-        progressAdvanced = true;
-        stageStates.push({ stage: "evidence_admission", status: "completed_valid", detail: "synthesized" });
-        completedStages.push("evidence_admission");
-        console.log(`${LOG_PREFIX} evidence_admission: SYNTHESIZED at tree_level=96`);
-      } catch (e: any) {
-        console.error(`${LOG_PREFIX} evidence_admission: synthesis FAILED: ${e?.message}`);
-        stageStates.push({ stage: "evidence_admission", status: "failed", detail: e?.message });
-        return buildResult("blocked", "evidence_admission", null, stageStates, completedStages, progressAdvanced, checkpointWritten, input, [`evidence_admission synthesis failed: ${e?.message}`]);
-      }
-    }
-  } else {
-    stageStates.push({ stage: "evidence_admission", status: "completed_valid", detail: "not_required" });
-    completedStages.push("evidence_admission");
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // STAGE 4: canonical_finalize (F06)
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // Budget check before finalization
-  const finalizeBudget = timeRemaining();
-  if (finalizeBudget < FINALIZATION_MIN_BUDGET_MS) {
-    stageStates.push({ stage: "canonical_finalize", status: "partial", detail: `budget_insufficient (${Math.round(finalizeBudget / 1000)}s)` });
-    console.log(`${LOG_PREFIX} canonical_finalize: BUDGET INSUFFICIENT — yielding`);
-    return buildResult("in_progress", "canonical_finalize", "canonical_finalize", stageStates, completedStages, progressAdvanced, checkpointWritten, input);
-  }
-
-  // Load checkpoint status (same helper used by F06 itself)
-  const checkpointStatus = await loadCheckpointStatus(
-    ctx.integrations.db, runId, moduleId, canonicalRootFindings.length > 0
-  );
-
-  // Pre-flight: verify our readiness matches what F06 expects
-  const missingPrereqs = checkpointStatus.filter(s => !s.present).map(s => s.key);
-  if (missingPrereqs.length > 0) {
-    // Readiness mismatch — our stages completed but F06 still reports missing
-    const diagnostic = `Runner believes prerequisites complete, but loadCheckpointStatus reports missing: ${missingPrereqs.join(", ")}`;
-    console.error(`${LOG_PREFIX} canonical_finalize: READINESS MISMATCH — ${diagnostic}`);
-    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: diagnostic });
-    return buildResult("blocked", "canonical_finalize", null, stageStates, completedStages, progressAdvanced, checkpointWritten, input, [diagnostic]);
-  }
-
-  // Run post-merge pipeline (suppression, Layer-1 numeric, consolidation, recon append, materiality)
-  // Skip if caller has already run post-merge processing (normal-path case)
-  let finalFindings = canonicalRootFindings;
-  let finalHousekeeping = housekeepingFindings;
-
-  if (!input.findingsAlreadyPostProcessed) {
-    // Load numeric report for post-merge pipeline
+  if (CLAIMS_REQUIRED_MODULES.has(moduleId)) {
+    // Load numeric report (dependency for reconciliation)
     let numericReport: { figures: any[]; discrepancies: any[] } | null = null;
     try {
       const numCpRows = await ctx.integrations.db.query(
@@ -548,7 +421,7 @@ export async function runPostMergeFinalizationStages(
            AND COALESCE(status, 'complete') = 'complete'`,
         z.object({ payload: z.any() }),
         [runId],
-        { label: `${LOG_PREFIX} Load numeric_report for post-merge` },
+        { label: `${LOG_PREFIX} Load numeric report` },
       );
       if (numCpRows.length > 0 && numCpRows[0].payload) {
         const saved = numCpRows[0].payload as { figures: unknown[]; discrepancies: unknown[] };
@@ -556,176 +429,310 @@ export async function runPostMergeFinalizationStages(
           numericReport = { figures: saved.figures as any[], discrepancies: saved.discrepancies as any[] };
         }
       }
-    } catch { /* non-fatal */ }
+    } catch { /* proceed without */ }
 
+    if (numericReport) {
+      lineage.numericReportHash = computeContentHash(JSON.stringify(numericReport.figures.length));
+    }
+
+    // Load existing reconciliation checkpoint with lineage
+    let reconExistingVersion: string | null = null;
+    try {
+      const reconCpRows = await ctx.integrations.db.query(
+        `SELECT payload, status, version_hash FROM pipeline_checkpoints
+         WHERE module_run_id = $1 AND checkpoint_key = 'reconciliation'`,
+        z.object({ payload: z.any(), status: z.string().nullable(), version_hash: z.string().nullable() }),
+        [runId],
+        { label: `${LOG_PREFIX} Load reconciliation` },
+      );
+      if (reconCpRows.length > 0 && reconCpRows[0].payload) {
+        const cpStatus = reconCpRows[0].status;
+        reconExistingVersion = reconCpRows[0].version_hash;
+        if (cpStatus === "complete" || cpStatus === "done") {
+          reconciliationResult = reconCpRows[0].payload as ReconciliationResult;
+        }
+      }
+    } catch { /* treat as missing */ }
+
+    // Lineage validation for reconciliation
+    if (reconciliationResult && reconExistingVersion && reconExistingVersion !== pipelineVersion) {
+      console.warn(`${LOG_PREFIX} reconciliation: STALE — version ${reconExistingVersion} != current ${pipelineVersion}`);
+      stageStates.push({ stage: "reconciliation", status: "stale", detail: `version mismatch`, lineageValid: false });
+      reconciliationResult = null; // Force re-execution
+    }
+
+    if (reconciliationResult) {
+      stageStates.push({ stage: "reconciliation", status: "completed_valid", detail: `${reconciliationResult.findings.length} findings`, lineageValid: true });
+      completedStages.push("reconciliation");
+      lineage.reconciliationHash = hashReconciliation(reconciliationResult);
+      console.log(`${LOG_PREFIX} reconciliation: COMPLETE — ${reconciliationResult.findings.length} findings`);
+    } else if (claimsDegraded) {
+      // Claims degraded — reconciliation cannot run but we proceed
+      stageStates.push({ stage: "reconciliation", status: "skipped", detail: "claims degraded" });
+      completedStages.push("reconciliation");
+      console.log(`${LOG_PREFIX} reconciliation: SKIPPED (claims degraded)`);
+    } else if (!claimsLedger?.complete) {
+      // Claims not done — reconciliation blocked
+      stageStates.push({ stage: "reconciliation", status: "blocked", detail: "claims not complete" });
+      return buildResult("blocked", "reconciliation", stageStates, completedStages, progressAdvanced, ["Reconciliation blocked: claims extraction not complete"]);
+    } else {
+      // Execute reconciliation
+      const reconBudget = Math.max(0, timeRemaining() - 30_000);
+      if (reconBudget < RECONCILIATION_MIN_BUDGET_MS) {
+        stageStates.push({ stage: "reconciliation", status: "partial", detail: "budget insufficient" });
+        return buildResult("in_progress", "reconciliation", stageStates, completedStages, progressAdvanced, []);
+      }
+
+      try {
+        reconciliationResult = await runReconciliation(
+          ctx,
+          claimsLedger!,
+          numericReport?.figures ?? [],
+          numericReport?.discrepancies ?? [],
+          startTime,
+          reconBudget,
+        );
+
+        // Persist
+        try {
+          await ctx.integrations.db.execute(
+            `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+             VALUES ($1, 'reconciliation', $2::jsonb, 'complete', $3)
+             ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE
+               SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
+            [runId, JSON.stringify(reconciliationResult), pipelineVersion],
+            { label: `${LOG_PREFIX} Persist reconciliation` },
+          );
+          progressAdvanced = true;
+        } catch (e: any) {
+          console.warn(`${LOG_PREFIX} reconciliation: persist failed: ${e?.message}`);
+        }
+
+        stageStates.push({ stage: "reconciliation", status: "completed_valid", detail: `${reconciliationResult.findings.length} findings` });
+        completedStages.push("reconciliation");
+        lineage.reconciliationHash = hashReconciliation(reconciliationResult);
+        console.log(`${LOG_PREFIX} reconciliation: executed — ${reconciliationResult.findings.length} findings`);
+      } catch (err: any) {
+        console.error(`${LOG_PREFIX} reconciliation: FAILED: ${err?.message}`);
+        stageStates.push({ stage: "reconciliation", status: "failed", detail: err?.message });
+        return buildResult("failed", "reconciliation", stageStates, completedStages, progressAdvanced, [`Reconciliation failed: ${err?.message}`]);
+      }
+    }
+  } else {
+    stageStates.push({ stage: "reconciliation", status: "skipped", detail: "not required for module" });
+    completedStages.push("reconciliation");
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STAGE 3: post_merge (suppression, numeric, consolidation, recon append, materiality)
+  // ─────────────────────────────────────────────────────────────────────────
+  let postMergeFindings = canonicalRootFindings;
+  let postMergeHousekeeping = housekeepingFindings;
+
+  try {
     const postMergeResult = await runPostMergePipeline({
-      findings: finalFindings,
-      housekeepingFindings: finalHousekeeping,
-      numericReport,
-      claimsReconciliation: reconciliation,
+      findings: canonicalRootFindings,
+      housekeepingFindings,
+      numericReport: null, // Loaded internally by post-merge if needed
+      claimsReconciliation: reconciliationResult,
       fileTagMap,
       moduleId,
     });
-    finalFindings = postMergeResult.findings;
-    finalHousekeeping = postMergeResult.housekeepingFindings;
-    console.log(`${LOG_PREFIX} Post-merge pipeline: ${canonicalRootFindings.length} → ${finalFindings.length} findings`);
-  } else {
-    console.log(`${LOG_PREFIX} Skipping post-merge pipeline (findingsAlreadyPostProcessed=true, findings=${finalFindings.length})`);
+    postMergeFindings = postMergeResult.findings;
+    postMergeHousekeeping = postMergeResult.housekeepingFindings;
+    lineage.postMergeResultHash = hashFindings(postMergeFindings);
+    stageStates.push({ stage: "post_merge", status: "completed_valid", detail: `${postMergeFindings.length} findings after processing` });
+    completedStages.push("post_merge");
+    console.log(`${LOG_PREFIX} post_merge: ${canonicalRootFindings.length} → ${postMergeFindings.length} findings`);
+  } catch (err: any) {
+    console.error(`${LOG_PREFIX} post_merge: FAILED: ${err?.message}`);
+    stageStates.push({ stage: "post_merge", status: "failed", detail: err?.message });
+    return buildResult("failed", "post_merge", stageStates, completedStages, progressAdvanced, [`Post-merge processing failed: ${err?.message}`]);
   }
 
-  // Format report — use pre-formatted if provided (normal-path already formatted with disclosures),
-  // otherwise run the pure renderer (fast-path / recovery-path)
-  let fullReport: string | null = null;
-  if (input.preFormattedReport) {
-    fullReport = input.preFormattedReport;
-    console.log(`${LOG_PREFIX} Using pre-formatted report (${fullReport.length} chars)`);
-  } else {
-    const formatBudget = timeRemaining();
+  // ─────────────────────────────────────────────────────────────────────────
+  // STAGE 4: absence_verify (only for checklist modules)
+  // ─────────────────────────────────────────────────────────────────────────
+  let verificationErrored = false;
+  if (ABSENCE_VERIFICATION_MODULES.has(moduleId)) {
+    const verifyBudget = timeRemaining();
+    if (verifyBudget < ABSENCE_VERIFICATION_MIN_BUDGET_MS) {
+      stageStates.push({ stage: "absence_verify", status: "partial", detail: "budget insufficient" });
+      console.log(`${LOG_PREFIX} absence_verify: BUDGET INSUFFICIENT — yielding`);
+      return buildResult("in_progress", "absence_verify", stageStates, completedStages, progressAdvanced, []);
+    }
+
     try {
-      fullReport = await formatReportInline(
-        ctx, moduleId, executiveHeader, finalFindings,
-        formatBudget, startTime, finalHousekeeping,
+      const verifyResult = await runAbsenceVerificationPhase(
+        ctx, dealId, runId, postMergeFindings, moduleId,
+        useOpus, subjectDocumentIds ?? [], timeRemaining, startTime,
       );
-    } catch (fmtErr: any) {
-      console.warn(`${LOG_PREFIX} formatReportInline failed: ${fmtErr?.message}`);
+      postMergeFindings = verifyResult.findings;
+
+      if (!verifyResult.completed) {
+        stageStates.push({ stage: "absence_verify", status: "partial", detail: "incomplete — will resume" });
+        return buildResult("in_progress", "absence_verify", stageStates, completedStages, progressAdvanced, []);
+      }
+
+      stageStates.push({ stage: "absence_verify", status: "completed_valid", detail: `${verifyResult.verificationLog.length} verified` });
+      completedStages.push("absence_verify");
+      console.log(`${LOG_PREFIX} absence_verify: COMPLETE`);
+    } catch (err: any) {
+      console.error(`${LOG_PREFIX} absence_verify: FAILED (non-fatal): ${err?.message}`);
+      verificationErrored = true;
+      stageStates.push({ stage: "absence_verify", status: "failed", detail: `error: ${err?.message}` });
+      completedStages.push("absence_verify"); // Non-fatal — proceed with degraded
+    }
+  } else {
+    stageStates.push({ stage: "absence_verify", status: "skipped", detail: "not applicable" });
+    completedStages.push("absence_verify");
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STAGE 5: canonical_finalize (F06)
+  // ─────────────────────────────────────────────────────────────────────────
+  const finalizeBudget = timeRemaining();
+  if (finalizeBudget < FINALIZATION_MIN_BUDGET_MS) {
+    stageStates.push({ stage: "canonical_finalize", status: "partial", detail: "budget insufficient" });
+    console.log(`${LOG_PREFIX} canonical_finalize: BUDGET INSUFFICIENT — yielding`);
+    return buildResult("in_progress", "canonical_finalize", stageStates, completedStages, progressAdvanced, []);
+  }
+
+  // Validate evidence admission prerequisite
+  // Evidence admission (tree_level=96) must genuinely exist — never fabricated.
+  // loadCheckpointStatus checks the actual Q3 merge checkpoint payload.
+  const checkpointStatus = await loadCheckpointStatus(
+    ctx.integrations.db, runId, moduleId, postMergeFindings.length > 0,
+  );
+
+  // Check evidence admission specifically — if required and missing, BLOCK
+  if (CLAIMS_REQUIRED_MODULES.has(moduleId)) {
+    const evidenceEntry = checkpointStatus.find(s => s.key === "evidence_admission");
+    if (evidenceEntry && !evidenceEntry.present) {
+      console.error(`${LOG_PREFIX} canonical_finalize: BLOCKED — evidence_admission missing. Cannot fabricate.`);
+      stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: "evidence_admission prerequisite missing — cannot fabricate" });
+      return buildResult("blocked", "canonical_finalize", stageStates, completedStages, progressAdvanced,
+        ["Evidence admission (tree_level=96) checkpoint is missing. This stage must be executed by the production evidence-admission service. Finalization is blocked until genuine evidence admission data exists."]);
     }
   }
 
-  // Keepalive before F06
-  try {
-    await ctx.integrations.db.execute(`SELECT 1`, [], { label: `${LOG_PREFIX} Pre-F06 keepalive` });
-  } catch { /* non-fatal */ }
+  // Invoke F06 — the sole authoritative finalizer
+  console.log(`${LOG_PREFIX} canonical_finalize: invoking F06 — ${postMergeFindings.length} findings, housekeeping=${postMergeHousekeeping.length}`);
 
-  // Call F06
-  const outcome = await f06CanonicalFinalize(
+  const f06Outcome = await f06CanonicalFinalize(
     ctx.integrations.db,
     runId,
     dealId,
     {
-      findings: finalFindings,
+      findings: postMergeFindings,
       executiveHeader,
       moduleType: moduleId,
       checkpointStatus,
-      preFormattedReport: fullReport ?? undefined,
-      degradedConditions,
       proposedFinalNode: {
         treeLevel: naturalRootTreeLevel,
         nodeIndex: naturalRootNodeIndex,
       },
+      claimsDegraded,
+      degradedConditions: verificationErrored
+        ? [`Absence verification phase errored (${postMergeHousekeeping.length} housekeeping findings present)`]
+        : undefined,
     },
   );
 
-  // Handle F06 outcomes
-  if (outcome.status === "completed" || outcome.status === "idempotent") {
-    const artifactId = outcome.artifactId;
-    const semanticHash = outcome.semanticHash;
-    const findingCount = outcome.status === "completed" ? outcome.findingCount : finalFindings.length;
+  // ── Translate F06 outcome to runner result ──────────────────────────────
+
+  if (f06Outcome.status === "completed") {
+    stageStates.push({ stage: "canonical_finalize", status: "completed_valid", detail: `artifact=${f06Outcome.artifactId}, hash=${f06Outcome.semanticHash}` });
+    completedStages.push("canonical_finalize");
     progressAdvanced = true;
-    checkpointWritten = true;
-    stageStates.push({ stage: "canonical_finalize", status: "completed_valid", detail: `artifact=${artifactId.slice(0, 8)}` });
-    completedStages.push("canonical_finalize");
-    console.log(`${LOG_PREFIX} canonical_finalize: ${outcome.status} — artifact=${artifactId}, hash=${semanticHash.slice(0, 12)}`);
-
+    console.log(`${LOG_PREFIX} COMPLETE — artifact=${f06Outcome.artifactId}, hash=${f06Outcome.semanticHash}, findings=${f06Outcome.findingCount}`);
     return {
       status: "complete",
-      naturalRootId: { treeLevel: naturalRootTreeLevel, nodeIndex: naturalRootNodeIndex },
-      currentStage: "canonical_finalize",
+      currentStage: null,
+      stageStates,
       completedStages,
-      nextStage: null,
       progressAdvanced,
-      checkpointWritten,
       blockingReasons: [],
-      stageStates,
-      output: {
-        artifactId,
-        semanticHash,
-        findingCount,
-        reportGenerated: !!fullReport,
-        findings: finalFindings,
-        fullReport: fullReport ?? "",
-        executiveHeader,
-      },
+      artifact: f06Outcome.artifact ?? null,
+      finalizerOutcome: f06Outcome,
     };
   }
 
-  if (outcome.status === "prerequisites_missing") {
-    // Mismatch between our readiness check and F06's — this should never happen
-    // since we used the same loadCheckpointStatus helper. Record as blocked diagnostic.
-    const diagnostic = `Shared runner pre-flight passed but F06 reports prerequisites_missing: ${outcome.missingKeys.join(", ")}`;
-    console.error(`${LOG_PREFIX} canonical_finalize: FINALIZER READINESS MISMATCH — ${diagnostic}`);
-    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: diagnostic });
-    return buildResult("blocked", "canonical_finalize", null, stageStates, completedStages, progressAdvanced, checkpointWritten, input, [diagnostic]);
-  }
-
-  if (outcome.status === "publication_blocked") {
-    const diagnostic = `Publication gate blocked: ${outcome.message}`;
-    console.warn(`${LOG_PREFIX} canonical_finalize: ${diagnostic}`);
-    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: diagnostic });
-    return buildResult("blocked", "canonical_finalize", null, stageStates, completedStages, progressAdvanced, checkpointWritten, input, [diagnostic]);
-  }
-
-  if (outcome.status === "persist_failed") {
-    const diagnostic = `F06 persist failed: ${outcome.error}`;
-    console.error(`${LOG_PREFIX} canonical_finalize: ${diagnostic}`);
-    stageStates.push({ stage: "canonical_finalize", status: "failed", detail: diagnostic });
-    return buildResult("failed", "canonical_finalize", "canonical_finalize", stageStates, completedStages, progressAdvanced, checkpointWritten, input, [diagnostic]);
-  }
-
-  if (outcome.status === "rejected_overwrite") {
-    const diagnostic = `F06 rejected overwrite: existing=${outcome.existingHash.slice(0, 12)} vs new=${outcome.newHash.slice(0, 12)}`;
-    console.error(`${LOG_PREFIX} canonical_finalize: ${diagnostic}`);
-    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: diagnostic });
-    return buildResult("blocked", "canonical_finalize", null, stageStates, completedStages, progressAdvanced, checkpointWritten, input, [diagnostic]);
-  }
-
-  if (outcome.status === "already_completed") {
-    stageStates.push({ stage: "canonical_finalize", status: "completed_valid", detail: "already_completed" });
+  if (f06Outcome.status === "idempotent") {
+    // Already finalized with same content — no artifact on idempotent (already persisted)
+    stageStates.push({ stage: "canonical_finalize", status: "completed_valid", detail: `idempotent, artifact=${f06Outcome.artifactId}` });
     completedStages.push("canonical_finalize");
-    console.log(`${LOG_PREFIX} canonical_finalize: already_completed`);
+    console.log(`${LOG_PREFIX} IDEMPOTENT — artifact=${f06Outcome.artifactId}`);
     return {
       status: "complete",
-      naturalRootId: { treeLevel: naturalRootTreeLevel, nodeIndex: naturalRootNodeIndex },
-      currentStage: "canonical_finalize",
-      completedStages,
-      nextStage: null,
-      progressAdvanced: false,
-      checkpointWritten: false,
-      blockingReasons: [],
+      currentStage: null,
       stageStates,
+      completedStages,
+      progressAdvanced: false,
+      blockingReasons: [],
+      artifact: null, // Idempotent outcome doesn't carry full artifact — already persisted
+      finalizerOutcome: f06Outcome,
     };
   }
 
-  // Unexpected outcome
-  const diagnostic = `Unexpected F06 outcome: ${JSON.stringify(outcome)}`;
-  console.error(`${LOG_PREFIX} canonical_finalize: ${diagnostic}`);
-  stageStates.push({ stage: "canonical_finalize", status: "failed", detail: diagnostic });
-  return buildResult("failed", "canonical_finalize", "canonical_finalize", stageStates, completedStages, progressAdvanced, checkpointWritten, input, [diagnostic]);
+  if (f06Outcome.status === "publication_blocked") {
+    // Publication gate failed — this is a BLOCKED state, not retryable as in_progress
+    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: f06Outcome.message });
+    console.error(`${LOG_PREFIX} PUBLICATION BLOCKED: ${f06Outcome.message}`);
+    return buildResult("blocked", "canonical_finalize", stageStates, completedStages, progressAdvanced,
+      [`Publication gate blocked: ${f06Outcome.message}`]);
+  }
+
+  if (f06Outcome.status === "prerequisites_missing") {
+    // Prerequisites still missing after our validation — blocked
+    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: `missing: ${f06Outcome.missingKeys?.join(", ")}` });
+    console.error(`${LOG_PREFIX} PREREQUISITES MISSING: ${f06Outcome.missingKeys?.join(", ")}`);
+    return buildResult("blocked", "canonical_finalize", stageStates, completedStages, progressAdvanced,
+      [`F06 prerequisites missing: ${f06Outcome.missingKeys?.join(", ")}. Pipeline cannot proceed without manual intervention.`]);
+  }
+
+  if (f06Outcome.status === "persist_failed") {
+    // Persistence failure — this is a FAILED state
+    stageStates.push({ stage: "canonical_finalize", status: "failed", detail: f06Outcome.error });
+    console.error(`${LOG_PREFIX} PERSIST FAILED: ${f06Outcome.error}`);
+    return buildResult("failed", "canonical_finalize", stageStates, completedStages, progressAdvanced,
+      [`F06 persistence failed: ${f06Outcome.error}`]);
+  }
+
+  if (f06Outcome.status === "rejected_overwrite") {
+    // Run already completed with different hash — blocked
+    stageStates.push({ stage: "canonical_finalize", status: "blocked", detail: "rejected_overwrite" });
+    console.error(`${LOG_PREFIX} REJECTED OVERWRITE: existing=${f06Outcome.existingHash}, new=${f06Outcome.newHash}`);
+    return buildResult("blocked", "canonical_finalize", stageStates, completedStages, progressAdvanced,
+      [`Run already completed with different artifact. Cannot overwrite without administrative action.`]);
+  }
+
+  // Unknown F06 status — fail-closed
+  stageStates.push({ stage: "canonical_finalize", status: "failed", detail: `unexpected F06 status: ${f06Outcome.status}` });
+  return buildResult("failed", "canonical_finalize", stageStates, completedStages, progressAdvanced,
+    [`Unexpected F06 outcome: ${f06Outcome.status}`]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Result Builder
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildResult(
-  status: PostMergeFinalizationResult["status"],
-  currentStage: StageName | null,
-  nextStage: StageName | null,
+  status: RunnerStatus,
+  currentStage: StageName,
   stageStates: StageState[],
   completedStages: StageName[],
   progressAdvanced: boolean,
-  checkpointWritten: boolean,
-  input: PostMergeFinalizationInput,
-  blockingReasons: string[] = [],
+  blockingReasons: string[],
 ): PostMergeFinalizationResult {
   return {
     status,
-    naturalRootId: { treeLevel: input.naturalRootTreeLevel, nodeIndex: input.naturalRootNodeIndex },
     currentStage,
-    completedStages,
-    nextStage,
-    progressAdvanced,
-    checkpointWritten,
-    blockingReasons,
     stageStates,
+    completedStages,
+    progressAdvanced,
+    blockingReasons,
+    artifact: null,
+    finalizerOutcome: null,
   };
 }

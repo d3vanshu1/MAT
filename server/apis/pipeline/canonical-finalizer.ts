@@ -342,16 +342,18 @@ export async function canonicalFinalize(
   const ExistingOutputSchema = z.object({
     id: z.string(),
     semantic_hash: z.string().nullable(),
+    executive_header: z.string().nullable(),
   });
   const ExistingOutputSchemaLegacy = z.object({
     id: z.string(),
+    executive_header: z.string().nullable(),
   });
 
-  let existingOutputs: { id: string; semantic_hash: string | null }[];
+  let existingOutputs: { id: string; semantic_hash: string | null; executive_header: string | null }[];
   let hasExtendedSchema = true;
   try {
     existingOutputs = await db.query(
-      `SELECT id, semantic_hash FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
+      `SELECT id, semantic_hash, executive_header FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
       ExistingOutputSchema,
       [runId],
       { label: "canonicalFinalize: check existing output" }
@@ -360,13 +362,22 @@ export async function canonicalFinalize(
     // semantic_hash column does not exist — use legacy schema
     hasExtendedSchema = false;
     const legacyRows = await db.query(
-      `SELECT id FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
+      `SELECT id, executive_header FROM module_outputs WHERE module_run_id = $1 LIMIT 1`,
       ExistingOutputSchemaLegacy,
       [runId],
       { label: "canonicalFinalize: check existing output (legacy)" }
     );
-    existingOutputs = legacyRows.map(r => ({ id: r.id, semantic_hash: null }));
+    existingOutputs = legacyRows.map(r => ({ id: r.id, semantic_hash: null, executive_header: r.executive_header }));
     console.log(`[canonicalFinalize] Extended schema columns not available — using legacy persist path`);
+  }
+
+  // Invalidated partial artifacts should NOT be updated in place — insert a new row.
+  // This preserves the invalidated row as audit evidence.
+  const isInvalidatedPartial = existingOutputs.length > 0 &&
+    existingOutputs[0].executive_header?.startsWith("[INVALIDATED_PARTIAL]");
+  if (isInvalidatedPartial) {
+    console.log(`[canonicalFinalize] Existing output ${existingOutputs[0].id} is invalidated partial — will INSERT new row`);
+    existingOutputs = [];
   }
 
   // For contradiction_check, require all canonical checkpoints

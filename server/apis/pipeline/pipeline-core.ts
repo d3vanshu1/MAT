@@ -74,7 +74,7 @@ import { runReconciliation, validateSupersessionProof, type ReconciliationResult
 import { runCleanParsedTextPhase } from "./clean-parsed-text.js";
 import { runWebResearchPhase } from "./web-research-phase.js";
 import { upsertModuleOutput } from "../modules/upsert-module-output.js";
-import { canonicalFinalize as f06CanonicalFinalize, loadCheckpointStatus, type FinalizerPrerequisites } from "./canonical-finalizer.js";
+import { loadCheckpointStatus } from "./canonical-finalizer.js";
 import { getModuleModel, SONNET_MODEL } from "./model-config.js";
 import { runChecklistScan, formatCoverageMapForPrompt, type ChecklistScanResult } from "./checklist-scan-phase.js";
 import { runAbsenceVerificationPhase } from "./absence-verification-phase.js";
@@ -2486,11 +2486,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               }
             }
 
-            // If housekeeping is corrupt or unloadable, or quality-stage prerequisites missing,
-            // abort fast path entirely. Route through the shared post-merge finalization runner
-            // which executes only quality stages (no upstream re-traversal).
-            if (fastPathHousekeepingAbort || fastPathPrereqAbort) {
-              console.log(`[pipeline:fast-path] Routing to shared post-merge finalization runner (prereqAbort=${fastPathPrereqAbort}, hkAbort=${fastPathHousekeepingAbort})`);
+            // All fast-path cases route through the shared post-merge finalization runner.
+            // The runner handles claims, reconciliation, post-merge, absence verification,
+            // and canonical finalization as a single resumable state machine.
+            console.log(`[pipeline:fast-path] Routing to shared post-merge finalization runner (prereqAbort=${fastPathPrereqAbort}, hkAbort=${fastPathHousekeepingAbort})`);
               const finalizationResult = await runPostMergeFinalizationStages({
                 ctx,
                 runId,
@@ -2504,14 +2503,16 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 timeRemaining,
                 callerPath: "fast_path",
                 housekeepingFindings: fastPathHousekeeping,
+                housekeepingValidated: !fastPathHousekeepingAbort,
                 fileTagMap,
+                sourceManifestHash: topCheckpoint.source_manifest_hash ?? null,
                 runPostMergePipeline,
-                formatReportInline,
+                runAbsenceVerificationPhase,
               });
               // Translate PostMergeFinalizationResult → pipeline return type
-              if (finalizationResult.status === "complete" && finalizationResult.output) {
+              if (finalizationResult.status === "complete" && finalizationResult.artifact) {
                 const MAX_MERGED_TEXT_CHARS = 150_000;
-                let mergedText = finalizationResult.output.fullReport;
+                let mergedText = finalizationResult.artifact.report?.markdown ?? "";
                 if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
                   mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport]";
                 }
@@ -2521,10 +2522,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                   phase: "done",
                   progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
                   result: {
-                    executiveHeader: finalizationResult.output.executiveHeader,
-                    findings: finalizationResult.output.findings,
+                    executiveHeader: finalizationResult.artifact.report?.executive_header ?? topCheckpoint.executive_header,
+                    findings: (finalizationResult.artifact.canonical_findings ?? findings) as MergedFinding[],
                     mergedText,
-                    fullReport: finalizationResult.output.fullReport,
+                    fullReport: finalizationResult.artifact.report?.markdown ?? "",
                   },
                   failedChunks: 0,
                   truncatedChunks: 0,
@@ -2546,324 +2547,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                   ? finalizationResult.blockingReasons.join("; ")
                   : null,
               };
-            } else {
-
-            const finalNode = {
-              text: buildMergedText(topCheckpoint.executive_header, findings),
-              executiveHeader: topCheckpoint.executive_header,
-              findings,
-              truncated: topCheckpoint.is_truncated,
-            };
-
-            let finalFindings = finalNode.findings;
-
-            // --- Fast-path: Load checkpoints needed for shared post-merge pipeline ---
-            // Load numericReport from checkpoint (Layer-1 validation + materiality need it)
-            let fastPathNumericReport: { figures: any[]; discrepancies: any[] } | null = null;
-            try {
-              const numCpRows = await ctx.integrations.db.query(
-                `SELECT payload FROM pipeline_checkpoints
-                 WHERE module_run_id = $1 AND checkpoint_key = 'numeric_report'
-                   AND COALESCE(status, 'complete') = 'complete'`,
-                z.object({ payload: z.any() }),
-                [runId],
-                { label: "Fast-path: load numeric report checkpoint" }
-              );
-              if (numCpRows.length > 0 && numCpRows[0].payload) {
-                const saved = numCpRows[0].payload as { figures: unknown[]; discrepancies: unknown[] };
-                if (saved.figures && saved.discrepancies) {
-                  fastPathNumericReport = { figures: saved.figures as any[], discrepancies: saved.discrepancies as any[] };
-                  console.log(`[pipeline:fast-path] Loaded numeric report: ${saved.figures.length} figures`);
-                }
-              }
-            } catch { /* pipeline_checkpoints may not exist — proceed without */ }
-
-            // Load reconciliation from checkpoint (recon append needs it)
-            let fastPathRecon: ReconciliationResult | null = null;
-            if (moduleId === "contradiction_check") {
-              try {
-                const reconCpRows = await ctx.integrations.db.query(
-                  `SELECT payload FROM pipeline_checkpoints
-                   WHERE module_run_id = $1 AND checkpoint_key = 'reconciliation'
-                     AND COALESCE(status, 'complete') = 'complete'`,
-                  z.object({ payload: z.any() }),
-                  [runId],
-                  { label: "Fast-path: load reconciliation checkpoint" }
-                );
-                if (reconCpRows.length > 0 && reconCpRows[0].payload) {
-                  fastPathRecon = reconCpRows[0].payload as ReconciliationResult;
-                  console.log(`[pipeline:fast-path] Loaded reconciliation checkpoint: ${fastPathRecon.findings.length} findings`);
-                }
-              } catch {
-                // pipeline_checkpoints may not exist — proceed without
-              }
-            }
-
-            // --- Run shared post-merge pipeline (identical to main path) ---
-            const postMergeResult = await runPostMergePipeline({
-              findings: finalFindings,
-              housekeepingFindings: fastPathHousekeeping,
-              numericReport: fastPathNumericReport,
-              claimsReconciliation: fastPathRecon,
-              fileTagMap,
-              moduleId,
-            });
-            finalFindings = postMergeResult.findings;
-            fastPathHousekeeping = postMergeResult.housekeepingFindings;
-
-            // --- FIX 3: Run absence verification on fast path (parity with main path) ---
-            let fastPathVerificationErrored = false;
-            if (CHECKLIST_MODULES.has(moduleId)) {
-              // Reconstruct subject IDs for fast-path
-              // Fix 10C: First try loading persisted canonical subject IDs from run checkpoint.
-              // Only fall back to document_tag derivation if no persisted set exists.
-              let fpSubjectIds = input.subjectDocumentIds ?? [];
-              if (fpSubjectIds.length === 0) {
-                try {
-                  // Fix 10C: Load persisted canonical subject document IDs
-                  const [subjectCp] = await ctx.integrations.db.query(
-                    `SELECT payload FROM pipeline_checkpoints
-                     WHERE module_run_id = $1 AND checkpoint_key = 'canonical_subject_ids' AND status = 'complete'
-                     LIMIT 1`,
-                    z.object({ payload: z.any() }),
-                    [runId],
-                    { label: "Fast-path Fix10C: load canonical subject IDs" }
-                  );
-                  if (subjectCp?.payload) {
-                    const savedIds = typeof subjectCp.payload === "string"
-                      ? JSON.parse(subjectCp.payload)
-                      : subjectCp.payload;
-                    if (Array.isArray(savedIds) && savedIds.length > 0) {
-                      fpSubjectIds = savedIds as string[];
-                      console.log(`[pipeline:fast-path:Fix10C] Loaded ${fpSubjectIds.length} persisted canonical subject ID(s)`);
-                    }
-                  }
-                } catch { /* checkpoint table may not exist — fall through to derivation */ }
-              }
-              if (fpSubjectIds.length === 0) {
-                try {
-                  const icMemoRows = await ctx.integrations.db.query(
-                    `SELECT id FROM documents WHERE deal_id = $1 AND document_tag = 'ic_memo' ORDER BY created_at`,
-                    z.object({ id: z.string() }),
-                    [dealId],
-                    { label: "Fast-path: reconstruct subjectIds from ic_memo docs (fallback)" }
-                  );
-                  fpSubjectIds = icMemoRows.map(r => r.id);
-                  if (fpSubjectIds.length > 0) {
-                    console.log(`[pipeline:fast-path] Reconstructed subjectIds from ${icMemoRows.length} ic_memo doc(s) (derivation fallback)`);
-                  }
-                } catch { /* proceed with empty — absence verification will skip subject-self check */ }
-              }
-
-              const verifyBudget = timeRemaining();
-              if (verifyBudget >= ABSENCE_VERIFICATION_MIN_BUDGET_MS) {
-                console.log(`[pipeline:fast-path] Running absence verification (${Math.round(verifyBudget / 1000)}s budget, findings=${finalFindings.length})`);
-                try {
-                  const verifyResult = await runAbsenceVerificationPhase(
-                    ctx,
-                    dealId,
-                    runId!,
-                    finalFindings,
-                    moduleId,
-                    useOpus,
-                    fpSubjectIds,
-                    timeRemaining,
-                    startTime
-                  );
-                  finalFindings = verifyResult.findings;
-                  const revised = verifyResult.verificationLog.filter(v => v.verdict.verdict === "REVISED").length;
-                  const upheld = verifyResult.verificationLog.filter(v => v.verdict.verdict === "UPHELD").length;
-                  console.log(`[pipeline:fast-path] Absence verification: ${revised} revised, ${upheld} upheld, completed=${verifyResult.completed}`);
-
-                  // If incomplete, return in_progress — do NOT format prematurely
-                  if (!verifyResult.completed) {
-                    return {
-                      status: "in_progress",
-                      runId: runId!,
-                      phase: "fast_path_absence_verification",
-                      progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                      result: null,
-                      failedChunks: 0,
-                      truncatedChunks: 0,
-                      truncatedMerges: 0,
-                      firstError: null,
-                    };
-                  }
-                } catch (verifyErr) {
-                  const msg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-                  console.error(`[pipeline:fast-path] Absence verification failed (non-fatal): ${msg}`);
-                  fastPathVerificationErrored = true;
-                }
-              } else {
-                // Insufficient budget — defer to next invocation
-                console.warn(`[pipeline:fast-path] Insufficient time for absence verification (${Math.round(verifyBudget / 1000)}s < ${ABSENCE_VERIFICATION_MIN_BUDGET_MS / 1000}s needed) — deferring`);
-                return {
-                  status: "in_progress",
-                  runId: runId!,
-                  phase: "fast_path_absence_verification",
-                  progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                  result: null,
-                  failedChunks: 0,
-                  truncatedChunks: 0,
-                  truncatedMerges: 0,
-                  firstError: null,
-                };
-              }
-            }
-
-            // Fast-path format budget: derived from PLATFORM cap, not TIME_BUDGET.
-            // The fast-path has no post-format phases (no extraction, no merge remaining) —
-            // only a DB upsert after formatting. PLATFORM_HEADROOM_MS (30s) covers that.
-            const elapsedMs = Date.now() - startTime;
-            const formatBudget = EFFECTIVE_CAP_MS - elapsedMs - PLATFORM_HEADROOM_MS;
-            if (formatBudget < FORMAT_REPORT_MIN_BUDGET_MS) {
-              console.warn(`[pipeline:fast-path] Insufficient time even on fast-path (budget=${Math.round(formatBudget / 1000)}s, elapsed=${Math.round(elapsedMs / 1000)}s) — returning in_progress`);
-              return {
-                status: "in_progress",
-                runId,
-                phase: "fast_path_formatting",
-                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                result: null,
-                failedChunks: 0,
-                truncatedChunks: 0,
-                truncatedMerges: 0,
-                firstError: null,
-              };
-            }
-
-            // Sanity telemetry: shows the clamp arithmetic in the wild
-            const perCallTimeoutPreview = Math.min(formatBudget - 10_000, 230_000);
-            console.log(`[pipeline:fast-path] Formatting report — elapsed=${Math.round(elapsedMs / 1000)}s, formatBudget=${Math.round(formatBudget / 1000)}s, perCallTimeout=${Math.round(perCallTimeoutPreview / 1000)}s, findings=${finalFindings.length}`);
-            const fullReport = await formatReportInline(ctx, moduleId, finalNode.executiveHeader, finalFindings, formatBudget, startTime, fastPathHousekeeping, fastPathVerificationErrored);
-
-            if (!fullReport) {
-              console.warn(`[pipeline:fast-path] formatReportInline returned null — will retry on next invocation`);
-              return {
-                status: "in_progress",
-                runId,
-                phase: "formatting_retry",
-                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                result: null,
-                failedChunks: 0,
-                truncatedChunks: 0,
-                truncatedMerges: 0,
-                firstError: "Report formatting failed — will retry on next invocation",
-              };
-            }
-
-            // ─── MAT-F06: Delegate to canonical finalizer (§A — one path) ───
-            const fpCheckpointStatus = await loadCheckpointStatus(
-              ctx.integrations.db, runId, moduleId, finalFindings.length > 0
-            );
-            const fpOutcome = await f06CanonicalFinalize(
-              ctx.integrations.db,
-              runId,
-              dealId,
-              {
-                findings: finalFindings,
-                executiveHeader: finalNode.executiveHeader,
-                moduleType: moduleId,
-                checkpointStatus: fpCheckpointStatus,
-                preFormattedReport: fullReport,
-                proposedFinalNode: {
-                  treeLevel: topCheckpoint.tree_level,
-                  nodeIndex: topCheckpoint.node_index,
-                },
-              }
-            );
-
-            if (fpOutcome.status === "prerequisites_missing") {
-              console.error(`[pipeline:fast-path] F06 prerequisites missing: ${fpOutcome.missingKeys.join(", ")} — returning in_progress`);
-              return {
-                status: "in_progress",
-                runId,
-                phase: "f06_prerequisites_missing",
-                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                result: null,
-                failedChunks: 0,
-                truncatedChunks: 0,
-                truncatedMerges: 0,
-                firstError: `F06 prerequisites missing: ${fpOutcome.missingKeys.join(", ")}`,
-              };
-            }
-
-            if (fpOutcome.status === "persist_failed") {
-              console.error(`[pipeline:fast-path] F06 persist failed: ${fpOutcome.error}`);
-              return {
-                status: "in_progress",
-                runId,
-                phase: "save_retry",
-                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                result: null,
-                failedChunks: 0,
-                truncatedChunks: 0,
-                truncatedMerges: 0,
-                firstError: `F06 persist failed: ${fpOutcome.error}`,
-              };
-            }
-
-            if (fpOutcome.status === "publication_blocked") {
-              console.warn(`[pipeline:fast-path] Publication gate blocked: ${fpOutcome.message}`);
-              return {
-                status: "in_progress",
-                runId,
-                phase: "publication_gate_blocked",
-                progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-                result: null,
-                failedChunks: 0,
-                truncatedChunks: 0,
-                truncatedMerges: 0,
-                firstError: `Publication gate blocked — tree incomplete. ${fpOutcome.message}`,
-              };
-            }
-
-            console.log(`[pipeline:fast-path] F06 outcome=${fpOutcome.status}`);
-
-            // Post-completion audit (Fix 22/24: post-quality text, bounded timeout)
-            try {
-              const auditResult = await Promise.race([
-                Promise.resolve(runPostCompletionAudit({
-                  runId,
-                  moduleId,
-                  reportText: fullReport,
-                  findings: finalFindings,
-                })),
-                new Promise<{ flagged: boolean; warnings: string[] }>((resolve) =>
-                  setTimeout(() => resolve({ flagged: false, warnings: [] }), 10_000)
-                ),
-              ]);
-              if (auditResult.flagged) {
-                console.warn(`[pipeline:fast-path] Post-completion audit flagged ${auditResult.warnings.length} pattern(s)`);
-              }
-            } catch (auditErr) {
-              console.warn(`[pipeline:fast-path] Post-completion audit failed (non-fatal):`, auditErr);
-            }
-
-            // Fix 22/24: mergedText from post-quality fullReport
-            const MAX_MERGED_TEXT_CHARS = 150_000;
-            let mergedText = fullReport;
-            if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
-              mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport]";
-            }
-
-            return {
-              status: "completed",
-              runId,
-              phase: "done",
-              progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-              result: {
-                executiveHeader: finalNode.executiveHeader,
-                findings: finalFindings,
-                mergedText,
-                fullReport,
-              },
-              failedChunks: 0,
-              truncatedChunks: 0,
-              truncatedMerges: 0,
-              firstError: null,
-            };
-            } // end else (fast-path housekeeping valid)
-            } // end else (fast-path findings valid)
+            } // end fast-path findings valid
           }
         }
       }
@@ -5414,25 +5098,24 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     timeRemaining,
     callerPath: "normal_path",
     housekeepingFindings: finalHousekeepingFindings,
+    housekeepingValidated: true,
     fileTagMap,
+    sourceManifestHash: null,
     runPostMergePipeline,
-    formatReportInline,
-    degradedConditions: permanentlyFailedExtractions.length > 0
-      ? [`${permanentlyFailedExtractions.length} section(s) could not be extracted after exhausting retries.`]
-      : undefined,
-    findingsAlreadyPostProcessed: true,
-    preFormattedReport: fullReport,
+    runAbsenceVerificationPhase,
   });
 
   // Post-completion framing audit (only on successful finalization)
-  if (normalPathFinalizationResult.status === "complete" && normalPathFinalizationResult.output) {
+  if (normalPathFinalizationResult.status === "complete" && normalPathFinalizationResult.artifact) {
     try {
+      const auditReportText = normalPathFinalizationResult.artifact.report?.markdown ?? "";
+      const auditFindings = (normalPathFinalizationResult.artifact.canonical_findings ?? []) as MergedFinding[];
       const auditResult = await Promise.race([
         Promise.resolve(runPostCompletionAudit({
           runId: runId!,
           moduleId,
-          reportText: normalPathFinalizationResult.output.fullReport,
-          findings: normalPathFinalizationResult.output.findings,
+          reportText: auditReportText,
+          findings: auditFindings,
         })),
         new Promise<{ flagged: boolean; warnings: string[] }>((resolve) =>
           setTimeout(() => resolve({ flagged: false, warnings: [] }), 10_000)
@@ -5448,7 +5131,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
 
   // Translate shared runner result → pipeline return type
   // Handle non-complete outcomes first
-  if (normalPathFinalizationResult.status !== "complete" || !normalPathFinalizationResult.output) {
+  if (normalPathFinalizationResult.status !== "complete" || !normalPathFinalizationResult.artifact) {
     const phase = `post_merge_finalization_${normalPathFinalizationResult.currentStage ?? "unknown"}`;
     const firstErrMsg = normalPathFinalizationResult.blockingReasons.length > 0
       ? normalPathFinalizationResult.blockingReasons.join("; ")
@@ -5472,13 +5155,14 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     };
   }
 
-  // Finalization complete — derive mergedText from the shared runner's output
-  console.log(`[pipeline] Shared finalization runner: complete — artifact=${normalPathFinalizationResult.output.artifactId.slice(0, 8)}`);
-  finalFindings = normalPathFinalizationResult.output.findings;
-  fullReport = normalPathFinalizationResult.output.fullReport;
+  // Finalization complete — derive mergedText from the shared runner's artifact
+  const artifactResult = normalPathFinalizationResult.artifact;
+  console.log(`[pipeline] Shared finalization runner: complete — findings=${(artifactResult.canonical_findings ?? []).length}`);
+  finalFindings = (artifactResult.canonical_findings ?? []) as MergedFinding[];
+  fullReport = artifactResult.report?.markdown ?? "";
 
   const MAX_MERGED_TEXT_CHARS = 150_000;
-  let mergedText = fullReport;
+  let mergedText: string = fullReport;
   if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
     console.warn(`[pipeline] mergedText ${mergedText.length} chars exceeds ${MAX_MERGED_TEXT_CHARS} cap — truncating`);
     mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport — full content available in DB checkpoints]";
@@ -5553,7 +5237,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       executiveHeader: finalNode.executiveHeader,
       findings: finalFindings,
       mergedText,
-      fullReport,
+      fullReport: fullReport ?? "",
     },
     failedChunks,
     truncatedChunks,
