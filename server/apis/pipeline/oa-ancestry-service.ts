@@ -834,7 +834,7 @@ export interface OaRuntimePath {
   enforcesOa02: boolean;
   enforcesOa03: boolean;
   oa02VerificationMethod: "import_present" | "call_verified" | "caller_enforced" | "not_applicable" | "not_enforced";
-  oa03VerificationMethod: "import_present" | "call_verified" | "not_enforced";
+  oa03VerificationMethod: "import_present" | "call_verified" | "caller_enforced" | "not_applicable" | "not_enforced";
   description: string;
 }
 
@@ -849,10 +849,10 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     entrypoint: "ResumeMergeRecovery",
     isPostLeafMergePath: true,
     enforcesOa02: true,
-    enforcesOa03: false,
+    enforcesOa03: true,
     oa02VerificationMethod: "call_verified",
-    oa03VerificationMethod: "not_enforced",
-    description: "Targeted merge-only recovery worker. OA-02 enforced at line ~855.",
+    oa03VerificationMethod: "call_verified",
+    description: "Targeted merge-only recovery worker. OA-02 at line ~855, OA-03 post-contract.",
   },
   {
     pathId: "complete_merge_tree",
@@ -860,10 +860,10 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     entrypoint: "CompleteMergeTree",
     isPostLeafMergePath: true,
     enforcesOa02: true,
-    enforcesOa03: false,
+    enforcesOa03: true,
     oa02VerificationMethod: "call_verified",
-    oa03VerificationMethod: "not_enforced",
-    description: "Merges remaining top-level nodes into root. OA-02 wired post-parse.",
+    oa03VerificationMethod: "call_verified",
+    description: "Merges remaining top-level nodes into root. OA-02 + OA-03 wired post-parse.",
   },
   {
     pathId: "pipeline_core_merge",
@@ -871,10 +871,10 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     entrypoint: "RunModulePipeline (post-L1 merge loop)",
     isPostLeafMergePath: true,
     enforcesOa02: true,
-    enforcesOa03: false,
+    enforcesOa03: true,
     oa02VerificationMethod: "call_verified",
-    oa03VerificationMethod: "not_enforced",
-    description: "Main pipeline merge consolidation loop. OA-02 wired before fallback and accounting.",
+    oa03VerificationMethod: "call_verified",
+    description: "Main pipeline. OA-02 in group merge, OA-03 delegates Stage 3 to family dedup.",
   },
   {
     pathId: "merge_findings_module",
@@ -882,10 +882,10 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     entrypoint: "MergeFindings (module API)",
     isPostLeafMergePath: true,
     enforcesOa02: true,
-    enforcesOa03: false,
+    enforcesOa03: true,
     oa02VerificationMethod: "caller_enforced",
-    oa03VerificationMethod: "not_enforced",
-    description: "Standalone merge findings module. OA-02 enforced at caller (pipeline-core, resume-merge-recovery).",
+    oa03VerificationMethod: "caller_enforced",
+    description: "Standalone merge findings module. OA-02 + OA-03 enforced at caller.",
   },
   {
     pathId: "promote_root_findings",
@@ -893,10 +893,10 @@ export const OA_RUNTIME_PATH_REGISTRY: OaRuntimePath[] = [
     entrypoint: "PromoteRootFindings",
     isPostLeafMergePath: true,
     enforcesOa02: true,
-    enforcesOa03: false,
+    enforcesOa03: true,
     oa02VerificationMethod: "not_applicable",
-    oa03VerificationMethod: "not_enforced",
-    description: "Saves root checkpoint to module_outputs. No merge occurs — OA-02 N/A (no LLM output to validate).",
+    oa03VerificationMethod: "not_applicable",
+    description: "Saves root to module_outputs. No merge/dedup occurs — promotion only.",
   },
 ];
 

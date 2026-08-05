@@ -4,6 +4,7 @@ import { parseCanonicalFindings } from "./canonical-finding.js";
 import { getModuleModel } from "./model-config.js";
 import { enforceNarrativeBoundary } from "./narrative-enforcement.js";
 import { validateMergeContract } from "./merge-contract-validator.js";
+import { deduplicateFindings } from "./canonical-family-dedup.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -188,6 +189,20 @@ export default api({
         findings = contractResult.acceptedFindings;
       } else {
         console.log(`[CompleteMerge][OA-02] Merge contract passed for ${findings.length} findings.`);
+      }
+    }
+
+    // OA-03: Canonical family dedup (omission_audit only)
+    if (moduleId === "omission_audit" && findings.length > 1) {
+      const preDedupCount = findings.length;
+      const familyResult = deduplicateFindings(findings as any);
+      const retainedIds = new Set<string>([
+        ...familyResult.ungroupedFindingIds,
+        ...familyResult.families.map(f => f.representativeFindingId),
+      ]);
+      findings = findings.filter(f => retainedIds.has(f.finding_id));
+      if (findings.length < preDedupCount) {
+        console.log(`[CompleteMerge][OA-03] Family dedup: ${preDedupCount} → ${findings.length} (families=${familyResult.totalFamiliesCreated})`);
       }
     }
 

@@ -65,6 +65,7 @@ import { SUB_AGENT_PROMPTS } from "../modules/analyze-chunk.js";
 import { MERGE_PROMPTS, FINDINGS_RULE_FINAL, FINDINGS_RULE_INTERMEDIATE } from "../modules/merge-findings.js";
 import { runPostCompletionAudit } from "./post-completion-audit.js";
 import { validateMergeContract } from "./merge-contract-validator.js";
+import { deduplicateFindings } from "./canonical-family-dedup.js";
 import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
@@ -588,6 +589,7 @@ interface PostMergePipelineInput {
   numericReport: { figures: any[]; discrepancies: any[] } | null;
   claimsReconciliation: ReconciliationResult | null;
   fileTagMap: Map<string, string>;
+  moduleId: string;
 }
 
 interface PostMergePipelineResult {
@@ -597,7 +599,7 @@ interface PostMergePipelineResult {
 
 async function runPostMergePipeline(input: PostMergePipelineInput): Promise<PostMergePipelineResult> {
   let { findings, housekeepingFindings } = input;
-  const { numericReport, claimsReconciliation, fileTagMap } = input;
+  const { numericReport, claimsReconciliation, fileTagMap, moduleId } = input;
 
   // === Stage 1: FABRICATED_ARITHMETIC suppression (Fix 19 closure: context-guarded) ===
   const { shouldSuppressArithmeticFinding } = await import("./fabricated-arithmetic-patterns.js");
@@ -719,6 +721,21 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
   }
 
   // === Stage 3: Global Semantic Consolidation (Defect 1) ===
+  // OA-03: For omission_audit, delegate to canonical family dedup service
+  if (moduleId === "omission_audit") {
+    const preConsolidationCount = findings.length;
+    const familyResult = deduplicateFindings(findings as any);
+    // Keep only retained findings (representatives + ungrouped)
+    const retainedIds = new Set<string>([
+      ...familyResult.ungroupedFindingIds,
+      ...familyResult.families.map(f => f.representativeFindingId),
+    ]);
+    findings = findings.filter(f => retainedIds.has(f.finding_id));
+    const consolidatedCount = preConsolidationCount - findings.length;
+    if (consolidatedCount > 0) {
+      console.log(`[pipeline:postMerge][OA-03] Canonical family dedup: ${preConsolidationCount} → ${findings.length} findings (collapsed ${consolidatedCount}, families=${familyResult.totalFamiliesCreated})`);
+    }
+  } else
   {
     const preConsolidationCount = findings.length;
 
@@ -1292,6 +1309,7 @@ export async function runPostMergeFinalization(input: CanonicalFinalizeInput): P
     numericReport,
     claimsReconciliation,
     fileTagMap,
+    moduleId,
   });
   let { findings, housekeepingFindings } = postMerge;
 
@@ -2506,6 +2524,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               numericReport: fastPathNumericReport,
               claimsReconciliation: fastPathRecon,
               fileTagMap,
+              moduleId,
             });
             finalFindings = postMergeResult.findings;
             fastPathHousekeeping = postMergeResult.housekeepingFindings;
@@ -5088,6 +5107,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     numericReport,
     claimsReconciliation,
     fileTagMap,
+    moduleId,
   });
   finalFindings = postMergeMainResult.findings;
   finalHousekeepingFindings = postMergeMainResult.housekeepingFindings;

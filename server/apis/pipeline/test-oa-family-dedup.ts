@@ -88,8 +88,8 @@ function runT1(): TestResult {
 
   const checks: string[] = [];
   if (result.families.length !== 1) checks.push(`expected 1 family, got ${result.families.length}`);
-  if (result.families[0]?.familyId !== "revenue_recognition_timing") {
-    checks.push(`expected revenue_recognition_timing, got ${result.families[0]?.familyId}`);
+  if (result.families[0]?.familyId !== "revenue_recognition_cutoff") {
+    checks.push(`expected revenue_recognition_cutoff, got ${result.families[0]?.familyId}`);
   }
   if (result.families[0]?.memberFindingIds.length !== 4) {
     checks.push(`expected 4 members, got ${result.families[0]?.memberFindingIds.length}`);
@@ -299,12 +299,12 @@ function runT6(): TestResult {
   const result = deduplicateFindings(allFindings);
 
   const checks: string[] = [];
-  // Should have 2 families: customer_concentration and supplier_concentration
-  const custFamily = result.families.find((f) => f.familyId === "customer_concentration");
-  const suppFamily = result.families.find((f) => f.familyId === "supplier_concentration");
+  // Should have 2 families: customer_revenue_concentration and supplier_single_source
+  const custFamily = result.families.find((f) => f.familyId === "customer_revenue_concentration");
+  const suppFamily = result.families.find((f) => f.familyId === "supplier_single_source");
 
-  if (!custFamily) checks.push("no customer_concentration family");
-  if (!suppFamily) checks.push("no supplier_concentration family");
+  if (!custFamily) checks.push("no customer_revenue_concentration family");
+  if (!suppFamily) checks.push("no supplier_single_source family");
 
   // Verify no cross-contamination
   if (custFamily && custFamily.memberFindingIds.some((id) => id.startsWith("supp"))) {
@@ -314,8 +314,8 @@ function runT6(): TestResult {
     checks.push("supplier family contains customer findings");
   }
 
-  // Additionally test anti-overmerge on ip_ownership_chain
-  const ipRule = KNOWN_FAMILY_RULES.find((r) => r.familyId === "ip_ownership_chain")!;
+  // Additionally test anti-overmerge on trademark_ownership_chain
+  const ipRule = KNOWN_FAMILY_RULES.find((r) => r.familyId === "trademark_ownership_chain")!;
   const regTM = makeFinding({
     finding_id: "ip-reg-001",
     title: "Registered trademark ownership gap",

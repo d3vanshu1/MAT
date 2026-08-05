@@ -28,18 +28,18 @@ export const FAMILY_RULE_VERSION = "1.0.0";
 // Types
 // ---------------------------------------------------------------------------
 
-/** The 10 known issue families for grouping */
+/** The 10 SCG deal-specific issue families */
 export type KnownFamilyId =
-  | "revenue_recognition_timing"
-  | "working_capital_adjustment"
-  | "earn_out_contingency"
-  | "regulatory_compliance_gap"
-  | "key_person_dependency"
-  | "ip_ownership_chain"
-  | "customer_concentration"
-  | "supplier_concentration"
-  | "tax_structure_risk"
-  | "environmental_liability";
+  | "fca_permissions_gap"
+  | "earn_out_basis_divergence"
+  | "revenue_recognition_cutoff"
+  | "nwc_peg_adjustment"
+  | "management_key_person"
+  | "trademark_ownership_chain"
+  | "customer_revenue_concentration"
+  | "supplier_single_source"
+  | "transfer_pricing_structure"
+  | "conduct_of_business_breach";
 
 /** Rule definition for one known family */
 export interface FamilyRule {
@@ -103,70 +103,74 @@ export interface FamilyDedupResult {
 
 export const KNOWN_FAMILY_RULES: FamilyRule[] = [
   {
-    familyId: "revenue_recognition_timing",
-    issueKeys: ["revenue_recognition_timing", "revenue_timing_discrepancy", "revenue_cutoff"],
-    eligibleKinds: ["data_divergence", "cross_version"],
-    antiOvermergePairs: [],
-  },
-  {
-    familyId: "working_capital_adjustment",
-    issueKeys: ["working_capital_adjustment", "wc_adjustment", "nwc_peg"],
-    eligibleKinds: ["data_divergence", "cross_version"],
-    antiOvermergePairs: [],
-  },
-  {
-    familyId: "earn_out_contingency",
-    issueKeys: ["earn_out_contingency", "earnout_risk", "contingent_consideration"],
-    eligibleKinds: ["data_divergence", "source_stated_risk"],
-    antiOvermergePairs: [],
-  },
-  {
-    familyId: "regulatory_compliance_gap",
-    issueKeys: ["regulatory_compliance_gap", "fca_authorisation_risk", "regulatory_gap", "compliance_gap"],
+    familyId: "fca_permissions_gap",
+    issueKeys: ["fca_authorisation_risk", "fca_permissions_gap", "s19_permission_gap", "regulatory_authorisation"],
     eligibleKinds: ["absence_claim", "source_stated_risk", "process_observation"],
+    antiOvermergePairs: [
+      { dimension: "fca_proposition_type", valueA: "s19_permission", valueB: "conduct_of_business" },
+    ],
+  },
+  {
+    familyId: "earn_out_basis_divergence",
+    issueKeys: ["earn_out_contingency", "earnout_risk", "contingent_consideration", "earn_out_basis_divergence"],
+    eligibleKinds: ["data_divergence", "cross_version", "source_stated_risk"],
     antiOvermergePairs: [],
   },
   {
-    familyId: "key_person_dependency",
-    issueKeys: ["key_person_dependency", "key_man_risk", "management_concentration"],
+    familyId: "revenue_recognition_cutoff",
+    issueKeys: ["revenue_recognition_timing", "revenue_timing_discrepancy", "revenue_cutoff", "revenue_recognition_cutoff"],
+    eligibleKinds: ["data_divergence", "cross_version"],
+    antiOvermergePairs: [],
+  },
+  {
+    familyId: "nwc_peg_adjustment",
+    issueKeys: ["working_capital_adjustment", "wc_adjustment", "nwc_peg", "nwc_peg_adjustment"],
+    eligibleKinds: ["data_divergence", "cross_version"],
+    antiOvermergePairs: [],
+  },
+  {
+    familyId: "management_key_person",
+    issueKeys: ["key_person_dependency", "key_man_risk", "management_concentration", "management_key_person"],
     eligibleKinds: ["absence_claim", "source_stated_risk"],
     antiOvermergePairs: [],
   },
   {
-    familyId: "ip_ownership_chain",
-    issueKeys: ["ip_ownership_chain", "ip_assignment_gap", "trademark_risk", "patent_ownership"],
+    familyId: "trademark_ownership_chain",
+    issueKeys: ["ip_ownership_chain", "ip_assignment_gap", "trademark_risk", "trademark_ownership_chain"],
     eligibleKinds: ["absence_claim", "source_stated_risk", "process_observation"],
     antiOvermergePairs: [
       { dimension: "ip_type", valueA: "registered_trademark", valueB: "unregistered_trademark" },
     ],
   },
   {
-    familyId: "customer_concentration",
-    issueKeys: ["customer_concentration", "revenue_concentration_customer", "client_dependency"],
+    familyId: "customer_revenue_concentration",
+    issueKeys: ["customer_concentration", "revenue_concentration_customer", "client_dependency", "customer_revenue_concentration"],
     eligibleKinds: ["data_divergence", "source_stated_risk"],
     antiOvermergePairs: [
       { dimension: "counterparty_role", valueA: "customer", valueB: "supplier" },
     ],
   },
   {
-    familyId: "supplier_concentration",
-    issueKeys: ["supplier_concentration", "supply_chain_concentration", "vendor_dependency"],
+    familyId: "supplier_single_source",
+    issueKeys: ["supplier_concentration", "supply_chain_concentration", "vendor_dependency", "supplier_single_source"],
     eligibleKinds: ["data_divergence", "source_stated_risk"],
     antiOvermergePairs: [
       { dimension: "counterparty_role", valueA: "supplier", valueB: "customer" },
     ],
   },
   {
-    familyId: "tax_structure_risk",
-    issueKeys: ["tax_structure_risk", "transfer_pricing_risk", "tax_avoidance_structure"],
+    familyId: "transfer_pricing_structure",
+    issueKeys: ["tax_structure_risk", "transfer_pricing_risk", "transfer_pricing_structure"],
     eligibleKinds: ["source_stated_risk", "process_observation"],
     antiOvermergePairs: [],
   },
   {
-    familyId: "environmental_liability",
-    issueKeys: ["environmental_liability", "contamination_risk", "environmental_remediation"],
-    eligibleKinds: ["absence_claim", "source_stated_risk"],
-    antiOvermergePairs: [],
+    familyId: "conduct_of_business_breach",
+    issueKeys: ["regulatory_compliance_gap", "conduct_of_business_breach", "conduct_risk", "tcf_compliance"],
+    eligibleKinds: ["absence_claim", "source_stated_risk", "process_observation"],
+    antiOvermergePairs: [
+      { dimension: "fca_proposition_type", valueA: "conduct_of_business", valueB: "s19_permission" },
+    ],
   },
 ];
 
@@ -220,6 +224,14 @@ function extractDimensionValue(finding: CanonicalFinding, dimension: string): st
     if (hasRegistered && !hasUnregistered) return "registered_trademark";
     if (hasUnregistered && !hasRegistered) return "unregistered_trademark";
     return null;
+  }
+
+  if (dimension === "fca_proposition_type") {
+    const hasS19 = /s\.?\s*19|section\s*19|permission.?(?:gap|missing|absent)|authoris(?:ation|ed)/i.test(searchText);
+    const hasConduct = /conduct.?of.?business|tcf|treating.?customers.?fairly|cobs/i.test(searchText);
+    if (hasS19 && !hasConduct) return "s19_permission";
+    if (hasConduct && !hasS19) return "conduct_of_business";
+    return null; // ambiguous — don't group across these
   }
 
   return null;

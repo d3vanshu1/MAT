@@ -29,6 +29,7 @@ import { getModuleModel } from "./model-config.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { parseCanonicalFindings, type CanonicalFinding } from "./canonical-finding.js";
 import { validateMergeContract } from "./merge-contract-validator.js";
+import { deduplicateFindings } from "./canonical-family-dedup.js";
 import type { PipelineContext } from "./pipeline-config.js";
 import { EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS } from "./pipeline-config.js";
 
@@ -876,6 +877,20 @@ async function consolidateFindings(
       console.warn(`[ResumeMergeRecovery] ${missing.length} input finding_ids not accounted for — carrying forward`);
       const missingFindings = findings.filter(f => missing.includes(f.finding_id));
       contractResult.acceptedFindings.push(...missingFindings);
+    }
+
+    // OA-03: Canonical family dedup after merge contract passes
+    if (contractResult.acceptedFindings.length > 1) {
+      const familyResult = deduplicateFindings(contractResult.acceptedFindings as any);
+      const retainedIds = new Set<string>([
+        ...familyResult.ungroupedFindingIds,
+        ...familyResult.families.map(f => f.representativeFindingId),
+      ]);
+      const preDedupCount = contractResult.acceptedFindings.length;
+      contractResult.acceptedFindings = contractResult.acceptedFindings.filter(f => retainedIds.has(f.finding_id));
+      if (contractResult.acceptedFindings.length < preDedupCount) {
+        console.log(`[ResumeMergeRecovery][OA-03] Family dedup: ${preDedupCount} → ${contractResult.acceptedFindings.length}`);
+      }
     }
 
     return contractResult.acceptedFindings;
