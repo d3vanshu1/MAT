@@ -100,6 +100,7 @@ import DiagOaAncestry from './pipeline/diag-oa-ancestry.js';
 import DiagOaAncestryExport from './pipeline/diag-oa-ancestry-export.js';
 import TestOaAncestry from './pipeline/test-oa-ancestry.js';
 import TestOaMergeContract from './pipeline/test-oa-merge-contract.js';
+import TestOaFamilyDedup from './pipeline/test-oa-family-dedup.js';
 
 // Database setup
 import SetupSchema from './db/setup-schema.js';
@@ -179,7 +180,7 @@ const apis = {
   ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings, ReplayPopulateClaimsLedger, DiagSaintReconciliation, GetSaintReconciliationPage, DiagReconciliationFindings,
   RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree, PromoteRootFindings,
   DiagCheckpointInspect, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
-  DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract,
+  DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
