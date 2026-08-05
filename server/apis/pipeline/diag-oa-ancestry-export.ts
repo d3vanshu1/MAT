@@ -10,7 +10,7 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import type { CanonicalFinding } from "./canonical-finding.js";
 import {
-  buildOccurrenceGraph, buildAncestryLedgerRow, isDegraded, fnv1a,
+  buildOccurrenceGraph, buildAncestryLedgerRow, isDegraded, fnv1a, occKeyStr,
   type NodeInput,
 } from "./oa-ancestry-service.js";
 
@@ -111,7 +111,7 @@ export default api({
             o.key.level === level && o.key.nodeIndex === node.nodeIndex && o.key.findingId === f.finding_id && o.finding === f
           );
           if (occ) {
-            allRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, globalIdx, node.checkpointId ?? null));
+            allRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, globalIdx));
             globalIdx++;
           }
         }
@@ -121,7 +121,7 @@ export default api({
     // Terminal rows
     const termOccs = graph.allOccurrences.filter(o => o.key.stage === "terminal");
     for (const occ of termOccs) {
-      allRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, globalIdx, null));
+      allRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, globalIdx));
       globalIdx++;
     }
 

@@ -27,7 +27,7 @@ import { api, z, postgres } from "@superblocksteam/sdk-api";
 import type { CanonicalFinding } from "./canonical-finding.js";
 import {
   buildOccurrenceGraph, buildAncestryLedgerRow, isDegraded, normalize, fnv1a,
-  detectFactualChanges, computeFactualFingerprint,
+  detectFactualChanges, computeFactualFingerprint, occKeyStr,
   type OccurrenceGraph, type NodeInput, type DegradedGroupReport,
   type AncestryLedgerRow, type FindingOccurrence,
 } from "./oa-ancestry-service.js";
@@ -165,15 +165,29 @@ export default api({
         if (degradedFindings.length === 0) continue;
         const nodeId = `L${level}:N${node.nodeIndex}`;
         const findingIds = degradedFindings.map(f => f.finding_id);
-        const termDescendants: string[] = [];
-        for (const fid of findingIds) termDescendants.push(...graph.getTerminalDescendants(fid));
-        const uniqueTermDescendants = [...new Set(termDescendants)].sort();
+        // Collect terminal descendant occurrence keys via occurrence-level traversal
+        const termDescOccKeys: string[] = [];
+        const termDescFindingIds: string[] = [];
+        for (const df of degradedFindings) {
+          const dfOccs = graph.byFindingId.get(df.finding_id) ?? [];
+          for (const dfOcc of dfOccs) {
+            const termOccs = graph.getTerminalDescendantOccurrences(occKeyStr(dfOcc.key));
+            for (const tk of termOccs) {
+              termDescOccKeys.push(tk);
+              const termO = graph.byOccKey.get(tk);
+              if (termO) termDescFindingIds.push(termO.key.findingId);
+            }
+          }
+        }
+        const uniqueTermDescFindingIds = [...new Set(termDescFindingIds)].sort();
         degradedGroups.push({
           diagnostic_node_group_id: nodeId,
           persisted_degraded_group_id: node.checkpointId ?? null,
           degraded_group_identity_source: node.checkpointId ? "persisted_checkpoint_id" : "diagnostic_level_node",
           stage, finding_count: degradedFindings.length, finding_ids: findingIds,
-          terminal_descendant_ids: uniqueTermDescendants,
+          occurrence_keys: degradedFindings.flatMap(df => (graph.byFindingId.get(df.finding_id) ?? []).map(o => occKeyStr(o.key))),
+          terminal_descendant_occurrence_keys: [...new Set(termDescOccKeys)].sort(),
+          terminal_descendant_finding_ids: uniqueTermDescFindingIds,
           reconstructable: degradedFindings.every(f => (f.merged_from_finding_ids ?? []).length > 0),
           non_reconstructable_reason: degradedFindings.some(f => (f.merged_from_finding_ids ?? []).length === 0)
             ? "no_merged_from_ids_persisted" : null,
@@ -226,12 +240,12 @@ export default api({
     // Parentless above L1
     for (const [fid, occs] of graph.byFindingId) {
       const minLevel = Math.min(...occs.map(o => o.key.level));
-      if (minLevel > 1 && (!graph.childToParents.has(fid) || graph.childToParents.get(fid)!.size === 0)) {
+      if (minLevel > 1 && (!graph.findingIdChildToParents.has(fid) || graph.findingIdChildToParents.get(fid)!.size === 0)) {
         lineageEvents.push({ finding_id: fid, event_type: "parentless_occurrence", first_stage: occs.find(o => o.key.level === minLevel)?.key.stage, details: "No merged_from_finding_ids" });
       }
     }
     // One-to-many splits
-    for (const [pid, children] of graph.parentToChildren) {
+    for (const [pid, children] of graph.findingIdParentToChildren) {
       if (children.size <= 1) continue;
       const childTitles = new Set<string>();
       for (const cid of children) { const co = graph.byFindingId.get(cid); if (co?.[0]) childTitles.add(normalize(co[0].finding.title)); }
@@ -278,19 +292,18 @@ export default api({
       falsePositives.push({ label: fp.label, matching_finding_ids: [...new Set(matchIds)], exact_proposition: proposition, source_evidence_lineage: [...new Set(evidence)].slice(0, 5), first_stage_present: firstStage, originated_at_leaf: firstStage === "L1" ? true : firstStage ? false : null, changed_fields: [], terminal_finding_id: termId });
     }
 
-    // ═══ ANCESTRY LEDGER SAMPLE (first 50 terminal) ═══
+    // ═══ ANCESTRY LEDGER + STATS ═══
+    const terminalOccsFull = graph.allOccurrences.filter(o => o.key.stage === "terminal");
+
     const ancestryRows: AncestryLedgerRow[] = [];
-    const terminalOccs = graph.allOccurrences.filter(o => o.key.stage === "terminal").slice(0, 50);
-    for (let i = 0; i < terminalOccs.length; i++) {
-      const occ = terminalOccs[i];
-      const node = (findingsByLevel.get(occ.key.level) ?? [])[0];
-      ancestryRows.push(buildAncestryLedgerRow(occ, graph, runId, dealId ?? null, moduleId, i, node?.checkpointId ?? null));
+    const terminalOccsSample = terminalOccsFull.slice(0, 50);
+    for (let i = 0; i < terminalOccsSample.length; i++) {
+      ancestryRows.push(buildAncestryLedgerRow(terminalOccsSample[i], graph, runId, dealId ?? null, moduleId, i));
     }
 
-    // ═══ STATS ═══
     let tracesToLeaf = 0, generated = 0, broken = 0, cycleCount = 0, ambiguous = 0;
-    for (const f of terminalFindings) {
-      const cls = graph.classifyFinding(f.finding_id);
+    for (const occ of terminalOccsFull) {
+      const cls = graph.classifyOccurrence(occKeyStr(occ.key));
       if (cls === "traces_to_leaf") tracesToLeaf++;
       else if (cls === "generated_without_parent") generated++;
       else if (cls === "broken_parent_reference") broken++;
@@ -347,6 +360,3 @@ export default api({
   },
 });
 
-function occKeyStr(k: any): string {
-  return `${k.stage}:L${k.level}:N${k.nodeIndex}:${k.findingId}:${k.occurrenceIndexWithinNode}`;
-}
