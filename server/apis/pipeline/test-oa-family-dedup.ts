@@ -574,8 +574,8 @@ async function runT10(ctx: any): Promise<TestResult> {
     return {
       id: "T10",
       name: "SCG bounded replay: before/after counts by family",
-      passed: true,
-      detail: `SCG integration skipped: ${err.message?.slice(0, 100) ?? "error"} (passed by convention)`,
+      passed: false,
+      detail: `SCG integration failed: ${err.message?.slice(0, 100) ?? "error"}`,
     };
   }
 }
