@@ -95,7 +95,7 @@ Result:
 
 ### Current commit
 
-`pending`
+`6b99269bf17b7437fc8a371f9ee5250e4af4aab2`
 
 ### Files and areas inspected
 
@@ -147,7 +147,7 @@ Result:
 
 ### Candidate SHA, if ready
 
-`pending`
+`6b99269bf17b7437fc8a371f9ee5250e4af4aab2`
 
 ---
 
