@@ -111,6 +111,7 @@ export default api({
   input: z.object({
     runId: z.string().nullable().describe("Explicit run ID; null = auto-select largest OA run"),
     dryRun: z.boolean().nullable().describe("Reserved for future use; currently ignored"),
+    ungroupedOnly: z.boolean().nullable().describe("If true, skip sampleGroups/spotCheck in output and return only ungrouped titles (smaller payload)"),
   }),
 
   output: z.object({
@@ -146,9 +147,12 @@ export default api({
     sampleGroups: z.array(GroupSampleEntry),
     // Spot check
     spotCheckReasons: z.array(SpotCheckEntry),
+    // Ungrouped findings (first 50 titles for review)
+    ungroupedCount: z.number(),
+    ungroupedTitles: z.array(z.string()),
   }),
 
-  async run(ctx, { runId: inputRunId }) {
+  async run(ctx, { runId: inputRunId, ungroupedOnly }) {
     // ── Step 0: Resolve run ID ─────────────────────────────────────────────
     let resolvedRunId: string;
 
@@ -535,6 +539,17 @@ Rules:
       size: g.member_refs.length,
     }));
 
+    // ── Compute ungrouped refs (not in any post-gate group with 2+ members) ──
+    const groupedRefSet = new Set<string>();
+    for (const g of postGateGroups) {
+      for (const ref of g.member_refs) groupedRefSet.add(ref);
+    }
+    const ungroupedRefsList = [...allRefs].filter((r) => !groupedRefSet.has(r));
+    const ungroupedTitles = ungroupedRefsList.slice(0, 50).map((ref) => {
+      const idx = refToIndex.get(ref);
+      return idx !== undefined ? (rawFindings[idx].title || "").slice(0, 200) : `[unknown ref: ${ref}]`;
+    });
+
     return {
       runId: resolvedRunId,
       findingCount,
@@ -558,9 +573,11 @@ Rules:
       requiredSeparations: REQUIRED_SEPARATIONS as string[],
       conservation,
       gateSplitCount: gateSplits.length,
-      gateSplits,
-      sampleGroups,
-      spotCheckReasons,
+      gateSplits: ungroupedOnly ? [] : gateSplits,
+      sampleGroups: ungroupedOnly ? [] : sampleGroups,
+      spotCheckReasons: ungroupedOnly ? [] : spotCheckReasons,
+      ungroupedCount: ungroupedRefsList.length,
+      ungroupedTitles,
     };
   },
 });
