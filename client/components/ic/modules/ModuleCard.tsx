@@ -60,6 +60,7 @@ export default function ModuleCard({
   disabledReason,
 }: ModuleCardProps) {
   const [showOutput, setShowOutput] = useState(false);
+
   const hasOutput = status?.latestOutput != null;
   const isComplete = status?.latestRun?.status === "completed";
   const Icon = ICON_MAP[definition.iconName] ?? FileText;
