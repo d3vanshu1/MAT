@@ -6,6 +6,11 @@
  *
  * Does NOT touch deduplicateFindings, the live OA path, or any production logic.
  * Read-only: no writes to module_outputs or anywhere else.
+ *
+ * Modes:
+ *   - Full run (replayGroupedRefs = null): calls model, runs gate, returns everything.
+ *   - Replay mode (replayGroupedRefs = [...refs...]): skips model call entirely,
+ *     uses provided refs as "grouped," returns ungrouped titles. Pure DB read.
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import {
@@ -20,9 +25,7 @@ const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 const SCG_DEAL_ID = "c46b4129-8a16-48ae-ad3a-1da061255445";
 
-// All 17 material dimensions — same as used by diag-consolidation-dryrun.ts
-// This is the MOST CONSERVATIVE gate: any pair with differing non-null values
-// on ANY dimension will be rejected.
+// All 17 material dimensions — most conservative gate.
 const ALL_DIMENSIONS: GroupingDimension[] = [
   "entity", "counterparty", "counterparty_role", "contract", "property",
   "product", "issue_provision", "affected_obligation", "period", "segment",
@@ -34,7 +37,7 @@ const ALL_DIMENSIONS: GroupingDimension[] = [
 const REQUIRED_SEPARATIONS: GroupingDimension[] = [];
 
 // Token budget safety: if input exceeds this char count, batch
-const MAX_INPUT_CHARS = 550_000; // ~137k tokens, well within 200k context
+const MAX_INPUT_CHARS = 550_000;
 
 // ─── Response Schema for Anthropic ─────────────────────────────────────────
 const MessageResponseSchema = z.object({
@@ -74,6 +77,10 @@ const GateSplitEntry = z.object({
   title_a: z.string(),
   title_b: z.string(),
   conflicting_dimension: z.string(),
+  extracted_value_a: z.string().nullable(),
+  extracted_value_b: z.string().nullable(),
+  issue_key_a: z.string().nullable(),
+  issue_key_b: z.string().nullable(),
   failed_closed: z.boolean(),
 });
 
@@ -111,12 +118,15 @@ export default api({
   input: z.object({
     runId: z.string().nullable().describe("Explicit run ID; null = auto-select largest OA run"),
     dryRun: z.boolean().nullable().describe("Reserved for future use; currently ignored"),
-    ungroupedOnly: z.boolean().nullable().describe("If true, skip sampleGroups/spotCheck in output and return only ungrouped titles (smaller payload)"),
+    replayGroupedRefs: z.array(z.string()).nullable().describe(
+      "If provided: skip model call entirely, treat these refs as grouped, return all ungrouped titles. Pure DB read mode."
+    ),
   }),
 
   output: z.object({
     runId: z.string(),
     findingCount: z.number(),
+    mode: z.string(),
     modelUsed: z.string(),
     oneCallOrBatches: z.string(),
     batchCount: z.number(),
@@ -140,19 +150,21 @@ export default api({
     requiredSeparations: z.array(z.string()),
     // Conservation
     conservation: ConservationReport,
-    // Gate splits
+    // Gate splits (enriched with extracted values)
     gateSplitCount: z.number(),
     gateSplits: z.array(GateSplitEntry),
     // Human review sample
     sampleGroups: z.array(GroupSampleEntry),
     // Spot check
     spotCheckReasons: z.array(SpotCheckEntry),
-    // Ungrouped findings (first 50 titles for review)
+    // Post-gate grouped refs (for feeding into replay mode)
+    allPostGateGroupedRefs: z.array(z.string()),
+    // Ungrouped findings (ALL titles, not capped)
     ungroupedCount: z.number(),
     ungroupedTitles: z.array(z.string()),
   }),
 
-  async run(ctx, { runId: inputRunId, ungroupedOnly }) {
+  async run(ctx, { runId: inputRunId, replayGroupedRefs }) {
     // ── Step 0: Resolve run ID ─────────────────────────────────────────────
     let resolvedRunId: string;
 
@@ -198,16 +210,13 @@ export default api({
 
     const findingCount = rawFindings.length;
 
-    // Build ref → finding_id map and compact projection
-    const refToId = new Map<string, string>();
+    // Build ref → index map and compact projection
     const refToIndex = new Map<string, number>();
     const compactFindings: Array<{ ref: string; title: string; detail_trimmed: string; source_docs: string[] }> = [];
 
     for (let i = 0; i < rawFindings.length; i++) {
       const f = rawFindings[i];
       const ref = `f${String(i + 1).padStart(3, "0")}`;
-      const findingId = f.finding_id || `oa_${i}`;
-      refToId.set(ref, findingId);
       refToIndex.set(ref, i);
       compactFindings.push({
         ref,
@@ -219,6 +228,54 @@ export default api({
 
     const allRefs = new Set(compactFindings.map((c) => c.ref));
 
+    // ════════════════════════════════════════════════════════════════════════
+    // REPLAY MODE: skip model call, just compute ungrouped from provided refs
+    // ════════════════════════════════════════════════════════════════════════
+    if (replayGroupedRefs && replayGroupedRefs.length > 0) {
+      const groupedSet = new Set(replayGroupedRefs);
+      const ungroupedRefsList = [...allRefs].filter((r) => !groupedSet.has(r));
+      const ungroupedTitles = ungroupedRefsList.map((ref) => {
+        const idx = refToIndex.get(ref);
+        return idx !== undefined ? (rawFindings[idx].title || "").slice(0, 200) : `[unknown ref: ${ref}]`;
+      });
+
+      return {
+        runId: resolvedRunId,
+        findingCount,
+        mode: "replay",
+        modelUsed: "none (replay)",
+        oneCallOrBatches: "none",
+        batchCount: 0,
+        batchSize: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        parseFailed: false,
+        parseError: null,
+        proposedGroupCount: 0,
+        proposedFindingsInGroups: replayGroupedRefs.length,
+        proposedUngrouped: ungroupedRefsList.length,
+        afterGateGroupCount: 0,
+        afterGateFindingsInGroups: replayGroupedRefs.length,
+        afterGateUngrouped: ungroupedRefsList.length,
+        projectedFindingCountAfter: 0,
+        countingRule: "replay mode — ungrouped = all_refs minus replayGroupedRefs",
+        materialDimensions: [],
+        requiredSeparations: [],
+        conservation: { total_refs: findingCount, accounted_refs: findingCount, missing_refs: [], duplicated_refs: [], conservation_ok: true },
+        gateSplitCount: 0,
+        gateSplits: [],
+        sampleGroups: [],
+        spotCheckReasons: [],
+        allPostGateGroupedRefs: replayGroupedRefs,
+        ungroupedCount: ungroupedRefsList.length,
+        ungroupedTitles,
+      };
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // FULL MODE: model call + gate
+    // ════════════════════════════════════════════════════════════════════════
+
     // ── Step 1: Build input text ───────────────────────────────────────────
     const findingLines = compactFindings.map((c) => {
       const docs = c.source_docs.length > 0 ? ` [Sources: ${c.source_docs.join(", ")}]` : "";
@@ -226,7 +283,7 @@ export default api({
     });
 
     const inputText = findingLines.join("\n\n");
-    const model = getModuleModel("omission_audit"); // Sonnet for OA
+    const model = getModuleModel("omission_audit");
 
     // ── Step 2: Model call(s) ──────────────────────────────────────────────
     const systemPrompt = `You are grouping private-equity due-diligence findings from an Omission Audit report. Below is a numbered list of findings. Group together ONLY findings that describe the SAME underlying issue (same specific problem about the same subject), even if worded differently. Do NOT group findings that are merely related or in the same topic area — they must be about the exact same issue to be grouped.
@@ -257,8 +314,8 @@ Rules:
     let allUngroupedRefs: string[] = [];
 
     if (inputText.length > MAX_INPUT_CHARS) {
-      // ── Step 2b: Batch mode ────────────────────────────────────────────
-      const targetBatchChars = Math.floor(MAX_INPUT_CHARS * 0.8); // 80% of max per batch
+      // ── Batch mode ─────────────────────────────────────────────────────
+      const targetBatchChars = Math.floor(MAX_INPUT_CHARS * 0.8);
       const batches: string[][] = [];
       let currentBatch: string[] = [];
       let currentChars = 0;
@@ -287,7 +344,7 @@ Rules:
               path: "/v1/messages",
               body: {
                 model,
-                max_tokens: 8000,
+                max_tokens: 16000,
                 system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
                 messages: [{ role: "user", content: batchInput }],
               },
@@ -313,7 +370,6 @@ Rules:
             break;
           }
 
-          // Offset group_ids to avoid collisions across batches
           const offset = allGroups.length;
           for (const g of parsed.groups) {
             allGroups.push({ ...g, group_id: g.group_id + offset });
@@ -334,7 +390,7 @@ Rules:
             path: "/v1/messages",
             body: {
               model,
-              max_tokens: 8000,
+              max_tokens: 16000,
               system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
               messages: [{ role: "user", content: inputText }],
             },
@@ -390,7 +446,6 @@ Rules:
       if (count === 0) missingRefs.push(ref);
       if (count > 1) duplicatedRefs.push(ref);
     }
-    // Also check for invented refs
     for (const ref of seenRefs.keys()) {
       if (!allRefs.has(ref)) {
         missingRefs.push(`INVENTED:${ref}`);
@@ -413,11 +468,9 @@ Rules:
     const proposedUngrouped = findingCount - proposedFindingsInGroups;
 
     // ── Step 3: Enforce dimensional compatibility gate ─────────────────────
-    // Build dimension vectors for all findings
     const dimCache = new Map<string, DimensionVector>();
     for (const [ref, idx] of refToIndex) {
       const f = rawFindings[idx];
-      // Cast to CanonicalFinding shape for extractDimensions
       const asFinding: CanonicalFinding = {
         finding_id: f.finding_id || `oa_${idx}`,
         severity: f.severity || "info",
@@ -433,32 +486,30 @@ Rules:
       dimCache.set(ref, extractDimensions(asFinding));
     }
 
-    // For each group with 2+ members, check all pairs
+    // Gate splits — enriched with extracted values + issue_keys
     interface GateSplit {
       ref_a: string;
       ref_b: string;
       title_a: string;
       title_b: string;
       conflicting_dimension: string;
+      extracted_value_a: string | null;
+      extracted_value_b: string | null;
+      issue_key_a: string | null;
+      issue_key_b: string | null;
       failed_closed: boolean;
     }
 
     const gateSplits: GateSplit[] = [];
-
-    // Post-gate groups: split incompatible members using greedy sub-grouping
     const postGateGroups: Array<{ group_id: number; member_refs: string[]; reason: string }> = [];
 
     for (const group of allGroups) {
-      if (group.member_refs.length < 2) {
-        // Single-member "groups" become ungrouped
-        continue;
-      }
+      if (group.member_refs.length < 2) continue;
 
-      // Greedy sub-grouping (same algorithm as partitionByDimensions)
       const subgroups: Array<{ seed: DimensionVector; members: string[] }> = [];
 
       for (const ref of group.member_refs) {
-        if (!dimCache.has(ref)) continue; // skip invented refs
+        if (!dimCache.has(ref)) continue;
         const dims = dimCache.get(ref)!;
 
         let placed = false;
@@ -466,7 +517,6 @@ Rules:
           const check = areDimensionsCompatible(dims, sg.seed, ALL_DIMENSIONS, REQUIRED_SEPARATIONS);
           if (check.compatible) {
             sg.members.push(ref);
-            // Update seed: fill nulls with new values
             for (const dim of ALL_DIMENSIONS) {
               if (sg.seed[dim] === null && dims[dim] !== null) {
                 (sg.seed as any)[dim] = dims[dim];
@@ -475,16 +525,23 @@ Rules:
             placed = true;
             break;
           } else {
-            // Record the gate split
-            if (gateSplits.length < 30) {
+            // Record enriched gate split (no cap — collect all)
+            if (gateSplits.length < 100) {
               const idxA = refToIndex.get(sg.members[0])!;
               const idxB = refToIndex.get(ref)!;
+              const conflictDim = (check.conflictingDimension || "unknown") as keyof DimensionVector;
+              const dimsA = dimCache.get(sg.members[0])!;
+              const dimsB = dims;
               gateSplits.push({
                 ref_a: sg.members[0],
                 ref_b: ref,
                 title_a: (rawFindings[idxA].title || "").slice(0, 150),
                 title_b: (rawFindings[idxB].title || "").slice(0, 150),
-                conflicting_dimension: check.conflictingDimension || "unknown",
+                conflicting_dimension: conflictDim,
+                extracted_value_a: conflictDim in dimsA ? (dimsA as any)[conflictDim] ?? null : null,
+                extracted_value_b: conflictDim in dimsB ? (dimsB as any)[conflictDim] ?? null : null,
+                issue_key_a: rawFindings[idxA].issue_key ?? null,
+                issue_key_b: rawFindings[idxB].issue_key ?? null,
                 failed_closed: check.failedClosed,
               });
             }
@@ -492,12 +549,10 @@ Rules:
         }
 
         if (!placed) {
-          // Start a new sub-group
           subgroups.push({ seed: { ...dims }, members: [ref] });
         }
       }
 
-      // Each sub-group with 2+ members becomes a post-gate group
       for (const sg of subgroups) {
         if (sg.members.length >= 2) {
           postGateGroups.push({
@@ -513,13 +568,11 @@ Rules:
     const afterGateGroupCount = postGateGroups.length;
     const afterGateFindingsInGroups = postGateGroups.reduce((s, g) => s + g.member_refs.length, 0);
     const afterGateUngrouped = findingCount - afterGateFindingsInGroups;
-
-    // Counting rule: projected = post-gate groups (1 representative each) + ungrouped singletons
     const projectedFindingCountAfter = afterGateGroupCount + afterGateUngrouped;
 
     // ── Step 4: Build output ───────────────────────────────────────────────
 
-    // SAMPLE FOR HUMAN REVIEW: 20 largest post-gate groups
+    // 20 largest post-gate groups
     const sortedPostGate = [...postGateGroups].sort((a, b) => b.member_refs.length - a.member_refs.length);
     const sampleGroups = sortedPostGate.slice(0, 20).map((g) => ({
       group_id: g.group_id,
@@ -531,7 +584,7 @@ Rules:
       }),
     }));
 
-    // SPOT CHECK: 10 random groups' reasons
+    // 10 random spot checks
     const shuffled = [...postGateGroups].sort(() => Math.random() - 0.5);
     const spotCheckReasons = shuffled.slice(0, 10).map((g) => ({
       group_id: g.group_id,
@@ -539,13 +592,16 @@ Rules:
       size: g.member_refs.length,
     }));
 
-    // ── Compute ungrouped refs (not in any post-gate group with 2+ members) ──
-    const groupedRefSet = new Set<string>();
+    // All post-gate grouped refs (for replay mode)
+    const allPostGateGroupedRefs: string[] = [];
     for (const g of postGateGroups) {
-      for (const ref of g.member_refs) groupedRefSet.add(ref);
+      for (const ref of g.member_refs) allPostGateGroupedRefs.push(ref);
     }
+
+    // Ungrouped: ALL titles (not capped)
+    const groupedRefSet = new Set(allPostGateGroupedRefs);
     const ungroupedRefsList = [...allRefs].filter((r) => !groupedRefSet.has(r));
-    const ungroupedTitles = ungroupedRefsList.slice(0, 50).map((ref) => {
+    const ungroupedTitles = ungroupedRefsList.map((ref) => {
       const idx = refToIndex.get(ref);
       return idx !== undefined ? (rawFindings[idx].title || "").slice(0, 200) : `[unknown ref: ${ref}]`;
     });
@@ -553,6 +609,7 @@ Rules:
     return {
       runId: resolvedRunId,
       findingCount,
+      mode: "full",
       modelUsed: model,
       oneCallOrBatches,
       batchCount,
@@ -573,9 +630,10 @@ Rules:
       requiredSeparations: REQUIRED_SEPARATIONS as string[],
       conservation,
       gateSplitCount: gateSplits.length,
-      gateSplits: ungroupedOnly ? [] : gateSplits,
-      sampleGroups: ungroupedOnly ? [] : sampleGroups,
-      spotCheckReasons: ungroupedOnly ? [] : spotCheckReasons,
+      gateSplits,
+      sampleGroups,
+      spotCheckReasons,
+      allPostGateGroupedRefs,
       ungroupedCount: ungroupedRefsList.length,
       ungroupedTitles,
     };
@@ -586,7 +644,6 @@ Rules:
 
 function parseModelResponse(text: string): ModelResponse | null {
   try {
-    // Strip markdown code fences if present
     let cleaned = text.trim();
     if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
@@ -595,7 +652,6 @@ function parseModelResponse(text: string): ModelResponse | null {
     if (!parsed || !Array.isArray(parsed.groups) || !Array.isArray(parsed.ungrouped_refs)) {
       return null;
     }
-    // Validate structure
     for (const g of parsed.groups) {
       if (typeof g.group_id !== "number" || !Array.isArray(g.member_refs) || typeof g.reason !== "string") {
         return null;
