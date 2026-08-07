@@ -434,6 +434,191 @@ export function enforceMaterialityGate(
   return { findings: survivingFindings, housekeepingFindings, demotedCount };
 }
 
+// ---------------------------------------------------------------------------
+// Absence Verification Gate (FP-1) — Code-enforced check that demotes
+// false "not disclosed in memo" findings when the topic IS retrievable from
+// IC-memo document chunks. Runs after reconciliation, before materiality gate.
+// ---------------------------------------------------------------------------
+
+/** Minimum distinct memo chunks that must match to consider topic "disclosed" */
+const ABSENCE_GATE_MIN_MEMO_CHUNKS = 2;
+/** Minimum keywords that a SINGLE chunk must match (fallback if fewer distinct chunks) */
+const ABSENCE_GATE_MIN_KEYWORDS_PER_CHUNK = 2;
+
+/** IC memo file_name pattern */
+const IC_MEMO_FILE_PATTERN = /IC[_ ]Memo|IC update/i;
+
+/** Absence-claim detection — same regex used by RC5 defense-in-depth */
+const ABSENCE_CLAIM_PATTERN = /\b(does not confirm|does not disclose|absent|not disclosed|missing|no mention|fails to address|not addressed|not confirmed|no evidence of|no reference to|omits?|silent on|does not discuss|not discussed|not surfaced|not reflected|not mentioned|undisclosed|not flagged|not highlighted)\b/i;
+
+/** Stopwords to strip when extracting salient keywords from finding title */
+const STOPWORDS = new Set([
+  "the", "a", "an", "in", "of", "on", "at", "to", "for", "is", "are", "was",
+  "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+  "will", "shall", "would", "could", "should", "may", "might", "can", "and",
+  "or", "but", "if", "so", "not", "no", "nor", "by", "from", "with", "as",
+  "this", "that", "it", "its", "ic", "memo", "memos", "disclosed", "disclose",
+  "absent", "missing", "mentioned", "discussed", "addressed", "surfaced",
+  "reflected", "flagged", "highlighted", "undisclosed", "confirm", "confirmed",
+  "evidence", "reference", "mention",
+]);
+
+/**
+ * Minimal query-function interface so the gate can be tested without a live DB.
+ */
+export interface AbsenceGateQueryFn {
+  (sql: string, schema: z.ZodType<any>, params: unknown[], meta?: { label: string }): Promise<any[]>;
+}
+
+const AbsenceGateChunkSchema = z.object({
+  file_name: z.string(),
+  chunk_index: z.coerce.number(),
+  content: z.string(),
+});
+
+/**
+ * Extracts 3-6 salient keywords from a finding title.
+ * Strips stopwords, absence verbs, and short tokens.
+ */
+export function extractSalientKeywords(title: string): string[] {
+  const tokens = title
+    .replace(/[^a-zA-Z0-9&%/.-]/g, " ")
+    .split(/\s+/)
+    .map((t) => t.toLowerCase().replace(/^[.\-]+|[.\-]+$/g, ""))
+    .filter((t) => t.length > 2 && !STOPWORDS.has(t));
+
+  // Deduplicate and take up to 6
+  const unique = [...new Set(tokens)];
+  return unique.slice(0, 6);
+}
+
+/**
+ * Determines if a finding is an absence claim.
+ */
+function isAbsenceClaim(f: MergedFinding): boolean {
+  if (f.gap_type === "memo_omission") return true;
+  const textToCheck = `${f.title ?? ""} ${f.detail ?? ""}`;
+  return ABSENCE_CLAIM_PATTERN.test(textToCheck);
+}
+
+/**
+ * Code-enforced absence verification gate.
+ *
+ * For each absence-claim finding in a CHECKLIST_MODULES run, verifies via
+ * full-text search whether the claimed-absent topic is actually present in
+ * IC-memo document chunks. If the memo DOES disclose the topic (meeting
+ * confidence thresholds), the finding is demoted to housekeeping.
+ *
+ * @param queryFn - DB query function (injectable for testing)
+ * @param dealId  - Deal to search
+ * @param findings - Principal findings array (mutated in place for `absence_verification`)
+ * @param housekeepingFindings - Housekeeping array (demoted findings appended here)
+ * @param moduleId - Module type; gate only fires for CHECKLIST_MODULES
+ * @returns Count of demoted findings
+ */
+export async function verifyAbsenceClaims(
+  queryFn: AbsenceGateQueryFn,
+  dealId: string,
+  findings: MergedFinding[],
+  housekeepingFindings: MergedFinding[],
+  moduleId: string,
+): Promise<{ survivingFindings: MergedFinding[]; housekeepingFindings: MergedFinding[]; demotedCount: number }> {
+  // Only run for checklist modules
+  if (!CHECKLIST_MODULES.has(moduleId)) {
+    return { survivingFindings: findings, housekeepingFindings, demotedCount: 0 };
+  }
+
+  let demotedCount = 0;
+  const survivingFindings: MergedFinding[] = [];
+
+  for (const f of findings) {
+    if (!isAbsenceClaim(f)) {
+      // Non-absence findings pass through completely untouched
+      survivingFindings.push(f);
+      continue;
+    }
+
+    // Extract salient keywords from title
+    const keywords = extractSalientKeywords(f.title ?? "");
+    if (keywords.length === 0) {
+      // Cannot verify without keywords — leave in place, mark confirmed
+      (f as any).absence_verification = "memo_absent_confirmed";
+      survivingFindings.push(f);
+      continue;
+    }
+
+    // Build a websearch_to_tsquery-compatible query from keywords
+    const searchQuery = keywords.join(" OR ");
+
+    // Search document_chunks for this deal
+    let memoHit = false;
+    let matchingMemoFiles: string[] = [];
+    let matchingKeywordsForSearch = keywords;
+
+    try {
+      const hits = await queryFn(
+        `SELECT dc.file_name, dc.chunk_index, dc.content
+         FROM document_chunks dc,
+              websearch_to_tsquery('english', $2) q
+         WHERE dc.deal_id = $1
+           AND dc.tsv @@ q
+         ORDER BY ts_rank_cd(dc.tsv, q) DESC
+         LIMIT 50`,
+        AbsenceGateChunkSchema,
+        [dealId, searchQuery],
+        { label: `[absenceGate] verify: "${(f.title ?? "").slice(0, 60)}"` }
+      );
+
+      // Filter to IC-memo chunks only
+      const memoChunks = hits.filter((h) => IC_MEMO_FILE_PATTERN.test(h.file_name));
+
+      if (memoChunks.length >= ABSENCE_GATE_MIN_MEMO_CHUNKS) {
+        // Threshold A: >= 2 distinct memo chunks match
+        memoHit = true;
+        matchingMemoFiles = [...new Set(memoChunks.map((h) => h.file_name))];
+      } else if (memoChunks.length === 1) {
+        // Threshold B: single chunk must match >= 2 keywords
+        const chunkContent = memoChunks[0].content.toLowerCase();
+        const matchedKeywords = keywords.filter((kw) => chunkContent.includes(kw));
+        if (matchedKeywords.length >= ABSENCE_GATE_MIN_KEYWORDS_PER_CHUNK) {
+          memoHit = true;
+          matchingMemoFiles = [memoChunks[0].file_name];
+          matchingKeywordsForSearch = matchedKeywords;
+        }
+      }
+    } catch (err) {
+      // On query error, leave finding in place
+      console.warn(`[pipeline:absenceGate] Query error for "${(f.title ?? "").slice(0, 60)}":`, err);
+      survivingFindings.push(f);
+      continue;
+    }
+
+    if (memoHit) {
+      // Memo DOES disclose the topic — demote the false-absence finding
+      demotedCount++;
+      (f as any).absence_verification = "contradicted_by_memo";
+      housekeepingFindings.push({
+        ...f,
+        severity: "info",
+        category: "housekeeping",
+        absence_verification: "contradicted_by_memo" as any,
+        materiality_rationale: `[CODE_ENFORCED:absenceGate] Topic disclosed in IC memo(s): ${matchingMemoFiles.join(", ")}. Keywords matched: ${matchingKeywordsForSearch.join(", ")}. Claim contradicted by evidence.`,
+      });
+      console.log(`[pipeline:absenceGate] DEMOTED "${(f.title ?? "").slice(0, 80)}" — disclosed in ${matchingMemoFiles.join(", ")} via ${matchingKeywordsForSearch.join(", ")}`);
+    } else {
+      // Topic genuinely not found in memo chunks — retain
+      (f as any).absence_verification = "memo_absent_confirmed";
+      survivingFindings.push(f);
+    }
+  }
+
+  if (demotedCount > 0) {
+    console.log(`[pipeline:absenceGate] Total demoted: ${demotedCount} false-absence finding(s)`);
+  }
+
+  return { survivingFindings, housekeepingFindings, demotedCount };
+}
+
 export function appendReconciliationFindings(
   finalFindings: MergedFinding[],
   housekeepingFindings: MergedFinding[],
@@ -582,7 +767,7 @@ export function appendReconciliationFindings(
 // ---------------------------------------------------------------------------
 // Shared post-merge pipeline: runs identically in main-path and fast-path.
 // Order: suppression → Layer-1 numeric validation → consolidation →
-//        reconciliation append → independent override → materiality gate.
+//        reconciliation append → absence gate → independent override → materiality gate.
 // ---------------------------------------------------------------------------
 interface PostMergePipelineInput {
   findings: MergedFinding[];
@@ -591,6 +776,10 @@ interface PostMergePipelineInput {
   claimsReconciliation: ReconciliationResult | null;
   fileTagMap: Map<string, string>;
   moduleId: string;
+  /** DB query function — required for absence gate (optional for backward compat) */
+  queryFn?: AbsenceGateQueryFn;
+  /** Deal ID — required for absence gate */
+  dealId?: string;
 }
 
 interface PostMergePipelineResult {
@@ -600,7 +789,7 @@ interface PostMergePipelineResult {
 
 async function runPostMergePipeline(input: PostMergePipelineInput): Promise<PostMergePipelineResult> {
   let { findings, housekeepingFindings } = input;
-  const { numericReport, claimsReconciliation, fileTagMap, moduleId } = input;
+  const { numericReport, claimsReconciliation, fileTagMap, moduleId, queryFn, dealId } = input;
 
   // === Stage 1: FABRICATED_ARITHMETIC suppression (Fix 19 closure: context-guarded) ===
   const { shouldSuppressArithmeticFinding } = await import("./fabricated-arithmetic-patterns.js");
@@ -1215,6 +1404,14 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
   findings = reconResult.finalFindings;
   housekeepingFindings = reconResult.housekeepingFindings;
 
+  // === Stage 4.5: Absence Verification Gate (FP-1) ===
+  // Code-enforced check: demotes false "not disclosed" findings when memo DOES disclose the topic.
+  if (queryFn && dealId) {
+    const absenceGateResult = await verifyAbsenceClaims(queryFn, dealId, findings, housekeepingFindings, moduleId);
+    findings = absenceGateResult.survivingFindings;
+    housekeepingFindings = absenceGateResult.housekeepingFindings;
+  }
+
   // === Stage 5: Deterministic independent override ===
   let independentOverrides = 0;
   for (const f of findings) {
@@ -1275,6 +1472,7 @@ interface CanonicalFinalizeInput {
   ctx: PipelineContext;
   runId: string;
   moduleId: string;
+  dealId?: string;
   findings: MergedFinding[];
   housekeepingFindings: MergedFinding[];
   executiveHeader: string;
@@ -1315,6 +1513,8 @@ export async function runPostMergeFinalization(input: CanonicalFinalizeInput): P
     claimsReconciliation,
     fileTagMap,
     moduleId,
+    queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
+    dealId: input.dealId,
   });
   let { findings, housekeepingFindings } = postMerge;
 
@@ -4893,6 +5093,8 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     claimsReconciliation,
     fileTagMap,
     moduleId,
+    queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
+    dealId,
   });
   finalFindings = postMergeMainResult.findings;
   finalHousekeepingFindings = postMergeMainResult.housekeepingFindings;

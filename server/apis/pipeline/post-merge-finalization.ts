@@ -142,6 +142,8 @@ export interface PostMergeFinalizationInput {
     claimsReconciliation: ReconciliationResult | null;
     fileTagMap: Map<string, string>;
     moduleId: string;
+    queryFn?: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]>;
+    dealId?: string;
   }) => Promise<{ findings: MergedFinding[]; housekeepingFindings: MergedFinding[] }>;
   runAbsenceVerificationPhase: (
     ctx: PipelineContext,
@@ -538,6 +540,8 @@ export async function runPostMergeFinalizationStages(
       claimsReconciliation: reconciliationResult,
       fileTagMap,
       moduleId,
+      queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
+      dealId,
     });
     postMergeFindings = postMergeResult.findings;
     postMergeHousekeeping = postMergeResult.housekeepingFindings;
