@@ -66,6 +66,7 @@ import { MERGE_PROMPTS, FINDINGS_RULE_FINAL, FINDINGS_RULE_INTERMEDIATE } from "
 import { runPostCompletionAudit } from "./post-completion-audit.js";
 import { validateMergeContract } from "./merge-contract-validator.js";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
+import { modelConsolidate } from "./model-consolidation-adapter.js";
 import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
@@ -1121,12 +1122,21 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
   }
 
   // === Stage 3: Global Semantic Consolidation (Defect 1) ===
-  // OA-03: For omission_audit, delegate to canonical family dedup service
+  // OA-03: For omission_audit, delegate to consolidation engine
+  // MG-3: model-grouping replaces canonical-family-dedup by default (flag-controlled)
   // Preserves the full family artifact for downstream promotion
   let familyDedupArtifact: ReturnType<typeof deduplicateFindings> | null = null;
   if (moduleId === "omission_audit") {
+    const useModelGrouping = true; // MG-3 flag: true = model-grouping (default), false = old canonical-family-dedup
     const preConsolidationCount = findings.length;
-    familyDedupArtifact = deduplicateFindings(findings as any);
+    if (useModelGrouping) {
+      if (!aiFn) {
+        throw new Error("[pipeline:postMerge][MG-3] Model grouping requires aiFn but none was provided");
+      }
+      familyDedupArtifact = await modelConsolidate(findings as any, aiFn);
+    } else {
+      familyDedupArtifact = deduplicateFindings(findings as any);
+    }
     // Keep only retained findings (representatives + ungrouped)
     const retainedIds = new Set<string>([
       ...familyDedupArtifact.ungroupedFindingIds,
@@ -1135,7 +1145,7 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
     findings = findings.filter(f => retainedIds.has(f.finding_id));
     const consolidatedCount = preConsolidationCount - findings.length;
     if (consolidatedCount > 0) {
-      console.log(`[pipeline:postMerge][OA-03] Canonical family dedup: ${preConsolidationCount} → ${findings.length} findings (collapsed ${consolidatedCount}, families=${familyDedupArtifact.totalFamiliesCreated})`);
+      console.log(`[pipeline:postMerge][OA-03] ${useModelGrouping ? 'Model' : 'Canonical'} consolidation: ${preConsolidationCount} → ${findings.length} findings (collapsed ${consolidatedCount}, families=${familyDedupArtifact.totalFamiliesCreated})`);
     }
     // Attach family artifact to findings array for downstream preservation
     (findings as any).__familyDedupArtifact = familyDedupArtifact;
