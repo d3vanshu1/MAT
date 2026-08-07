@@ -90,6 +90,8 @@ import { buildSourceSnapshot, validateSourceSnapshot, computeSnapshotFingerprint
 import { CONTRADICTION_CHECK_ALLOWED_TAGS, isChunkAllowedForContradictionCheck, createPolicySummary, type SourcePolicySummary } from "./source-policy.js";
 import { type RoutingDiagnosticEntry, type RoutingDiagnostics } from "./replay-classifier.js";
 import { runPostMergeFinalizationStages, type PostMergeFinalizationResult } from "./post-merge-finalization.js";
+import { buildEngagementMap, type EngagementMapResult } from "./engagement-map.js";
+import { matchAbsenceFindings, type FindingInput, type MatcherOutput } from "./absence-map-matcher.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -657,6 +659,167 @@ export async function verifyAbsenceClaims(
   return { survivingFindings, housekeepingFindings, demotedCount };
 }
 
+// ---------------------------------------------------------------------------
+// Engagement Map Absence Gate (EM-3)
+// Replaces the keyword-based verifyAbsenceClaims. Uses LLM-powered engagement
+// map + per-finding Sonnet matching for precise dispositions.
+// ---------------------------------------------------------------------------
+
+interface EngagementGateResult {
+  survivingFindings: MergedFinding[];
+  housekeepingFindings: MergedFinding[];
+  demotedCount: number;
+  flaggedCount: number;
+  thesisDriftCount: number;
+  unprocessedCount: number;
+}
+
+export async function applyEngagementAbsenceGate(
+  queryFn: AbsenceGateQueryFn,
+  aiFn: (req: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"; path: string; body: Record<string, unknown> }, opts: { response: z.ZodType<any> }, meta?: { label: string }) => Promise<any>,
+  dealId: string,
+  findings: MergedFinding[],
+  housekeepingFindings: MergedFinding[],
+  moduleId: string,
+): Promise<EngagementGateResult> {
+  // Only run for checklist modules
+  if (!CHECKLIST_MODULES.has(moduleId)) {
+    return { survivingFindings: findings, housekeepingFindings, demotedCount: 0, flaggedCount: 0, thesisDriftCount: 0, unprocessedCount: 0 };
+  }
+
+  console.log(`[engagementGate] Starting for module=${moduleId}, deal=${dealId}, findings=${findings.length}`);
+
+  // --- Step 1: Build engagement map ---
+  const GATE_DEADLINE_MS = 180_000; // Allow up to 180s for the entire gate
+  const gateStart = Date.now();
+  const mapDeadline = gateStart + 120_000; // Allow 120s for map build
+
+  let engagementMap: EngagementMapResult;
+  try {
+    engagementMap = await buildEngagementMap(queryFn, aiFn, dealId, mapDeadline);
+  } catch (err: any) {
+    console.warn(`[engagementGate] Map build FAILED: ${err?.message} — retaining all findings (no demotion)`);
+    return { survivingFindings: findings, housekeepingFindings, demotedCount: 0, flaggedCount: 0, thesisDriftCount: 0, unprocessedCount: 0 };
+  }
+
+  if (!engagementMap.memos || engagementMap.memos.length === 0) {
+    console.warn(`[engagementGate] No memos found — retaining all findings (no demotion)`);
+    return { survivingFindings: findings, housekeepingFindings, demotedCount: 0, flaggedCount: 0, thesisDriftCount: 0, unprocessedCount: 0 };
+  }
+
+  // --- Step 2: Run matcher against all findings ---
+  const matcherDeadline = gateStart + GATE_DEADLINE_MS;
+  const findingsInput: FindingInput[] = findings.map(f => ({
+    finding_id: f.finding_id ?? "",
+    title: f.title ?? "",
+    detail: f.detail ?? "",
+    gap_type: (f as any).gap_type,
+    finding_kind: f.finding_kind,
+  }));
+
+  let matchResult: MatcherOutput;
+  try {
+    matchResult = await matchAbsenceFindings(
+      findingsInput, engagementMap, aiFn, dealId, "gate", matcherDeadline
+    );
+  } catch (err: any) {
+    console.warn(`[engagementGate] Matcher FAILED: ${err?.message} — retaining all findings (no demotion)`);
+    return { survivingFindings: findings, housekeepingFindings, demotedCount: 0, flaggedCount: 0, thesisDriftCount: 0, unprocessedCount: 0 };
+  }
+
+  // --- Step 3: Apply dispositions ---
+  const survivingFindings: MergedFinding[] = [];
+  let demotedCount = 0;
+  let flaggedCount = 0;
+  let thesisDriftCount = 0;
+  let unprocessedCount = matchResult.partial ? (findings.length - matchResult.results.length) : 0;
+
+  // Build lookup by finding_id
+  const dispositionMap = new Map<string, typeof matchResult.results[number]>();
+  for (const r of matchResult.results) {
+    if (r.finding_id) dispositionMap.set(r.finding_id, r);
+  }
+
+  for (let i = 0; i < findings.length; i++) {
+    const f = findings[i];
+    const fId = f.finding_id ?? "";
+    const result = dispositionMap.get(fId);
+
+    if (!result || result.disposition === "not_applicable") {
+      // Non-absence finding — pass through
+      survivingFindings.push(f);
+      continue;
+    }
+
+    switch (result.disposition) {
+      case "demote": {
+        demotedCount++;
+        const memoList = (result.matched_memos ?? []).join(", ");
+        housekeepingFindings.push({
+          ...f,
+          severity: "info",
+          category: "housekeeping",
+          absence_verification: "contradicted_by_memo" as any,
+          materiality_rationale: `[CODE_ENFORCED:engagementGate] disclosed in memo(s) ${memoList} — topic ${result.matched_topic ?? "unknown"}. ${result.reason ?? ""}`,
+        });
+        console.log(`[engagementGate] DEMOTED "${(f.title ?? "").slice(0, 80)}" — memos=[${memoList}], topic="${result.matched_topic}"`);
+        break;
+      }
+
+      case "surface_thesis_drift": {
+        thesisDriftCount++;
+        const earlierMemos = (result.matched_memos ?? []).join(", ");
+        (f as any).absence_verification = "thesis_drift";
+        f.detail = (f.detail ?? "") + `\n\n[engagementGate:thesis_drift] Topic engaged in memo(s) ${earlierMemos}, absent from latest memo ${matchResult.latest_full_memo_order} — verify whether resolved or dropped.`;
+        survivingFindings.push(f);
+        break;
+      }
+
+      case "surface_omission": {
+        (f as any).absence_verification = "memo_absent_confirmed";
+        survivingFindings.push(f);
+        break;
+      }
+
+      case "flag":
+      default: {
+        flaggedCount++;
+        (f as any).absence_verification = "memo_disclosure_uncertain";
+        f.detail = (f.detail ?? "") + `\n\n[engagementGate:uncertain] Memo may address this topic — verify. ${result.reason ?? ""}`;
+        survivingFindings.push(f);
+        break;
+      }
+    }
+  }
+
+  // Handle any unprocessed findings (partial timeout) — treat as flag/retain
+  if (matchResult.partial && findings.length > matchResult.results.length) {
+    // The findings beyond what was processed are already in survivingFindings
+    // because the dispositionMap won't have entries for them and they pass through.
+    // But we need to mark absence claims among them as flagged.
+    const processedIds = new Set(matchResult.results.map(r => r.finding_id));
+    for (const f of survivingFindings) {
+      const fId = f.finding_id ?? "";
+      if (!processedIds.has(fId) && !(f as any).absence_verification) {
+        // Check if this is an absence claim that wasn't processed
+        const textCheck = `${f.title ?? ""} ${f.detail ?? ""}`;
+        const isAbsence = (f as any).gap_type === "memo_omission" ||
+          /\b(does not confirm|does not disclose|absent|not disclosed|missing|no mention|fails to address|not addressed|not confirmed|no evidence of|no reference to|omits?|silent on|does not discuss|not discussed)\b/i.test(textCheck);
+        if (isAbsence) {
+          (f as any).absence_verification = "memo_disclosure_uncertain";
+          f.detail = (f.detail ?? "") + `\n\n[engagementGate:unprocessed] Time budget exhausted — retained for manual review.`;
+          unprocessedCount++;
+          flaggedCount++;
+        }
+      }
+    }
+  }
+
+  console.log(`[engagementGate] demoted ${demotedCount}, thesis_drift ${thesisDriftCount}, surfaced_omission ${findings.length - demotedCount - flaggedCount - thesisDriftCount - unprocessedCount}, flagged ${flaggedCount}, unprocessed ${unprocessedCount} (retained)`);
+
+  return { survivingFindings, housekeepingFindings, demotedCount, flaggedCount, thesisDriftCount, unprocessedCount };
+}
+
 export function appendReconciliationFindings(
   finalFindings: MergedFinding[],
   housekeepingFindings: MergedFinding[],
@@ -818,6 +981,8 @@ interface PostMergePipelineInput {
   queryFn?: AbsenceGateQueryFn;
   /** Deal ID — required for absence gate */
   dealId?: string;
+  /** AI function — required for engagement absence gate */
+  aiFn?: (req: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"; path: string; body: Record<string, unknown> }, opts: { response: z.ZodType<any> }, meta?: { label: string }) => Promise<any>;
 }
 
 interface PostMergePipelineResult {
@@ -827,7 +992,7 @@ interface PostMergePipelineResult {
 
 async function runPostMergePipeline(input: PostMergePipelineInput): Promise<PostMergePipelineResult> {
   let { findings, housekeepingFindings } = input;
-  const { numericReport, claimsReconciliation, fileTagMap, moduleId, queryFn, dealId } = input;
+  const { numericReport, claimsReconciliation, fileTagMap, moduleId, queryFn, dealId, aiFn } = input;
 
   // === Stage 1: FABRICATED_ARITHMETIC suppression (Fix 19 closure: context-guarded) ===
   const { shouldSuppressArithmeticFinding } = await import("./fabricated-arithmetic-patterns.js");
@@ -1442,12 +1607,13 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
   findings = reconResult.finalFindings;
   housekeepingFindings = reconResult.housekeepingFindings;
 
-  // === Stage 4.5: Absence Verification Gate (FP-1) ===
-  // Code-enforced check: demotes false "not disclosed" findings when memo DOES disclose the topic.
-  if (queryFn && dealId) {
-    const absenceGateResult = await verifyAbsenceClaims(queryFn, dealId, findings, housekeepingFindings, moduleId);
-    findings = absenceGateResult.survivingFindings;
-    housekeepingFindings = absenceGateResult.housekeepingFindings;
+  // === Stage 4.5: Engagement Map Absence Gate (EM-3, replaces FP-1 keyword gate) ===
+  // LLM-verified gate: builds per-memo engagement map, matches each absence-claim finding
+  // against it via Sonnet, and demotes/annotates based on disposition.
+  if (queryFn && dealId && aiFn) {
+    const gateResult = await applyEngagementAbsenceGate(queryFn, aiFn, dealId, findings, housekeepingFindings, moduleId);
+    findings = gateResult.survivingFindings;
+    housekeepingFindings = gateResult.housekeepingFindings;
   }
 
   // === Stage 5: Deterministic independent override ===
@@ -1553,6 +1719,7 @@ export async function runPostMergeFinalization(input: CanonicalFinalizeInput): P
     moduleId,
     queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
     dealId: input.dealId,
+    aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
   });
   let { findings, housekeepingFindings } = postMerge;
 
@@ -5133,6 +5300,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     moduleId,
     queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
     dealId,
+    aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
   });
   finalFindings = postMergeMainResult.findings;
   finalHousekeepingFindings = postMergeMainResult.housekeepingFindings;

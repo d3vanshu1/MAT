@@ -144,6 +144,7 @@ export interface PostMergeFinalizationInput {
     moduleId: string;
     queryFn?: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]>;
     dealId?: string;
+    aiFn?: (req: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"; path: string; body: Record<string, unknown> }, opts: { response: any }, meta?: { label: string }) => Promise<any>;
   }) => Promise<{ findings: MergedFinding[]; housekeepingFindings: MergedFinding[] }>;
   runAbsenceVerificationPhase: (
     ctx: PipelineContext,
@@ -542,6 +543,7 @@ export async function runPostMergeFinalizationStages(
       moduleId,
       queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
       dealId,
+      aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
     });
     postMergeFindings = postMergeResult.findings;
     postMergeHousekeeping = postMergeResult.housekeepingFindings;
