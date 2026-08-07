@@ -244,19 +244,45 @@ export async function tierFindings(
   const deadlineMs = invocationStart + INVOCATION_BUDGET_MS - SAFETY_MARGIN_MS;
 
   // 1. Ensure checkpoint table exists
-  await queryFn(CREATE_TABLE_SQL, z.any(), [], { label: "mg4: ensure checkpoint table" }).catch(() => {
-    // DDL may throw on some adapters; ignore — table creation is best-effort
-  });
+  try {
+    await queryFn(CREATE_TABLE_SQL, z.any(), [], { label: "mg4: ensure checkpoint table" });
+  } catch (ddlErr: unknown) {
+    const msg = ddlErr && typeof ddlErr === "object" && "message" in ddlErr
+      ? String((ddlErr as { message: unknown }).message)
+      : String(ddlErr);
+    // "already exists" is expected on non-first runs — suppress silently.
+    // All other DDL errors (permissions, connection) are logged loudly so they surface.
+    if (!/already exists/i.test(msg)) {
+      console.error(`[mg4-tier] CHECKPOINT TABLE CREATION FAILED: ${msg}. Subsequent checkpoint reads/writes will fail.`);
+      throw ddlErr;
+    }
+  }
 
   // 2. Load already-tiered finding_ids for this checkpointKey
-  const existingRows = await queryFn(
-    `SELECT finding_id, tier, rationale, driver
-     FROM mg4_materiality_tier_checkpoints
-     WHERE checkpoint_key = $1`,
-    CheckpointRowSchema,
-    [checkpointKey],
-    { label: "mg4: load checkpoint" }
-  ).catch(() => [] as any[]);
+  let existingRows: any[];
+  try {
+    existingRows = await queryFn(
+      `SELECT finding_id, tier, rationale, driver
+       FROM mg4_materiality_tier_checkpoints
+       WHERE checkpoint_key = $1`,
+      CheckpointRowSchema,
+      [checkpointKey],
+      { label: "mg4: load checkpoint" }
+    );
+  } catch (loadErr: unknown) {
+    const msg = loadErr && typeof loadErr === "object" && "message" in loadErr
+      ? String((loadErr as { message: unknown }).message)
+      : String(loadErr);
+    // "does not exist" / "undefined_table" → first invocation, table just created;
+    // treat as empty checkpoint (expected on first run before any rows exist).
+    if (/does not exist|undefined_table|42P01/i.test(msg)) {
+      existingRows = [];
+    } else {
+      // Real error (permission, schema mismatch, connection): fail loud.
+      console.error(`[mg4-tier] CHECKPOINT LOAD FAILED (not a missing-table case): ${msg}`);
+      throw loadErr;
+    }
+  }
 
   const checkpointMap = new Map<string, TierAssignment>();
   for (const row of existingRows) {
