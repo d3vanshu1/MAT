@@ -115,6 +115,7 @@ import ValidateTreeRoot from './pipeline/validate-tree-root.js';
 import FindingReductionGate from './pipeline/finding-reduction-gate.js';
 import ScgClonedStatePreflight from './pipeline/scg-cloned-state-preflight.js';
 import DiagChecklistCoverage from './pipeline/diag-checklist-coverage.js';
+import DiagEngagementMap from './pipeline/diag-engagement-map.js';
 
 // Database setup
 import SetupSchema from './db/setup-schema.js';
@@ -195,7 +196,7 @@ const apis = {
   RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree, PromoteRootFindings,
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
-  RunMigration019, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage,
+  RunMigration019, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
