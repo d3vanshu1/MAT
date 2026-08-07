@@ -192,6 +192,13 @@ export function getReportExclusionReason(finding: any): ExcludedFinding["exclusi
  * Format a report from canonical reportable findings only.
  * Non-reportable items must not appear as substantive findings.
  * Operational disclosures may be appended as a clearly separated section.
+ *
+ * MG-5: Sections by materiality_tier (from MG-4 Stage 4.6), NOT by severity.
+ *   Tier 1 — Potentially Deal-Relevant (with rationale + driver prominently)
+ *   Tier 2 — Worth a Condition or Follow-Up (with rationale + driver)
+ *   Tier 3 — Noted (compact: title + one-line rationale only)
+ *   Challenges to the Memo's Figures (absence_verification === "memo_disclosure_uncertain")
+ *   Other Findings (untiered — safety net, nothing silently dropped)
  */
 export function formatCanonicalReport(
   executiveHeader: string,
@@ -203,15 +210,36 @@ export function formatCanonicalReport(
 ): string {
   const lines: string[] = [];
 
-  const criticals = reportableFindings.filter(f => f.severity === "critical");
-  const warnings = reportableFindings.filter(f => f.severity === "warning");
-  const infos = reportableFindings.filter(f => f.severity === "info");
+  // ── Classify findings by tier ──────────────────────────────────────────────
+  const tier1: any[] = [];
+  const tier2: any[] = [];
+  const tier3: any[] = [];
+  const framingChallenges: any[] = [];
+  const other: any[] = [];
+
+  for (const f of reportableFindings) {
+    // Framing challenges: memo engages the topic but finding disputes its framing
+    if (f.absence_verification === "memo_disclosure_uncertain") {
+      framingChallenges.push(f);
+    } else if (f.materiality_tier === 1) {
+      tier1.push(f);
+    } else if (f.materiality_tier === 2) {
+      tier2.push(f);
+    } else if (f.materiality_tier === 3) {
+      tier3.push(f);
+    } else {
+      // No tier set (non-absence findings, safety-floor residuals, etc.)
+      other.push(f);
+    }
+  }
+
   const total = reportableFindings.length;
 
+  // ── Header ─────────────────────────────────────────────────────────────────
   lines.push("# Diligence Report");
   lines.push("");
   lines.push(`> **${total} reportable finding${total !== 1 ? "s" : ""}**`);
-  lines.push(`> Severity: ${criticals.length} critical, ${warnings.length} warning, ${infos.length} info.`);
+  lines.push(`> Tier 1 (deal-relevant): ${tier1.length}  ·  Tier 2: ${tier2.length}  ·  Tier 3: ${tier3.length}`);
   lines.push("");
 
   if (executiveHeader) {
@@ -221,20 +249,29 @@ export function formatCanonicalReport(
     lines.push("");
   }
 
-  const renderSection = (sectionTitle: string, items: any[]) => {
-    if (items.length === 0) return;
-    lines.push(`## ${sectionTitle} (${items.length})`);
+  // ── Tier 1 — full detail with prominent rationale ──────────────────────────
+  if (tier1.length > 0) {
+    lines.push(`## Tier 1 — Potentially Deal-Relevant (${tier1.length})`);
     lines.push("");
-    for (const f of items) {
+    for (const f of tier1) {
       lines.push(`### ${f.title || "Untitled Finding"}`);
       lines.push("");
-      if (f.detail) lines.push(f.detail);
-      if (f.full_analysis) {
+      if (f.tier_rationale) {
+        lines.push(`> **Why this matters:** ${f.tier_rationale}`);
+      }
+      if (f.tier_driver) {
+        lines.push(`> **Affects:** ${f.tier_driver}`);
+      }
+      if (f.tier_rationale || f.tier_driver) lines.push("");
+      if (f.detail) {
+        lines.push(f.detail);
         lines.push("");
+      }
+      if (f.full_analysis) {
         lines.push(f.full_analysis);
+        lines.push("");
       }
       if (f.evidence && f.evidence.length > 0) {
-        lines.push("");
         lines.push("**Evidence:**");
         for (const ev of f.evidence.slice(0, 5)) {
           const label = typeof ev === "string"
@@ -242,16 +279,113 @@ export function formatCanonicalReport(
             : ev.verbatim_snippet ?? ev.figure ?? JSON.stringify(ev);
           lines.push(`- ${label}`);
         }
+        lines.push("");
       }
-      lines.push("");
     }
-  };
+  }
 
-  renderSection("Critical Findings", criticals);
-  renderSection("Warnings", warnings);
-  renderSection("Informational", infos);
+  // ── Tier 2 — full detail with rationale ────────────────────────────────────
+  if (tier2.length > 0) {
+    lines.push(`## Tier 2 — Worth a Condition or Follow-Up (${tier2.length})`);
+    lines.push("");
+    for (const f of tier2) {
+      lines.push(`### ${f.title || "Untitled Finding"}`);
+      lines.push("");
+      if (f.tier_rationale) {
+        lines.push(`> **Why this matters:** ${f.tier_rationale}`);
+      }
+      if (f.tier_driver) {
+        lines.push(`> **Affects:** ${f.tier_driver}`);
+      }
+      if (f.tier_rationale || f.tier_driver) lines.push("");
+      if (f.detail) {
+        lines.push(f.detail);
+        lines.push("");
+      }
+      if (f.full_analysis) {
+        lines.push(f.full_analysis);
+        lines.push("");
+      }
+      if (f.evidence && f.evidence.length > 0) {
+        lines.push("**Evidence:**");
+        for (const ev of f.evidence.slice(0, 5)) {
+          const label = typeof ev === "string"
+            ? ev
+            : ev.verbatim_snippet ?? ev.figure ?? JSON.stringify(ev);
+          lines.push(`- ${label}`);
+        }
+        lines.push("");
+      }
+    }
+  }
 
-  // Operational disclosures — clearly separated, never counted as findings
+  // ── Tier 3 — compact appendix (title + rationale only, no full_analysis/evidence) ─
+  if (tier3.length > 0) {
+    lines.push(`## Tier 3 — Noted (${tier3.length})`);
+    lines.push("");
+    for (const f of tier3) {
+      const rationale = f.tier_rationale ? ` — ${f.tier_rationale}` : "";
+      lines.push(`- **${f.title || "Untitled Finding"}**${rationale}`);
+    }
+    lines.push("");
+  }
+
+  // ── Framing Challenges (memo engages topic but finding disputes framing) ───
+  if (framingChallenges.length > 0) {
+    lines.push(`## Challenges to the Memo's Figures (${framingChallenges.length})`);
+    lines.push("");
+    lines.push("These are not omissions — the memos address these topics, but the tool's read of the underlying data differs from how the memo presents it. Verify against source.");
+    lines.push("");
+    for (const f of framingChallenges) {
+      lines.push(`### ${f.title || "Untitled Finding"}`);
+      lines.push("");
+      if (f.tier_rationale) {
+        lines.push(`> **Why this matters:** ${f.tier_rationale}`);
+      }
+      if (f.tier_driver) {
+        lines.push(`> **Affects:** ${f.tier_driver}`);
+      }
+      if (f.tier_rationale || f.tier_driver) lines.push("");
+      if (f.detail) {
+        lines.push(f.detail);
+        lines.push("");
+      }
+      if (f.full_analysis) {
+        lines.push(f.full_analysis);
+        lines.push("");
+      }
+    }
+  }
+
+  // ── Other Findings (untiered — safety net, never drop) ─────────────────────
+  if (other.length > 0) {
+    lines.push(`## Other Findings (${other.length})`);
+    lines.push("");
+    for (const f of other) {
+      lines.push(`### ${f.title || "Untitled Finding"}`);
+      lines.push("");
+      if (f.detail) {
+        lines.push(f.detail);
+        lines.push("");
+      }
+      if (f.full_analysis) {
+        lines.push(f.full_analysis);
+        lines.push("");
+      }
+      if (f.evidence && f.evidence.length > 0) {
+        lines.push("**Evidence:**");
+        for (const ev of f.evidence.slice(0, 5)) {
+          const label = typeof ev === "string"
+            ? ev
+            : ev.verbatim_snippet ?? ev.figure ?? JSON.stringify(ev);
+          lines.push(`- ${label}`);
+        }
+        lines.push("");
+      }
+    }
+  }
+
+  // ── Operational disclosures — clearly separated, never counted as findings ─
   const disclosureLines: string[] = [];
   if (options.degradedConditions && options.degradedConditions.length > 0) {
     disclosureLines.push(...options.degradedConditions);
