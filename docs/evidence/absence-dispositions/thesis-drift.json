@@ -1,0 +1,32 @@
+[
+  {
+    "finding_id": "4d6d5882-bf1d-4966-8aa2-197ffc755545",
+    "title": "Thesis Drift: Key Risk Disclosures Dropped from Latest Memo",
+    "matched_memos": [2],
+    "reason": "Memo 2 explicitly engages with 'margin sustainability risk' as a distinct topic, but Memo 3 (the latest full memo) does not include this as a listed topic in the engagement map, indicating it was dropped from the latest memo."
+  },
+  {
+    "finding_id": "75a253c7-0142-48b4-8c59-d0824b04cd64",
+    "title": "Microsoft Teams Margin Dilution Risk to Horizon Not Addressed in Latest Memo",
+    "matched_memos": [1, 2],
+    "reason": "The specific Microsoft Teams disintermediation/margin dilution risk was explicitly addressed in Memo 1 (technology disruption risk) and Memo 2 (with specific Teams revenue exposure data: 0.6% of revenue), but Memo 3's engagement map only covers a general 'AI risk and opportunity' topic without specifically addressing Teams competition or margin dilution risk."
+  },
+  {
+    "finding_id": "bcd3a7d9-ef14-425a-99b9-ba25bb7d6431",
+    "title": "Microsoft Teams SME Penetration Risk Qualified by CDD Adviser",
+    "matched_memos": [2],
+    "reason": "The disintermediation risk from Teams/Zoom is explicitly addressed in Memo 2 but does not appear as a distinct topic in the latest full memo (Memo 3), and the specific sub-aspect of a CDD adviser qualifying SME penetration risk from Teams is not engaged with in Memo 3 or the update supplement."
+  },
+  {
+    "finding_id": "c8a228e0-3015-44ba-9b4a-c2b956c329ce",
+    "title": "Evonex Core Growth Materially Weaker Ex-Education: Composition Risk Undisclosed in Latest Memo",
+    "matched_memos": [2],
+    "reason": "Memo 2 explicitly disclosed that education drove ~40% of absolute Evonex license growth (>50% YoY seat growth), but Memo 3 (the latest full memo) dropped this specific composition risk entirely, making this a case of thesis drift rather than a genuine never-disclosed omission."
+  },
+  {
+    "finding_id": "f1c6feff-d1b1-4e82-9140-b548c8fff525",
+    "title": "Thesis Drift: Own-Network Competitive Advantage Work Dropped from Later IC Memos",
+    "matched_memos": [2],
+    "reason": "The specific topic of VAR market share gains vs incumbent telcos (own-network competitive advantage framing) appears in Memo 2 but is not carried forward as a distinct topic in the latest full memo (Memo 3), indicating thesis drift/dropped coverage."
+  }
+]

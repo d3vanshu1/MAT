@@ -1,0 +1,135 @@
+[
+  {
+    "finding_id": "00a27ebb-d417-4b5c-ad63-4285a185d21b",
+    "title": "Seller Proceeds Sensitivity and Thin Equity Position Not Disclosed in IC Memo",
+    "matched_topic": "seller dynamics and price sensitivity",
+    "matched_memos": [2],
+    "reason": "Memo 2 explicitly discloses that sellers have a thin equity layer due to the quantum of Ares debt and are sensitive to any change in their proceeds (~\u00a388m total), directly addressing the specific finding about seller proceeds sensitivity and thin equity position."
+  },
+  {
+    "finding_id": "293a9943-b5c5-4971-9ea1-1b98c9856b9b",
+    "title": "New-Period MIP Structure Absent from IC Memo Record",
+    "matched_topic": "management team and incentives",
+    "matched_memos": [2, 3, 4],
+    "reason": "The MIP structure (12% pref, 12.5% base sweet, 5% ratchet from 2.5x\u20134.0x PEP MoM) is explicitly disclosed in both the latest full memo (memo 3) and the update supplement (memo 4), making the 'not disclosed' claim false."
+  },
+  {
+    "finding_id": "33f283f2-1c87-4bda-9216-e5468fdbbd48",
+    "title": "Own-IP UCaaS Platform (Evonex) Sustainability Not Resolved in Latest IC Memo",
+    "matched_topic": "intra-group migrations (3rd party UCaaS to own-IP)",
+    "matched_memos": [3, 4],
+    "reason": "Memo 3 substantively engages with Evonex sustainability through multiple topics including intra-group migrations to own-IP, UCaaS competitive dynamics, AI risk/opportunity, and regulatory environment, while the update supplement explicitly models Evonex education vertical growth scenarios, making the 'not disclosed' claim false."
+  },
+  {
+    "finding_id": "383f1c41-72bb-4c23-b2a8-8e38ff9e995a",
+    "title": "Dividend Recap at Year 3 \u2014 Leverage Covenant Headroom Not Disclosed",
+    "matched_topic": "dividend recapitalisation",
+    "matched_memos": [3, 4],
+    "reason": "Both the latest full memo (memo 3) and the update supplement (memo 4) explicitly reference a dividend recap to 6x in Year 3, but neither discloses leverage covenant headroom in the context of that recap \u2014 however, memo 4 separately discloses the leverage covenant (9.2x at entry, cov lite once EBITDA >£80m in Year 3), which directly addresses headroom at the time of the planned dividend recap, meaning the specific issue of covenant headroom around the Year 3 recap is in fact disclosed in the update supplement."
+  },
+  {
+    "finding_id": "48f133f2-69dc-42dd-9d60-0df8799b1fbe",
+    "title": "Forecast Constructed on No-M&A Basis Despite Active Acquisition Track Record",
+    "matched_topic": "M&A pipeline and track record",
+    "matched_memos": [1, 2, 3, 4],
+    "reason": "Memo 3 and the update supplement explicitly address M&A in the return projections on both an organic (no-M&A) and with-M&A basis, making clear the base/PEP case is constructed without M&A while the upside scenario includes it \u2014 directly engaging with the specific issue the finding raises."
+  },
+  {
+    "finding_id": "49ece39f-6baa-468c-9ef9-b2849a77b366",
+    "title": "NHS / Public Funding Dependency: One-Off 2024 Benefit Disclosed but Not Modelled in IC Memo",
+    "matched_topic": "NHS regulatory risk and funding dependency",
+    "matched_memos": [2],
+    "reason": "Memo 2 explicitly discloses that SCG benefitted from one-off NHS funding in 2024 to incentivise GP migration to cloud telephony, directly addressing the specific finding that this one-off benefit was not disclosed."
+  },
+  {
+    "finding_id": "6927f7fd-6e9c-43fa-8882-8a68916650cd",
+    "title": "Calls and Lines Structural Decline Not Addressed in IC Memos",
+    "matched_topic": "call volume / voice usage trends",
+    "matched_memos": [3],
+    "reason": "Memo 3 explicitly addresses structural decline in voice/calls, noting UK voice minutes are declining at -6% CAGR L3Y, directly engaging with the specific issue the finding claims is undisclosed."
+  },
+  {
+    "finding_id": "7fa71417-421a-4886-aa03-b9cf6af2d475",
+    "title": "Leverage and Interest Cover Tightness Throughout Forecast Not Stress-Tested in Memo",
+    "matched_topic": "interest coverage",
+    "matched_memos": [3, 4],
+    "reason": "Both memo 3 and the update supplement explicitly disclose interest coverage ratios across the forecast period (e.g., 1.8x\u20133.6x in memo 3; 1.9x\u20133.7x in memo 4), directly engaging with the tightness of interest cover throughout the forecast."
+  },
+  {
+    "finding_id": "b0368194-0873-478e-ba87-e370a1147d1a",
+    "title": "Reseller Gross Margin Structural Decline Not Addressed in Latest Memo",
+    "matched_topic": "margin sustainability risk",
+    "matched_memos": [2],
+    "reason": "Memo 2 explicitly addresses the reseller margin compression risk under 'margin sustainability risk,' noting that 'an important portion of SCG's business is fundamentally a reseller and so there is a risk of margin compression, particularly as technology evolves,' and Memo 3 also engages with gross margin expansion and its drivers, substantively addressing the structural margin dynamics of the reseller business."
+  },
+  {
+    "finding_id": "b4a0ec2e-3b69-47bd-8c84-1bc9f6bf75e9",
+    "title": "Unidentified Future M&A Drives Material Terminal EBITDA",
+    "matched_topic": "M&A pipeline and track record",
+    "matched_memos": [1, 2, 3, 4],
+    "reason": "All memos, including the latest full memo (memo 3) and the update supplement (memo 4), explicitly disclose that future M&A (unidentified targets from a pipeline) contributes to return projections, quantify its impact (e.g., +3.5% IRR / +0.4x MoM in memo 4), and present organic-only vs. M&A scenarios, making the 'not disclosed' claim false."
+  },
+  {
+    "finding_id": "bc796011-346d-4879-aa58-cd9478f723ce",
+    "title": "Microsoft Teams Voice Share Acceleration: Structural Threat Understated in Thesis",
+    "matched_topic": "disintermediation risk from Teams/Zoom",
+    "matched_memos": [2, 3],
+    "reason": "Memo 2 explicitly addresses Teams/Zoom disintermediation risk with specific data (only 4% of revenue from customers with any Teams spend, 0.6% of revenue from Teams itself), and Memo 3 addresses AI/UCaaS competitive dynamics including Teams, so the finding's claim that this structural threat is 'understated' does not mean it is undisclosed."
+  },
+  {
+    "finding_id": "c93e9f95-6cf3-48d6-b4e0-436ce119c4a6",
+    "title": "Dealer Buy-Out Savings Not Confirmed as Sustainable in Plan",
+    "matched_topic": "dealer buyouts",
+    "matched_memos": [4],
+    "reason": "The update supplement (Memo 4) explicitly references dealer buyouts as contributing \u00a31.4m EBITDA in FY30 and quantifies their IRR/MoM contribution, directly engaging with the topic the finding claims is undisclosed."
+  },
+  {
+    "finding_id": "d26d83fb-67de-43be-ba06-f07cf0f5a882",
+    "title": "Calls and Lines Revenue Decline CAGR Not Addressed in Forward Projections",
+    "matched_topic": "analogue migration / product sunset risk",
+    "matched_memos": [2, 3],
+    "reason": "Memo 3 explicitly addresses the decline of analogue/calls-and-lines revenue in forward projections, noting the PEP Case conservatively assumes run-off to zero, and also quantifies the -6% CAGR for UK voice minutes, making the 'not disclosed' claim false."
+  },
+  {
+    "finding_id": "d3cdfaa8-b64b-45d1-954a-855e64866927",
+    "title": "Net Revenue Retention and Gross Revenue Retention Rates Present in FDD but Not Cited in Latest IC Memo",
+    "matched_topic": "retention metrics (NRR/GRR)",
+    "matched_memos": [1, 2, 3],
+    "reason": "Memo 3 explicitly cites both GRR (93%) and NRR (104%) for Mar-26, directly engaging with the specific retention metrics the finding claims are undisclosed."
+  },
+  {
+    "finding_id": "d3e886f3-4384-487f-aaf8-b312acb6db8f",
+    "title": "X-on Contingent Consideration Earn-Out Quantum Not Disclosed in IC Memos",
+    "matched_topic": "earn-out structure",
+    "matched_memos": [1, 2, 3, 4],
+    "reason": "The latest full memo (Memo 3) explicitly discloses the \u00a385m earn-out quantum and its 50/50 upside sharing mechanism above 2.5x MoM, making the 'not disclosed' claim false."
+  },
+  {
+    "finding_id": "d52101ce-39e8-4366-8ddd-f1d17647d67b",
+    "title": "Evonex Revenue Growth Narrative Truncated in FDD; Growth Drivers Unconfirmed",
+    "matched_topic": "Evonex education vertical growth",
+    "matched_memos": [2, 4],
+    "reason": "Memo 2 and the update supplement (Memo 4) explicitly engage with Evonex education vertical growth drivers including seat growth >50% YoY, Martyn's Law tailwind, and school market share targets, directly addressing the growth narrative the finding claims is unconfirmed."
+  },
+  {
+    "finding_id": "d7dac973-2097-4597-99c5-da822f2dcc0d",
+    "title": "Earn-Out Mechanics and Governance Not Described in Latest Memo",
+    "matched_topic": "earn-out structure",
+    "matched_memos": [1, 2, 3, 4],
+    "reason": "The latest full memo (Memo 3) explicitly references the \u00a385m earn-out with 50/50 upside sharing above 2.5x MoM, and the update supplement (Memo 4) also describes the earn-out mechanics, so the 'not disclosed' claim is false."
+  },
+  {
+    "finding_id": "ed700edd-1b09-4284-9e8d-fb0187aa3f78",
+    "title": "Entry Interest Coverage of 1.9x and Covenant Stress-Test Not Presented in IC Memo",
+    "matched_topic": "interest coverage",
+    "matched_memos": [3, 4],
+    "reason": "Memo 3 explicitly discloses interest coverage (1.8x at entry) and Memo 4 (update supplement) discloses 1.9x interest coverage and the net leverage covenant, directly contradicting the finding's claim that these were not presented in the IC memo."
+  },
+  {
+    "finding_id": "f99b4f73-e1b1-4127-9eab-1569f2a2574c",
+    "title": "South Africa Shared Service Desk: Operational and Concentration Risk Not Discussed",
+    "matched_topic": "cost efficiency / South Africa offshoring",
+    "matched_memos": [3, 4],
+    "reason": "Both the latest full memo (memo 3) and the update supplement (memo 4) explicitly discuss South Africa offshoring as a cost efficiency lever, referencing increasing SA off-shoring from 16% to 23%+ of FTEs, so the 'not disclosed' claim is false."
+  }
+]

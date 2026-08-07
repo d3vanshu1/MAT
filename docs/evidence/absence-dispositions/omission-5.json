@@ -1,0 +1,182 @@
+[
+  {
+    "finding_id": "e46fa176-22a1-4f21-9119-d4b22b33014e",
+    "title": "Datakom FCA De-Registration: Scope and Residual Exposure Undisclosed",
+    "reason": "No memo in the engagement map addresses Datakom FCA de-registration, its scope, or any residual regulatory/compliance exposure related to it."
+  },
+  {
+    "finding_id": "e5137939-1cd7-4f56-a0a3-837828ce6d27",
+    "title": "Change-of-Control Customer Contract Termination Rights Unquantified",
+    "reason": "No memo in the engagement map addresses change-of-control provisions in customer contracts or quantifies the risk of customer termination rights triggered by the transaction."
+  },
+  {
+    "finding_id": "e72780ea-b799-463f-9f71-62caef146636",
+    "title": "Cisco Dependency Limits CCaaS Roadmap Control: CDD Not Reconciled in Memos",
+    "reason": "No memo in the engagement map engages with Cisco dependency as a constraint on the CCaaS roadmap or reconciles this specific third-party vendor risk identified in CDD."
+  },
+  {
+    "finding_id": "e87d629d-e120-4757-8dca-33fe32cbf275",
+    "title": "Change-of-Control Termination Rights in Key Customer Contracts Unquantified",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in key customer contracts or quantifies the financial exposure from such provisions."
+  },
+  {
+    "finding_id": "e8a65ec9-c282-4bd5-b78d-6e4cee55eb22",
+    "title": "Unresolved FY23 Reserves Variance — Management Cannot Explain",
+    "reason": "No memo in the engagement map addresses an unresolved FY23 reserves variance or management's inability to explain it; this specific issue is never disclosed."
+  },
+  {
+    "finding_id": "e9610934-89da-4d1a-9789-c5f5400eaa06",
+    "title": "Working Capital Characterisation Tension — 'Broadly Neutral' vs. Worsening Monthly Minimum",
+    "reason": "No memo in the engagement map addresses the specific tension between characterising working capital as 'broadly neutral' versus a worsening monthly minimum working capital requirement; working capital dynamics are never substantively engaged with across any of the memos."
+  },
+  {
+    "finding_id": "ea41697f-9b1f-4325-8597-5b2c8135439d",
+    "title": "Unregistered Trade Marks and Incomplete IP Assignment from Third-Party Developer",
+    "reason": "No memo in the engagement map addresses unregistered trade marks or incomplete IP assignment from a third-party developer; while proprietary IP and technology platform are mentioned generally, the specific legal/IP ownership issues raised in the finding are never engaged with."
+  },
+  {
+    "finding_id": "eac3b70e-5bb9-4a6f-b10e-4eca401206a0",
+    "title": "Restrictive Covenant Weaknesses in Senior Executive Contracts",
+    "reason": "No memo in the engagement map addresses restrictive covenants or non-compete/non-solicit weaknesses in senior executive contracts as a specific topic."
+  },
+  {
+    "finding_id": "eacb83fe-57d0-4ca0-bb02-2ae744e0c4f5",
+    "title": "M&A Cohort GP Growth Decelerating Sharply; Acquisition Multiples Rising Above Historical Average",
+    "reason": "No memo engages with the specific concern that the M&A cohort's GP growth is decelerating sharply, nor flags the trend of rising acquisition multiples above historical averages as a risk — the memos present acquisition multiples as a factual data point without flagging the upward drift as a concern."
+  },
+  {
+    "finding_id": "ebdd8f01-c132-4154-b137-4aff9b4bbd59",
+    "title": "NHS Digital Strategy Initiative Impact on Working Capital Not Addressed in IC Memos",
+    "reason": "No memo engages specifically with the impact of NHS Digital Strategy initiatives on working capital; the NHS-related topics covered concern funding dependency, regulatory risk, and product adoption dynamics, not working capital effects."
+  },
+  {
+    "finding_id": "ec4379c2-12ca-4252-8a6d-ec5b39aa0086",
+    "title": "Restrictive Covenant Weaknesses in Senior Executive Contracts Absent from IC Memo Record",
+    "reason": "No memo in the engagement map addresses restrictive covenants or non-compete provisions in senior executive employment contracts at any level of specificity."
+  },
+  {
+    "finding_id": "eda2d86f-9982-427d-a91b-f77e5a9745c9",
+    "title": "CTO Outside Core SLT — Product Governance Gap Not Disclosed",
+    "reason": "No memo in the engagement map addresses the CTO's position outside the core SLT or any resulting product governance gap; the management team discussions focus on the CEO, Executive Chairman, and high-level key person risks without engaging this specific structural/governance issue."
+  },
+  {
+    "finding_id": "edaa4be8-314b-43bb-be9a-93f3965dacd4",
+    "title": "Multiple Active Ofcom General Condition Breaches Absent from IC Memos",
+    "reason": "No memo in the engagement map addresses Ofcom General Condition breaches or any specific regulatory compliance/enforcement issues with Ofcom; the regulatory topics covered relate to NHS digital policy, analogue switch-off, and Martyn's Law, not active Ofcom GC breaches."
+  },
+  {
+    "finding_id": "ee8fdaf5-63a9-4527-bae9-b1a97cde8f7e",
+    "title": "Mobile FY24 Churn Event: Government Framework Losses to EE Competitor",
+    "reason": "No memo in the engagement map references a specific FY24 churn event involving losses of government framework contracts to EE or any named competitor; the memos discuss general churn metrics but not this specific competitive loss event."
+  },
+  {
+    "finding_id": "f1002ee2-4ba1-436e-9e86-ce5a3f5d0c81",
+    "title": "Forecast Capex Step-Up to ~£12m Not Reconciled in IC Memos",
+    "reason": "No memo references a capex step-up to ~£12m; the capex figures shown across all memos peak at ~£9.1m and the latest memos show declining capex, so this specific claim of an unreconciled ~£12m step-up is never disclosed or addressed anywhere in the engagement map."
+  },
+  {
+    "finding_id": "f11fbb17-05c8-497d-b8ac-9c38e62c12dd",
+    "title": "Unpaid Ofcom Administrative Charges: £60,000–£80,000 Quantified Liability",
+    "reason": "No memo in the engagement map addresses unpaid Ofcom administrative charges or any quantified regulatory liability of £60,000–£80,000."
+  },
+  {
+    "finding_id": "f2eb8618-9055-4a38-971e-cd2286379897",
+    "title": "Fixed Connectivity: Legacy Decline vs FTTP Growth Creates Revenue Mix Shift",
+    "reason": "While the memos discuss legacy product run-off (analogue/copper), none specifically address FTTP growth as a distinct revenue driver creating a mix shift within fixed connectivity."
+  },
+  {
+    "finding_id": "f45017ed-0753-4c68-a6fe-f6f803b7b2d3",
+    "title": "IP Rights Assignment Gap for Third-Party Developer Deliverables",
+    "reason": "No memo in the engagement map addresses IP rights assignment gaps for third-party developer deliverables; the closest topics (proprietary IP/owned technology platform, capex and R&D investment) do not engage with the specific contractual question of whether IP created by external developers is properly assigned to SCG."
+  },
+  {
+    "finding_id": "f5494fae-5439-4460-a319-bba85b3abb34",
+    "title": "Pervasive 30–90 Day Termination-for-Convenience Regime Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map discusses or discloses a pervasive 30–90 day termination-for-convenience regime in customer contracts; contract termination rights are never mentioned as a specific topic across any of the four memos."
+  },
+  {
+    "finding_id": "f57ab85e-85bb-40da-9e4d-01e261372f3a",
+    "title": "Key Executive Restrictive Covenants Flagged as Potentially Unenforceable",
+    "reason": "No memo in the engagement map engages with the enforceability of key executive restrictive covenants at any level of specificity."
+  },
+  {
+    "finding_id": "f75beb08-fcd6-4dc0-a3ab-c371db7fa340",
+    "title": "Surgery Connect Ancillary Revenue CAGR Lacks Independent Validation",
+    "reason": "No memo in the engagement map specifically addresses independent validation (or lack thereof) of the Surgery Connect ancillary revenue CAGR; the memos reference management ambitions and PEP haircuts to those ambitions, but none engage with whether the ancillary revenue growth rate has been independently validated."
+  },
+  {
+    "finding_id": "f781c9db-29ad-4ae7-b207-74485d8c1909",
+    "title": "Change-of-Control Termination Right in Openwork Agreement Not Addressed in Latest Memo",
+    "reason": "No memo in the engagement map addresses a change-of-control termination right in the Openwork agreement or any Openwork-related contractual provision at all."
+  },
+  {
+    "finding_id": "f7e3d74b-6c92-4765-8fd9-ef05a404e78e",
+    "title": "EE MSA Revenue Guarantee and Early Termination Charges Not Quantified in IC Memos",
+    "reason": "No memo in the engagement map addresses the EE MSA revenue guarantee quantum or early termination charges as a specific contractual risk or financial exposure."
+  },
+  {
+    "finding_id": "f7fe3d3f-afac-4eed-8aed-84ce99317268",
+    "title": "Fragmented T&C Landscape Across Nine Regimes in Top-20 Customers Undisclosed",
+    "reason": "No memo in the engagement map addresses the specific issue of a fragmented terms-and-conditions landscape across nine distinct contractual regimes within the top-20 customers."
+  },
+  {
+    "finding_id": "f9da462a-d82d-4ab5-bff2-de041222a38a",
+    "title": "Multiple Ofcom General Conditions Technical Breaches — Low Enforcement Risk",
+    "reason": "No memo in the engagement map addresses Ofcom General Conditions technical breaches or related regulatory compliance/enforcement risk at any level of specificity."
+  },
+  {
+    "finding_id": "fa5cf114-d88d-49b3-aff3-bf4b9e8cdaa7",
+    "title": "ARR Double-Counting and Manual Overlay Exposure Not Disclosed to IC",
+    "reason": "No memo in the engagement map addresses ARR double-counting methodology or manual overlay exposure in revenue/ARR reporting; the memos discuss NRR, GRR, recurring revenue, and financial forecasts at a high level without engaging with any specific ARR accounting or manual adjustment risks."
+  },
+  {
+    "finding_id": "fa97b64c-eb81-46e8-972d-792a7f3185bf",
+    "title": "Gamma Telecom Single-Supplier Concentration (£11.9m Annual Spend) Not Highlighted in IC Memos",
+    "reason": "No memo in the engagement map discusses Gamma Telecom as a single supplier to SCG or any specific supplier concentration risk involving £11.9m annual spend; Gamma is only mentioned as an alternative investment opportunity."
+  },
+  {
+    "finding_id": "fd43b8b8-488e-4cd5-a22d-129e0725f76b",
+    "title": "General Terms and Conditions Regulatory Compliance: Cease Charge Breach Identified",
+    "reason": "No memo in the engagement map addresses General Terms and Conditions regulatory compliance or any cease charge breach; this specific finding is never disclosed across any of the memos."
+  },
+  {
+    "finding_id": "fd862df1-d2cb-4740-9574-f71b26d6299c",
+    "title": "Aggregator Gross Margin Compression vs. Model Assumptions",
+    "reason": "No memo in the engagement map specifically addresses aggregator gross margin compression relative to model assumptions; while margin sustainability risk and gross margin expansion are noted, none engage with the specific issue of aggregator GM compression versus what is assumed in the financial model."
+  },
+  {
+    "finding_id": "fdca7b07-6f62-464c-aa6b-e087b5ff1d46",
+    "title": "M2M Connections Gross Margin Collapsed 46.3ppts FY23–FY25",
+    "reason": "No memo in the engagement map addresses the specific finding of M2M connections gross margin collapsing 46.3 percentage points from FY23 to FY25; while gross margin expansion at the group level is discussed in Memo 3, the specific M2M product segment and its margin collapse are never engaged with."
+  },
+  {
+    "finding_id": "fde9f903-96a4-4a05-875e-e24463c6db32",
+    "title": "Asbestos Survey at Hemel Hempstead Outdated; 2019 Refurbishment Survey Unconfirmed",
+    "reason": "No memo in the engagement map addresses asbestos surveys, refurbishment surveys, or any property/environmental due diligence findings related to the Hemel Hempstead site."
+  },
+  {
+    "finding_id": "fe533eb6-38a3-44f2-a380-95abcf2f129f",
+    "title": "Change-of-Control Customer Termination Rights Unquantified in IC Memos",
+    "reason": "No memo in the engagement map addresses change-of-control customer termination rights or attempts to quantify the financial exposure from such contractual provisions."
+  },
+  {
+    "finding_id": "feb26d30-030e-4cf7-b7a4-9a765ff16fcf",
+    "title": "CYBR Vision ARPU Peak-and-Decline in FY28 Not Addressed in IC Memos",
+    "reason": "No memo in the engagement map discusses CYBR Vision ARPU peaking and then declining in FY28 specifically; the cybersecurity topic is only addressed at a high level regarding growth rates and cross-sell penetration, not any ARPU peak-and-decline dynamic."
+  },
+  {
+    "finding_id": "fefe1c2c-b186-444e-ac80-6c92d2643fc7",
+    "title": "IT, Cloud & Security Churn Acceleration Unaddressed Despite Strong Cross-Sell Narrative",
+    "reason": "No memo specifically addresses churn acceleration within the IT, Cloud & Security segment; memos discuss overall group churn rates and IT/cybersecurity cross-sell growth but not segment-level churn trends that could undermine the cross-sell thesis."
+  },
+  {
+    "finding_id": "ff1a2b73-3d4d-4208-963e-62320a9e469b",
+    "title": "Germany Market Entry Risks Not Addressed in Memo",
+    "reason": "No memo in the engagement map addresses Germany market entry risks or any international expansion risks; all geographic content is UK-focused."
+  },
+  {
+    "finding_id": "fff6ccee-0ed3-4675-9c22-d803d109d5e0",
+    "title": "CFO Transition Risk Absent from IC Memo Record",
+    "reason": "No memo in the engagement map addresses CFO transition risk or any CFO-specific leadership change; management team discussions focus on the CEO (Daryl Pile) and Executive Chairman (Paul Bradford) without mentioning the CFO role or any transition thereof."
+  }
+]

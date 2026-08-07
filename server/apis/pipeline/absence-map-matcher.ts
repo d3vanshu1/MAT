@@ -89,7 +89,7 @@ export interface MatcherAIFn {
 // Absence claim detection
 // ---------------------------------------------------------------------------
 
-function isAbsenceClaim(f: FindingInput): boolean {
+export function isAbsenceClaim(f: FindingInput): boolean {
   if (f.gap_type === "memo_omission") return true;
   const textToCheck = `${f.title ?? ""} ${f.detail ?? ""}`;
   return ABSENCE_CLAIM_PATTERN.test(textToCheck);
@@ -99,7 +99,7 @@ function isAbsenceClaim(f: FindingInput): boolean {
 // Decision → Disposition mapping
 // ---------------------------------------------------------------------------
 
-function decisionToDisposition(decision: Decision): Disposition {
+export function decisionToDisposition(decision: Decision): Disposition {
   switch (decision) {
     case "A": return "demote";
     case "B": return "surface_thesis_drift";
@@ -126,7 +126,7 @@ const MessageResponseSchema = z.object({
 // Compact map formatter
 // ---------------------------------------------------------------------------
 
-function formatCompactMap(map: EngagementMapResult, latestFullMemoOrder: number): string {
+export function formatCompactMap(map: EngagementMapResult, latestFullMemoOrder: number): string {
   const lines: string[] = [];
   for (const memo of map.memos) {
     const isLatest = memo.memo_order === latestFullMemoOrder;
@@ -173,7 +173,7 @@ Return ONLY valid JSON:
 // Single finding matcher
 // ---------------------------------------------------------------------------
 
-async function matchSingleFinding(
+export async function matchSingleFinding(
   finding: FindingInput,
   compactMap: string,
   latestFullMemoOrder: number,
@@ -225,7 +225,7 @@ async function matchSingleFinding(
 // Concurrency-limited executor
 // ---------------------------------------------------------------------------
 
-async function runWithConcurrency<T, R>(
+export async function runWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   fn: (item: T, index: number) => Promise<R>,

@@ -1,0 +1,27 @@
+[
+  {
+    "finding_id": "4e4c2158-067d-450c-83f5-79203c1abec6",
+    "title": "42% GP Market Share: Competitive Response and Regulatory Exposure Not Quantified",
+    "reason": "No memo in the engagement map quantifies competitive response risk or regulatory exposure specifically tied to the 42% GP market share position; the memos reference Surgery Connect's ~55% market share and general competitive/regulatory context but never quantify the specific risks the finding identifies."
+  },
+  {
+    "finding_id": "bb6f4b0d-7265-46a2-bf8d-d4cc16f022be",
+    "title": "Surgery Connect Leadership Vacancy Not Surfaced in Latest IC Memo Risk Discussion",
+    "reason": "error: Unexpected non-whitespace character after JSON at position 408 (line 2 column 1)"
+  },
+  {
+    "finding_id": "c3b62a01-2240-4e2b-929c-ed8b932d418f",
+    "title": "IT/Cloud/Cyber Cross-Sell Execution Risk Absent from IC Stress-Test",
+    "reason": "The engagement map shows IT services and cybersecurity is mentioned as a growth lever and upside scenario in the update supplement (memo 4) and memo 3, but no memo engages with the specific sub-topic of cross-sell execution risk for IT/Cloud/Cyber being stress-tested or absence thereof in downside scenarios."
+  },
+  {
+    "finding_id": "f3a38beb-ca6f-47ce-bd78-0d5b67a4da78",
+    "title": "Hosted Voice/UCaaS Growth Deceleration Not Reconciled in IC Memo",
+    "reason": "While Memo 3 broadly addresses UCaaS market growth and acknowledges EBITDA growth deceleration vs historical trends, the engagement map does not show a specific reconciliation of Hosted Voice/UCaaS product-level growth deceleration, making it unclear whether the specific concern raised in the finding is substantively addressed."
+  },
+  {
+    "finding_id": "f40d1532-6572-4599-8d05-d5e82b56d496",
+    "title": "Scotland, Wales, and Northern Ireland Expansion \u2014 Zero Penetration Risk Not in Latest Memo",
+    "reason": "error: Unexpected non-whitespace character after JSON at position 340 (line 2 column 1)"
+  }
+]

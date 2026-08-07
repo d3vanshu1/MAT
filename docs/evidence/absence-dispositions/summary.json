@@ -1,0 +1,18 @@
+{
+  "run_id": "576171a3-5533-4dcc-8af6-7a1ffd56026e",
+  "deal_id": "c46b4129-8a16-48ae-ad3a-1da061255445",
+  "session_id": "f31b5eeb-cf54-4860-81a3-16ad8980a678",
+  "total_findings": 434,
+  "counts": {
+    "demote_false_positive": 19,
+    "surface_omission": 236,
+    "surface_thesis_drift": 5,
+    "flag_uncertain": 5,
+    "not_absence_claim": 169
+  },
+  "absence_total": 265,
+  "processed": 434,
+  "unprocessed": 0,
+  "model": "claude-sonnet-4-6",
+  "latest_full_memo_order": 3
+}

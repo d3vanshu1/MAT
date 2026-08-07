@@ -1,0 +1,252 @@
+[
+  {
+    "finding_id": "0152e5c8-9f1f-425c-9d10-511f44ad809d",
+    "title": "Unregistered Trade Marks and Unassigned Third-Party IP Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses unregistered trade marks or unassigned third-party IP; this is a genuine omission across all memos."
+  },
+  {
+    "finding_id": "0326baed-97ab-43dc-b1ad-c10cf365b802",
+    "title": "Change-of-Control Termination Rights in Customer Contracts Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in customer contracts at any level of specificity."
+  },
+  {
+    "finding_id": "0363a272-4fda-408c-91d2-e717e02bbaf5",
+    "title": "UCaaS Resale Margin Consistency: ~66% vs ~67% Across Memo Sections",
+    "reason": "No memo in the engagement map discusses or compares UCaaS resale margin consistency at the specific ~66% vs ~67% level across memo sections; this granular margin figure comparison is never engaged with."
+  },
+  {
+    "finding_id": "04e7411c-bc51-4f7c-9046-c7ebd48d6129",
+    "title": "NRR Trough at 94.4% FY24 Not Disclosed in IC Memos",
+    "reason": "No memo discloses a specific NRR trough of 94.4% in FY24; all memos present only average or current NRR figures (102-105%) without referencing any historical low point."
+  },
+  {
+    "finding_id": "06244bfb-09d1-4ee8-b29a-95983c79206f",
+    "title": "SIPP Property Break Right Expired September 2025: Exercise Status Unconfirmed",
+    "reason": "No memo in the engagement map addresses the SIPP property break right, its September 2025 expiry, or whether it was exercised."
+  },
+  {
+    "finding_id": "0676e012-e2d1-4474-9b67-55fd5f55ad50",
+    "title": "SIP NRR Deterioration and Organic ARR Collapse Not Addressed in IC Memos",
+    "reason": "While the memos report aggregate NRR/GRR metrics and legacy product run-off, none specifically address SIP product-level NRR deterioration or an organic ARR collapse as a distinct risk or data point."
+  },
+  {
+    "finding_id": "0b8817b1-8747-4f0f-a086-741ca8f1bf52",
+    "title": "SME Segment ARPU Decline and Pricing Pressure Not Flagged in IC Memos",
+    "reason": "No memo in the engagement map specifically addresses SME segment ARPU decline or pricing pressure within the SME customer cohort; the memos discuss overall NRR, churn, contract escalators, and ARPC but do not flag a deteriorating ARPU trend or pricing pressure specific to the SME segment."
+  },
+  {
+    "finding_id": "0ef59d5b-ad5a-41d3-b9c1-225bb9c0ae77",
+    "title": "Unregistered Trade Marks: Source-Stated Legal DD Finding",
+    "reason": "No memo in the engagement map engages with unregistered trade marks or any trade mark/intellectual property registration issues as a legal due diligence finding."
+  },
+  {
+    "finding_id": "0f5df985-65ae-4ccf-93b2-02a8edc42d85",
+    "title": "NHS Deferred Income Unwind as Working Capital Driver Not Surfaced",
+    "reason": "No memo in the engagement map addresses NHS deferred income unwind as a working capital driver or cash flow component; the NHS-related topics covered concern funding dynamics, regulatory risk, and Surgery Connect product adoption, not deferred income accounting mechanics."
+  },
+  {
+    "finding_id": "10d0e199-26a0-4a4c-905b-6b8d333f6ff2",
+    "title": "Mobile Segment Gross Margin in Sustained Decline — No Mitigation Stated",
+    "reason": "No memo in the engagement map specifically addresses mobile segment gross margin trends or mitigation of a sustained decline in mobile segment margins; the closest topics are general gross margin expansion and margin sustainability risk, but neither engages with a distinct 'mobile segment' gross margin decline."
+  },
+  {
+    "finding_id": "17d52da2-e479-4165-af81-8fbecc36a733",
+    "title": "SBD Executive Restrictive Covenant Weaknesses Absent from IC Memos",
+    "reason": "No memo in the engagement map addresses executive restrictive covenant terms, non-compete provisions, or related legal weaknesses for SBD executives."
+  },
+  {
+    "finding_id": "192cb72b-1100-48fd-86e3-01e30f4c02a9",
+    "title": "Courts Design IP Assignment Gap — Legal DD Finding Absent from IC Memos",
+    "reason": "No memo in the engagement map addresses Courts Design IP assignment gaps or any legal due diligence finding related to IP ownership or assignment obligations for Courts Design specifically."
+  },
+  {
+    "finding_id": "1f44a4a6-0fd0-4bc9-a242-9c98ef02df60",
+    "title": "Cloud Services 13ppt Gross Margin Compression Absent From IC Narrative",
+    "reason": "No memo in the engagement map addresses a specific 13 percentage point gross margin compression within a Cloud Services segment; the memos discuss overall GP margin expansion and general margin sustainability risk but not this specific sub-segment compression figure."
+  },
+  {
+    "finding_id": "2276b9f0-6775-4c7d-bf9f-e01e2da0df8c",
+    "title": "FY31 Gross Profit 4x Growth Thesis: CDD Phase II Validation Absent",
+    "reason": "No memo in the engagement map specifically addresses CDD Phase II validation of the FY31 gross profit growth thesis; while GP forecasts and due diligence workstreams are discussed, the specific sub-aspect of CDD Phase II validation status for this growth projection is never engaged with."
+  },
+  {
+    "finding_id": "2316400f-c5c3-466e-8fa1-fbe21f2ff4f2",
+    "title": "Platinum-Tier Churn Deterioration Not Surfaced in IC Memos",
+    "reason": "No memo engages specifically with platinum-tier customer churn deterioration as a distinct sub-segment metric; churn disclosures across all memos are at the aggregate or large-customer level (~5-7%), not broken out by tier."
+  },
+  {
+    "finding_id": "256f24b3-ce0d-4e29-a0ed-fddce904842e",
+    "title": "Multiple Employment Tribunal Proceedings and Threatened Litigation Undisclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses Employment Tribunal proceedings or threatened litigation against SCG at any level of specificity."
+  },
+  {
+    "finding_id": "258b1b06-87cd-4227-b71f-cf606ce9a5c9",
+    "title": "No Registered Trade Marks in Any Jurisdiction — Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses trade mark registration or intellectual property protection via registered marks in any jurisdiction."
+  },
+  {
+    "finding_id": "258fcb37-f1d7-4d3e-b869-847c708d7b68",
+    "title": "German Direct Routing vs. Operator Connect Transition Dynamic",
+    "reason": "No memo in the engagement map addresses the specific dynamic of German Direct Routing versus Operator Connect transition; this topic is never mentioned or engaged with across any memo."
+  },
+  {
+    "finding_id": "278c4ca3-da27-4f91-92cd-d96a111b9076",
+    "title": "Deteriorating ARR Churn and Collapsing Net Upsell Trajectory",
+    "reason": "No memo frames ARR churn as deteriorating or net upsell trajectory as collapsing — the memos present NRR and churn metrics as stable or healthy without flagging a worsening directional trend as a specific risk."
+  },
+  {
+    "finding_id": "2a0e4b9b-0401-437f-ab68-af9a827aa7d9",
+    "title": "Unregistered Trade Marks: IP Ownership Risk Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses unregistered trade marks or IP ownership/registration risk at any level of specificity."
+  },
+  {
+    "finding_id": "2a28df19-7b53-4e95-9565-46d6c4ab58ea",
+    "title": "Unregistered Trade Marks Across Group — Legal DD Finding Not in Any IC Memo",
+    "reason": "No memo in the engagement map addresses unregistered trade marks or trade mark registration status across the group; this is a genuine omission."
+  },
+  {
+    "finding_id": "2d0cfecf-da90-4622-8153-636af9015d6b",
+    "title": "X-On Health Assignment Restrictions Require Customer Consent — IC Memos Silent",
+    "reason": "No memo in the engagement map addresses X-On Health assignment restrictions or customer consent requirements related to contract assignment, making this a genuine omission."
+  },
+  {
+    "finding_id": "2d18bc89-611c-4cbb-9f18-23a8f7002f23",
+    "title": "Block Solutions Ltd: No Express Termination Rights for the Group",
+    "reason": "No memo in the engagement map addresses termination rights or the absence of express termination rights for the group in its contracts with Block Solutions Ltd or any supplier/customer agreement."
+  },
+  {
+    "finding_id": "2dd10757-b1c9-43af-baac-7c22ec7d8fd4",
+    "title": "Phone Mobile UK Entry (2026) and Direct Routing Growth Create Near-Term Competitive Disruption",
+    "reason": "No memo in the engagement map specifically addresses Phone Mobile UK market entry in 2026 or Direct Routing growth as near-term competitive disruption risks to SCG."
+  },
+  {
+    "finding_id": "2e70d5eb-84c9-49d8-bd6e-77c30b5e4784",
+    "title": "Senior Executive Restrictive Covenants Flagged Inadequate — IC Memos Silent",
+    "reason": "No memo in the engagement map addresses the adequacy or specific terms of senior executive restrictive covenants (e.g., non-competes, non-solicits, gardening leave provisions)."
+  },
+  {
+    "finding_id": "319b0b52-2aab-4a4e-bdd1-f30d014be2ef",
+    "title": "NT Voice & Data: Deferred and Contingent Consideration Due Proximate to Close",
+    "reason": "No memo in the engagement map addresses NT Voice & Data specifically or deferred/contingent consideration owed by SCG to prior acquisition targets coming due proximate to close; the earn-out discussions relate solely to the seller earn-out mechanism for PEP, not SCG's own M&A-related payment obligations."
+  },
+  {
+    "finding_id": "31a4a2b4-7d92-4410-95ee-24ce7bd3c81d",
+    "title": "IT & Cloud Customer Count Growth (92.5%) Outpaces Revenue Growth Significantly",
+    "reason": "No memo in the engagement map addresses the specific finding that IT & Cloud customer count growth of 92.5% significantly outpaces revenue growth in that segment; while various memos discuss overall customer metrics, NRR, churn, and segment growth rates, none engage with this specific customer count vs. revenue growth divergence in the IT & Cloud segment."
+  },
+  {
+    "finding_id": "350d8536-6455-457c-b667-6d0c3fa13c0c",
+    "title": "Director/Secretary Role Concentration in Wilson — Key Man Risk Amplifier",
+    "reason": "No memo in the engagement map addresses the specific issue of Director/Secretary role concentration in Wilson or the associated key man risk amplifier—this specific governance/structural concern is never disclosed."
+  },
+  {
+    "finding_id": "35c08aec-ed63-47ca-ba54-d1c82e0cba33",
+    "title": "TalkTalk Right of First Refusal Over SCN — Absent from All IC Memos",
+    "reason": "No memo in the engagement map discusses a TalkTalk right of first refusal over SCN (or any similar contractual pre-emption right in favour of TalkTalk) at any point."
+  },
+  {
+    "finding_id": "36f338c0-a31a-43d5-b8bb-5dbad003c507",
+    "title": "General Conditions Compliance Breach Risk Not Addressed in IC Memo",
+    "reason": "No memo in the engagement map addresses general conditions compliance breach risk or any related contractual compliance obligations that could trigger a breach; this specific topic is entirely absent from all memos."
+  },
+  {
+    "finding_id": "39e26017-3509-4f00-887c-dc3c2813c2be",
+    "title": "SIP ARPU 54% Growth vs. 3.1% Organic ARR Growth Tension Undisclosed",
+    "reason": "No memo in the engagement map addresses the specific tension between SIP ARPU growth (54%) and organic ARR growth (3.1%); while SIP trunk migrations and organic growth rates are mentioned separately, this particular metric-level inconsistency is never disclosed."
+  },
+  {
+    "finding_id": "3a6d193f-c287-44a0-bf11-f8ec58ba79b9",
+    "title": "Verticalization Strategy Risks Not Quantified in IC Memos",
+    "reason": "While all memos discuss verticalization as a growth opportunity, none of them specifically quantify the risks associated with the verticalization strategy (e.g., execution risk, vertical concentration risk, or downside scenarios if niche markets underperform), making this a genuine omission."
+  },
+  {
+    "finding_id": "3aa6c741-e8b8-47c4-83ce-a0141e65938d",
+    "title": "Buyside CDD Scoped as Phase I Only — Phase II Completion Status Not Disclosed",
+    "reason": "No memo in the engagement map addresses the scope or completion status of a buyside commercial due diligence (Phase I vs Phase II), making this a genuine omission."
+  },
+  {
+    "finding_id": "3b0d73a2-a5e5-4d5a-a50f-0a412a3a51f0",
+    "title": "Group Trade Names and Logos Unregistered — IP Vulnerability Not in IC Memos",
+    "reason": "No memo in the engagement map addresses the registration status of group trade names and logos or any related IP vulnerability concerning trademark/brand registration."
+  },
+  {
+    "finding_id": "3c012ab2-19c1-41de-9b39-2d79ea363a6f",
+    "title": "FTTP and SoGEA Margin Improvement Partly Driven by One-Off Wholesale Pricing Events",
+    "reason": "No memo engages with the specific sub-issue that FTTP/SoGEA margin improvement was partly driven by one-off wholesale pricing events; memos discuss gross margin expansion drivers and legacy product run-off but never mention one-off wholesale pricing as a factor."
+  },
+  {
+    "finding_id": "3ceb1f07-8db0-4465-b38d-4b6f3f867e1d",
+    "title": "Debtor Ageing Deterioration — Over-90-Day Balances Doubled",
+    "reason": "No memo in the engagement map discusses bank reconciliations, cash reconciliation procedures, or the timing/scope of bank rec reviews at any specific date."
+  },
+  {
+    "finding_id": "3e5f1896-6fd9-4287-a64b-843930cad35f",
+    "title": "Run-Rate EBITDA Bridge Includes £1.5m from Uncommitted Bolt-On Acquisitions",
+    "reason": "No memo in the engagement map addresses a run-rate EBITDA bridge that includes £1.5m from uncommitted bolt-on acquisitions; the M&A topics covered relate to historical track record, pipeline size, and acquisition multiples, not to uncommitted acquisitions embedded within a run-rate EBITDA bridge figure."
+  },
+  {
+    "finding_id": "43e2ac0f-cf1d-4554-80c7-25ffd5dca699",
+    "title": "Key-Man Restrictive Covenants Flagged as Potentially Inadequate — No IC Memo Resolution",
+    "reason": "No memo in the engagement map addresses key-man restrictive covenants, their adequacy, or any resolution of concerns about them."
+  },
+  {
+    "finding_id": "44e99fc8-1b19-47eb-b429-fab29418c8ad",
+    "title": "IP Assignment Gap: Courts Design Deliverables",
+    "reason": "No memo in the engagement map addresses IP assignment gaps related to Courts Design deliverables or any IP ownership/assignment issues for that entity."
+  },
+  {
+    "finding_id": "453aec7f-a08f-4f2b-bae3-391d35b16f48",
+    "title": "GP Reconciliation: ~9% of Group GP Relies on Estimation Assumptions",
+    "reason": "No memo in the engagement map addresses the specific finding that approximately 9% of Group GP relies on estimation assumptions in GP reconciliation; this is a specific FDD/reconciliation methodology concern never engaged with."
+  },
+  {
+    "finding_id": "45432698-10c6-47a6-ad8a-d872206e6fe3",
+    "title": "£19.5m Revenue Basis Discrepancy Unexplained in IC Memos",
+    "reason": "No memo in the engagement map addresses or explains a specific £19.5m revenue basis discrepancy; while revenue and EBITDA figures appear across memos, the specific discrepancy and its explanation are never engaged with."
+  },
+  {
+    "finding_id": "4594eac5-2f11-44c0-a3af-646285818233",
+    "title": "Change-of-Control Termination Rights in Key Customer Contracts",
+    "reason": "No memo in the engagement map engages with change-of-control termination rights in key customer contracts at any level of specificity."
+  },
+  {
+    "finding_id": "46ce25a1-bb5f-45a5-9244-909374e1ef06",
+    "title": "Cash Reconciliation Limited — Bank Recs Reviewed at March 2025 Only",
+    "reason": "No memo in the engagement map discusses bank reconciliations, cash reconciliation procedures, or the timing/scope of bank rec reviews at any specific date."
+  },
+  {
+    "finding_id": "492de745-65c0-4dba-ae85-d49cfe285074",
+    "title": "ROPA, DP Policy Integration, and Acquired-Entity Privacy Policies Materially Incomplete",
+    "reason": "No memo in the engagement map addresses ROPA (Records of Processing Activities), data protection policy integration, or acquired-entity privacy policies at any level of specificity."
+  },
+  {
+    "finding_id": "4a4b06a1-6bd7-42a5-b96c-6d8013b09d3f",
+    "title": "Mark Shraga Personally Owns Core Sales Methodology IP; License Only, No Assignment",
+    "reason": "No memo in the engagement map addresses the specific issue of Mark Shraga personally owning core sales methodology IP or the distinction between a license arrangement versus a full IP assignment to the company."
+  },
+  {
+    "finding_id": "4b828a38-9c49-49b3-868c-520b75dc2364",
+    "title": "FY25 Organic Growth Inflated by WIP Timing; Base Case Entry Multiple Risk",
+    "reason": "No memo engages with the specific claim that FY25 organic growth was inflated by WIP timing; while entry multiples are discussed broadly, the specific WIP-driven revenue recognition distortion concern is never raised in any memo."
+  },
+  {
+    "finding_id": "4d1e0aed-75fd-4f7d-b537-6212d25ea23a",
+    "title": "Senior Executive Restrictive Covenants Flagged as Insufficient by Legal DD",
+    "reason": "No memo in the engagement map addresses senior executive restrictive covenants or any legal due diligence findings regarding the sufficiency of non-compete or non-solicitation clauses for senior management."
+  },
+  {
+    "finding_id": "4d7628da-2eeb-4710-80a8-35ae4f68b365",
+    "title": "Unlimited Indemnities in Four Major Customer Frameworks",
+    "reason": "No memo in the engagement map addresses unlimited indemnities in customer contracts or any indemnity cap/limitation issues in major customer frameworks."
+  },
+  {
+    "finding_id": "4f86698e-241d-420b-941b-f90115132385",
+    "title": "SIP Calls Gross Margin Collapsed to -34.1% in FY25 — No IC Memo Discussion",
+    "reason": "No memo in the engagement map discusses SIP calls gross margin specifically or a collapse to -34.1% in FY25; while gross margin expansion and product-level gross profit mix are mentioned, the specific SIP calls gross margin deterioration is never addressed."
+  },
+  {
+    "finding_id": "4fd0aec3-e612-4074-82bd-5584cbf8d0c2",
+    "title": "General Conditions C2 Compliance Review — Cease Charges Breach Flagged but Not Quantified",
+    "reason": "No memo in the engagement map engages with General Conditions C2 compliance, cease charges, or any regulatory breach quantification related to such charges."
+  }
+]

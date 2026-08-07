@@ -1,0 +1,252 @@
+[
+  {
+    "finding_id": "acdaf7ef-36f5-4deb-be18-47f03c0c5d0f",
+    "title": "Surgery Connect AI Ancillary Product Revenue Highly Concentrated in Single Unproven Line",
+    "reason": "While the memos discuss Surgery Connect AI ancillary products and apply haircuts to management ambitions, none explicitly engage with the specific risk of revenue concentration in a single unproven product line as a distinct finding or concern."
+  },
+  {
+    "finding_id": "acf5c303-837d-4bc6-8af4-8ff0d514cf52",
+    "title": "IP Assignment Gap: Third-Party Developer Deliverables Not Formally Assigned",
+    "reason": "No memo in the engagement map addresses the specific issue of IP assignment gaps for third-party developer deliverables; while proprietary IP and in-house developers are mentioned generally, the legal/contractual risk of unassigned IP from third-party developers is never engaged with."
+  },
+  {
+    "finding_id": "b027d10c-0391-4e76-8531-187604d934d3",
+    "title": "Contracted vs. Variable Revenue Split Not Available",
+    "reason": "No memo in the engagement map addresses the split between contracted (fixed) versus variable revenue, which is the specific sub-aspect raised by this finding."
+  },
+  {
+    "finding_id": "b0bc2cf4-c490-4547-bee1-f92c7e34303c",
+    "title": "EMIS / Accurx Competitive Encroachment on Surgery Connect Ecosystem Not Quantified",
+    "reason": "No memo specifically quantifies or engages with the competitive encroachment risk from EMIS/Accurx on the Surgery Connect ecosystem; the closest reference in Memo 3 is a passing mention of 'EMIS/Vision competitive insights' under regulatory environment with 'no red flags,' but this does not quantify the competitive threat or its impact on Surgery Connect's market position."
+  },
+  {
+    "finding_id": "b0bf9ebd-8899-4516-a1e1-369ef536a6d6",
+    "title": "PSTN/ISDN Switch-Off Timeline: Dual Date References in CDD",
+    "reason": "No memo in the engagement map addresses dual or conflicting date references for the PSTN/ISDN switch-off timeline in the CDD; the analogue/legacy product topic is covered only in terms of run-off impact on financials, not specific switch-off date discrepancies."
+  },
+  {
+    "finding_id": "b0da8da9-16da-437a-99c3-08c5d8b8751c",
+    "title": "Surgery Intellect: MHRA Class IIa Regulatory Approval Pending — Status Undisclosed",
+    "reason": "No memo in the engagement map discloses the specific topic of MHRA Class IIa regulatory approval being pending for Surgery Intellect; while Surgery Connect ancillary products including Surgery Intellect are mentioned, the regulatory approval status is never addressed."
+  },
+  {
+    "finding_id": "b2236224-54b4-4655-a684-2d9500fb2b61",
+    "title": "Cardiff Gate Lease Break Option: Undisclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses the Cardiff Gate lease break option or any specific property/real estate lease terms at all."
+  },
+  {
+    "finding_id": "b234feff-48eb-48cf-8d3b-2d2beba45f6e",
+    "title": "AI Ancillary GP Haircut Rationale Absent from IC Record",
+    "reason": "While Memo 3 discloses the ~50% haircut applied to management's AI ancillary GP ambition and its quantified output, no memo in the engagement map substantively engages with the specific rationale or analytical basis underpinning that haircut level."
+  },
+  {
+    "finding_id": "b23720ae-c923-4227-bba1-4c781753e65e",
+    "title": "Key-Man Restrictive Covenant Deficiencies Not Reflected in Latest IC Memo",
+    "reason": "No memo in the engagement map addresses key-man restrictive covenant terms, their adequacy, or any deficiencies in such provisions."
+  },
+  {
+    "finding_id": "b33b6c6d-387c-42a3-a699-e392a356c71a",
+    "title": "No Legitimate Interest Assessments Conducted Despite Documented LI Reliance",
+    "reason": "No memo in the engagement map addresses Legitimate Interest Assessments (LIAs) or any GDPR/data protection legal basis documentation, making this a genuine omission never disclosed across any memo."
+  },
+  {
+    "finding_id": "b4cdf18c-35bb-4ec7-ac7e-a1a2ae34d9fb",
+    "title": "General Consumer Terms Compliance Breach — IC Memo Disclosure Not Confirmed",
+    "reason": "No memo in the engagement map addresses general consumer terms compliance or any regulatory breach related to consumer-facing terms and conditions."
+  },
+  {
+    "finding_id": "b53056bb-7b33-465b-a16f-fbef7ee4ab35",
+    "title": "SBD Executive Restrictive Covenants Flagged as Inadequate by Legal DD",
+    "reason": "No memo in the engagement map addresses the adequacy of SBD executive restrictive covenants or any legal due diligence findings related to non-compete or non-solicitation provisions."
+  },
+  {
+    "finding_id": "b8473761-f68d-4010-8e01-1c02d47bffed",
+    "title": "Surgery Connect ARR New Wins: FY25 Timing Distortion Masks Underlying Growth Rate",
+    "reason": "No memo in the engagement map specifically addresses FY25 timing distortions in Surgery Connect ARR new wins or how such timing effects mask the underlying new-win growth rate; the memos discuss Surgery Connect's market share, NRR, churn, and ancillary product growth but not this specific sub-issue."
+  },
+  {
+    "finding_id": "b8c9d0e1-f2a3-4567-bcde-678901234567",
+    "title": "Cohort 2 FY25 NRR absent while Cohort 1 shows sharp FY25 deterioration — prevents assessment of portfolio-wide retention trend at a critical decision point",
+    "reason": "No memo in the engagement map addresses cohort-level NRR analysis (Cohort 1 vs. Cohort 2) or FY25 cohort-specific deterioration; all retention metric disclosures are at aggregate or segment level only."
+  },
+  {
+    "finding_id": "bb12b7c7-fd56-47f2-9bee-187287eba394",
+    "title": "New Vertical Identification Strategy Described as Post-Close — Not Disclosed as Open Item in Latest IC Memo",
+    "reason": "No memo in the engagement map specifically identifies a 'new vertical identification strategy' as a post-close open item or flags it as an undisclosed or pending workstream; the memos discuss existing verticals (GP surgeries, schools) but do not surface a new vertical identification strategy as an open or post-close item."
+  },
+  {
+    "finding_id": "bc09c90d-5b9d-4866-b2b1-2e2118fecabe",
+    "title": "DPO/CISO Dual-Role Concentration — No Separate Service Agreement",
+    "reason": "No memo in the engagement map addresses the DPO/CISO dual-role concentration or the absence of a separate service agreement for those roles."
+  },
+  {
+    "finding_id": "bc3b724a-0284-474e-bffb-3ef8fd34a134",
+    "title": "Confirmed Regulatory Breach on Cancellation Charges Not Disclosed in IC Memo",
+    "reason": "No memo in the engagement map addresses a confirmed regulatory breach related to cancellation charges; the regulatory topics covered relate to NHS digital policy, analogue switch-off, and Martyn's Law, not cancellation charge compliance breaches."
+  },
+  {
+    "finding_id": "bdba5e4c-5738-42a6-8afc-19f7f2ec01d1",
+    "title": "Semiconductor Stockpiling Inventory Normalisation — Context Not in Memos",
+    "reason": "No memo in the engagement map discusses semiconductor stockpiling or inventory normalisation cycles in any context."
+  },
+  {
+    "finding_id": "be512c02-8b9b-4dc0-bddf-1847d6ccd9e0",
+    "title": "Change-of-Control Termination Rights in Named Customer Contracts Not Addressed in Memo",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in named customer contracts; this specific contractual risk is never disclosed across any of the memos."
+  },
+  {
+    "finding_id": "bee58755-e650-463c-bce3-cbdc816a59da",
+    "title": "IP Not Registered as Trade Marks in Any Jurisdiction",
+    "reason": "No memo in the engagement map addresses trade mark registration or the absence of IP registered as trade marks in any jurisdiction."
+  },
+  {
+    "finding_id": "bf22e1af-fcc5-4627-88fc-9f22a994411d",
+    "title": "Change-of-Control Termination Rights in Openwork Contract Not Quantified",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in the Openwork contract or quantifies any associated liability or exposure."
+  },
+  {
+    "finding_id": "c0f3f261-431d-4dc4-93a0-557f98d54170",
+    "title": "Change-of-Control Termination Right in Openwork Agreement Not Disclosed in Any IC Memo",
+    "reason": "No memo in the engagement map addresses a change-of-control termination right in the Openwork agreement or any Openwork-specific contractual provision at all."
+  },
+  {
+    "finding_id": "c3eb3a67-1ae8-4c37-aee3-d976c5b841a1",
+    "title": "Hanley Health Acquired at Negative EBITDA — No Performance Milestone Disclosed",
+    "reason": "No memo in the engagement map discusses Hanley Health as an acquisition target, its EBITDA profile at acquisition, or any associated performance milestones."
+  },
+  {
+    "finding_id": "c4760a1a-c7e7-4cc7-a4e1-644b95b8c501",
+    "title": "UC Collaboration Growth Fastest-Segment But Gamma Platform Mix-Dilution Risk Unaddressed",
+    "reason": "No memo engages with the specific risk that UC Collaboration being the fastest-growing segment creates platform mix-dilution risk via Gamma (or any named competing platform mix dynamic), as distinct from general margin sustainability or technology disruption topics already covered."
+  },
+  {
+    "finding_id": "c566470a-4f51-4a79-b9ef-9576436c7727",
+    "title": "Surgery Connect Margin Step-Up Driven by Methodology Change, Not Operations",
+    "reason": "No memo in the engagement map specifically addresses Surgery Connect's margin step-up being driven by a methodology or accounting change rather than genuine operational improvement; the closest topic is 'gross margin expansion' in Memo 3 which attributes margin expansion to mix and like-for-like improvement, but does not engage with a methodology change as the driver."
+  },
+  {
+    "finding_id": "c646d591-a26e-4ff3-a27a-779a548171aa",
+    "title": "Aggregator Gross Margin Structural Compression: CDD Not Reconciled in Memos",
+    "reason": "No memo in the engagement map addresses aggregator gross margin structural compression specific to CDD findings or any reconciliation gap between CDD outputs and memo assumptions on gross margin compression dynamics."
+  },
+  {
+    "finding_id": "c6c5e313-4c28-441e-8557-e9bd9c929f59",
+    "title": "MS Teams Germany Share Trajectory Not Addressed in IC Memos",
+    "reason": "No memo in the engagement map specifically addresses the trajectory or share trend of MS Teams in Germany; the closest topic is disintermediation risk from Teams/Zoom (memo 2) and Teams spend as a percentage of revenue, but neither engages with MS Teams Germany share trajectory specifically."
+  },
+  {
+    "finding_id": "c7cd99b9-5ab3-4f7a-9368-9a3f7ce5777a",
+    "title": "QuantumLoopAi Competition Law Allegation Absent from All IC Memos",
+    "reason": "No memo in the engagement map addresses any competition law allegation related to QuantumLoopAi or any competition/antitrust legal matter at all."
+  },
+  {
+    "finding_id": "caa20ad8-8eeb-4146-85a9-96d21e2b903b",
+    "title": "NHS Rollout Overtime Cost Non-Normalisation Not Addressed in IC Memos",
+    "reason": "No memo in the engagement map addresses the specific issue of NHS rollout overtime costs or their non-normalisation in EBITDA/financial figures; the NHS-related topics covered concern funding dynamics, regulatory risk, and market position, not overtime cost treatment."
+  },
+  {
+    "finding_id": "cc3c8970-65c0-4f46-a69a-226bcb0b95c6",
+    "title": "Potential Regulatory Breach on Cease Charges Not Disclosed in IC Memo Record",
+    "reason": "No memo in the engagement map addresses regulatory breach risk related to cease charges specifically; the regulatory topics covered are NHS digital policy, analogue switch-off, and Martyn's Law, none of which relate to cease charge regulatory compliance."
+  },
+  {
+    "finding_id": "cc986fc3-e780-40ee-82df-59b03a84110c",
+    "title": "PwC VDD Churn Data Granularity Not Disclosed Alongside NRR/GRR Claims in IC Memos",
+    "reason": "No memo in the engagement map discusses the granularity or methodology of the PwC VDD churn data underlying the NRR/GRR claims; the memos cite the NRR/GRR figures themselves but never address the source data granularity or limitations of the PwC vendor due diligence churn analysis."
+  },
+  {
+    "finding_id": "cd0ec47e-43ef-4302-be0f-9c9a1bab57e3",
+    "title": "Incomplete DPIAs for Healthcare AI Products; NHS Data Anonymisation Unverified",
+    "reason": "No memo in the engagement map addresses Data Protection Impact Assessments (DPIAs) for healthcare AI products or verification of NHS data anonymisation practices; these specific data privacy compliance topics are never disclosed."
+  },
+  {
+    "finding_id": "ce03d089-d5dd-4132-b533-90e31c39b56d",
+    "title": "Subsidiary contracts lack post-termination non-compete and key protections",
+    "reason": "No memo in the engagement map addresses subsidiary contract terms, post-termination non-compete clauses, or related key protections in contracts at all."
+  },
+  {
+    "finding_id": "ce082a8d-5524-4db2-9740-18550a5b46c5",
+    "title": "Gold-Tier Churn Acceleration: Context and Cross-Sell Thesis Not Reconciled",
+    "reason": "No memo engages with the specific issue of gold-tier customer churn acceleration being unreconciled with the cross-sell thesis; memos discuss churn rates and cross-sell opportunities separately but never analyze their tension or reconcile them."
+  },
+  {
+    "finding_id": "ce33551d-ce5c-4113-a318-b79c074dcff1",
+    "title": "CTO Upgrade Question Raised in Earlier Memo — Not Addressed in Latest Memo",
+    "reason": "No memo in the engagement map explicitly engages with a CTO upgrade question; the closest topic in Memo 2 notes management gaps as 'Head of Surgery Connect' and 'Chief Revenue Officer,' not a CTO, and Memo 3 does not address any CTO-related gap at all."
+  },
+  {
+    "finding_id": "ce7bd287-01e2-4df4-a45c-c3e9757194e6",
+    "title": "PRS Network Operator Registration Breach — Ofcom Compliance",
+    "reason": "No memo in the engagement map addresses PRS network operator registration requirements or Ofcom compliance obligations at any level of specificity."
+  },
+  {
+    "finding_id": "ceae0aee-775b-4e98-a93f-7c469fc00660",
+    "title": "International Data Transfer to South Africa — SCC Reliance Not Independently Verified",
+    "reason": "No memo engages with the specific issue of whether SCC (Standard Contractual Clauses) reliance for international data transfers to South Africa has been independently verified; while South Africa offshoring is mentioned in memos 3 and 4, the data transfer compliance mechanism is never addressed."
+  },
+  {
+    "finding_id": "d30705bd-918a-409d-b2bc-9f5f18924535",
+    "title": "IP ownership gaps: no group-level protection and incomplete design agency assignment",
+    "reason": "No memo in the engagement map addresses IP ownership gaps at the group level or incomplete assignment of IP from design agencies; the closest topic (proprietary IP/owned technology platform) only covers the share of own IP growth and developer headcount, not ownership structure or assignment gaps."
+  },
+  {
+    "finding_id": "d42f3b39-de41-4caa-9d8a-5ef7b1e14fea",
+    "title": "Change of Control Triggers Mandatory Full Prepayment of All Facilities",
+    "reason": "No memo in the engagement map discusses change of control provisions or mandatory prepayment triggers in the debt facilities; the debt-related topics covered are limited to leverage, financing terms, interest rates, and covenants."
+  },
+  {
+    "finding_id": "d446dc9b-e8fe-4849-920b-19b1ca049826",
+    "title": "H&S Compliance Cluster: Documentation Gaps, Fire Safety, and RIDDOR",
+    "reason": "No memo in the engagement map engages with health & safety compliance documentation gaps, fire safety, or RIDDOR reporting obligations at any level of specificity."
+  },
+  {
+    "finding_id": "d5486c02-1120-4415-96e8-bb4c5e570a6e",
+    "title": "Regulatory Breach (General Conditions C2) with Enforcement Risk — Absent from All IC Memos",
+    "reason": "No memo in the engagement map engages with a specific regulatory breach of General Conditions C2 or any associated enforcement risk; the regulatory topics covered relate to NHS digital policy, analogue switch-off, and Martyn's Law, none of which address General Conditions C2 compliance."
+  },
+  {
+    "finding_id": "d62e0a6d-554d-49cd-b650-f367932e01b4",
+    "title": "Multiple Supplier MSAs Contain Outdated Data Protection Provisions",
+    "reason": "No memo in the engagement map engages with supplier MSAs or data protection provisions in any form."
+  },
+  {
+    "finding_id": "d6b32343-a474-4d58-8df9-12edba23baaf",
+    "title": "SBD Executive Restrictive Covenant Weaknesses Not Surfaced in IC Memos",
+    "reason": "No memo in the engagement map engages with SBD executive restrictive covenant weaknesses or any specific discussion of non-compete/non-solicit covenant terms for key executives."
+  },
+  {
+    "finding_id": "d704c8c0-d0a7-4861-a48c-066caa2f1b7c",
+    "title": "Change-of-Control Termination Rights in Key Contracts Not Addressed in IC Memo",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in key contracts; this specific contractual risk is never disclosed across any of the memos."
+  },
+  {
+    "finding_id": "d7c6fe2b-8459-495c-9ac0-0e7ae85a5cbf",
+    "title": "Earn-Out Obligations Across Five Acquired Entities Unquantified in IC Memos",
+    "reason": "No memo in the engagement map addresses earn-out obligations on acquired entities (i.e., deferred/contingent consideration owed to sellers of the ~17-20 companies SCG itself acquired); the earn-out topic that does appear across all memos refers exclusively to the earn-out payable by PEP to SCG's sellers, not to obligations SCG carries toward its own acquisition targets."
+  },
+  {
+    "finding_id": "d954f6ac-5291-4e99-b31d-9c3a73dc2150",
+    "title": "Standard Customer T&Cs Dated April 2018 — Seven-Year Vintage Not Flagged in IC Memos",
+    "reason": "No memo in the engagement map addresses the vintage or age of standard customer terms and conditions, nor flags any concern about T&Cs dated April 2018 being seven years old."
+  },
+  {
+    "finding_id": "dc3dd9f2-0b55-4953-a53b-0138a463366f",
+    "title": "Three Senior Executives Departing at Completion; SBD Non-Compete Enforceability Flagged",
+    "reason": "No memo in the engagement map addresses the departure of three senior executives at completion or the enforceability of SBD non-compete clauses."
+  },
+  {
+    "finding_id": "e0b2bdcd-348e-47a8-851d-fddcfd5a7e66",
+    "title": "SOJAM Consulting Related-Party Loan — Treatment at Completion Unconfirmed",
+    "reason": "No memo in the engagement map discusses a SOJAM Consulting related-party loan or its treatment at completion."
+  },
+  {
+    "finding_id": "e23fe77b-220a-4b36-a593-71671bc0053d",
+    "title": "Unregistered Trade Marks Across All Jurisdictions; Memo Silent",
+    "reason": "No memo in the engagement map addresses trade mark registration status or unregistered trade marks across any jurisdiction."
+  },
+  {
+    "finding_id": "e3180440-abe0-4266-98ea-f9852f15bde5",
+    "title": "Deferred Income Billing Model Shift — NWC Unwinding Risk",
+    "reason": "No memo in the engagement map discusses a deferred income billing model shift or the associated NWC unwinding risk; this specific sub-topic is never engaged with across any memo."
+  }
+]

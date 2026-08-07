@@ -1,0 +1,252 @@
+[
+  {
+    "finding_id": "88c3d2f3-b585-4c73-8d60-8618421ea6ee",
+    "title": "Change of Control Termination Rights in Key Customer Contracts Not Addressed in Latest Memo",
+    "reason": "No memo in the engagement map addresses change of control termination rights in key customer contracts; this specific contractual risk is never disclosed across any of the four memos."
+  },
+  {
+    "finding_id": "8aa01fb3-a57a-4146-a25f-f736a1db173a",
+    "title": "Unregistered Trade Marks: Legal DD Flags Risk, IC Memos Silent",
+    "reason": "No memo in the engagement map addresses trade mark registration status or the risk of unregistered trade marks flagged by legal due diligence."
+  },
+  {
+    "finding_id": "8aa7a55b-a661-47ab-92ec-e31c9520c52d",
+    "title": "Subsidiary contracts lack governing law and jurisdiction clauses",
+    "reason": "No memo in the engagement map addresses governing law or jurisdiction clauses in subsidiary contracts; this is a genuine omission."
+  },
+  {
+    "finding_id": "8ab53626-b8dd-48ed-a5b0-e012cbc38ee3",
+    "title": "Apex Park Licence Expired December 2025: Continuity Status Unknown",
+    "reason": "No memo in the engagement map addresses the Apex Park Licence, its expiry in December 2025, or any licence continuity/renewal risk related to it."
+  },
+  {
+    "finding_id": "8ad8d0e4-f435-42ce-bdb1-46f8ee3d4f91",
+    "title": "Restrictive Covenant Weakness for Senior Executives Not Surfaced in IC",
+    "reason": "No memo in the engagement map addresses the enforceability or adequacy of restrictive covenants (non-competes, non-solicits) for senior executives; the management team coverage focuses on incentive plans, rollover, and MIP rather than covenant protection."
+  },
+  {
+    "finding_id": "8b129313-52cf-4a60-823b-4cc28b2fa3bc",
+    "title": "EE and Class NS2 Supplier Agreements Expired — Operating Informally at Close",
+    "reason": "No memo in the engagement map addresses the expiry of EE and Class NS2 supplier agreements or the fact that SCG is operating under those agreements informally at close."
+  },
+  {
+    "finding_id": "8b3f4207-04ec-4cab-b371-04fafeb1a732",
+    "title": "Unregistered Trade Marks Across All Jurisdictions",
+    "reason": "No memo in the engagement map addresses trade mark registration status or unregistered trade marks across any jurisdiction."
+  },
+  {
+    "finding_id": "8bcfa5ac-3a5c-44ca-8c15-7cd344984cb8",
+    "title": "Budget vs. Actuals: Revenue Shortfall Widening to 4.8% by FY25",
+    "reason": "No memo in the engagement map engages with a budget-vs-actuals revenue shortfall widening to 4.8% by FY25; the memos discuss financial forecasts and historical growth but never reference this specific variance or shortfall metric."
+  },
+  {
+    "finding_id": "8be3a031-a8a8-4b28-aac3-0b7228bb017c",
+    "title": "Gold Partner Agreement Unsecured Loan: Recoverability Not Disclosed",
+    "reason": "No memo in the engagement map addresses the recoverability or terms of any unsecured loan related to a Gold Partner Agreement."
+  },
+  {
+    "finding_id": "8c21c8f9-84d9-4c68-93c7-8dd63cc797af",
+    "title": "Winchester Consultancy Related-Party Arrangement: £70k/Month Margin Pass-Through",
+    "reason": "No memo in the engagement map addresses a Winchester Consultancy related-party arrangement or any £70k/month margin pass-through; this specific topic is never disclosed."
+  },
+  {
+    "finding_id": "8e515b7e-4b42-4bf3-aef4-50d6e169a82a",
+    "title": "Unregistered Trade Marks and Unresolved IP Assignment Gap (Courts Design)",
+    "reason": "No memo in the engagement map engages with unregistered trade marks or an IP assignment gap relating to Courts Design at any level of specificity."
+  },
+  {
+    "finding_id": "90fec4a6-695a-4b0f-bc12-039ed7105fa1",
+    "title": "X-On Health Overdue Internal Privacy Policy; Special-Category Health Data Exposure",
+    "reason": "No memo in the engagement map addresses X-On Health's internal privacy policy status or special-category health data exposure risks at all."
+  },
+  {
+    "finding_id": "9120c2bf-b1be-4291-a840-a535d149dc2f",
+    "title": "Preference Share Coupon Rate Discrepancy Across Share Classes",
+    "reason": "No memo in the engagement map addresses a preference share coupon rate discrepancy across share classes; the MIP references (12% pref) appear only in passing without any discussion of differing coupon rates across share classes."
+  },
+  {
+    "finding_id": "91839503-130c-4bd5-b09e-991237251f10",
+    "title": "BT Wholesale GEA Discount Letter Unsigned — Pricing Enforceability Uncertain",
+    "reason": "No memo in the engagement map addresses the BT Wholesale GEA discount letter, its signing status, or the enforceability/risk of that specific pricing arrangement."
+  },
+  {
+    "finding_id": "92157487-26c7-4a35-8fb2-c1eb5b49d6d0",
+    "title": "Surgery Connect GP Market Near-Saturation (80%) Not Stress-Tested in Returns Sensitivity",
+    "reason": "No memo in the engagement map stress-tests a near-saturation scenario for Surgery Connect's GP market penetration within the returns sensitivity analysis; while market share figures are mentioned, the specific risk of growth stalling due to ~80% market saturation is never modeled as a downside sensitivity."
+  },
+  {
+    "finding_id": "93d6edea-888b-474f-9dca-c45d774dce3a",
+    "title": "Regulatory Compliance Breach Risk: General Conditions and Cease Charges",
+    "reason": "No memo in the engagement map engages with regulatory compliance breach risk related to general conditions or cease charges as a specific topic."
+  },
+  {
+    "finding_id": "94555548-0311-4874-b206-3b0f9a6c71a3",
+    "title": "16-Month FY23 Period Creates Structural Comparability Risk Across the QoE Baseline",
+    "reason": "No memo in the engagement map addresses the structural comparability risk created by a 16-month FY23 period or its impact on the QoE baseline; the financial discussions reference FY23 figures without flagging any non-standard period length distorting comparability."
+  },
+  {
+    "finding_id": "94eff905-948c-4094-9776-41b3c3b2e001",
+    "title": "Matrix Agreement 2008 Mid-Renewal: Completion Status and Revised Terms Unconfirmed",
+    "reason": "No memo in the engagement map addresses the Matrix Agreement 2008, its mid-renewal completion status, or any revised terms associated with it."
+  },
+  {
+    "finding_id": "94f21a1e-ef96-4201-88dc-012c105a2b13",
+    "title": "Net Liability Position of £(178.5)m — Capital Structure Complexity Not Reflected in IC Memos",
+    "reason": "No memo in the engagement map addresses the specific net liability position of £(178.5)m or discusses capital structure complexity in terms of a net liability balance sheet position; leverage and debt structure are discussed but not this specific finding."
+  },
+  {
+    "finding_id": "95ebf350-ebdc-490a-9b3d-16f99556e454",
+    "title": "Ares Debenture Network — Release Mechanism Unconfirmed in IC Record",
+    "reason": "No memo in the engagement map addresses the Ares debenture release mechanism or confirms how/when Ares structured debt is released at exit; the memos only reference the quantum and pricing of Ares debt, not its release mechanics."
+  },
+  {
+    "finding_id": "95fa8444-0585-46b8-8e41-963ba9359f86",
+    "title": "CCS Framework Notification Obligation: Potential Conflict-of-Interest Constraint",
+    "reason": "No memo in the engagement map addresses a CCS Framework notification obligation or any conflict-of-interest constraint arising from such a framework."
+  },
+  {
+    "finding_id": "979f1c09-cf67-4ada-9b0a-dd0d907b0540",
+    "title": "Goodwill Concentration — £339m NBV from Historical Acquisitions",
+    "reason": "No memo in the engagement map addresses goodwill concentration, the £339m NBV from historical acquisitions, or any related impairment/balance sheet intangibles risk."
+  },
+  {
+    "finding_id": "9853bc31-1634-41cf-961b-5e49209e67fa",
+    "title": "Change-of-Control Termination Right: Openwork Revenue Exposure Unquantified",
+    "reason": "No memo in the engagement map addresses a change-of-control termination right specific to Openwork or quantifies the associated revenue exposure."
+  },
+  {
+    "finding_id": "9881642d-6b1c-48a9-9036-5293ba4596ee",
+    "title": "Employee Equity Vesting Schedules Not Disclosed",
+    "reason": "No memo in the engagement map addresses employee equity vesting schedules at any level of specificity; the closest topics are MIP structure and management rollover, which are distinct from vesting schedule disclosures for the broader employee base."
+  },
+  {
+    "finding_id": "98fdcc00-4308-405a-8e70-ca20da0fad3a",
+    "title": "Widespread Uncapped Supplier Liability Exposure Undisclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses supplier liability exposure, whether capped or uncapped, at any level of specificity."
+  },
+  {
+    "finding_id": "990badb1-9d29-474a-a6fd-58b02fdb05ad",
+    "title": "Senior Executive Restrictive Covenants Flagged as Potentially Unenforceable",
+    "reason": "No memo in the engagement map addresses the enforceability of senior executive restrictive covenants at any level of specificity."
+  },
+  {
+    "finding_id": "9934a2f5-583b-4b19-aaa9-5cc1932dd50d",
+    "title": "Germany Expansion: Structural Market Differences vs. UK Model",
+    "reason": "No memo in the engagement map addresses structural market differences between Germany and the UK model; Germany expansion is never mentioned as a topic in any memo."
+  },
+  {
+    "finding_id": "9a88cb25-4b4e-4055-a8e6-868876b6eac8",
+    "title": "No contingency plans for macro-uncertainty; PwC flags materially greater forecast variance",
+    "reason": "No memo in the engagement map addresses contingency planning for macro-uncertainty or PwC flagging materially greater forecast variance; this specific finding is never disclosed across any memo."
+  },
+  {
+    "finding_id": "9b0d0547-4f0e-4ee8-b66f-48fb93c61095",
+    "title": "Unregistered Trade Marks Across All Jurisdictions",
+    "reason": "No memo in the engagement map addresses trade mark registration status or unregistered trade marks across any jurisdiction."
+  },
+  {
+    "finding_id": "9b28f0d8-f611-4028-aedc-19cdfe845aea",
+    "title": "Recent Acquisitions Excluded from Datacube — Bottom-Up Revenue Verification Limited",
+    "reason": "No memo in the engagement map engages with the specific issue of recent acquisitions being excluded from the datacube or limitations in bottom-up revenue verification methodology."
+  },
+  {
+    "finding_id": "9b3037ec-2614-4a43-81d4-72785ace1766",
+    "title": "Restrictive Covenant Limitations on Key SBD Executives",
+    "reason": "No memo in the engagement map discusses restrictive covenants or non-compete limitations applicable to key SBD executives specifically."
+  },
+  {
+    "finding_id": "9bc6d8e2-3fd0-41ef-b7ec-d59d0bb63459",
+    "title": "SBD Executive Restrictive Covenant Limitations Not Flagged in IC Memo",
+    "reason": "No memo in the engagement map engages with the specific topic of restrictive covenant limitations applicable to SBD executives, which is never mentioned across any of the memos."
+  },
+  {
+    "finding_id": "9d84a545-405c-4002-a1da-0c89923372ce",
+    "title": "Unregistered Trade Marks: IP Protection Gap Identified by Legal DD",
+    "reason": "No memo in the engagement map addresses unregistered trade marks or any IP protection gap identified by legal due diligence."
+  },
+  {
+    "finding_id": "9e2d80ef-1e07-4625-a33a-5f0ebc2c991d",
+    "title": "Restrictive Covenant Enforceability Limitations on Senior Employees",
+    "reason": "No memo in the engagement map addresses the enforceability limitations of restrictive covenants (e.g., non-competes, non-solicits) applicable to senior employees, which is the specific legal/HR risk the finding raises."
+  },
+  {
+    "finding_id": "9fbc1e63-f1a3-409a-b0b1-0bea4bb8434a",
+    "title": "Data Broker Agreement Lacks Consent Obligation — Prospect Data Provenance Unverified",
+    "reason": "No memo in the engagement map addresses data broker agreements, consent obligations, or prospect data provenance verification at any level of specificity."
+  },
+  {
+    "finding_id": "a33349fa-e78b-4b3e-9cec-707770f54c62",
+    "title": "Non-Recurring Revenue Negative Gross Profit Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map engages with non-recurring revenue generating negative gross profit; the memos discuss recurring vs. non-recurring revenue splits and legacy product run-off but never address non-recurring revenue having a negative gross profit contribution."
+  },
+  {
+    "finding_id": "a48182d2-3b3f-40a3-ae57-f7799b411ca7",
+    "title": "PwC VDD scope excludes audit verification; no responsibility assumed for accuracy",
+    "reason": "No memo in the engagement map addresses the PwC VDD scope limitations, disclaimer of responsibility, or audit verification exclusions — this specific finding about the VDD's scope and liability carve-out is never disclosed across any memo."
+  },
+  {
+    "finding_id": "a4ae8441-74b4-4a6e-88b2-9a626b3b660f",
+    "title": "Outstanding 2024 Rent Review at Hereford: No Formal Nil-Increase Documentation",
+    "reason": "No memo in the engagement map addresses the specific issue of an outstanding 2024 rent review at Hereford or the absence of formal nil-increase documentation for that rent review."
+  },
+  {
+    "finding_id": "a5d82611-9889-467e-aefe-1722fb6dbb2a",
+    "title": "Change-of-Control Termination Rights in Named Customer Contracts",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights or provisions in named customer contracts; this specific contractual risk is never disclosed."
+  },
+  {
+    "finding_id": "a6ae3b2c-c633-47b0-b491-b9066b0425f2",
+    "title": "Telecoms Regulatory DD Scope Explicitly Excludes Broad Compliance Review",
+    "reason": "No memo in the engagement map addresses the scope or exclusions of a telecoms regulatory due diligence workstream; the only regulatory reference is a brief note on NHS digital policy and Martyn's Law impact, not a DD scope limitation."
+  },
+  {
+    "finding_id": "a7629d9d-5610-44ff-850e-a9905e79cbd9",
+    "title": "RM3808 Framework Contract on Informal Rolling Basis — Renewal Risk Not Disclosed",
+    "reason": "No memo in the engagement map addresses the RM3808 framework contract, its renewal mechanism, or the specific risk of informal rolling renewal arrangements."
+  },
+  {
+    "finding_id": "a7a1f25b-25ac-45d6-a3c6-0a0e19a10de6",
+    "title": "P&L Excludes Statutory Year-End Adjustments — Balance Sheet and P&L Presentational Basis Diverges",
+    "reason": "No memo in the engagement map addresses the specific issue of statutory year-end adjustments being excluded from the P&L or a divergence between the balance sheet and P&L presentational basis."
+  },
+  {
+    "finding_id": "a8afacc7-bc83-4e10-9f38-fc96db69554c",
+    "title": "No Registered Trade Marks in Any Jurisdiction; IP Assignment Gap in Courts Design Relationship",
+    "reason": "No memo in the engagement map addresses trade mark registration status or IP assignment gaps in the Courts design relationship; this specific IP ownership and registration issue is never disclosed across any memo."
+  },
+  {
+    "finding_id": "a8d0c179-609e-4fd2-bbfb-133d63af97d3",
+    "title": "Regulatory Compliance Breach: General Condition C2 — Enforcement Risk",
+    "reason": "No memo in the engagement map addresses General Condition C2 regulatory compliance breach or any associated enforcement risk; the regulatory topics covered relate to NHS digital policy, analogue switch-off, and Martyn's Law, none of which constitute or reference a General Condition C2 compliance breach."
+  },
+  {
+    "finding_id": "a98a3703-a7f8-4d40-8f84-f6b305af6acf",
+    "title": "Change-of-Control Customer Termination Rights Not Disclosed in IC Memo",
+    "reason": "No memo in the engagement map addresses change-of-control customer termination rights or related contractual provisions that could be triggered upon a change of ownership."
+  },
+  {
+    "finding_id": "aaca64a5-4f67-42c1-96d9-5dfa62534e13",
+    "title": "FRS 102 amendments effective January 2026 — management and PwC assess immaterial; no independent stress-test",
+    "reason": "No memo in the engagement map engages with FRS 102 accounting standard amendments (effective January 2026), management's materiality assessment, or any independent stress-testing of that accounting change."
+  },
+  {
+    "finding_id": "aacaa8d7-ba87-46b1-8bf2-44d53811fe64",
+    "title": "Change-of-Control Contract Termination Rights Not Surfaced in Latest IC Memo",
+    "reason": "No memo in the engagement map addresses change-of-control contract termination rights or related customer/supplier contract provisions triggered by a change of ownership."
+  },
+  {
+    "finding_id": "abe1965a-a5e8-4384-ac78-5a41d5c41aee",
+    "title": "Riduna Park Lease: Terrorism Exclusion and Uncapped Service Charge Not in IC Memos",
+    "reason": "No memo in the engagement map engages with the specific topics of a terrorism exclusion clause or an uncapped service charge in the Riduna Park lease."
+  },
+  {
+    "finding_id": "ac0ac940-5be4-4a33-b1b3-7f6ed65b375c",
+    "title": "New Star Networks SA Acquisition at 22.1x — No Strategic Rationale in IC Record",
+    "reason": "No memo in the engagement map references a specific acquisition called 'New Star Networks SA' or any acquisition at a 22.1x multiple; while M&A track record and average multiples (~5-6x) are discussed across memos, this specific transaction and its outlier multiple are never disclosed."
+  },
+  {
+    "finding_id": "ac437253-e13d-4743-83ad-f8529d5475fb",
+    "title": "Interest Rate Hedging Commitment: 90-Day Post-Close Deadline Not Confirmed Satisfied",
+    "reason": "No memo in the engagement map engages with a 90-day post-close interest rate hedging deadline or its satisfaction status."
+  }
+]

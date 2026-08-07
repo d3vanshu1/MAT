@@ -1,0 +1,252 @@
+[
+  {
+    "finding_id": "5121f516-ad62-49ec-8046-fc2b8f99e7e8",
+    "title": "X-on Health Market Share: Irreconcilable Conflict Within CDD",
+    "reason": "No memo in the engagement map mentions X-on Health or any irreconcilable conflict within the CDD regarding a competitor's market share figures; the memos only reference Surgery Connect's own ~55% market share without addressing this specific sub-issue."
+  },
+  {
+    "finding_id": "529db469-5037-4b5e-9292-09b3e37a732d",
+    "title": "Vendor/Network Owner Value Chain Decline Not Quantified in Memo",
+    "reason": "No memo in the engagement map quantifies or substantively engages with a decline in the vendor/network owner value chain (e.g., margin compression or revenue erosion specifically attributable to network owners/vendors moving up or down the stack); margin sustainability risk is mentioned briefly in Memo 2 but does not quantify any value chain decline for vendors or network owners."
+  },
+  {
+    "finding_id": "5445f890-22f2-400c-ab49-3f61ff126cad",
+    "title": "IP Structural Deficiencies — No Intra-Group Licences, Defective Employment IP Provisions, Unassigned Courts Design IPO Statement",
+    "reason": "No memo in the engagement map addresses IP structural deficiencies such as the absence of intra-group licences, defective employment IP provisions, or unassigned design rights/IPO statements; the only IP-related references concern the share of own-IP products and technology disruption risk, not legal/structural IP ownership defects."
+  },
+  {
+    "finding_id": "55696127-0a98-49b5-86ef-c7d9aeebed80",
+    "title": "Openwork Change-of-Control Termination Right Undisclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses a change-of-control termination right held by Openwork or any similar contractual termination trigger associated with a specific customer or partner relationship."
+  },
+  {
+    "finding_id": "568f8661-69c4-4d5d-a7bf-f1cf2e067b72",
+    "title": "Dataphone FCA Authorisation Revocation — Disciplinary History Not Disclosed",
+    "reason": "No memo in the engagement map addresses Dataphone's FCA authorisation revocation or any disciplinary/regulatory history relating to Dataphone specifically."
+  },
+  {
+    "finding_id": "571cc687-bb07-4379-983f-5e2b6c8f71a5",
+    "title": "Regulatory Compliance Breach Risk (General Condition C2 and Cease Charges) Not Surfaced in Memo",
+    "reason": "No memo in the engagement map engages with General Condition C2 or cease charges as specific regulatory compliance breach risks; the closest regulatory topics covered are NHS digital policy, Martyn's Law, and analogue switch-off, none of which address the specific finding raised."
+  },
+  {
+    "finding_id": "589d5980-787e-4790-857d-4fd2f82b09c7",
+    "title": "Change-of-Control Termination Rights in Named Customer Contracts Not in IC Memos",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in named customer contracts; this specific contractual risk is never disclosed across any of the memos."
+  },
+  {
+    "finding_id": "5a3c8d88-902a-42e1-bc55-2d137521fe94",
+    "title": "Chippenham Hill Holdover: No Renewal Negotiations Underway, No Landlord Consent",
+    "reason": "No memo in the engagement map addresses Chippenham Hill, holdover tenancy status, renewal negotiations, or landlord consent for any property lease."
+  },
+  {
+    "finding_id": "5a9beff2-36b4-4ffc-9f25-3a340e6a1f14",
+    "title": "Restrictive Covenant Limitations on Senior Executives Flagged by Legal DD, Not in IC Memo",
+    "reason": "No memo in the engagement map addresses restrictive covenant limitations on senior executives flagged by legal due diligence."
+  },
+  {
+    "finding_id": "5aa6aec2-125d-4188-a17b-49a5fd7c4573",
+    "title": "M&A Pipeline Assumptions Embedded in Base Case Without Individual Target Underwriting",
+    "reason": "No memo engages with the specific issue of individual target underwriting within the M&A pipeline assumptions embedded in the base case; memos reference aggregate M&A pacing (£4m EBITDA p.a. at ~6x) and historical track record but never disclose underwriting of individual acquisition targets."
+  },
+  {
+    "finding_id": "5c1dca1e-b17b-4a40-b63e-e038a7e90375",
+    "title": "Change of Control Termination Rights in Key Customer Contracts Not Addressed in Latest IC Memo",
+    "reason": "No memo in the engagement map addresses change of control termination rights or related provisions in key customer contracts; this specific contractual risk is never disclosed."
+  },
+  {
+    "finding_id": "5d48273f-f618-4c95-8c0a-a12dedf62ef4",
+    "title": "FSMA General Prohibition Breach — Legacy Regulated Hire Agreements",
+    "reason": "No memo in the engagement map addresses FSMA General Prohibition, regulated hire agreements, or any FCA/financial promotion regulatory compliance issue specific to legacy hire agreement products."
+  },
+  {
+    "finding_id": "5db4cf03-efcb-49b5-a4b5-47ea2fcff64c",
+    "title": "Legal DD Six-Month Staleness Not Acknowledged in Latest IC Memo",
+    "reason": "No memo in the engagement map addresses the staleness of the legal due diligence or acknowledges that legal DD findings are six months old and not flagged as such in the IC memo."
+  },
+  {
+    "finding_id": "5f76b43d-4a10-4870-a54f-a0d398203ba0",
+    "title": "CCaaS Scale Delivery Risk: Value Leakage to Vendors/SIs Flagged by CDD",
+    "reason": "No memo in the engagement map engages with CDD findings specifically flagging value leakage to vendors or system integrators as a CCaaS scale delivery risk."
+  },
+  {
+    "finding_id": "621466fd-0956-4bad-b5a3-5a3f3037b196",
+    "title": "CCaaS Market Competitive Concentration — Genesys/Avaya/Zendesk/NICE Hold 44% of European Market",
+    "reason": "No memo in the engagement map addresses the specific finding about Genesys, Avaya, Zendesk, and NICE holding 44% of the European CCaaS market; while competitive dynamics are discussed generally, this specific CCaaS European market concentration statistic is never disclosed."
+  },
+  {
+    "finding_id": "645aaea8-ba77-47b0-9a4e-db16d7a5b912",
+    "title": "Senior Executive Restrictive Covenants Flagged as Limited by Legal DD",
+    "reason": "No memo in the engagement map addresses senior executive restrictive covenants or any legal due diligence findings flagging limitations on such covenants."
+  },
+  {
+    "finding_id": "67a0d3fb-b0ad-4a62-b166-bb8e180f8398",
+    "title": "Acquisition ARR Contribution Declined 73% FY24–FY25; Inorganic Strategy Dependency Not Reassessed",
+    "reason": "No memo engages with the specific finding that acquisition ARR contribution declined 73% from FY24 to FY25 or reassesses the dependency on inorganic growth strategy in light of declining acquisition contribution."
+  },
+  {
+    "finding_id": "6802ba37-b3c3-4469-9629-7fe147d9014e",
+    "title": "No Registered Trademarks — Group Brands Unprotected in Any Jurisdiction",
+    "reason": "No memo in the engagement map addresses trademark registration, brand protection, or intellectual property rights in any jurisdiction."
+  },
+  {
+    "finding_id": "68a02902-5078-4694-82be-1271c87c3489",
+    "title": "Senior Executive Restrictive Covenant Adequacy Flagged in Legal DD; Absent from Memo",
+    "reason": "No memo in the engagement map addresses senior executive restrictive covenant adequacy or any related legal DD findings on non-compete/non-solicit provisions for senior executives."
+  },
+  {
+    "finding_id": "6963e9a4-2796-4407-89c8-221829295eaa",
+    "title": "DuoCall Legacy T&Cs Permit Customer Termination Without Cause on 90 Days' Notice",
+    "reason": "No memo in the engagement map addresses DuoCall Legacy T&Cs or any customer termination-without-cause notice provisions in legacy contracts."
+  },
+  {
+    "finding_id": "6a746c4c-3021-457d-a6d2-510741925d7c",
+    "title": "ARPU Comparability Limitation: Historic vs. Forecast Periods Not Directly Comparable",
+    "reason": "No memo in the engagement map addresses the specific issue of ARPU comparability limitations between historic and forecast periods, or flags that historic and forecast ARPU figures are not directly comparable."
+  },
+  {
+    "finding_id": "6b570533-a321-4256-a115-2555591554fc",
+    "title": "Partner Network Contractual Fragility: Undefined Future Basis for 49 Direct Dealers",
+    "reason": "No memo engages with the specific risk of contractual fragility or undefined future contractual terms for the direct dealer/partner network; the only dealer reference (Memo 4) addresses dealer buyouts as an upside return driver, not as a contractual risk."
+  },
+  {
+    "finding_id": "6cbcedca-b7ad-4228-bf8d-e88833aa5bff",
+    "title": "Change-of-Control Termination Right in Customer Contract Not Disclosed in Any IC Memo",
+    "reason": "No memo in the engagement map addresses a change-of-control termination right in any customer contract; this specific contractual risk is never disclosed across any of the four memos."
+  },
+  {
+    "finding_id": "6cdc3138-160e-4e94-9a3f-0252d2da2c5d",
+    "title": "Change-of-Control Termination Rights in Key Contracts Not Addressed in IC Memos",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights or provisions in key customer or supplier contracts; this specific contractual risk is never engaged with across any memo."
+  },
+  {
+    "finding_id": "6d1ba2fb-66d4-40ef-9081-6d2b57f892fa",
+    "title": "IT Licences Margin Ceiling: Microsoft Pricing Control Limits Upside",
+    "reason": "No memo in the engagement map specifically addresses Microsoft pricing control limiting margin upside on IT licences resale; the closest topic is general margin sustainability risk, but that does not cover the specific sub-issue of Microsoft's pricing power constraining IT licence margins."
+  },
+  {
+    "finding_id": "6d45ccc6-9dfe-4630-98ce-58a19db27292",
+    "title": "IP Assignment Gap — Courts Design Deliverables Not Formally Assigned",
+    "reason": "No memo in the engagement map addresses IP assignment gaps or the formal assignment of Courts design deliverables to the company."
+  },
+  {
+    "finding_id": "6daa3d00-5410-4239-a0dc-1f667c0d7b0e",
+    "title": "South Africa Block D Leases: Landlord Consent Required for Change of Control",
+    "reason": "No memo in the engagement map addresses landlord consent requirements for change of control in South Africa Block D leases or any related lease consent/change-of-control provisions."
+  },
+  {
+    "finding_id": "6dc46897-3c59-4a23-baa5-c0cacca8e5e3",
+    "title": "Evonex Migration Characterised as 'New Logo Effort' But Modelled as Routine Upsell",
+    "reason": "No memo in the engagement map specifically addresses the characterisation of Evonex migration as a 'new logo effort' versus modelling it as a routine upsell — the memos discuss Evonex seat growth and intra-group migrations generally but never engage with this specific tension between how the growth is described qualitatively versus how it is modelled financially."
+  },
+  {
+    "finding_id": "6dd19cb2-f2ac-4b76-bc97-1c56d120c92f",
+    "title": "Gross Debt Increasing to £803.7m by FY34 Despite Leverage Reduction — Not Highlighted",
+    "reason": "No memo engages with the specific issue of gross debt increasing to £803.7m by FY34; memos only discuss net debt levels and leverage ratios (which decline), not the gross debt trajectory that would reveal this growing absolute debt figure."
+  },
+  {
+    "finding_id": "6e0e6895-dcc3-4eaa-8501-91a91f3845b7",
+    "title": "Mobile Segment Growth Assumptions Flagged as Ambitious by VDD",
+    "reason": "No memo in the engagement map specifically addresses VDD flagging mobile segment growth assumptions as ambitious; mobile segment growth is never discussed as a distinct topic across any memo."
+  },
+  {
+    "finding_id": "6f37af2b-84b1-4015-a925-90ed0570fc94",
+    "title": "Restrictive Covenant Scope in Senior Executive Contracts Flagged by Legal DD",
+    "reason": "No memo in the engagement map engages with restrictive covenant scope in senior executive contracts or any legal due diligence findings related to non-compete or non-solicitation provisions."
+  },
+  {
+    "finding_id": "6fa7a487-188d-4ad5-830c-d09489fe11ba",
+    "title": "Vendor FDD Draft Status Unresolved Across Extended Deal Timeline",
+    "reason": "No memo in the engagement map addresses the status of vendor financial due diligence (FDD) drafts or any unresolved FDD deliverable across the deal timeline; the due diligence references in the memos relate only to costs and workstream commitments, not FDD draft completion status."
+  },
+  {
+    "finding_id": "7293342e-d733-422a-bb9a-06a938435ab2",
+    "title": "Unexplained 14.3% Loaded People Cost Per FTE Jump FY26",
+    "reason": "No memo in the engagement map addresses the specific issue of an unexplained 14.3% jump in loaded people cost per FTE in FY26; while South Africa offshoring and cost efficiency are mentioned, the specific per-FTE people cost increase is never disclosed or engaged with."
+  },
+  {
+    "finding_id": "72959dc5-c413-4b7b-93f5-e472e201bf35",
+    "title": "TalkTalk Business: Multiple Agreements, Operative Document Not Identified",
+    "reason": "No memo in the engagement map references TalkTalk Business or any issue regarding multiple agreements with an unidentified operative document — this is a genuine omission."
+  },
+  {
+    "finding_id": "747661a2-f0c6-4bec-b764-62801435cfa7",
+    "title": "IBMG Contract Loss (£596k p.a.) Not Quantified or Contextualised in IC Memos",
+    "reason": "No memo in the engagement map engages with the IBMG contract loss of £596k p.a. specifically, neither quantifying it nor contextualising it within the broader revenue or churn discussion."
+  },
+  {
+    "finding_id": "747e1d9f-9ce1-4f4f-82d8-a1a316ff7e9a",
+    "title": "Horizon Margin Compression: Blended GM Declines ~10pp by 2030",
+    "reason": "No memo in the engagement map addresses a blended gross margin decline of approximately 10 percentage points by 2030; the memos discuss gross margin expansion, product mix, and EBITDA margins but not a ~10pp blended GM compression over the hold period."
+  },
+  {
+    "finding_id": "74840597-c76f-4eae-8816-ccc3e6a95320",
+    "title": "Change-of-Control Termination Rights in Material Customer Contracts",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights or provisions in material customer contracts; this specific risk is never disclosed across any of the four memos."
+  },
+  {
+    "finding_id": "75f9f22f-ed15-411f-82ba-3e6bb842967f",
+    "title": "Group-Level Trade Marks Unregistered in All Jurisdictions",
+    "reason": "No memo in the engagement map addresses the registration status of group-level trade marks in any jurisdiction."
+  },
+  {
+    "finding_id": "788dad96-05b8-4a70-bdad-2001b84457df",
+    "title": "B2C/Sole-Trader Marketing Consent — No Documented Opt-In",
+    "reason": "No memo in the engagement map addresses B2C/sole-trader marketing consent, opt-in documentation, or related GDPR/direct marketing compliance topics at any level of specificity."
+  },
+  {
+    "finding_id": "78ff345f-ab73-4f91-a05d-5fa5d6a295c9",
+    "title": "Change-of-Control Termination Rights in Material Customer Contracts Not in Latest Memo",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in material customer contracts; this specific contractual risk is never disclosed across any of the memos."
+  },
+  {
+    "finding_id": "7965a285-28cd-4e8d-8b3e-a799079d9bd9",
+    "title": "Unregistered Trade Marks on Core Brand Assets Not Addressed in IC Memo",
+    "reason": "No memo in the engagement map engages with trade mark registration status or intellectual property protection for brand assets; this is a genuine omission."
+  },
+  {
+    "finding_id": "7ce83a2c-87b7-40ac-a500-bb4adc7026da",
+    "title": "Change-of-Control Termination Rights in Key Customer Contracts Not Addressed in Latest IC Memo",
+    "reason": "No memo in the engagement map addresses change-of-control termination rights in key customer contracts; this specific contractual risk is never disclosed across any memo."
+  },
+  {
+    "finding_id": "8045a9ee-1fa4-4ed9-8ed5-1c8244447711",
+    "title": "IP Assignment Gap: Third-Party Developer IP Not Formally Assigned to Group",
+    "reason": "No memo in the engagement map addresses the specific issue of IP created by third-party developers not being formally assigned to the Group; the proprietary IP topics covered relate to the share of own-IP products and technology disruption risk, not IP ownership/assignment gap."
+  },
+  {
+    "finding_id": "807daa64-9d72-47b8-87b0-510bd428a525",
+    "title": "Near-Term M&A Pipeline: Two Targets Carry Undisclosed Stress Flags",
+    "reason": "No memo in the engagement map addresses stress flags on specific near-term M&A targets in the pipeline; M&A coverage is limited to historical track record, aggregate pipeline size, and acquisition multiples, not due diligence or stress indicators on individual identified targets."
+  },
+  {
+    "finding_id": "820de5b7-10ed-4a8f-b33b-5b0822d23f1c",
+    "title": "Uncapped Liability in Legacy Fuse 2 T&Cs — Migration Status Not Disclosed",
+    "reason": "No memo in the engagement map addresses uncapped liability in legacy Fuse 2 terms and conditions or the migration status of customers away from those terms."
+  },
+  {
+    "finding_id": "82f5ac4d-fffe-4f37-9a6a-9346af8b6a2f",
+    "title": "Legal DD Structural Limitations Not Disclosed in IC Memos",
+    "reason": "No memo in the engagement map addresses the structural limitations of the legal due diligence process (e.g., scope restrictions, reliance limitations, carve-outs, or gaps in legal DD coverage); this specific topic is never disclosed."
+  },
+  {
+    "finding_id": "84d36263-df0f-44e9-8d7d-c31c37d73007",
+    "title": "Change-of-Control Termination Rights Across Multiple Material Customer Contracts",
+    "reason": "No memo in the engagement map engages with change-of-control termination rights in customer contracts at any level of specificity."
+  },
+  {
+    "finding_id": "8692c692-9503-4982-974c-b4b72e799ec3",
+    "title": "Restrictive Covenant Adequacy for Senior Executives Not Confirmed",
+    "reason": "No memo in the engagement map engages with the adequacy or enforceability of restrictive covenants (non-competes, non-solicits, garden leave, etc.) for senior executives."
+  },
+  {
+    "finding_id": "86acb378-61ea-4358-bf23-6de309be3234",
+    "title": "Datakom FCA De-registration: Documentation Present, Status Not Confirmed",
+    "reason": "No memo in the engagement map addresses Datakom FCA de-registration documentation or status confirmation at all."
+  },
+  {
+    "finding_id": "883d0a5c-c961-4d79-a298-a6b9a5bf7953",
+    "title": "Unregistered Trade Marks — IP Ownership Risk Not Disclosed in IC Memo",
+    "reason": "No memo in the engagement map addresses trade mark registration status or IP ownership risk related to unregistered trade marks; the IP references are limited to own-IP software share and technology disruption risk."
+  }
+]
