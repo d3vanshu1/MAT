@@ -8,9 +8,11 @@
  * Fixture B: absence finding whose topic returns ZERO memo matches → RETAINED
  * Fixture C: non-absence finding → UNTOUCHED
  * Fixture D: single memo chunk matching only ONE keyword → NOT demoted (threshold guard)
+ * Fixture E: change-of-control (generic terms match many chunks, but distinctive
+ *            term absent from all) → NOT demoted
  */
 
-import { verifyAbsenceClaims, extractSalientKeywords, type AbsenceGateQueryFn } from "../pipeline-core.js";
+import { verifyAbsenceClaims, extractSalientKeywords, extractDistinctiveKeywords, type AbsenceGateQueryFn } from "../pipeline-core.js";
 import type { CanonicalFinding } from "../canonical-finding.js";
 
 type MergedFinding = CanonicalFinding;
@@ -84,6 +86,16 @@ const FIXTURE_D = baseFinding({
   severity: "warning",
 });
 
+// Fixture E: change-of-control — generic terms (customer, contracts, key) match
+// many memo chunks, but the DISTINCTIVE term "change-of-control" is absent.
+// On the old OR-based code this wrongly demotes; on the fixed AND + generic-stoplist code it retains.
+const FIXTURE_E = baseFinding({
+  title: "Change-of-Control Termination Rights in Key Customer Contracts Unquantified",
+  detail: "Key customer contracts contain change-of-control termination clauses allowing counterparties to exit upon majority ownership transfer, but the IC memos do not quantify exposure.",
+  gap_type: "memo_omission",
+  severity: "critical",
+});
+
 // ---------------------------------------------------------------------------
 // Stubbed query functions
 // ---------------------------------------------------------------------------
@@ -119,6 +131,36 @@ const queryStubD: AbsenceGateQueryFn = async (_sql, _schema, params, _meta) => {
     return [
       { file_name: "2026-05-18 SCG - 2nd IC Memo vS.pdf", chunk_index: 42, content: "The Gamma network provides connectivity infrastructure for the UK enterprise segment. Revenue from this channel grew 8% YoY." },
     ];
+  }
+  return [];
+};
+
+/**
+ * Stub E: Simulates many memo chunks matching GENERIC terms ("customer", "contracts", "key")
+ * but NONE containing the distinctive term "change-of-control" or "change of control".
+ * Under the old OR code, 327 chunks would fire threshold A and wrongly demote.
+ * Under the fixed AND+generic-stoplist code, the query uses only "change-of-control"
+ * (the distinctive term), so it returns 0 matches.
+ */
+const queryStubE: AbsenceGateQueryFn = async (_sql, _schema, params, _meta) => {
+  const searchQuery = (params[1] as string).toLowerCase();
+  // The distinctive term is "change-of-control" (after generic-stoplist filtering).
+  // If the query contains "change-of-control" or "change" — return 0 chunks
+  // (memo never discusses change of control).
+  if (/change/.test(searchQuery)) {
+    return [];
+  }
+  // If somehow generic terms leaked through (old OR code path), return many memo chunks
+  if (/customer|contract|key/.test(searchQuery)) {
+    const chunks = [];
+    for (let i = 0; i < 50; i++) {
+      chunks.push({
+        file_name: i < 30 ? "2026-05-18 SCG - 2nd IC Memo vS.pdf" : "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+        chunk_index: i,
+        content: `The key customer contracts include Openwork Group, BT, and Vodafone. Customer revenue concentration is 34% for the top 3 contracts.`,
+      });
+    }
+    return chunks;
   }
   return [];
 };
@@ -200,6 +242,37 @@ async function runTests() {
     assertEq(result.survivingFindings.length, 1, "1 surviving finding");
     assertEq(result.housekeepingFindings.length, 0, "0 housekeeping findings");
     assertEq(result.survivingFindings[0].absence_verification, "memo_absent_confirmed", "absence_verification = memo_absent_confirmed (below threshold)");
+  }
+  console.log("");
+
+  // -- Fixture E: change-of-control with generic term over-match → NOT demoted --
+  console.log("Fixture E: Change-of-control (generic terms match, distinctive term absent — should NOT demote):");
+  {
+    const findings = [{ ...FIXTURE_E }];
+    const housekeeping: MergedFinding[] = [];
+    const result = await verifyAbsenceClaims(queryStubE, "deal-123", findings, housekeeping, "omission_audit");
+
+    assertEq(result.demotedCount, 0, "0 findings demoted (distinctive term not in memos)");
+    assertEq(result.survivingFindings.length, 1, "1 surviving finding");
+    assertEq(result.housekeepingFindings.length, 0, "0 housekeeping findings");
+    assertEq(result.survivingFindings[0].absence_verification, "memo_absent_confirmed", "absence_verification = memo_absent_confirmed");
+    assertEq(result.survivingFindings[0].severity, "critical", "severity unchanged (still critical)");
+  }
+  console.log("");
+
+  // -- extractDistinctiveKeywords test --
+  console.log("extractDistinctiveKeywords:");
+  {
+    const all = extractSalientKeywords("Change-of-Control Termination Rights in Key Customer Contracts Unquantified");
+    const distinctive = extractDistinctiveKeywords(all);
+    console.log(`  all keywords: [${all.join(", ")}]`);
+    console.log(`  distinctive:  [${distinctive.join(", ")}]`);
+    assert(!distinctive.includes("customer"), "'customer' filtered as generic");
+    assert(!distinctive.includes("contracts"), "'contracts' filtered as generic");
+    assert(!distinctive.includes("key"), "'key' filtered as generic");
+    assert(!distinctive.includes("termination"), "'termination' filtered as generic");
+    assert(!distinctive.includes("unquantified"), "'unquantified' filtered as generic");
+    assert(distinctive.includes("change-of-control"), "'change-of-control' is distinctive");
   }
   console.log("");
 

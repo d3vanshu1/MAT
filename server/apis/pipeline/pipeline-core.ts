@@ -464,6 +464,27 @@ const STOPWORDS = new Set([
 ]);
 
 /**
+ * Generic high-frequency deal terms that match too many chunks indiscriminately.
+ * These are removed from the keyword set used for memo-hit matching; they may
+ * still appear in log output but MUST NOT drive demotion decisions.
+ */
+const GENERIC_TERMS = new Set([
+  "customer", "customers", "contract", "contracts", "rights", "key", "general",
+  "risk", "risks", "execution", "forecast", "annual", "average", "latest",
+  "material", "group", "revenue", "growth", "margin", "terms", "agreement",
+  "business", "market", "value", "total", "net", "rate", "period", "year",
+  "report", "analysis", "management", "company", "deal", "target", "investment",
+  "portfolio", "fund", "partner", "equity", "debt", "capital", "cash", "cost",
+  "costs", "performance", "operations", "operational", "financial", "strategy",
+  "strategic", "plan", "planning", "due", "diligence", "review", "assessment",
+  "impact", "potential", "significant", "current", "future", "expected",
+  "projected", "estimated", "approximately", "based", "level", "status",
+  "position", "structure", "process", "service", "services", "product",
+  "products", "sector", "industry", "provider", "suppliers", "supplier",
+  "unquantified", "quantified", "termination",
+]);
+
+/**
  * Minimal query-function interface so the gate can be tested without a live DB.
  */
 export interface AbsenceGateQueryFn {
@@ -490,6 +511,16 @@ export function extractSalientKeywords(title: string): string[] {
   // Deduplicate and take up to 6
   const unique = [...new Set(tokens)];
   return unique.slice(0, 6);
+}
+
+/**
+ * Filters keywords to only distinctive (non-generic) terms.
+ * These are the terms that actually indicate topic specificity.
+ * When in doubt, RETAIN the finding — if no distinctive terms survive, we cannot
+ * verify the claim and must keep it.
+ */
+export function extractDistinctiveKeywords(allKeywords: string[]): string[] {
+  return allKeywords.filter((kw) => !GENERIC_TERMS.has(kw));
 }
 
 /**
@@ -538,17 +569,22 @@ export async function verifyAbsenceClaims(
       continue;
     }
 
-    // Extract salient keywords from title
-    const keywords = extractSalientKeywords(f.title ?? "");
+    // Extract salient keywords from title, then filter to DISTINCTIVE terms only
+    const allKeywords = extractSalientKeywords(f.title ?? "");
+    const keywords = extractDistinctiveKeywords(allKeywords);
     if (keywords.length === 0) {
-      // Cannot verify without keywords — leave in place, mark confirmed
+      // No distinctive keywords survive — cannot verify, RETAIN the finding
+      // (bias: when in doubt, keep rather than risk suppressing a true omission)
       (f as any).absence_verification = "memo_absent_confirmed";
       survivingFindings.push(f);
+      console.log(`[pipeline:absenceGate] RETAINED "${(f.title ?? "").slice(0, 80)}" — no distinctive keywords after filtering generic terms (all: ${allKeywords.join(", ")})`);
       continue;
     }
 
-    // Build a websearch_to_tsquery-compatible query from keywords
-    const searchQuery = keywords.join(" OR ");
+    // Build an AND-based websearch_to_tsquery query from distinctive keywords.
+    // websearch_to_tsquery treats unquoted space-separated terms as AND.
+    // To be explicit, join with " AND " for clarity and safety.
+    const searchQuery = keywords.join(" AND ");
 
     // Search document_chunks for this deal
     let memoHit = false;
@@ -573,17 +609,19 @@ export async function verifyAbsenceClaims(
       const memoChunks = hits.filter((h) => IC_MEMO_FILE_PATTERN.test(h.file_name));
 
       if (memoChunks.length >= ABSENCE_GATE_MIN_MEMO_CHUNKS) {
-        // Threshold A: >= 2 distinct memo chunks match
+        // Threshold A: >= 2 distinct memo chunks match the AND query
+        // The AND query already ensures all distinctive keywords co-occur,
+        // so matching chunks ARE genuine topic disclosures.
         memoHit = true;
         matchingMemoFiles = [...new Set(memoChunks.map((h) => h.file_name))];
       } else if (memoChunks.length === 1) {
-        // Threshold B: single chunk must match >= 2 keywords
+        // Threshold B: single chunk must match >= 2 DISTINCTIVE keywords
         const chunkContent = memoChunks[0].content.toLowerCase();
-        const matchedKeywords = keywords.filter((kw) => chunkContent.includes(kw));
-        if (matchedKeywords.length >= ABSENCE_GATE_MIN_KEYWORDS_PER_CHUNK) {
+        const matchedDistinctive = keywords.filter((kw) => chunkContent.includes(kw));
+        if (matchedDistinctive.length >= ABSENCE_GATE_MIN_KEYWORDS_PER_CHUNK) {
           memoHit = true;
           matchingMemoFiles = [memoChunks[0].file_name];
-          matchingKeywordsForSearch = matchedKeywords;
+          matchingKeywordsForSearch = matchedDistinctive;
         }
       }
     } catch (err) {
