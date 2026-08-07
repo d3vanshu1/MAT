@@ -1,0 +1,22 @@
+{
+  "sessionId": "3c96416d-d024-468b-95a9-ab11c6ff56b3",
+  "run_id": "576171a3-5533-4dcc-8af6-7a1ffd56026e",
+  "converged_collapse": "434 -> 274",
+  "trajectory": [434, 276, 275, 274, 274],
+  "total_groups": 52,
+  "total_findings_in_groups": 216,
+  "total_ungrouped": 222,
+  "old_engine_comparison": {
+    "grouped": 74,
+    "ungrouped": 360,
+    "families": 7,
+    "family_names": [
+      "courts_design_ip_assignment",
+      "customer_change_of_control",
+      "group_trademarks_unregistered",
+      "one_park_lane_title_and_lease",
+      "restrictive_covenants",
+      "supplier_change_of_control"
+    ]
+  }
+}

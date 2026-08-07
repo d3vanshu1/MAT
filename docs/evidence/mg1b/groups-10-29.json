@@ -1,0 +1,223 @@
+[
+  {
+    "group_id": 39,
+    "member_count": 3,
+    "members": [
+      { "finding_id": "f393", "title": "Multiple Active Ofcom General Condition Breaches Absent from IC Memos" },
+      { "finding_id": "f416", "title": "Multiple Ofcom General Conditions Technical Breaches — Low Enforcement Risk" },
+      { "finding_id": "f334", "title": "PRS Network Operator Registration Breach — Ofcom Compliance" }
+    ],
+    "reasons": [
+      "All describe the same cluster of Ofcom General Condition technical breaches (mid-contract price rise notifications, end-of-contract notifications, annual best-tariff notifications, VoIP emergency services disclosure, PRS registration) that are documented in the Legal DD but absent from IC memos — noting f076/f080/f116/f126/f215/f255/f286/f299/f328/f352/f423 are grouped separately as they specifically concern the cease charges/GC C2 breach."
+    ]
+  },
+  {
+    "group_id": 1,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f000", "title": "Seller Proceeds Sensitivity and Thin Equity Position Not Disclosed in IC Memo" },
+      { "finding_id": "f041", "title": "Seller Equity Sensitivity and Process Dynamics Not Carried Forward to Later IC Memos" }
+    ],
+    "reasons": [
+      "Both describe the same issue: sellers have thin equity due to Ares debt and are extremely sensitive to value movements affecting their ~£88m proceeds, with the 2nd IC Memo disclosing this dynamic and later memos not carrying it forward."
+    ]
+  },
+  {
+    "group_id": 8,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f026", "title": "NHS Deferred Income Unwind as Working Capital Driver Not Surfaced" },
+      { "finding_id": "f387", "title": "NHS Digital Strategy Initiative Impact on Working Capital Not Addressed in IC Memos" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the VDD identifies that working capital turns positive in outer years primarily due to the unwind of NHS Digital Strategy Initiative deferred income, a non-recurring driver not disclosed in the IC memos."
+    ]
+  },
+  {
+    "group_id": 9,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f039", "title": "CCaaS Margin Capture Conditioned on Scale Delivery Capability" },
+      { "finding_id": "f135", "title": "CCaaS Scale Delivery Risk: Value Leakage to Vendors/SIs Flagged by CDD" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Altman Solon CDD states that CCaaS margin capture is contingent on Gamma's ability to package and deliver at scale, otherwise value leaks to vendors and system integrators."
+    ]
+  },
+  {
+    "group_id": 10,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f047", "title": "FY31 Gross Profit 4x Growth Thesis: CDD Phase II Validation Absent" },
+      { "finding_id": "f082", "title": "Buyside CDD Scoped as Phase I Only — Phase II Completion Status Not Disclosed" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Altman Solon buyside CDD is explicitly Phase I only, and the IC memo record does not disclose whether Phase II has been completed or waived, leaving independent commercial validation incomplete."
+    ]
+  },
+  {
+    "group_id": 12,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f353", "title": "Multiple Supplier MSAs Contain Outdated Data Protection Provisions" },
+      { "finding_id": "f361", "title": "Multiple Supplier MSAs Contain Outdated Data Protection Provisions (DPA 1998)" }
+    ],
+    "reasons": [
+      "Both describe the same issue: multiple supplier MSAs (including Virtual1, Neos Networks, and Virgin Media) contain data protection provisions referencing the superseded Data Protection Act 1998 rather than current legislation."
+    ]
+  },
+  {
+    "group_id": 13,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f086", "title": "£406.5m Debt Repayment Triggered by Change of Control at Close" },
+      { "finding_id": "f347", "title": "Change of Control Triggers Mandatory Full Prepayment of All Facilities" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the transaction triggers mandatory full prepayment of all outstanding facilities (totalling ~£406.5m) under change-of-control provisions in both the Senior Facilities Agreement and PIK Facilities Agreement."
+    ]
+  },
+  {
+    "group_id": 14,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f101", "title": "Forecast Constructed on No-M&A Basis Despite Active Acquisition Track Record" },
+      { "finding_id": "f247", "title": "FY26–28 Plan Excludes M&A; Thesis Depends on Continued Acquisitions" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the VDD plan projections are built on a no-M&A basis despite the Group's active acquisition track record and M&A-dependent investment thesis, creating a structural gap in the base-case financials."
+    ]
+  },
+  {
+    "group_id": 15,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f104", "title": "ROPA, DP Policy Integration, and Acquired-Entity Privacy Policies Materially Incomplete" },
+      { "finding_id": "f186", "title": "Privacy Policy Harmonisation Incomplete Across 9 Group Entities" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Group's privacy policy and ROPA harmonisation across acquired entities is materially incomplete, with multiple entities still on legacy or non-compliant policies as of the Legal DD date."
+    ]
+  },
+  {
+    "group_id": 16,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f110", "title": "Surgery Connect Ancillary Products: 58% CAGR Assumption Lacks Independent Validation" },
+      { "finding_id": "f408", "title": "Surgery Connect Ancillary Revenue CAGR Lacks Independent Validation" }
+    ],
+    "reasons": [
+      "Both describe the same issue: Surgery Connect Ancillary Products are projected at an extremely high CAGR (58–84%) from a nascent base with no independent CDD or FDD validation of this trajectory."
+    ]
+  },
+  {
+    "group_id": 17,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f240", "title": "Cohort 1 Revenue CAGR mathematically inconsistent with stated start/end values" },
+      { "finding_id": "f281", "title": "Cohort 2 Revenue and GP CAGRs mathematically inconsistent with stated start/end values" }
+    ],
+    "reasons": [
+      "Both describe the same issue: CAGR figures stated in the 2nd IC Memo for customer cohorts are arithmetically inconsistent with the stated start and end revenue/GP values."
+    ]
+  },
+  {
+    "group_id": 19,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f379", "title": "Supplier Change-of-Control Termination Rights Not Formally Waived" },
+      { "finding_id": "f418", "title": "Gamma Telecom Single-Supplier Concentration (£11.9m Annual Spend) Not Highlighted in IC Memos" }
+    ],
+    "reasons": [
+      "Both describe supplier change-of-control consent/termination rights in key supplier agreements that have not been formally waived, creating a pre-completion execution risk not addressed in IC memos."
+    ]
+  },
+  {
+    "group_id": 20,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f212", "title": "Preference Share Coupon Rate Discrepancy Across Share Classes" },
+      { "finding_id": "f236", "title": "Preference Share Coupon Rate Inconsistency Across DD Documents" }
+    ],
+    "reasons": [
+      "Both describe the same issue: inconsistent preference share coupon rates across DD documents (A Preference at 14%, B/C Preference at 12%, PIK at 12%), creating a discrepancy that affects the net debt bridge and equity waterfall."
+    ]
+  },
+  {
+    "group_id": 21,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f190", "title": "Legal DD Structural Limitations Not Disclosed in IC Memos" },
+      { "finding_id": "f134", "title": "Legal DD Six-Month Staleness Not Acknowledged in Latest IC Memo" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Legal DD was prepared as a vendor report with a November 2025 cut-off, and by the time of the latest IC memo (June 2026) it is approximately seven months stale, with no acknowledged refresh or bring-down in the IC record."
+    ]
+  },
+  {
+    "group_id": 22,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f154", "title": "South Africa Block D Leases: Landlord Consent Required for Change of Control" },
+      { "finding_id": "f108", "title": "South African Leases: Governing Law Outside Legal DD Scope" }
+    ],
+    "reasons": [
+      "Both describe the same issue: South African leases require landlord consent for a change of control, the Legal DD explicitly excludes non-English law analysis, and no IC memo discloses this pre-completion condition or its resolution status."
+    ]
+  },
+  {
+    "group_id": 23,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f324", "title": "SCG Acquisition Count in Chunk 25 (17 since Apr-22) vs. Chunk 27 Average EV/EBITDA (5.0x across 17 transactions) — Cohort GP Declining Despite Low Entry Multiple Claim" },
+      { "finding_id": "f386", "title": "M&A Cohort GP Growth Decelerating Sharply; Acquisition Multiples Rising Above Historical Average" }
+    ],
+    "reasons": [
+      "Both describe the same issue: M&A cohort gross profit or returns are declining while acquisition multiples are rising, creating a scissors pattern that is not addressed in the IC memo record."
+    ]
+  },
+  {
+    "group_id": 25,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f010", "title": "NRR Trough at 94.4% FY24 Not Disclosed in IC Memos" },
+      { "finding_id": "f329", "title": "PwC VDD Churn Data Granularity Not Disclosed Alongside NRR/GRR Claims in IC Memos" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the NRR trough to 94.4% in FY24 (indicating net customer base contraction) is documented in the VDD but not disclosed in the IC memos, which present NRR/GRR metrics without this granularity."
+    ]
+  },
+  {
+    "group_id": 26,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f073", "title": "Own-IP UCaaS Platform (Evonex) Sustainability Not Resolved in Latest IC Memo" },
+      { "finding_id": "f398", "title": "Thesis Drift: Own-Network Competitive Advantage Work Dropped from Later IC Memos" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Screening Memo flagged own-IP UCaaS platform sustainability as a key open question, and this has not been demonstrably resolved or carried forward in later IC memos."
+    ]
+  },
+  {
+    "group_id": 27,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f096", "title": "£19.5m Revenue Basis Discrepancy Unexplained in IC Memos" },
+      { "finding_id": "f310", "title": "Datacube Excludes ~6% of Total Revenue; Coverage Methodology to Confirm" }
+    ],
+    "reasons": [
+      "Both describe the same issue: there is a ~£19.5m revenue basis discrepancy between the routes-to-market and datacube product-category presentations in the VDD, which is unexplained in the IC memos."
+    ]
+  },
+  {
+    "group_id": 29,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f174", "title": "Customer Cube / Organic Growth Validation Explicitly Incomplete at IC Decision Point" },
+      { "finding_id": "f297", "title": "Retention Metrics Explicitly Provisional: IC Presented with Unfinished Customer Cube" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the customer cube work and retention metrics are explicitly flagged as provisional and incomplete at the time the IC is being asked to approve the transaction."
+    ]
+  }
+]

@@ -1,0 +1,244 @@
+[
+  {
+    "group_id": 30,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f283", "title": "No Legitimate Interest Assessments Conducted Despite Documented LI Reliance" },
+      { "finding_id": "f169", "title": "B2C/Sole-Trader Marketing Consent — No Documented Opt-In" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Group relies on legitimate interests as a lawful basis for data processing (including direct marketing to individuals and sole traders) but has not conducted Legitimate Interest Assessments or secured documented opt-in consents."
+    ]
+  },
+  {
+    "group_id": 33,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f358", "title": "Earn-Out Obligations Across Five Acquired Entities Unquantified in IC Memos" },
+      { "finding_id": "f068", "title": "NT Voice & Data: Deferred and Contingent Consideration Due Proximate to Close" }
+    ],
+    "reasons": [
+      "Both describe the same issue: multiple near-term earn-out and deferred consideration obligations across acquired entities are due proximate to or shortly after the expected deal close date, and these are not addressed in the IC memo record."
+    ]
+  },
+  {
+    "group_id": 34,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f189", "title": "Bad Debt Provision Doubled; 91+ Day Debtor Concentration Elevated at Year-End" },
+      { "finding_id": "f087", "title": "Debtor Ageing Deterioration — Over-90-Day Balances Doubled" }
+    ],
+    "reasons": [
+      "Both describe the same issue: trade debtors aged over 90 days have increased materially (to ~18% of the debtor book at Mar-25), coinciding with a doubling of the bad debt provision, a trend not discussed in the IC memos."
+    ]
+  },
+  {
+    "group_id": 35,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f164", "title": "Horizon Margin Compression: Blended GM Declines ~10pp by 2030" },
+      { "finding_id": "f043", "title": "Operator Connect Unit Economics Structurally Exceed Horizon at Same Price Point" }
+    ],
+    "reasons": [
+      "Both describe the same issue: Gamma Horizon's gross margin is structurally declining as customers migrate to Teams products (Operator Connect/Webex), with Operator Connect carrying only half the reseller margin of Horizon at the same end-user price point."
+    ]
+  },
+  {
+    "group_id": 36,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f117", "title": "CSRD compliance costs quantified by management but not validated by PwC" },
+      { "finding_id": "f259", "title": "FRS 102 amendments effective January 2026 — management and PwC assess immaterial; no independent stress-test" }
+    ],
+    "reasons": [
+      "Both describe the same issue: upcoming accounting/regulatory changes (CSRD and FRS 102 amendments) have been assessed as immaterial by management and PwC without independent stress-testing or validation."
+    ]
+  },
+  {
+    "group_id": 37,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f160", "title": "Vendor FDD Draft Status Unresolved Across Extended Deal Timeline" },
+      { "finding_id": "f244", "title": "PwC VDD scope excludes audit verification; no responsibility assumed for accuracy" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the PwC VDD is explicitly marked Draft and PwC disclaims responsibility for accuracy, yet the IC process has continued for seven months without a confirmed finalised report, a limitation not disclosed in the IC memos."
+    ]
+  },
+  {
+    "group_id": 38,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f330", "title": "Incomplete DPIAs for Healthcare AI Products; NHS Data Anonymisation Unverified" },
+      { "finding_id": "f211", "title": "X-On Health Overdue Internal Privacy Policy; Special-Category Health Data Exposure" }
+    ],
+    "reasons": [
+      "Both describe the same issue: X-On Health's data protection posture is deficient — specifically incomplete DPIAs for healthcare AI products and an overdue internal privacy policy — in the highest-risk data processing context in the Group."
+    ]
+  },
+  {
+    "group_id": 40,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f202", "title": "EE and Class NS2 Supplier Agreements Expired — Operating Informally at Close" },
+      { "finding_id": "f249", "title": "RM3808 Framework Contract on Informal Rolling Basis — Renewal Risk Not Disclosed" }
+    ],
+    "reasons": [
+      "Both describe the same issue: key supplier/framework agreements (EE MSA, Class NS2 Reseller Agreement, RM3808 CCS framework) have expired and are operating on an informal rolling basis, with renegotiations incomplete and not disclosed in IC memos."
+    ]
+  },
+  {
+    "group_id": 41,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f048", "title": "Platinum-Tier Churn Deterioration Not Surfaced in IC Memos" },
+      { "finding_id": "f332", "title": "Gold-Tier Churn Acceleration: Context and Cross-Sell Thesis Not Reconciled" }
+    ],
+    "reasons": [
+      "Both describe the same issue: churn is accelerating in the Platinum and Gold customer tiers (Platinum from 8.6% to 11.0%; Gold from 13.2% to 19.5%), which is not reconciled with the cross-sell growth thesis in the IC memos."
+    ]
+  },
+  {
+    "group_id": 42,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f252", "title": "M&A Count Inconsistency: Chunk 26 States '40+ acquisitions to date' vs. Chunk 25 and Chunk 27 Both State '17 acquisitions since April 2022'" },
+      { "finding_id": "f241", "title": "SCG FY22 and FY25 Revenue Both Stated as £168m — Zero Net Growth Over Three Years Despite 17 Acquisitions" }
+    ],
+    "reasons": [
+      "Both describe the same issue: there is an irreconcilable inconsistency in acquisition counts (17 since April 2022 vs. 40+ to date) and the flat FY22–FY25 revenue trajectory despite 17 acquisitions, neither of which is explained in the IC materials."
+    ]
+  },
+  {
+    "group_id": 43,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f118", "title": "X-on Health Market Share: Irreconcilable Conflict Within CDD" },
+      { "finding_id": "f257", "title": "Market Share Claims (42%+ UK, 55%+ NHS) Lack Third-Party Substantiation" }
+    ],
+    "reasons": [
+      "Both describe the same issue: X-on Health market share figures are internally contradictory or unsubstantiated — the CDD shows declining UK share (41%→19%) while simultaneously citing 55% in England, and no methodology is provided."
+    ]
+  },
+  {
+    "group_id": 44,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f015", "title": "SIP NRR Deterioration and Organic ARR Collapse Not Addressed in IC Memos" },
+      { "finding_id": "f079", "title": "SIP ARPU 54% Growth vs. 3.1% Organic ARR Growth Tension Undisclosed" }
+    ],
+    "reasons": [
+      "Both describe the same issue: SIP NRR is declining and organic ARR growth has collapsed to 3.1% in FY25, while simultaneously the VDD forecasts a 54% ARPU increase — an unreconciled tension not surfaced in IC memos."
+    ]
+  },
+  {
+    "group_id": 45,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f375", "title": "Overhead Cost Leverage Limited; People Costs Outpacing Revenue" },
+      { "finding_id": "f161", "title": "Unexplained 14.3% Loaded People Cost Per FTE Jump FY26" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Group's cost base as a percentage of revenue is rising (overheads from 12% to 14.4%; people costs from 6.7% to 8.7%), limiting EBITDA margin expansion, and a specific unexplained 14.3% people cost per FTE jump in FY26."
+    ]
+  },
+  {
+    "group_id": 46,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f204", "title": "Budget vs. Actuals: Revenue Shortfall Widening to 4.8% by FY25" },
+      { "finding_id": "f228", "title": "No contingency plans for macro-uncertainty; PwC flags materially greater forecast variance" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the Group has consistently missed revenue and EBITDA budgets (shortfall widening to 4.8% by FY25) and has no contingency plans for macro uncertainty, with PwC flagging materially greater forecast variance risk."
+    ]
+  },
+  {
+    "group_id": 47,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f290", "title": "Exit Multiple Re-Rating Thesis Lacks Independent CDD Confirmation" },
+      { "finding_id": "f045", "title": "Exit Multiple Assumption Relies on SoTP Premium Without Documented Comparable Precedent" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the IC memos assert an exit multiple re-rating toward healthcare software comps (citing TES as a precedent), but no independent CDD confirmation of the re-rating thesis or comparable transaction evidence is documented."
+    ]
+  },
+  {
+    "group_id": 48,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f296", "title": "Surgery Connect Leadership Vacancy Not Surfaced in Latest IC Memo Risk Discussion" },
+      { "finding_id": "f333", "title": "CTO Upgrade Question Raised in Earlier Memo — Not Addressed in Latest Memo" }
+    ],
+    "reasons": [
+      "Both describe the same issue: specific management gaps flagged in earlier IC memos (Head of Surgery Connect vacancy; CTO upgrade question) are not addressed or resolved in the latest IC memo, constituting thesis drift on named personnel risks."
+    ]
+  },
+  {
+    "group_id": 49,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f320", "title": "QuantumLoopAi Competition Law Allegation Absent from All IC Memos" },
+      { "finding_id": "f051", "title": "Multiple Employment Tribunal Proceedings and Threatened Litigation Undisclosed in IC Memos" }
+    ],
+    "reasons": [
+      "Both describe the same issue: legal proceedings and regulatory allegations (QuantumLoopAi competition law allegation; employment tribunal proceedings) documented in the Legal DD are absent from all IC memo versions."
+    ]
+  },
+  {
+    "group_id": 50,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f349", "title": "Cohort 1 NRR decline to sub-100% contradicts narrative of IP migration driving improved financial performance" },
+      { "finding_id": "f292", "title": "Cohort 2 FY25 NRR absent while Cohort 1 shows sharp FY25 deterioration — prevents assessment of portfolio-wide retention trend at a critical decision point" }
+    ],
+    "reasons": [
+      "Both describe the same issue: Cohort 1 NRR fell to 99% in FY25 (below 100%, indicating net contraction) while Cohort 2 FY25 NRR is entirely absent, preventing assessment of whether the deterioration is systemic — contradicting the IP migration narrative."
+    ]
+  },
+  {
+    "group_id": 51,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f376", "title": "Evonex 'only provider' with lockdown functionality claimed across two chunks without third-party validation; claim repeated but never substantiated" },
+      { "finding_id": "f406", "title": "Internal contradiction: Evonex simultaneously described as 'not complex' with basic 10-seat SME customers and as having differentiated vertical integrations requiring significant development investment" }
+    ],
+    "reasons": [
+      "Both describe the same issue in the 2nd IC Memo: Evonex is simultaneously characterised as serving low-complexity SME customers ('not complex', 10-seat average) and as having differentiated vertical integrations and lockdown moats, an internal contradiction not resolved."
+    ]
+  },
+  {
+    "group_id": 52,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f231", "title": "Recent Acquisitions Excluded from Datacube — Bottom-Up Revenue Verification Limited" },
+      { "finding_id": "f095", "title": "GP Reconciliation: ~9% of Group GP Relies on Estimation Assumptions" }
+    ],
+    "reasons": [
+      "Both describe the same issue: the VDD datacube covers only ~90-91% of group gross profit, with the remaining ~9% modelled using assumed margins and with five recent acquisitions excluded from granular bottom-up verification."
+    ]
+  },
+  {
+    "group_id": 53,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f425", "title": "M2M Connections Gross Margin Collapsed 46.3ppts FY23–FY25" },
+      { "finding_id": "f028", "title": "Mobile Segment Gross Margin in Sustained Decline — No Mitigation Stated" }
+    ],
+    "reasons": [
+      "Both describe the same issue: gross margins in mobile-related segments are in sustained decline (M2M collapsed 46.3ppts; overall mobile segment declined from 58.4% to 52.7%), with no mitigation or explanation in the IC memo record."
+    ]
+  },
+  {
+    "group_id": 54,
+    "member_count": 2,
+    "members": [
+      { "finding_id": "f264", "title": "Customer-Level EBITDA Attribution Incomplete — FTI Work Pending" },
+      { "finding_id": "f174", "title": "Customer Cube / Organic Growth Validation Explicitly Incomplete at IC Decision Point" }
+    ],
+    "reasons": [
+      "Both describe the same issue: customer-level EBITDA attribution is incomplete (FTI work pending) and the customer cube validation is explicitly flagged as unfinished at the IC decision point, leaving core financial thesis inputs unverified — noting f174 also relates to group 30 but its primary issue here is the incomplete financial verification at IC."
+    ]
+  }
+]

@@ -286,6 +286,8 @@ export default api({
     runId: z.string().nullable(),
     passNumber: z.number().nullable(),
     sessionId: z.string().nullable(),
+    dumpMode: z.boolean().nullable(),
+    dumpPart: z.string().nullable(), // "meta", "groups:0-19", "groups:20-51", "ungrouped", "overmerge"
   }),
   output: z.object({
     sessionId: z.string(),
@@ -341,12 +343,153 @@ export default api({
     }).nullable(),
     durationMs: z.number(),
     error: z.string().nullable(),
+    dumpJson: z.string().nullable(),
   }),
 
-  async run(ctx, { runId: inputRunId, passNumber: passNumberInput, sessionId: sessionIdInput }) {
+  async run(ctx, { runId: inputRunId, passNumber: passNumberInput, sessionId: sessionIdInput, dumpMode, dumpPart }) {
     const passNumber = passNumberInput ?? 1;
     const model = getModuleModel("omission_audit");
     const startTime = Date.now();
+
+    // ═══════ DUMP MODE: read converged state and return full JSON ═══════
+    if (dumpMode && sessionIdInput) {
+      const dumpRows = await ctx.integrations.db.query(
+        `SELECT pass_number, state_json FROM diag_consolidation_sessions
+         WHERE id = $1 ORDER BY pass_number DESC LIMIT 1`,
+        z.object({ pass_number: z.number(), state_json: z.any() }),
+        [sessionIdInput],
+        { label: "Load converged state for dump" }
+      );
+      if (dumpRows.length === 0) throw new Error(`No state found for session ${sessionIdInput}`);
+      const finalState: PersistedPassState = dumpRows[0].state_json as PersistedPassState;
+      const refToTitle = new Map(Object.entries(finalState.refToTitle));
+
+      const makeDumpReturn = (json: string) => ({
+        sessionId: sessionIdInput, passNumber: dumpRows[0].pass_number,
+        runId: finalState.runId, findingCount: finalState.findingCount, model,
+        thisPassStats: { pass: 0, inputItems: 0, groupsFormed: 0, mergesPerformed: 0, ungroupedAfter: 0, inputTokens: 0, outputTokens: 0, durationMs: 0 },
+        converged: true,
+        trajectory: [{ pass: 0, effectiveCount: finalState.findingCount, merges: 0, durationMs: 0 }],
+        finalAnalysis: null,
+        durationMs: Date.now() - startTime,
+        error: null,
+        dumpJson: json,
+      });
+
+      const part = dumpPart || "meta";
+
+      // ─── PART: meta ───
+      if (part === "meta") {
+        const allPassRows = await ctx.integrations.db.query(
+          `SELECT pass_number, state_json FROM diag_consolidation_sessions
+           WHERE id = $1 ORDER BY pass_number ASC`,
+          z.object({ pass_number: z.number(), state_json: z.any() }),
+          [sessionIdInput],
+          { label: "Load all passes for trajectory" }
+        );
+        const trajectory = [finalState.findingCount, ...allPassRows.map((r: any) => {
+          const s: PersistedPassState = r.state_json;
+          return s.groups.length + s.ungroupedRefs.length;
+        })];
+        const totalFindingsInGroups = finalState.groups.reduce((acc, g) => acc + g.memberRefs.length, 0);
+
+        // Old engine comparison
+        let oldEngineComparison = { grouped: 0, ungrouped: 0, families: 0, family_names: [] as string[] };
+        try {
+          const findingsRows = await ctx.integrations.db.query(
+            `SELECT mo.findings FROM module_outputs mo WHERE mo.module_run_id = $1`,
+            z.object({ findings: z.any() }),
+            [finalState.runId],
+            { label: "Load findings for old-engine dump" }
+          );
+          if (findingsRows.length > 0) {
+            const rawFindings: any[] = findingsRows[0].findings;
+            const asCanonical: CanonicalFinding[] = rawFindings.map((f: any, idx: number) => ({
+              finding_id: f.finding_id || `synth_${idx}`,
+              severity: f.severity || "info",
+              title: f.title || "",
+              detail: f.detail || "",
+              full_analysis: f.full_analysis || "",
+              source_docs: f.source_docs || [],
+              issue_key: f.issue_key || undefined,
+              category: f.category || undefined,
+              finding_kind: f.finding_kind || undefined,
+              claim_ids: f.claim_ids || undefined,
+              merged_from_finding_ids: f.merged_from_finding_ids || undefined,
+            }));
+            const oldResult = deduplicateFindings(asCanonical);
+            oldEngineComparison = {
+              grouped: oldResult.totalSuppressed + oldResult.totalFamiliesCreated,
+              ungrouped: oldResult.ungroupedFindingIds.length,
+              families: oldResult.totalFamiliesCreated,
+              family_names: oldResult.familyCatalogue,
+            };
+          }
+        } catch { /* skip */ }
+
+        const meta = {
+          sessionId: sessionIdInput,
+          run_id: finalState.runId,
+          converged_collapse: `${finalState.findingCount} -> ${finalState.groups.length + finalState.ungroupedRefs.length}`,
+          trajectory,
+          total_groups: finalState.groups.length,
+          total_findings_in_groups: totalFindingsInGroups,
+          total_ungrouped: finalState.ungroupedRefs.length,
+          old_engine_comparison: oldEngineComparison,
+        };
+        return makeDumpReturn(JSON.stringify(meta, null, 2));
+      }
+
+      // ─── PART: groups:START-END ───
+      if (part.startsWith("groups:")) {
+        const [startStr, endStr] = part.slice(7).split("-");
+        const startIdx = parseInt(startStr, 10);
+        const endIdx = parseInt(endStr, 10);
+        const sortedGroups = [...finalState.groups].sort((a, b) => b.memberRefs.length - a.memberRefs.length);
+        const slice = sortedGroups.slice(startIdx, endIdx + 1);
+        const dumpGroups = slice.map((g) => ({
+          group_id: g.groupId,
+          member_count: g.memberRefs.length,
+          members: g.memberRefs.map((r) => ({ finding_id: r, title: refToTitle.get(r) || "(unknown)" })),
+          reasons: g.reasons,
+        }));
+        return makeDumpReturn(JSON.stringify(dumpGroups, null, 2));
+      }
+
+      // ─── PART: ungrouped or ungrouped:START-END ───
+      if (part === "ungrouped" || part.startsWith("ungrouped:")) {
+        const allUngrouped = finalState.ungroupedRefs.map((r) => ({
+          finding_id: r, title: refToTitle.get(r) || "(unknown)",
+        }));
+        if (part === "ungrouped") {
+          return makeDumpReturn(JSON.stringify(allUngrouped, null, 2));
+        }
+        const [startStr, endStr] = part.slice(10).split("-");
+        const startIdx = parseInt(startStr, 10);
+        const endIdx = parseInt(endStr, 10);
+        return makeDumpReturn(JSON.stringify(allUngrouped.slice(startIdx, endIdx + 1), null, 2));
+      }
+
+      // ─── PART: overmerge ───
+      if (part === "overmerge") {
+        const sortedGroups = [...finalState.groups].sort((a, b) => b.memberRefs.length - a.memberRefs.length);
+        const overMergeCandidates: any[] = [];
+        for (const g of sortedGroups) {
+          const { flagged, signal } = detectOverMerge(g, refToTitle);
+          if (flagged) {
+            overMergeCandidates.push({
+              group_id: g.groupId, member_count: g.memberRefs.length, signal,
+              members: g.memberRefs.map((r) => ({ finding_id: r, title: refToTitle.get(r) || "(unknown)" })),
+              reasons: g.reasons,
+            });
+          }
+        }
+        return makeDumpReturn(JSON.stringify(overMergeCandidates, null, 2));
+      }
+
+      throw new Error(`Unknown dumpPart: ${part}. Valid: meta, groups:START-END, ungrouped, overmerge`);
+    }
+    // ═══════ END DUMP MODE ═══════
 
     // Haiku guard
     if (model.toLowerCase().includes("haiku")) {
@@ -439,6 +582,7 @@ export default api({
           trajectory: [{ pass: 1, effectiveCount: findingCount, merges: 0, durationMs: errorStats.durationMs }],
           finalAnalysis: null, durationMs: Date.now() - startTime,
           error: pass1Result.error || "Unknown pass 1 failure",
+          dumpJson: null,
         };
       }
 
@@ -505,6 +649,7 @@ export default api({
         finalAnalysis: null,
         durationMs: Date.now() - startTime,
         error: null,
+        dumpJson: null,
       };
     }
 
@@ -587,6 +732,7 @@ export default api({
         thisPassStats: trivialStats, converged: true,
         trajectory: await buildTrajectory(ctx, sessionId, passNumber),
         finalAnalysis, durationMs: Date.now() - startTime, error: null,
+        dumpJson: null,
       };
     }
 
@@ -624,6 +770,7 @@ export default api({
         trajectory,
         finalAnalysis, durationMs: Date.now() - startTime,
         error: `Converged via parse failure: ${passResult.error || "unknown"}`,
+        dumpJson: null,
       };
     }
 
@@ -729,6 +876,7 @@ export default api({
       finalAnalysis,
       durationMs: Date.now() - startTime,
       error: null,
+      dumpJson: null,
     };
   },
 });

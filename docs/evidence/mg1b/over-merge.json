@@ -1,0 +1,168 @@
+[
+  {
+    "group_id": 56,
+    "member_count": 40,
+    "signal": "Zero noun overlap: f003↔f140, f003↔f304, f003↔f367",
+    "members": [
+      { "finding_id": "f003", "title": "Unregistered Trade Marks and Unassigned Third-Party IP Not Disclosed in IC Memos" },
+      { "finding_id": "f008", "title": "Unregistered Trade Marks on Core Brand Assets — Legal DD Finding Not in IC Memos" },
+      { "finding_id": "f025", "title": "Unregistered Trade Marks: Source-Stated Legal DD Finding" },
+      { "finding_id": "f029", "title": "IP Gaps: Courts Design Unassigned Deliverables and Unregistered Group Trade Marks" },
+      { "finding_id": "f050", "title": "Unregistered Trade Marks: Legal DD Flag Not Acknowledged in IC Memo Record" },
+      { "finding_id": "f052", "title": "No Registered Trade Marks in Any Jurisdiction — Not Disclosed in IC Memos" },
+      { "finding_id": "f060", "title": "Unregistered Trade Marks: IP Ownership Risk Not Disclosed in IC Memos" },
+      { "finding_id": "f061", "title": "Unregistered Trade Marks Across Group — Legal DD Finding Not in Any IC Memo" },
+      { "finding_id": "f083", "title": "Group Trade Names and Logos Unregistered — IP Vulnerability Not in IC Memos" },
+      { "finding_id": "f140", "title": "No Registered Trademarks — Group Brands Unprotected in Any Jurisdiction" },
+      { "finding_id": "f168", "title": "Group-Level Trade Marks Unregistered in All Jurisdictions" },
+      { "finding_id": "f172", "title": "Unregistered Trade Marks on Core Brand Assets Not Addressed in IC Memo" },
+      { "finding_id": "f182", "title": "Unregistered Trade Marks Across Entire Group Portfolio" },
+      { "finding_id": "f195", "title": "Unregistered Trade Marks — IP Ownership Risk Not Disclosed in IC Memo" },
+      { "finding_id": "f198", "title": "Unregistered Trade Marks: Legal DD Flags Risk, IC Memos Silent" },
+      { "finding_id": "f203", "title": "Unregistered Trade Marks Across All Jurisdictions" },
+      { "finding_id": "f230", "title": "Unregistered Trade Marks Across All Jurisdictions" },
+      { "finding_id": "f235", "title": "Unregistered Trade Marks: IP Protection Gap Identified by Legal DD" },
+      { "finding_id": "f304", "title": "IP Not Registered as Trade Marks in Any Jurisdiction" },
+      { "finding_id": "f336", "title": "Group Trade Names and Logos Entirely Unregistered as Trade Marks" },
+      { "finding_id": "f355", "title": "Unregistered Trade Marks Across All Jurisdictions" },
+      { "finding_id": "f367", "title": "IP Not Registered: Trade Names and Logos Unprotected in All Jurisdictions" },
+      { "finding_id": "f370", "title": "Unregistered Trade Marks Across All Jurisdictions; Memo Silent" },
+      { "finding_id": "f410", "title": "Unregistered Trade Marks Across All Group Brands" },
+      { "finding_id": "f254", "title": "No Registered Trade Marks in Any Jurisdiction; IP Assignment Gap in Courts Design Relationship" },
+      { "finding_id": "f208", "title": "Unregistered Trade Marks and Unresolved IP Assignment Gap (Courts Design)" },
+      { "finding_id": "f384", "title": "Unregistered Trade Marks and Incomplete IP Assignment from Third-Party Developer" },
+      { "finding_id": "f012", "title": "IP Assignment Gap: Courts Design Developer IP Rights Not Formally Assigned to Group" },
+      { "finding_id": "f034", "title": "Courts Design IP Assignment Gap — Legal DD Finding Absent from IC Memos" },
+      { "finding_id": "f040", "title": "IP Assignment Deficiency: Courts Design Deliverables Not Formally Assigned" },
+      { "finding_id": "f090", "title": "Courts Design IP Assignment: Defective Contractual Basis for Owned IP" },
+      { "finding_id": "f094", "title": "IP Assignment Gap: Courts Design Deliverables" },
+      { "finding_id": "f121", "title": "IP Structural Deficiencies — No Intra-Group Licences, Defective Employment IP Provisions, Unassigned Courts Design IPO Statement" },
+      { "finding_id": "f153", "title": "IP Assignment Gap — Courts Design Deliverables Not Formally Assigned" },
+      { "finding_id": "f184", "title": "IP Assignment Gap: Third-Party Developer IP Not Formally Assigned to Group" },
+      { "finding_id": "f266", "title": "IP Assignment Gap: Third-Party Developer Deliverables Not Formally Assigned" },
+      { "finding_id": "f344", "title": "IP ownership gaps: no group-level protection and incomplete design agency assignment" },
+      { "finding_id": "f384", "title": "Unregistered Trade Marks and Incomplete IP Assignment from Third-Party Developer" },
+      { "finding_id": "f403", "title": "IP Rights Assignment Gap for Third-Party Developer Deliverables" },
+      { "finding_id": "f421", "title": "Courts Design IP Ownership Defect: Group Holds Only Non-Exclusive Licence" }
+    ],
+    "reasons": [
+      "Both describe overlapping IP deficiency findings — unregistered trade marks and unassigned Courts Design developer IP — that are explicitly paired in g055 and fully elaborated in g003, making them the same dual-issue finding.",
+      "Both describe unregistered trade marks as a core finding; g018 pairs it with the Courts Design IP assignment gap but the unregistered trade marks issue is the same underlying finding already captured in g002 — however, g018 also includes the Courts Design IP assignment issue already covered in g003, making g018 a duplicate overlap group that must be resolved by separating its members.",
+      "All describe the same issue: the Group has not registered any of its trade names or logos as trade marks in any jurisdiction, and this finding is absent from the IC memo record.",
+      "Both describe the same dual issue from the Legal DD: (1) Group trade names/logos unregistered as trade marks in any jurisdiction, and (2) Courts Design IP assignment deficiency — treated together as a paired IP weakness finding.",
+      "All describe the same issue: Courts Design's IPO Statement does not contain the requisite provisions to assign IP rights in existing deliverables to the Group, leaving IP ownership uncertain."
+    ]
+  },
+  {
+    "group_id": 5,
+    "member_count": 26,
+    "signal": "Zero noun overlap: f033↔f364, f280↔f364, f354↔f364",
+    "members": [
+      { "finding_id": "f006", "title": "Senior Executive Restrictive Covenants: Duration, Scope and Adequacy Concerns" },
+      { "finding_id": "f033", "title": "SBD Executive Restrictive Covenant Weaknesses Absent from IC Memos" },
+      { "finding_id": "f037", "title": "Senior Executive Restrictive Covenants: Material Gaps and Named Carve-Out" },
+      { "finding_id": "f067", "title": "Senior Executive Restrictive Covenants Flagged Inadequate — IC Memos Silent" },
+      { "finding_id": "f092", "title": "Key-Man Restrictive Covenants Flagged as Potentially Inadequate — No IC Memo Resolution" },
+      { "finding_id": "f109", "title": "Senior Executive Restrictive Covenants Flagged as Insufficient by Legal DD" },
+      { "finding_id": "f129", "title": "Restrictive Covenant Limitations on Senior Executives Flagged by Legal DD, Not in IC Memo" },
+      { "finding_id": "f137", "title": "Senior Executive Restrictive Covenants Flagged as Limited by Legal DD" },
+      { "finding_id": "f141", "title": "Senior Executive Restrictive Covenant Adequacy Flagged in Legal DD; Absent from Memo" },
+      { "finding_id": "f159", "title": "Restrictive Covenant Scope in Senior Executive Contracts Flagged by Legal DD" },
+      { "finding_id": "f193", "title": "Restrictive Covenant Adequacy for Senior Executives Not Confirmed" },
+      { "finding_id": "f201", "title": "Restrictive Covenant Weakness for Senior Executives Not Surfaced in IC" },
+      { "finding_id": "f226", "title": "Senior Executive Restrictive Covenants Flagged as Potentially Unenforceable" },
+      { "finding_id": "f232", "title": "Restrictive Covenant Limitations on Key SBD Executives" },
+      { "finding_id": "f233", "title": "SBD Executive Restrictive Covenant Limitations Not Flagged in IC Memo" },
+      { "finding_id": "f237", "title": "Restrictive Covenant Enforceability Limitations on Senior Employees" },
+      { "finding_id": "f272", "title": "Key Man Restrictive Covenants Flagged as Potentially Inadequate by Legal DD" },
+      { "finding_id": "f276", "title": "SBD Executive Restrictive Covenants Flagged as Potentially Inadequate by Legal DD" },
+      { "finding_id": "f280", "title": "Key-Man Restrictive Covenant Deficiencies Not Reflected in Latest IC Memo" },
+      { "finding_id": "f284", "title": "Restrictive Covenants on Senior Executives Flagged as Potentially Unenforceable" },
+      { "finding_id": "f287", "title": "SBD Executive Restrictive Covenants Flagged as Inadequate by Legal DD" },
+      { "finding_id": "f354", "title": "SBD Executive Restrictive Covenant Weaknesses Not Surfaced in IC Memos" },
+      { "finding_id": "f364", "title": "Three Senior Executives Departing at Completion; SBD Non-Compete Enforceability Flagged" },
+      { "finding_id": "f385", "title": "Restrictive Covenant Weaknesses in Senior Executive Contracts" },
+      { "finding_id": "f388", "title": "Restrictive Covenant Weaknesses in Senior Executive Contracts Absent from IC Memo Record" },
+      { "finding_id": "f405", "title": "Key Executive Restrictive Covenants Flagged as Potentially Unenforceable" }
+    ],
+    "reasons": [
+      "All describe the same issue: SBD executive restrictive covenants are flagged by the Legal DD as potentially unenforceable or insufficient in scope to prevent post-departure competition or solicitation, and this is absent from the IC memo record."
+    ]
+  },
+  {
+    "group_id": 6,
+    "member_count": 13,
+    "signal": "Zero noun overlap: f080↔f393, f299↔f393, f299↔f416",
+    "members": [
+      { "finding_id": "f076", "title": "General Conditions Compliance Breach Risk Not Addressed in IC Memo" },
+      { "finding_id": "f080", "title": "Regulatory Enforcement Risk: Confirmed Ombudsman Breach on Cease Charges" },
+      { "finding_id": "f116", "title": "General Conditions C2 Compliance Review — Cease Charges Breach Flagged but Not Quantified" },
+      { "finding_id": "f126", "title": "Regulatory Compliance Breach Risk (General Condition C2 and Cease Charges) Not Surfaced in Memo" },
+      { "finding_id": "f215", "title": "Regulatory Compliance Breach Risk: General Conditions and Cease Charges" },
+      { "finding_id": "f255", "title": "Regulatory Compliance Breach: General Condition C2 — Enforcement Risk" },
+      { "finding_id": "f286", "title": "General Consumer Terms Compliance Breach — IC Memo Disclosure Not Confirmed" },
+      { "finding_id": "f299", "title": "Confirmed Regulatory Breach on Cancellation Charges Not Disclosed in IC Memo" },
+      { "finding_id": "f328", "title": "Potential Regulatory Breach on Cease Charges Not Disclosed in IC Memo Record" },
+      { "finding_id": "f352", "title": "Regulatory Breach (General Conditions C2) with Enforcement Risk — Absent from All IC Memos" },
+      { "finding_id": "f393", "title": "Multiple Active Ofcom General Condition Breaches Absent from IC Memos" },
+      { "finding_id": "f416", "title": "Multiple Ofcom General Conditions Technical Breaches — Low Enforcement Risk" },
+      { "finding_id": "f423", "title": "General Terms and Conditions Regulatory Compliance: Cease Charge Breach Identified" }
+    ],
+    "reasons": [
+      "All describe the same issue: the Group is technically in breach of Ofcom General Conditions (particularly regarding cease charges on final invoices following an Ombudsman ruling), with enforcement risk flagged by the Legal DD and absent from the IC memo record."
+    ]
+  },
+  {
+    "group_id": 7,
+    "member_count": 4,
+    "signal": "Zero noun overlap: f016↔f046, f021↔f105, f046↔f105",
+    "members": [
+      { "finding_id": "f016", "title": "NHS Digital Initiative QoE Add-Back: Recurring vs. One-Off Classification Risk" },
+      { "finding_id": "f021", "title": "NHS Digital Initiative Normalisation: Non-BAU Costs Borne by Group" },
+      { "finding_id": "f046", "title": "NHS X-on Revenue Spike Normalisation Not Explicitly Addressed in Latest IC Memo" },
+      { "finding_id": "f105", "title": "NHS / Public Funding Dependency: One-Off 2024 Benefit Disclosed but Not Modelled in IC Memo" }
+    ],
+    "reasons": [
+      "All describe the same issue: the NHS Digital Strategy Initiative created a one-off surge in X-on revenue/costs that requires normalisation in the financial model, and its treatment is not clearly addressed in the IC memo record."
+    ]
+  },
+  {
+    "group_id": 24,
+    "member_count": 3,
+    "signal": "Zero noun overlap: f130↔f158, f130↔f285, f158↔f285",
+    "members": [
+      { "finding_id": "f130", "title": "M&A Pipeline Assumptions Embedded in Base Case Without Individual Target Underwriting" },
+      { "finding_id": "f158", "title": "Management Case M&A Contribution Assumption Lacks Independent Validation" },
+      { "finding_id": "f285", "title": "Unidentified Future M&A Drives Material Terminal EBITDA" }
+    ],
+    "reasons": [
+      "All describe the same issue: the management/base case embeds material unidentified or uncommitted future M&A EBITDA contributions without individual target underwriting, independent validation, or disclosed pipeline certainty."
+    ]
+  },
+  {
+    "group_id": 32,
+    "member_count": 3,
+    "signal": "Zero noun overlap: f371↔f300",
+    "members": [
+      { "finding_id": "f371", "title": "Teams Voice Margin Compression Structurally Quantified by CDD" },
+      { "finding_id": "f166", "title": "Microsoft Teams Margin Dilution Risk to Horizon Not Addressed in Latest Memo" },
+      { "finding_id": "f300", "title": "Microsoft Teams Voice Share Acceleration: Structural Threat Understated in Thesis" }
+    ],
+    "reasons": [
+      "All describe the same issue: Microsoft Teams voice is gaining market share rapidly and this creates margin dilution for Gamma/SCG as Teams products carry materially lower aggregator margins than legacy voice/Horizon, a risk not quantified in the IC memo record."
+    ]
+  },
+  {
+    "group_id": 39,
+    "member_count": 3,
+    "signal": "Zero noun overlap: f393↔f334, f416↔f334",
+    "members": [
+      { "finding_id": "f393", "title": "Multiple Active Ofcom General Condition Breaches Absent from IC Memos" },
+      { "finding_id": "f416", "title": "Multiple Ofcom General Conditions Technical Breaches — Low Enforcement Risk" },
+      { "finding_id": "f334", "title": "PRS Network Operator Registration Breach — Ofcom Compliance" }
+    ],
+    "reasons": [
+      "All describe the same cluster of Ofcom General Condition technical breaches (mid-contract price rise notifications, end-of-contract notifications, annual best-tariff notifications, VoIP emergency services disclosure, PRS registration) that are documented in the Legal DD but absent from IC memos — noting f076/f080/f116/f126/f215/f255/f286/f299/f328/f352/f423 are grouped separately as they specifically concern the cease charges/GC C2 breach."
+    ]
+  }
+]
