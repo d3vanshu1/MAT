@@ -1,0 +1,14 @@
+{
+  "total_distinct": 274,
+  "counts": {
+    "surface_omission": 137,
+    "surface_thesis_drift": 5,
+    "flag_uncertain": 5,
+    "demote_false_positive": 14,
+    "not_absence_claim": 113
+  },
+  "distinct_to_present": 142,
+  "methodology": "For each of 274 distinct units (52 MG-1b groups + 222 ungrouped singletons), one disposition assigned using priority rule: surface_omission > surface_thesis_drift > flag_uncertain > demote_false_positive > not_absence_claim. Title-matching used to correlate fXXX positional IDs with UUID-based disposition files.",
+  "source_run_id": "576171a3-5533-4dcc-8af6-7a1ffd56026e",
+  "groups_with_conflicts": 22
+}

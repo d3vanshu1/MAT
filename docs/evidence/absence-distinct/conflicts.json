@@ -1,0 +1,206 @@
+[
+  {
+    "group_id": 7,
+    "representative_title": "NHS Digital Initiative QoE / Normalisation",
+    "resolved_disposition": "demote_false_positive",
+    "member_dispositions": {
+      "f016": "not_absence_claim",
+      "f021": "not_absence_claim",
+      "f046": "not_absence_claim",
+      "f105": "demote_false_positive"
+    }
+  },
+  {
+    "group_id": 24,
+    "representative_title": "M&A Pipeline Assumptions Without Individual Target Underwriting",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f130": "surface_omission",
+      "f158": "not_absence_claim",
+      "f285": "demote_false_positive"
+    }
+  },
+  {
+    "group_id": 28,
+    "representative_title": "Calls and Lines Structural Decline",
+    "resolved_disposition": "demote_false_positive",
+    "member_dispositions": {
+      "f142": "demote_false_positive",
+      "f011": "not_absence_claim",
+      "f327": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 31,
+    "representative_title": "Aggregator Gross Margin Structural Compression per CDD",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f318": "surface_omission",
+      "f424": "surface_omission",
+      "f270": "demote_false_positive"
+    }
+  },
+  {
+    "group_id": 32,
+    "representative_title": "Microsoft Teams Margin Dilution / Voice Share Acceleration",
+    "resolved_disposition": "surface_thesis_drift",
+    "member_dispositions": {
+      "f371": "not_absence_claim",
+      "f166": "surface_thesis_drift",
+      "f300": "demote_false_positive"
+    }
+  },
+  {
+    "group_id": 1,
+    "representative_title": "Seller Proceeds Sensitivity and Thin Equity Position",
+    "resolved_disposition": "demote_false_positive",
+    "member_dispositions": {
+      "f000": "demote_false_positive",
+      "f041": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 12,
+    "representative_title": "Supplier MSAs Contain Outdated DPA 1998 Provisions",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f353": "surface_omission",
+      "f361": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 13,
+    "representative_title": "Change of Control Triggers Mandatory Full Prepayment",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f086": "not_absence_claim",
+      "f347": "surface_omission"
+    }
+  },
+  {
+    "group_id": 14,
+    "representative_title": "Forecast on No-M&A Basis Despite Active Track Record",
+    "resolved_disposition": "demote_false_positive",
+    "member_dispositions": {
+      "f101": "demote_false_positive",
+      "f247": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 15,
+    "representative_title": "ROPA and Privacy Policy Integration Incomplete",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f104": "surface_omission",
+      "f186": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 19,
+    "representative_title": "Supplier Change-of-Control / Gamma Single-Supplier",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f379": "not_absence_claim",
+      "f418": "surface_omission"
+    }
+  },
+  {
+    "group_id": 22,
+    "representative_title": "South Africa Block D Leases: Landlord Consent Required",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f154": "surface_omission",
+      "f108": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 23,
+    "representative_title": "M&A Cohort GP Declining / Multiples Rising",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f324": "not_absence_claim",
+      "f386": "surface_omission"
+    }
+  },
+  {
+    "group_id": 26,
+    "representative_title": "Own-IP UCaaS Platform / Own-Network Competitive Advantage Dropped",
+    "resolved_disposition": "surface_thesis_drift",
+    "member_dispositions": {
+      "f073": "demote_false_positive",
+      "f398": "surface_thesis_drift"
+    }
+  },
+  {
+    "group_id": 27,
+    "representative_title": "£19.5m Revenue Basis Discrepancy / Datacube Coverage",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f096": "surface_omission",
+      "f310": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 34,
+    "representative_title": "Debtor Ageing Deterioration — Over-90-Day Balances Doubled",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f189": "not_absence_claim",
+      "f087": "surface_omission"
+    }
+  },
+  {
+    "group_id": 35,
+    "representative_title": "Horizon Margin Compression / Operator Connect Economics",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f164": "surface_omission",
+      "f043": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 36,
+    "representative_title": "CSRD / FRS 102 Accounting Changes — No Independent Stress-Test",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f117": "not_absence_claim",
+      "f259": "surface_omission"
+    }
+  },
+  {
+    "group_id": 43,
+    "representative_title": "X-on Health Market Share Irreconcilable CDD Conflict",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f118": "surface_omission",
+      "f257": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 45,
+    "representative_title": "Overhead Cost Leverage Limited / People Cost Jump",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f375": "not_absence_claim",
+      "f161": "surface_omission"
+    }
+  },
+  {
+    "group_id": 48,
+    "representative_title": "Surgery Connect Leadership Vacancy / CTO Upgrade Unaddressed",
+    "resolved_disposition": "flag_uncertain",
+    "member_dispositions": {
+      "f296": "flag_uncertain",
+      "f333": "not_absence_claim"
+    }
+  },
+  {
+    "group_id": 50,
+    "representative_title": "Cohort NRR Deterioration Contradicts IP Migration Narrative",
+    "resolved_disposition": "surface_omission",
+    "member_dispositions": {
+      "f349": "not_absence_claim",
+      "f292": "surface_omission"
+    }
+  }
+]
