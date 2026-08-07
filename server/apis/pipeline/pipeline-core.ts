@@ -681,7 +681,14 @@ export async function applyEngagementAbsenceGate(
   findings: MergedFinding[],
   housekeepingFindings: MergedFinding[],
   moduleId: string,
+  deps?: {
+    buildMap?: typeof buildEngagementMap;
+    matchFindings?: typeof matchAbsenceFindings;
+  },
 ): Promise<EngagementGateResult> {
+  const buildMap = deps?.buildMap ?? buildEngagementMap;
+  const matchFindings = deps?.matchFindings ?? matchAbsenceFindings;
+
   // Only run for checklist modules
   if (!CHECKLIST_MODULES.has(moduleId)) {
     return { survivingFindings: findings, housekeepingFindings, demotedCount: 0, flaggedCount: 0, thesisDriftCount: 0, unprocessedCount: 0 };
@@ -696,7 +703,7 @@ export async function applyEngagementAbsenceGate(
 
   let engagementMap: EngagementMapResult;
   try {
-    engagementMap = await buildEngagementMap(queryFn, aiFn, dealId, mapDeadline);
+    engagementMap = await buildMap(queryFn, aiFn, dealId, mapDeadline);
   } catch (err: any) {
     console.warn(`[engagementGate] Map build FAILED: ${err?.message} — retaining all findings (no demotion)`);
     return { survivingFindings: findings, housekeepingFindings, demotedCount: 0, flaggedCount: 0, thesisDriftCount: 0, unprocessedCount: 0 };
@@ -719,7 +726,7 @@ export async function applyEngagementAbsenceGate(
 
   let matchResult: MatcherOutput;
   try {
-    matchResult = await matchAbsenceFindings(
+    matchResult = await matchFindings(
       findingsInput, engagementMap, aiFn, dealId, "gate", matcherDeadline
     );
   } catch (err: any) {
