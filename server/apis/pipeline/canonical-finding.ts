@@ -207,6 +207,14 @@ export const CanonicalFindingSchema = z.object({
   /** Full analyses from non-representative findings absorbed during global consolidation.
    *  Preserves content that would otherwise be lost when cluster members are merged. */
   consolidated_analyses: z.array(z.string()).optional(),
+
+  // --- MG-4: Materiality tiering (Stage 4.6) ---
+  /** Materiality tier assigned by Sonnet: 1=deal-changing, 2=condition/diligence, 3=noted/immaterial */
+  materiality_tier: z.number().optional(),
+  /** One-sentence rationale tying the finding to deal impact */
+  tier_rationale: z.string().optional(),
+  /** Which return driver or thesis pillar the finding affects, or "none" */
+  tier_driver: z.string().optional(),
 });
 
 export type CanonicalFinding = z.infer<typeof CanonicalFindingSchema>;

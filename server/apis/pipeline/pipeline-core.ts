@@ -67,6 +67,7 @@ import { runPostCompletionAudit } from "./post-completion-audit.js";
 import { validateMergeContract } from "./merge-contract-validator.js";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
 import { modelConsolidate } from "./model-consolidation-adapter.js";
+import { tierFindings } from "./materiality-tiering-stage.js";
 import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
@@ -991,6 +992,8 @@ interface PostMergePipelineInput {
   dealId?: string;
   /** AI function — required for engagement absence gate */
   aiFn?: (req: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"; path: string; body: Record<string, unknown> }, opts: { response: z.ZodType<any> }, meta?: { label: string }) => Promise<any>;
+  /** Run ID — required for materiality tiering checkpoint (MG-4) */
+  runId?: string;
 }
 
 interface PostMergePipelineResult {
@@ -999,8 +1002,9 @@ interface PostMergePipelineResult {
 }
 
 async function runPostMergePipeline(input: PostMergePipelineInput): Promise<PostMergePipelineResult> {
+  const invocationStart = Date.now(); // MG-4: track for materiality tiering time budget
   let { findings, housekeepingFindings } = input;
-  const { numericReport, claimsReconciliation, fileTagMap, moduleId, queryFn, dealId, aiFn } = input;
+  const { numericReport, claimsReconciliation, fileTagMap, moduleId, queryFn, dealId, aiFn, runId } = input;
 
   // === Stage 1: FABRICATED_ARITHMETIC suppression (Fix 19 closure: context-guarded) ===
   const { shouldSuppressArithmeticFinding } = await import("./fabricated-arithmetic-patterns.js");
@@ -1633,6 +1637,32 @@ async function runPostMergePipeline(input: PostMergePipelineInput): Promise<Post
     housekeepingFindings = gateResult.housekeepingFindings;
   }
 
+  // === Stage 4.6: Materiality Tiering (MG-4) ===
+  // Tiers each absence-surviving genuine-omission finding (Tier 1/2/3) via Sonnet.
+  // Runs ONLY for CHECKLIST_MODULES (omission_audit, blind_spot_scanner, diligence_completeness).
+  // Uses checkpoint/resume to survive across 240s invocation boundaries.
+  if (CHECKLIST_MODULES.has(moduleId) && queryFn && aiFn) {
+    const tierCheckpointKey = runId ? `${runId}:materiality` : `postmerge:${moduleId}:materiality`;
+    const tierResult = await tierFindings(
+      findings as any,
+      queryFn,
+      aiFn,
+      tierCheckpointKey,
+      invocationStart,
+    );
+    if (tierResult.partial) {
+      console.log(
+        `[pipeline:postMerge][MG-4] Materiality tiering PARTIAL: tiered ${tierResult.tieredCount}/${tierResult.totalEligible}, ` +
+        `${tierResult.untieredFindingIds.length} findings will be tiered on next resume`
+      );
+    } else {
+      console.log(
+        `[pipeline:postMerge][MG-4] Materiality tiering complete: ${tierResult.tieredCount}/${tierResult.totalEligible} tiered ` +
+        `(${tierResult.skippedFromCheckpoint} from checkpoint)`
+      );
+    }
+  }
+
   // === Stage 5: Deterministic independent override ===
   let independentOverrides = 0;
   for (const f of findings) {
@@ -1737,6 +1767,7 @@ export async function runPostMergeFinalization(input: CanonicalFinalizeInput): P
     queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
     dealId: input.dealId,
     aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
+    runId,
   });
   let { findings, housekeepingFindings } = postMerge;
 
@@ -5318,6 +5349,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
     dealId,
     aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
+    runId,
   });
   finalFindings = postMergeMainResult.findings;
   finalHousekeepingFindings = postMergeMainResult.housekeepingFindings;
