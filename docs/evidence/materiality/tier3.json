@@ -1,0 +1,260 @@
+[
+  {
+    "unit_id": "group_39",
+    "title": "Multiple Ofcom General Condition Technical Breaches (Non-C2)",
+    "rationale": "Non-C2 Ofcom General Condition breaches are administrative/technical in nature, carry no material financial penalties at SCG's scale, and are routine for UK comms providers of this size — they do not threaten licence continuity, customer retention, or any of the five thesis pillars at a £655m EV.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_12",
+    "title": "Multiple Supplier MSAs Contain Outdated DPA 1998 Provisions",
+    "rationale": "Legacy DPA 1998 references in supplier MSAs are a routine compliance housekeeping issue with no plausible path to material financial liability or deal-thesis impairment at a £655m EV; remediation is standard legal boilerplate work post-close.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_20",
+    "title": "Preference Share Coupon Rate Discrepancy Across Share Classes",
+    "rationale": "A discrepancy in preference share coupon rates across share classes is a routine capital structure clean-up item with no bearing on operating performance, EBITDA, churn, M&A pipeline, or the thesis pillars driving the 23% IRR / 2.8x MoM base case at this EV.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_15",
+    "title": "ROPA and Privacy Policy Integration Materially Incomplete",
+    "rationale": "Incomplete ROPA and privacy policy integration is a standard post-acquisition data governance gap common in roll-up businesses with ~50 acquisitions; at this deal size it carries no plausible material financial exposure (ICO fines for SME-scale violations are typically modest and rarely enforced at deal-threatening scale), does not impair any return driver, and is remediable via a standard warranty/undertaking to complete within 12–18 months post-close.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_22",
+    "title": "South Africa Leases Require Landlord Consent for Change of Control",
+    "rationale": "South Africa lease consent requirements are a standard change-of-control condition in a non-core geography with no identified revenue or EBITDA materiality relative to a £655m EV, making this a routine closing mechanic with negligible deal impact.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_30",
+    "title": "No Legitimate Interest Assessments / Marketing Consent Gaps",
+    "rationale": "GDPR/PECR marketing consent gaps are a common operational compliance issue at SME-focused comms businesses and, absent evidence of regulatory action or material customer base exposure, carry no plausible path to threatening the £655m EV, 23% IRR, or 7% churn assumption.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_36",
+    "title": "CSRD / FRS 102 Accounting Changes — No Independent Stress-Test",
+    "rationale": "CSRD applicability to a UK-domiciled private company at this size is limited and evolving, and FRS 102 changes (primarily lease and revenue recognition) are well-flagged accounting standard updates that affect presentation but not cash generation, FCF, or the EBITDA-based deal underwriting; the absence of an independent stress-test is a process observation rather than a value-at-risk finding material to a 23% IRR / 2.8x MoM thesis built on cash EBITDA.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f007",
+    "title": "UCaaS Resale Margin Consistency: ~66% vs ~67% Across Memo Sections",
+    "rationale": "A 1pp rounding/presentation discrepancy in UCaaS resale margins across memo sections is a documentation artefact with no meaningful impact on a £655m deal where the thesis centres on own-IP platform growth, not resale economics.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f013",
+    "title": "SIPP Property Break Right Expired September 2025: Exercise Status Unconfirmed",
+    "rationale": "An expired SIPP property break right is a legacy pension property technicality with no direct bearing on revenue, customer retention, M&A pipeline, or leverage capacity at a £655m EV deal — the financial exposure is de minimis relative to deal size.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f053",
+    "title": "German Direct Routing vs. Operator Connect Transition Dynamic",
+    "rationale": "Germany is not identified as a material revenue geography in the SCG deal context, which is centred on UK SME and NHS/healthcare verticals; a Microsoft Teams routing methodology transition in a non-core market has no discernible impact on the 23% IRR / 2.8x base case or any of the five thesis pillars.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f064",
+    "title": "Block Solutions Ltd: No Express Termination Rights for the Group",
+    "rationale": "The absence of express termination rights in a single supplier/partner agreement (Block Solutions) is a standard contractual gap that poses no material threat to revenue, EBITDA, or the core thesis pillars of platform growth, M&A roll-up, or customer retention at a £655m EV.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f100",
+    "title": "Cash Reconciliation Limited — Bank Recs Reviewed at March 2025 Only",
+    "rationale": "A single point-in-time bank reconciliation review at March 2025 is a standard QoF scoping limitation that does not threaten the deal thesis, pricing, or base-case returns on a £655m EV transaction where the risk is earnings quality and M&A execution, not treasury fraud.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f128",
+    "title": "Chippenham Hill Holdover: No Renewal Negotiations Underway, No Landlord Consent",
+    "rationale": "A single office lease holdover at Chippenham Hill has no bearing on the core thesis drivers (platform IP growth, M&A pipeline, customer retention, or EBITDA margin) and at deal scale represents an immaterial operational property matter that can be resolved post-close with standard landlord engagement.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f136",
+    "title": "CCaaS Market Competitive Concentration — Genesys/Avaya/Zendesk/NICE Hold 44% of European Market",
+    "rationale": "SCG is a vendor-agnostic SME reseller and own-IP niche verticals play (NHS/surgery, education), not a direct CCaaS competitor to Genesys/Avaya/NICE; market-level concentration in enterprise CCaaS does not threaten SCG's retention, M&A pipeline, or Surgery Connect/Evonex growth trajectory at the SME/vertical tier where it operates.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f145",
+    "title": "ARPU Comparability Limitation: Historic vs. Forecast Periods Not Directly Comparable",
+    "rationale": "ARPU metric discontinuity between historic and forecast periods is a data-quality presentation issue rather than a threat to retention, M&A pipeline, or IP-mix re-rating; the base-case return is driven by churn rates, EBITDA margin, and M&A contribution, none of which are directly undermined by an ARPU comparability gap.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f152",
+    "title": "IT Licences Margin Ceiling: Microsoft Pricing Control Limits Upside",
+    "rationale": "Microsoft pricing control on IT licences is a known structural feature of the SME reseller market and does not threaten the core return drivers (Surgery Connect/Evonex own-IP margin expansion, M&A roll-up, churn retention), which are deliberately designed to reduce dependence on low-margin vendor-resale revenue; it caps upside on a commoditised segment rather than breaking the base case.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f163",
+    "title": "IBMG Contract Loss (£596k p.a.) Not Quantified or Contextualised in IC Memos",
+    "rationale": "£596k p.a. revenue loss represents less than 0.1% of the £655m EV and is immaterial to a base case built on 35k+ customers, ~7% portfolio churn, and a near-term M&A pipeline of £6m EBITDA; its absence from IC memos is consistent with normal materiality thresholds at this deal size.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f199",
+    "title": "Subsidiary contracts lack governing law and jurisdiction clauses",
+    "rationale": "Missing governing law/jurisdiction clauses in subsidiary contracts is a standard legal housekeeping point that poses no direct threat to revenue retention, M&A pipeline, or platform re-rating at a £655m EV, and would typically be remedied by a low-cost contract tidy-up post-close.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f194",
+    "title": "Datakom FCA De-registration: Documentation Present, Status Not Confirmed",
+    "rationale": "Datakom is a single acquired entity within a ~50-acquisition portfolio; an FCA de-registration with documentation present suggests an administrative wind-down already in process, and at this deal size the residual regulatory exposure from one sub-entity is immaterial to returns unless it touches a regulated revenue line central to the thesis, which is not indicated.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f200",
+    "title": "Apex Park Licence Expired December 2025: Continuity Status Unknown",
+    "rationale": "An expired site licence for what appears to be a single premises (Apex Park) is a routine property/facilities matter that poses no threat to revenue, customer retention, M&A execution, or the own-IP growth thesis at a £655m EV; it requires a standard landlord consent or lease renewal condition but is immaterial to deal economics.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f205",
+    "title": "Gold Partner Agreement Unsecured Loan: Recoverability Not Disclosed",
+    "rationale": "An undisclosed recoverability position on a partner loan is a balance-sheet housekeeping item that, absent any indication of materiality relative to the £655m EV, is unlikely to affect deal pricing, leverage covenants, or any of the five core return drivers.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f206",
+    "title": "Winchester Consultancy Related-Party Arrangement: £70k/Month Margin Pass-Through",
+    "rationale": "At ~£840k/year, this related-party arrangement is immaterial relative to a £655m EV and does not threaten EBITDA, leverage covenants, or any of the five thesis pillars; it warrants standard RPT disclosure and arm's-length confirmation in the SPA but has no realistic deal-changing or return impact.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f216",
+    "title": "16-Month FY23 Period Creates Structural Comparability Risk Across the QoE Baseline",
+    "rationale": "A non-standard 16-month FY23 accounting period creates an analytical nuisance requiring normalisation but does not threaten the thesis, alter underlying cash EBITDA, or affect the deal's return drivers — QoE adjustments for stub periods are routine diligence work and the LTM Sep-26 baseline already supersedes the statutory comparator.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f221",
+    "title": "CCS Framework Notification Obligation: Potential Conflict-of-Interest Constraint",
+    "rationale": "A CCS framework notification or conflict-of-interest constraint is a public-sector compliance procedural requirement that, at this deal size and given SCG's primary revenue base in SME/healthcare comms rather than central government procurement, is unlikely to affect retention, M&A cadence, or the Surgery Connect/Evonex growth trajectory in any material way.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f222",
+    "title": "Goodwill Concentration — £339m NBV from Historical Acquisitions",
+    "rationale": "At a £655m EV built explicitly on ~50 acquisitions, a £339m goodwill balance is an expected accounting artefact of the inorganic growth strategy rather than a new risk; impairment would be a symptom of business deterioration already visible in EBITDA/churn metrics that the IC would catch through operating KPIs, and the goodwill itself does not affect cash returns or leverage covenants in the base case.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f224",
+    "title": "Employee Equity Vesting Schedules Not Disclosed",
+    "rationale": "Employee equity vesting terms are a standard HR/governance matter that do not affect the revenue model, EBITDA, leverage capacity, or any of the five thesis pillars at a £655m EV, and any dilution or retention cost would be immaterial to base-case returns unless management cliff-vesting creates a flight-risk for key individuals (which would be a separate finding).",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f227",
+    "title": "Germany Expansion: Structural Market Differences vs. UK Model",
+    "rationale": "Germany expansion is not referenced as a base-case return driver in the thesis — which is entirely UK-centric (SME comms, Surgery Connect NHS, Evonex UK education) — so structural market differences in Germany have no material impact on the 23% IRR / 2.8x MoM underwrite.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f238",
+    "title": "Data Broker Agreement Lacks Consent Obligation — Prospect Data Provenance Unverified",
+    "rationale": "Prospect data provenance for marketing is a compliance hygiene issue common across SME-facing businesses but does not threaten customer retention, platform revenue, M&A pipeline, or the leverage/return structure at this deal size and thesis orientation.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f245",
+    "title": "Outstanding 2024 Rent Review at Hereford: No Formal Nil-Increase Documentation",
+    "rationale": "An unresolved rent review at a single Hereford office is a minor administrative property matter with negligible financial exposure relative to a £655m EV and poses no threat to retention, M&A execution, or the own-IP mix re-rating thesis.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f248",
+    "title": "Telecoms Regulatory DD Scope Explicitly Excludes Broad Compliance Review",
+    "rationale": "An explicitly scoped-out telecoms regulatory compliance review is a process gap rather than an identified liability; SCG operates in a well-understood UK telecoms regulatory environment (Ofcom, PECR, GCs) with no flagged enforcement history, and the deal thesis turns on software/IP mix shift and M&A roll-up rather than regulatory arbitrage, so the absence of a broad compliance sweep does not threaten the base-case returns at this EV.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f261",
+    "title": "Riduna Park Lease: Terrorism Exclusion and Uncapped Service Charge Not in IC Memos",
+    "rationale": "A terrorism exclusion on a single office lease and an uncapped service charge are standard property risk items that carry no material bearing on a £655m EV deal whose thesis rests on software verticalisation, M&A roll-up, and customer retention — the financial exposure is negligible relative to deal size and the finding touches none of the core return drivers.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f278",
+    "title": "Cardiff Gate Lease Break Option: Undisclosed in IC Memos",
+    "rationale": "A single office lease break option, even if undisclosed, represents a negligible liability or optionality item relative to a £655m EV and does not affect revenue, churn, M&A pipeline, or any core return driver.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f291",
+    "title": "Surgery Connect ARR New Wins: FY25 Timing Distortion Masks Underlying Growth Rate",
+    "rationale": "A single-year timing distortion in new ARR wins is a normalisation/presentation nuance rather than a structural growth impairment; it does not alter Surgery Connect's ~30% growth trajectory, GP economics, or the re-rating thesis, and would be expected to wash through in the hold period without moving IRR materially.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f298",
+    "title": "DPO/CISO Dual-Role Concentration — No Separate Service Agreement",
+    "rationale": "A single individual holding DPO/CISO responsibilities without a separate service agreement is a governance housekeeping point that carries no material financial exposure at a £655m EV and does not threaten retention, M&A execution, or the own-IP revenue ramp that drive the base-case 23% IRR/2.8x MoM.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f302",
+    "title": "Semiconductor Stockpiling Inventory Normalisation — Context Not in Memos",
+    "rationale": "SCG is a software/services-led comms platform (own-IP SaaS and managed UCaaS) with a capital-light, acquisition-driven model; it is not a hardware manufacturer or semiconductor-intensive business, so post-COVID chip inventory normalisation is structurally irrelevant to its revenue, margins, or return drivers.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f319",
+    "title": "MS Teams Germany Share Trajectory Not Addressed in IC Memos",
+    "rationale": "MS Teams penetration in Germany is a micro-geographic data point on a single vendor's collaboration product within a UK-centric SME comms and NHS/healthcare verticalisation thesis, with no evidence of material revenue exposure or strategic dependency that could move the £655m EV or threaten the 23% IRR base case.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f335",
+    "title": "International Data Transfer to South Africa — SCC Reliance Not Independently Verified",
+    "rationale": "Unverified IDTA/SCC reliance for South Africa data transfers is a routine GDPR compliance housekeeping point with no material impact on revenue, customer retention, or M&A pipeline at a £655m EV, and does not threaten any return driver in the base case.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f348",
+    "title": "H&S Compliance Cluster: Documentation Gaps, Fire Safety, and RIDDOR",
+    "rationale": "Health & safety documentation gaps, fire safety, and RIDDOR reporting deficiencies are operational housekeeping issues standard in SME roll-up targets and carry no credible path to materially impairing a £655m EV, the 23% IRR, or any of the five thesis pillars at this deal size.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f360",
+    "title": "Standard Customer T&Cs Dated April 2018 — Seven-Year Vintage Not Flagged in IC Memos",
+    "rationale": "Outdated standard T&Cs are a common housekeeping issue in SME-focused roll-ups with legacy customer bases; at 35k+ customers the practical exposure is diffuse and renegotiation risk is low, and this does not threaten retention metrics, M&A execution, or the IP-mix re-rating that drive the 23% IRR.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f397",
+    "title": "Unpaid Ofcom Administrative Charges: £60,000–£80,000 Quantified Liability",
+    "rationale": "A £60k–£80k unpaid Ofcom administrative charge is de minimis relative to a £655m EV and poses no threat to the base-case IRR, churn profile, or any thesis pillar; it is a standard closing condition/escrow item at most.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f400",
+    "title": "Fixed Connectivity: Legacy Decline vs FTTP Growth Creates Revenue Mix Shift",
+    "rationale": "A structural shift from legacy fixed connectivity to FTTP is a well-understood secular trend fully visible in SCG's existing revenue mix and consistent with the thesis that own-IP platform growth (Surgery Connect, Evonex) offsets legacy decline — it does not threaten the base-case IRR because the model is already predicated on mix shift away from low-margin legacy connectivity toward higher-margin verticalised software, and ~7% churn guidance implicitly embeds some legacy attrition.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f426",
+    "title": "Asbestos Survey at Hemel Hempstead Outdated; 2019 Refurbishment Survey Unconfirmed",
+    "rationale": "An outdated asbestos management survey at a single leased office premises is a routine property compliance matter with no plausible path to affecting the £655m EV, deal returns, or any of the five thesis pillars.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f431",
+    "title": "Germany Market Entry Risks Not Addressed in Memo",
+    "rationale": "SCG's thesis is entirely UK-domestic (SME one-stop-shop, NHS Surgery Connect, UK education via Evonex), so a nascent or prospective Germany entry is peripheral to the base-case return drivers and, absent any material committed capex or management distraction quantified in the memo, does not threaten the 23% IRR / 2.8x.",
+    "driver": "none"
+  }
+]

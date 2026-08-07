@@ -1,0 +1,434 @@
+[
+  {
+    "unit_id": "group_5",
+    "title": "Senior Executive Restrictive Covenants Flagged Inadequate",
+    "rationale": "Inadequate post-exit restrictive covenants on senior executives create meaningful risk to the 'backable management' thesis pillar and M&A pipeline continuity, warranting a condition to close requiring enhanced covenants, but does not independently threaten the base-case IRR absent evidence of imminent departure or competitor solicitation.",
+    "driver": "Backable management / M&A industrialisation"
+  },
+  {
+    "unit_id": "group_56",
+    "title": "Unregistered Trade Marks and IP Assignment Gaps (Courts Design)",
+    "rationale": "Unregistered trade marks and IP assignment gaps in Courts Design create title risk over branding/design assets that could impair the own-IP verticalisation thesis (Surgery Connect / Evonex), but the issue is remediable via pre-close IP assignment deeds and registration, making it a standard closing condition rather than a deal-killer.",
+    "driver": "Verticalisation / own-IP platform differentiation and re-rating thesis"
+  },
+  {
+    "unit_id": "group_6",
+    "title": "General Conditions C2 / Cease Charges Regulatory Breach",
+    "rationale": "A regulatory breach on cease charges creates a defined but containable liability and potential remediation cost that warrants a specific diligence condition but is unlikely to be material enough at this EV to threaten the 23% IRR base case absent evidence of a systemic, ongoing breach or a live enforcement action.",
+    "driver": "M&A pipeline / regulatory compliance — could affect deal structure (price chip or escrow) but not thesis"
+  },
+  {
+    "unit_id": "group_4",
+    "title": "Change-of-Control Termination Rights in Customer Contracts",
+    "rationale": "CoC termination rights in customer contracts could elevate post-close churn above the ~7% base-case assumption, but the diversified, low-concentration customer book means even a modest uptick in triggered exits is unlikely to break the 23% IRR unless clustered in the high-margin Surgery Connect vertical, making this a condition/consent-solicitation diligence item rather than a deal-stopper.",
+    "driver": "retention holding (churn assumption underpinning recurring revenue base)"
+  },
+  {
+    "unit_id": "group_10",
+    "title": "Buyside CDD Phase I Only — Phase II Validation Absent",
+    "rationale": "At 11.6x EBITDA and 6x opening leverage, Phase I CDD without Phase II validation leaves the IC without granular customer-level churn validation, NPS cohort analysis, and competitive win/loss data that underpin the retention and re-rating assumptions central to the 23% IRR; this is a real condition-to-close gap but not deal-changing because Phase I findings have not surfaced a thesis-breaking issue.",
+    "driver": "retention holding / own-IP re-rating"
+  },
+  {
+    "unit_id": "group_9",
+    "title": "CCaaS Scale Delivery Risk / Value Leakage to Vendors",
+    "rationale": "CCaaS delivery dependency on third-party vendors creates margin leakage and execution risk on the verticalisation thesis (own-IP mix 30%→43%), but the finding does not threaten the existing SME base or near-term cash flows sufficiently to break the 23% IRR base case.",
+    "driver": "Verticalisation / own-IP mix re-rating (Thesis Pillar 1 and 4)"
+  },
+  {
+    "unit_id": "group_13",
+    "title": "Change of Control Triggers Mandatory Full Prepayment of Facilities",
+    "rationale": "CoC prepayment obligations are a standard structural consideration that must be addressed as a closing condition (typically via lender consent, refinancing, or a new debt package), but at a £655m EV with 6x opening leverage already assumed in the model, this is an expected transactional mechanic that does not threaten the thesis or base-case returns if handled pre-close.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "group_8",
+    "title": "NHS Deferred Income Unwind as Working Capital Driver",
+    "rationale": "If NHS deferred income is inflating reported working capital or normalised cash conversion in the deal model, it could misstate the true cash EBITDA bridge and therefore the entry multiple, but it is a modelling/diligence correction rather than a thesis-breaker given Surgery Connect's structural position and recurring NHS demand.",
+    "driver": "verticalisation / Surgery Connect cash EBITDA quality and leverage covenant headroom"
+  },
+  {
+    "unit_id": "group_16",
+    "title": "Surgery Connect Ancillary Revenue CAGR Lacks Validation",
+    "rationale": "Ancillary revenue growth within Surgery Connect is a named AI upsell return driver and contributes to the re-rating thesis, so unvalidated CAGR assumptions require a specific diligence condition but does not threaten the core Surgery Connect platform penetration or the broader SME/M&A thesis pillars underpinning base-case returns.",
+    "driver": "AI ancillary upsell into Surgery Connect / own-IP mix re-rating"
+  },
+  {
+    "unit_id": "group_21",
+    "title": "Legal DD Structural Limitations and Six-Month Staleness",
+    "rationale": "Six-month-stale legal DD on a deal at 6x leverage with 50+ acquisitions in the structure creates real closing-risk and potential SPA warranty gap, requiring a refresh or bring-down confirmation as a condition to close, but does not itself threaten the thesis or base-case returns absent any specific adverse finding surfaced by that staleness.",
+    "driver": "M&A / deal execution integrity; SPA / warranty risk management"
+  },
+  {
+    "unit_id": "group_24",
+    "title": "M&A Pipeline Assumptions Without Individual Target Underwriting",
+    "rationale": "M&A is a core thesis pillar and at 6x opening leverage any systematic overpayment or pipeline slippage could pressure returns, but the finding reflects an execution/diligence process gap rather than an identified failure in deal economics, and SCG's 50-acquisition track record provides a meaningful empirical base to stress-test aggregate assumptions.",
+    "driver": "M&A continuation / inorganic EBITDA growth"
+  },
+  {
+    "unit_id": "group_25",
+    "title": "NRR Trough at 94.4% FY24 / VDD Churn Granularity Not Disclosed",
+    "rationale": "A 94.4% NRR trough in FY24 directly tests the retention-holding pillar of the base case, but without granular VDD churn data it is unquantified whether this is a secular deterioration or a one-period dip—requiring a diligence condition before close rather than being deal-changing, given the 7% headline churn figure and 35k+ customer base.",
+    "driver": "Retention holding (thesis pillar 2) and IRR sensitivity to churn rate assumptions"
+  },
+  {
+    "unit_id": "group_33",
+    "title": "Earn-Out Obligations Across Acquired Entities Proximate to Close",
+    "rationale": "Earn-out obligations proximate to close create near-term cash leakage and potential balance-sheet liabilities that could pressure the already 6x levered structure, but are a known feature of an industrialised M&A model and manageable via standard W&I/SPA conditions and cash flow modelling rather than a deal-stopper.",
+    "driver": "M&A engine / leverage headroom"
+  },
+  {
+    "unit_id": "group_34",
+    "title": "Debtor Ageing Deterioration — Over-90-Day Balances Doubled",
+    "rationale": "Doubling of over-90-day debtors is a meaningful working-capital and credit-quality signal that warrants verification, but at this stage it is a diligence condition rather than a thesis-breaker absent evidence of systemic churn or bad-debt provisioning shortfalls.",
+    "driver": "Cash conversion / leverage serviceability"
+  },
+  {
+    "unit_id": "group_35",
+    "title": "Horizon Margin Compression vs Operator Connect Economics",
+    "rationale": "Operator Connect pricing dynamics could compress margins on the UCaaS/telephony stack over the hold period, but the shift toward own-IP platforms with ~55% GP share structurally mitigates this exposure as mix improves from 30% to 43%, making it a condition/monitoring item rather than a deal-breaker.",
+    "driver": "Verticalisation / own-IP GP margin expansion underpinning re-rating"
+  },
+  {
+    "unit_id": "group_37",
+    "title": "Vendor FDD Draft Status Unresolved / PwC Disclaims Accuracy",
+    "rationale": "An unresolved PwC FDD draft with active accuracy disclaimers means the financial foundation underwriting the 11.6x entry multiple has not been formally signed off, creating a closing condition risk and potential for EBITDA adjustments — but absent specific identified misstatements it is a process/timing issue, not a deal-killer.",
+    "driver": "M&A pipeline valuation accuracy / leverage structuring"
+  },
+  {
+    "unit_id": "group_40",
+    "title": "Key Supplier Agreements Expired — Operating Informally",
+    "rationale": "Expired supplier agreements create legal and commercial exposure that could disrupt the vendor-agnostic SME one-stop-shop model and M&A integration pipeline, but are typically curable via condition to close requiring counterparty renewals or comfort letters.",
+    "driver": "Vendor-agnostic SME platform — supplier cost base and continuity underpinning reseller margin"
+  },
+  {
+    "unit_id": "group_38",
+    "title": "X-On Health DPIAs Incomplete / Special-Category Health Data Exposure",
+    "rationale": "Incomplete DPIAs on X-On Health (Surgery Connect) expose the business to ICO enforcement, fines up to 4% of global turnover, and reputational damage in the NHS/GP customer base, but this is a remediable compliance gap requiring a condition to close rather than a deal-killer given the business is operational and no breach has crystallised.",
+    "driver": "Surgery Connect vertical — highest-GP-share platform and primary re-rating driver (30%→43% own-IP mix)"
+  },
+  {
+    "unit_id": "group_43",
+    "title": "X-on Health Market Share Irreconcilable CDD Conflict",
+    "rationale": "Conflicting CDD data on X-on Health / Surgery Connect market share creates uncertainty around the size and defensibility of the ~30% growth assumption, requiring reconciliation before close but does not by itself kill the deal given the product's demonstrated GP contribution and existing 55% gross profit share.",
+    "driver": "Verticalisation / own-IP platform growth (Surgery Connect revenue trajectory and re-rating thesis)"
+  },
+  {
+    "unit_id": "group_46",
+    "title": "Budget vs Actuals Revenue Shortfall / No Macro Contingency",
+    "rationale": "A revenue shortfall versus budget signals execution risk and modest forecast credibility concern, but without evidence of structural churn deterioration or M&A pipeline collapse it does not break the base-case IRR on its own — it warrants a specific diligence condition requiring management to reconcile actuals-to-budget variance.",
+    "driver": "retention holding / M&A revenue ramp assumptions underpinning 23% IRR base case"
+  },
+  {
+    "unit_id": "group_45",
+    "title": "Overhead Cost Leverage Limited / People Cost FTE Jump",
+    "rationale": "A structural inability to lever overheads as revenue scales would compress EBITDA margins and erode the re-rating multiple thesis, but the finding describes a cost trajectory issue rather than a deal-breaking flaw — it warrants a condition requiring management to present a credible headcount plan and revised margin bridge before close.",
+    "driver": "Re-rating / margin expansion (own-IP mix growth and EBITDA conversion underpinning 11.6x entry multiple and 2.8x base case)"
+  },
+  {
+    "unit_id": "group_52",
+    "title": "Recent Acquisitions Excluded from Datacube / ~9% GP Estimated",
+    "rationale": "If ~9% of GP sits outside the Datacube, the industrialised M&A thesis pillar rests on an incomplete data foundation — churn, cohort, and retention metrics may be overstated or unvalidated for a material slice of the portfolio, requiring a condition to reconcile acquired-entity data into the model before close.",
+    "driver": "M&A / retention metrics underpinning base-case GP and churn assumptions"
+  },
+  {
+    "unit_id": "group_32",
+    "title": "Microsoft Teams Margin Dilution Risk / Cross-Sell Cannibalisation",
+    "rationale": "Teams-native adoption could compress blended margins and cannibalise UCaaS/voice ARPU in the SME base, but SCG's Surgery Connect vertical is largely insulated (NHS/clinical workflow lock-in) and the SME book already operates at ~7% churn implying structural stickiness; the risk is real enough to require diligence but does not by itself break the base-case IRR.",
+    "driver": "Verticalisation / own-IP mix re-rating and SME retention"
+  },
+  {
+    "unit_id": "f111",
+    "title": "Thesis Drift: Key Risk Disclosures Dropped Between Memo Revisions",
+    "rationale": "Dropped risk disclosures between memo revisions is a process/governance red flag that warrants a condition requiring the IC to reconcile all prior drafts and confirm no substantive risks were deliberately suppressed, but absent evidence of a specific concealed material risk it does not itself break the return case.",
+    "driver": "backable management / governance"
+  },
+  {
+    "unit_id": "f321",
+    "title": "Evonex Core Growth Materially Weaker Ex-Education Vertical",
+    "rationale": "Evonex's ~30% growth narrative is a core re-rating driver, and if that growth is concentrated in one vertical (education) rather than broad-based, it raises execution risk on the thesis pillar around platform scalability, but does not by itself break the base-case IRR given Surgery Connect's 55% GP contribution remains intact.",
+    "driver": "Evonex platform growth / own-IP mix re-rating pillar"
+  },
+  {
+    "unit_id": "f301",
+    "title": "Microsoft Teams SME Penetration Risk Not Stress-Tested",
+    "rationale": "Teams/UCaaS commoditisation is a real structural headwind to the vendor-agnostic SME voice resale business but SCG's own-IP platforms are verticalised and sticky in ways Teams does not directly substitute, limiting the threat to a portion of the thesis rather than the whole; the absence of a stress-test warrants a specific diligence condition.",
+    "driver": "retention holding / vendor-agnostic SME one-stop-shop pillar"
+  },
+  {
+    "unit_id": "f065",
+    "title": "Phone Mobile UK Entry (2026) and Direct Routing Growth Create Near-Term Competitive Disruption",
+    "rationale": "New mobile/direct-routing entrants in 2026 could pressure SME churn above the ~7% base case and compress vendor margins, but SCG's Surgery Connect vertical lock-in and NHS/clinical workflow switching costs provide meaningful insulation that prevents this from being deal-changing.",
+    "driver": "Retention holding (churn ~7%) and vendor-agnostic SME one-stop-shop margin"
+  },
+  {
+    "unit_id": "f069",
+    "title": "IT & Cloud Customer Count Growth (92.5%) Outpaces Revenue Growth Significantly",
+    "rationale": "A near-doubling of customer count with materially lower revenue growth implies significant ARPU dilution, which could constrain the revenue and EBITDA uplift assumptions embedded in the M&A roll-up thesis and the upsell/cross-sell narrative, warranting diligence on unit economics and cohort revenue trends before close.",
+    "driver": "M&A industrialisation / cross-sell upsell revenue growth"
+  },
+  {
+    "unit_id": "f074",
+    "title": "Director/Secretary Role Concentration in Wilson — Key Man Risk Amplifier",
+    "rationale": "Wilson holding director/secretary roles across multiple group entities creates a structural key-man dependency that amplifies execution risk on M&A integration and Surgery Connect growth, warranting a condition around succession planning, but does not threaten the base-case returns on its own.",
+    "driver": "backable management / M&A industrialisation"
+  },
+  {
+    "unit_id": "f081",
+    "title": "Verticalization Strategy Risks Not Quantified in IC Memos",
+    "rationale": "The absence of quantified downside scenarios for the verticalisation thesis leg is a real diligence gap requiring explicit stress-testing of IRR sensitivity to slower vertical penetration before close, but the underlying business and cash flows are not themselves impaired by the memo omission.",
+    "driver": "Verticalisation / own-IP mix re-rating (Thesis Pillar 1 & 4)"
+  },
+  {
+    "unit_id": "f084",
+    "title": "FTTP and SoGEA Margin Improvement Partly Driven by One-Off Wholesale Pricing Events",
+    "rationale": "If a portion of the margin improvement embedded in the base-case EBITDA reflects non-recurring wholesale pricing events rather than structural unit economics, the normalised EBITDA may be overstated, requiring diligence to quantify the one-off benefit, but the own-IP verticalisation thesis remains intact.",
+    "driver": "EBITDA quality / base-case run-rate underpinning entry multiple and leverage serviceability"
+  },
+  {
+    "unit_id": "f089",
+    "title": "Run-Rate EBITDA Bridge Includes £1.5m from Uncommitted Bolt-On Acquisitions",
+    "rationale": "£1.5m of uncommitted M&A credit in the run-rate bridge modestly inflates the entry multiple denominator, but at ~2-3% of LTM EBITDA it is not deal-changing — it warrants a condition requiring these to be excluded from completion accounts or ring-fenced.",
+    "driver": "M&A / inorganic growth pillar (thesis pillar 3)"
+  },
+  {
+    "unit_id": "f112",
+    "title": "Unlimited Indemnities in Four Major Customer Frameworks",
+    "rationale": "Uncapped indemnities in major customer frameworks create contingent liability exposure that requires legal review and potential rep/warranty coverage at closing, but with 35k+ customers and no evidence of triggered claims, they do not threaten the retention thesis or base-case returns.",
+    "driver": "retention holding"
+  },
+  {
+    "unit_id": "f119",
+    "title": "Vendor/Network Owner Value Chain Decline Not Quantified in Memo",
+    "rationale": "Ongoing margin compression from wholesale price movements is a real but partially mitigated risk (own-IP mix growing 30%→43% is the explicit hedge); the memo's failure to quantify this headwind leaves the IC unable to stress-test how fast own-IP growth must occur to offset reseller margin erosion, making it a diligence condition.",
+    "driver": "Verticalisation / own-IP mix re-rating and SME one-stop-shop GP margin sustainability"
+  },
+  {
+    "unit_id": "f115",
+    "title": "SIP Calls Gross Margin Collapsed to -34.1% in FY25 — No IC Memo Discussion",
+    "rationale": "A -34.1% gross margin on SIP calls is a real deterioration that warrants understanding of whether it is structural or transitional, but SIP calls is a legacy connectivity component rather than a core thesis pillar, making it a condition/diligence item requiring quantification rather than a deal-killer.",
+    "driver": "blended gross margin / EBITDA quality"
+  },
+  {
+    "unit_id": "f125",
+    "title": "Dataphone FCA Authorisation Revocation — Disciplinary History Not Disclosed",
+    "rationale": "An FCA authorisation revocation on an acquired entity is a real regulatory flag requiring specific diligence on scope and successor liability, but absent evidence it affects core platforms or management fitness-and-propriety, it does not threaten the base-case thesis at this EV.",
+    "driver": "Industrialised M&A / regulatory clean-title on acquired entities"
+  },
+  {
+    "unit_id": "f132",
+    "title": "FSMA General Prohibition Breach — Legacy Regulated Hire Agreements",
+    "rationale": "A legacy FSMA breach creates a real legal/regulatory tail risk requiring specific legal diligence and warranty/indemnity coverage at signing, but absent evidence of FCA investigation or systemic current non-compliance, it is unlikely to threaten base-case returns at this EV.",
+    "driver": "M&A / balance sheet risk — legacy liability cap / indemnity structuring"
+  },
+  {
+    "unit_id": "f144",
+    "title": "DuoCall Legacy T&Cs Permit Customer Termination Without Cause on 90 Days' Notice",
+    "rationale": "DuoCall legacy T&Cs create elevated churn risk on that sub-portfolio, but with ~35k customers across the broader SCG base this is a bounded, quantifiable exposure requiring diligence on DuoCall ARR concentration and a migration plan as a condition, rather than a deal-changing finding.",
+    "driver": "retention holding / churn assumption"
+  },
+  {
+    "unit_id": "f155",
+    "title": "Evonex Migration Characterised as 'New Logo Effort' But Modelled as Routine Upsell",
+    "rationale": "If Evonex growth is being driven by migration/new-logo acquisition costs rather than low-friction upsell, the unit economics and CAC assumptions are misstated, requiring a specific diligence condition to reconcile how Evonex revenue and cost are actually classified in the model.",
+    "driver": "Evonex growth / own-IP mix re-rating (30%→43%)"
+  },
+  {
+    "unit_id": "f156",
+    "title": "Gross Debt Increasing to £803.7m by FY34 Despite Leverage Reduction — Not Highlighted",
+    "rationale": "The trajectory of gross debt to £803.7m by FY34 warrants explicit IC disclosure and stress-testing of refinancing risk and covenant headroom, but does not by itself break the base-case return absent evidence of covenant breach or inability to service.",
+    "driver": "M&A continuation / capital structure sustainability"
+  },
+  {
+    "unit_id": "f157",
+    "title": "Mobile Segment Growth Assumptions Flagged as Ambitious by VDD",
+    "rationale": "Ambitious mobile growth assumptions could pressure EBITDA and leverage covenants at 6x opening leverage, warranting a diligence reconciliation, but mobile is not a core thesis pillar so a shortfall is unlikely to break the 23% IRR on its own.",
+    "driver": "M&A / EBITDA build-up and leverage headroom"
+  },
+  {
+    "unit_id": "f162",
+    "title": "TalkTalk Business: Multiple Agreements, Operative Document Not Identified",
+    "rationale": "TalkTalk Business is likely a material wholesale network supplier; failure to identify the operative agreement creates contract risk that must be resolved before close, but absent evidence of concentration or cliff-edge renewal it is a condition/diligence item rather than a deal-breaker.",
+    "driver": "vendor-agnostic one-stop-shop / cost base integrity"
+  },
+  {
+    "unit_id": "f188",
+    "title": "Uncapped Liability in Legacy Fuse 2 T&Cs — Migration Status Not Disclosed",
+    "rationale": "An uncapped liability in legacy T&Cs is a real contractual risk requiring disclosure of migration status and likely a specific SPA indemnity or condition to close, but without knowing the volume of customers still on Fuse 2 terms it cannot be assessed as deal-changing.",
+    "driver": "Customer retention / contractual risk management"
+  },
+  {
+    "unit_id": "f147",
+    "title": "Partner Network Contractual Fragility: Undefined Future Basis for 49 Direct Dealers",
+    "rationale": "The 49 direct dealers represent a distribution channel whose contractual fragility could impair M&A pipeline execution and SME customer retention, but the undefined future basis is a negotiable/diligence-resolvable issue rather than an immediate threat to the base-case IRR.",
+    "driver": "M&A pipeline continuity and SME one-stop-shop retention (thesis pillars 3 and 2)"
+  },
+  {
+    "unit_id": "f213",
+    "title": "BT Wholesale GEA Discount Letter Unsigned — Pricing Enforceability Uncertain",
+    "rationale": "BT Wholesale GEA is core connectivity infrastructure; an unsigned discount letter creates pricing uncertainty that could erode margins, but does not itself break the thesis unless the discount proves unenforceable at scale — requiring a condition to close rather than a deal-stopper.",
+    "driver": "Margin / cost base of SME comms pillar (thesis pillar 2)"
+  },
+  {
+    "unit_id": "f218",
+    "title": "Matrix Agreement 2008 Mid-Renewal: Completion Status and Revised Terms Unconfirmed",
+    "rationale": "The Matrix Agreement governs a material wholesale or channel relationship whose mid-cycle renewal terms remain unconfirmed, creating uncertainty around cost structure that could affect EBITDA margins, but is resolvable as a closing condition once revised terms are confirmed.",
+    "driver": "M&A / vendor-agnostic one-stop-shop cost base and margin stack"
+  },
+  {
+    "unit_id": "f220",
+    "title": "Ares Debenture Network — Release Mechanism Unconfirmed in IC Record",
+    "rationale": "At 6x opening leverage, a clean capital structure and unencumbered security package are prerequisites for closing; an unconfirmed release mechanism on the Ares debenture is a genuine conditions-precedent gap that must be resolved before close but does not threaten the underlying thesis.",
+    "driver": "capital structure / deal execution"
+  },
+  {
+    "unit_id": "f225",
+    "title": "Widespread Uncapped Supplier Liability Exposure Undisclosed in IC Memos",
+    "rationale": "Uncapped supplier-side liability clauses are a real balance-sheet and warranty risk requiring contract remediation or specific SPA indemnity coverage at close, but on a £655m EV with diversified revenues they are unlikely to threaten base-case IRR unless concentrated in the Surgery Connect or Evonex supply chain.",
+    "driver": "Verticalisation / Surgery Connect & Evonex margin integrity"
+  },
+  {
+    "unit_id": "f242",
+    "title": "Non-Recurring Revenue Negative Gross Profit Not Disclosed in IC Memos",
+    "rationale": "Undisclosed negative gross profit on non-recurring revenue lines creates a quality-of-earnings gap that could modestly compress true recurring Cash EBITDA margins, but unless the quantum is material relative to the EBITDA base it is a diligence condition rather than a deal-changer.",
+    "driver": "Margin quality / EBITDA base underpinning entry multiple and leverage serviceability"
+  },
+  {
+    "unit_id": "f250",
+    "title": "P&L Excludes Statutory Year-End Adjustments — Balance Sheet and P&L Presentational Basis Diverges",
+    "rationale": "A divergence between the P&L trading basis and statutory year-end adjustments creates uncertainty around the quality of reported EBITDA, requiring reconciliation before close, but is not inherently deal-changing if the adjustments prove routine.",
+    "driver": "EBITDA quantum / entry multiple validation"
+  },
+  {
+    "unit_id": "f263",
+    "title": "Interest Rate Hedging Commitment: 90-Day Post-Close Deadline Not Confirmed Satisfied",
+    "rationale": "Failure to execute required hedging within 90 days post-close would breach a likely lender covenant condition, creating a technical default risk, but this is a procedural/compliance item that can be addressed as a closing condition.",
+    "driver": "none"
+  },
+  {
+    "unit_id": "f262",
+    "title": "New Star Networks SA Acquisition at 22.1x — No Strategic Rationale in IC Record",
+    "rationale": "A 22.1x acquisition multiple with no documented strategic rationale is a real governance and capital-allocation concern for the M&A thesis, but absent evidence this deal was material in size or represents a pattern, it does not by itself break the base case.",
+    "driver": "Industrialised M&A / capital allocation discipline"
+  },
+  {
+    "unit_id": "f269",
+    "title": "Contracted vs. Variable Revenue Split Not Available",
+    "rationale": "Without visibility into contracted vs. variable revenue proportions, the IC cannot validate the ~7% churn assumption or stress-test retention-driven cash flows underpinning leverage covenant headroom, making this a required diligence condition before close.",
+    "driver": "retention holding / leverage serviceability"
+  },
+  {
+    "unit_id": "f265",
+    "title": "Surgery Connect AI Ancillary Product Revenue Highly Concentrated in Single Unproven Line",
+    "rationale": "AI ancillary upsell into Surgery Connect is a return-enhancement driver; concentration in a single unproven line creates meaningful execution risk to the upside IRR but does not break the 23%/2.8x base case which rests primarily on retention, M&A, and own-IP mix shift.",
+    "driver": "AI ancillary upsell into Surgery Connect (return enhancement / re-rating pillar)"
+  },
+  {
+    "unit_id": "f274",
+    "title": "PSTN/ISDN Switch-Off Timeline: Dual Date References in CDD",
+    "rationale": "Conflicting switch-off date references create planning risk for M&A pipeline and customer migration cadence, but the underlying tailwind (forced migration to cloud voice) is structurally positive for SCG's own-IP platforms, making it a clarification condition rather than a deal-breaker.",
+    "driver": "M&A pipeline / own-IP platform adoption cadence"
+  },
+  {
+    "unit_id": "f279",
+    "title": "AI Ancillary GP Haircut Rationale Absent from IC Record",
+    "rationale": "The absence of documented GP haircut rationale for AI ancillary creates a diligence gap that could undermine return credibility if margins disappoint, but does not itself break the base case given AI upsell is an upside layer rather than the core EBITDA foundation.",
+    "driver": "AI ancillary upsell into Surgery Connect / verticalisation GP expansion"
+  },
+  {
+    "unit_id": "f295",
+    "title": "New Vertical Identification Strategy Described as Post-Close — Not Disclosed as Open Item",
+    "rationale": "Withholding the vertical expansion roadmap from pre-close disclosure is a transparency concern that warrants a diligence condition, but the core thesis already rests on two identified verticals with disclosed growth rates, so it does not break the base-case IRR.",
+    "driver": "verticalisation / re-rating pillar — own-IP mix growth 30%→43%"
+  },
+  {
+    "unit_id": "f315",
+    "title": "Hanley Health Acquired at Negative EBITDA — No Performance Milestone Disclosed",
+    "rationale": "Acquiring a loss-making asset without disclosed performance milestones is a process and governance flag on the M&A engine, warranting confirmation that integration criteria exist, but a single acquisition at negative EBITDA does not threaten the consolidated EBITDA base at this deal size.",
+    "driver": "Industrialised M&A / acquisition quality control"
+  },
+  {
+    "unit_id": "f316",
+    "title": "UC Collaboration Growth Fastest-Segment But Gamma Platform Mix-Dilution Risk Unaddressed",
+    "rationale": "If UC Collaboration growth is predominantly riding Gamma-resold product rather than own-IP, it dilutes the core re-rating thesis without being immediately deal-breaking, warranting a specific diligence condition to quantify platform mix within UC Collaboration revenue.",
+    "driver": "Thesis pillar 4 (own-IP mix re-rating 30%→43%) and pillar 1 (Surgery Connect / Evonex growth)"
+  },
+  {
+    "unit_id": "f325",
+    "title": "NHS Rollout Overtime Cost Non-Normalisation Not Addressed in IC Memos",
+    "rationale": "If NHS Surgery Connect rollout overtime costs are running through reported EBITDA without normalisation, the LTM EBITDA base may be overstated, requiring a specific diligence adjustment confirmation before close rather than threatening the thesis outright.",
+    "driver": "Surgery Connect verticalisation / EBITDA base quality"
+  },
+  {
+    "unit_id": "f331",
+    "title": "Subsidiary contracts lack post-termination non-compete and key protections",
+    "rationale": "With ~50 acquisitions completed, subsidiary-level contracts lacking non-competes creates a real but manageable risk that acquired founders could re-enter and compete, warranting a closing condition requiring remediation, but does not break the base case on its own.",
+    "driver": "Industrialised M&A / customer retention"
+  },
+  {
+    "unit_id": "f372",
+    "title": "Deferred Income Billing Model Shift — NWC Unwinding Risk",
+    "rationale": "A structural shift in billing model could unwind a deferred-income NWC cushion, creating a one-time cash drag or price adjustment dispute at close, but it is unlikely to break the 23% IRR base case unless the quantum is very large — it warrants a specific NWC peg diligence condition.",
+    "driver": "NWC peg / free cash flow conversion under high opening leverage"
+  },
+  {
+    "unit_id": "f380",
+    "title": "Cisco Dependency Limits CCaaS Roadmap Control: CDD Not Reconciled in Memos",
+    "rationale": "Cisco dependency constrains SCG's ability to independently develop its CCaaS roadmap, creating execution risk on the verticalisation thesis, but does not by itself break the base case given Surgery Connect and Evonex already operate as own-IP platforms.",
+    "driver": "Verticalisation / own-IP mix re-rating"
+  },
+  {
+    "unit_id": "f373",
+    "title": "Datakom FCA De-Registration: Scope and Residual Exposure Undisclosed",
+    "rationale": "An undisclosed FCA de-registration creates a regulatory gap needing scoping before close, but without knowing the scope it is unlikely to be deal-changing given SCG's primary value drivers are unregulated SME comms and clinical comms platforms.",
+    "driver": "none (regulatory hygiene / structural clean-up)"
+  },
+  {
+    "unit_id": "f383",
+    "title": "Working Capital Characterisation Tension — 'Broadly Neutral' vs. Worsening Monthly Minimum",
+    "rationale": "A systematic gap between the memo's NWC characterisation and evidence of worsening monthly minimums could cause a completion accounts adjustment and may compress distributable cash for M&A, but at 6x leverage the deal is structured to absorb moderate NWC normalisation without breaking the base-case IRR.",
+    "driver": "M&A continuing / free cash conversion underpinning leverage serviceability"
+  },
+  {
+    "unit_id": "f394",
+    "title": "Mobile FY24 Churn Event: Government Framework Losses to EE Competitor",
+    "rationale": "A discrete mobile churn event driven by government framework losses is real evidenced erosion of the ~7% churn pillar and warrants specific diligence, but it appears isolated to a segment/channel rather than indicative of platform-wide retention deterioration.",
+    "driver": "Customer retention / churn rate assumption (thesis pillar 2)"
+  },
+  {
+    "unit_id": "f395",
+    "title": "Forecast Capex Step-Up to ~£12m Not Reconciled in IC Memos",
+    "rationale": "A ~£12m capex step-up directly reduces free cash flow available for debt service and M&A at 6x opening leverage, potentially compressing returns, but does not on its face break the thesis unless the underlying cause proves recurring and larger than modelled.",
+    "driver": "FCF conversion / M&A funding capacity under high leverage"
+  },
+  {
+    "unit_id": "f411",
+    "title": "EE MSA Revenue Guarantee and Early Termination Charges Not Quantified in IC Memos",
+    "rationale": "An unquantified revenue guarantee and early termination liability under a key carrier MSA creates a contingent financial obligation, but is unlikely to be deal-changing absent evidence the quantum is material relative to the £655m EV.",
+    "driver": "M&A continuing / balance sheet / leverage covenant headroom"
+  },
+  {
+    "unit_id": "f412",
+    "title": "Fragmented T&C Landscape Across Nine Regimes in Top-20 Customers Undisclosed",
+    "rationale": "Nine distinct T&C regimes across top-20 customers creates meaningful but manageable exposure that could complicate M&A integration and constrain upsell, but absent evidence of materially adverse individual contracts this is a condition/diligence item given ~7% headline churn already priced.",
+    "driver": "Customer retention / M&A integration / verticalisation upsell"
+  },
+  {
+    "unit_id": "f430",
+    "title": "IT, Cloud & Security Churn Acceleration Unaddressed Despite Strong Cross-Sell Narrative",
+    "rationale": "Accelerating churn in IT/Cloud/Security directly undermines the cross-sell and one-stop-shop retention narrative, but these segments are lower-margin adjacencies rather than the core own-IP Surgery Connect/Evonex growth engine, warranting a specific diligence condition rather than breaking the base case outright.",
+    "driver": "Retention holding / vendor-agnostic SME one-stop-shop thesis (pillar 2)"
+  },
+  {
+    "unit_id": "f428",
+    "title": "CYBR Vision ARPU Peak-and-Decline in FY28 Not Addressed in IC Memos",
+    "rationale": "CYBR Vision ARPU decline from FY28 signals a product-cycle risk within the own-IP verticalisation pillar, but without visibility on its revenue share it is not demonstrably deal-changing and warrants a specific diligence follow-up on roadmap refresh and mitigation plan.",
+    "driver": "Verticalisation / own-IP mix re-rating (thesis pillar 1 and 4)"
+  },
+  {
+    "unit_id": "f433",
+    "title": "CFO Transition Risk Absent from IC Memo Record",
+    "rationale": "A CFO transition at 6x opening leverage with an active M&A programme creates real execution and lender-relationship risk, warranting a condition (confirmed succession plan or retention package), but does not threaten the core thesis absent evidence the incumbent is leaving imminently.",
+    "driver": "Industrialised M&A continuity and leverage management"
+  }
+]

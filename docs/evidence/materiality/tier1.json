@@ -1,0 +1,164 @@
+[
+  {
+    "unit_id": "group_19",
+    "title": "Supplier Change-of-Control Consent / Gamma Single-Supplier Risk",
+    "rationale": "Gamma is the primary network/wholesale supplier underpinning the vendor-agnostic SME comms stack; if Gamma's change-of-control clause gives it termination or renegotiation rights triggered by the buyout, it could disrupt service delivery to 35k+ customers, destroy the churn assumption, and directly threaten the thesis pillar that most of the non-Surgery-Connect / non-Evonex EBITDA rests on — at 6x leverage, any material EBITDA impairment breaks the base-case IRR.",
+    "driver": "Retention / churn thesis pillar and M&A roll-up platform integrity (Pillar 2 and 3)"
+  },
+  {
+    "unit_id": "group_23",
+    "title": "M&A Cohort GP Declining / Acquisition Multiples Rising",
+    "rationale": "Industrialised M&A is a core thesis pillar (~50 acquisitions, £6m near-term pipeline) underpinning both EBITDA growth and the re-rating story; if acquired cohort GP is structurally declining while entry multiples are rising, the capital deployment engine that drives the 2.8x MoM breaks directly — either through value destruction on deployed capital, compressed synergy realisation, or a higher-for-longer leverage profile at 6x opening, all of which materially threaten base-case returns.",
+    "driver": "Industrialised M&A / EBITDA growth and re-rating from own-IP mix expansion"
+  },
+  {
+    "unit_id": "group_27",
+    "title": "£19.5m Revenue Basis Discrepancy / Datacube Coverage Gap",
+    "rationale": "A £19.5m revenue discrepancy between reported financials and the Datacube system directly undermines the quality-of-earnings foundation of an £655m EV deal priced at 11.6x — if revenue (and thus EBITDA) is overstated or unverifiable, the base-case IRR/multiple collapses and the asset cannot be priced with confidence; this is precisely the kind of finding that belongs on the first page before any IC can approve entry.",
+    "driver": "quality of earnings / EBITDA base — affects all five thesis pillars since every return driver (churn, M&A pipeline EBITDA, verticalisation mix shift) is calibrated off reported financials"
+  },
+  {
+    "unit_id": "group_31",
+    "title": "Aggregator Gross Margin Structural Compression per CDD",
+    "rationale": "The aggregator/reseller segment is the core revenue base funding M&A and leverage serviceability; structural GP margin compression directly attacks the 'one-stop-shop' thesis pillar and the EBITDA growth rate underpinning both the 11.6x entry multiple justification and the re-rating to own-IP mix — if aggregator margins are structurally declining, the base-case cash generation supporting 6x leverage and 2.8x MoM is materially impaired before own-IP mix reaches 43%.",
+    "driver": "Gross margin / EBITDA conversion on the legacy reseller book — directly threatens leverage serviceability, M&A funding capacity, and the re-rating thesis"
+  },
+  {
+    "unit_id": "group_41",
+    "title": "Platinum/Gold-Tier Churn Acceleration vs Cross-Sell Thesis",
+    "rationale": "Accelerating churn in the Platinum/Gold tier directly attacks the highest-LTV, highest-margin cohort that underpins both the retention assumption (7% blended churn holding) and the cross-sell/upsell thesis (AI ancillary into Surgery Connect, Evonex education vertical), meaning if top-tier attrition is running ahead of blended figures it can simultaneously compress EBITDA, slow own-IP revenue mix expansion (the 30%→43% re-rating driver), and break the 23% IRR / 2.8x base case without any offset from M&A or new logo growth.",
+    "driver": "Customer retention / top-cohort revenue concentration — directly undermines thesis pillars (1) verticalisation revenue ramp, (2) churn assumption, and (4) re-rating multiple"
+  },
+  {
+    "unit_id": "group_44",
+    "title": "SIP NRR Deterioration / ARPU Growth vs ARR Collapse Tension",
+    "rationale": "SIP (legacy voice) NRR deterioration directly undermines the churn/retention pillar (~7% stated churn) and creates a structural tension between ARPU growth masking ARR volume collapse — if net revenue retention on the SIP base is declining, the 'vendor-agnostic SME one-stop-shop' thesis overstates the stickiness of the 35k+ customer base and threatens the revenue bridge that supports 6x levered entry at 11.6x EBITDA, with material downside to the base-case IRR if ARR erosion accelerates faster than own-IP mix can compensate.",
+    "driver": "Customer retention / ARR quality — directly challenges thesis pillar (2) and the revenue baseline underpinning pillar (4) re-rating story"
+  },
+  {
+    "unit_id": "group_50",
+    "title": "Cohort NRR Deterioration Contradicts IP Migration Narrative",
+    "rationale": "If cohort-level NRR is deteriorating, it directly undermines the retention assumption (~7% churn thesis pillar) and the verticalisation re-rating story simultaneously — a base-case IRR of 23% at 6x leverage has very little buffer for revenue attrition that compounds faster than the model assumes, and the earn-out structure means the GP shortfall could also cost the fund the £85m upside; this is a finding a partner must see on page one before pricing or signing.",
+    "driver": "Retention / NRR holding + verticalisation re-rating (own-IP mix 30%→43%)"
+  },
+  {
+    "unit_id": "group_49",
+    "title": "Legal Proceedings and Competition Law Allegations Undisclosed",
+    "rationale": "Undisclosed legal proceedings or competition law allegations at point of signing create direct warranty/indemnity exposure, potential regulatory intervention risk, and — if material in quantum or scope — could rebase EBITDA, trigger SPA renegotiation, or block completion entirely, all of which directly threaten the 23% IRR / 2.8x base case at 6x opening leverage where there is no headroom for earnings or multiple erosion.",
+    "driver": "Retention / thesis integrity and M&A pipeline continuity — competition findings could also impair the industrialised M&A roll-up strategy if SCG's market practices face regulatory scrutiny"
+  },
+  {
+    "unit_id": "group_53",
+    "title": "Mobile/M2M Gross Margin Collapsed — No Mitigation",
+    "rationale": "Mobile/M2M is a revenue line within the vendor-agnostic SME one-stop-shop; if gross margin has structurally collapsed with no mitigation plan disclosed, it directly erodes the EBITDA base underpinning the 11.6x entry multiple and 6x leverage covenant headroom, threatening both the base-case return and the ability to service debt — particularly material given no offsetting action is documented in the memo.",
+    "driver": "Retention / EBITDA base — thesis pillar 2 (vendor-agnostic SME one-stop-shop) and deal structuring (6x opening leverage)"
+  },
+  {
+    "unit_id": "group_26",
+    "title": "Own-IP UCaaS Sustainability / Own-Network Competitive Threat",
+    "rationale": "The entire re-rating thesis (30%→43% own-IP mix) and the 30% growth assumption underpinning Surgery Connect and Evonex are predicated on SCG's own-IP UCaaS platforms sustaining competitive differentiation; if a superior own-network or UCaaS rival (e.g., a MNO, hyperscaler, or PSTN-replacement incumbent) undercuts SCG's value proposition in either vertical, the highest-margin, fastest-growing segment collapses, directly breaking the 23% IRR / 2.8x base case by compressing both EBITDA growth and the exit multiple re-rating.",
+    "driver": "Verticalisation / own-IP platform growth and exit multiple re-rating (Thesis pillars 1 and 4)"
+  },
+  {
+    "unit_id": "f019",
+    "title": "SME Segment ARPU Decline and Pricing Pressure Not Flagged in IC Memos",
+    "rationale": "SME segment (~35k customers, ~7% churn) is the volume base underpinning recurring revenue and M&A roll-up synergies; undisclosed ARPU decline directly threatens the retention and revenue-density assumptions embedded in the 23% IRR base case, and at 6x opening leverage any top-line compression compounds quickly into covenant and return risk.",
+    "driver": "Retention holding / SME one-stop-shop revenue base (Thesis Pillar 2)"
+  },
+  {
+    "unit_id": "f044",
+    "title": "Cloud Services 13ppt Gross Margin Compression Absent From IC Narrative",
+    "rationale": "A 13 percentage-point gross margin compression in Cloud Services — if structural rather than one-off — directly undermines the verticalisation thesis and re-rating pillar by eroding the higher-margin own-IP segment that justifies the 11.6x entry multiple and drives the 30%→43% mix shift underpinning base-case IRR; its complete absence from the IC narrative means the investment committee has not stress-tested its impact on EBITDA bridge, leverage serviceability at 6x opening, or earn-out achievability.",
+    "driver": "Verticalisation / own-IP margin expansion (thesis pillars 1 & 4; re-rating and EBITDA quantum underpinning 23% IRR / 2.8x MoM)"
+  },
+  {
+    "unit_id": "f056",
+    "title": "Deteriorating ARR Churn and Collapsing Net Upsell Trajectory",
+    "rationale": "Deteriorating ARR churn and collapsing net upsell directly attacks thesis pillars (1) and (2) simultaneously — ~7% churn assumption underpins the £655m/11.6x EV, net upsell is the primary lever for Surgery Connect and Evonex revenue acceleration toward the 30%→43% own-IP mix re-rating, and any sustained deterioration in both metrics would compress EBITDA growth, impair the M&A multiple arbitrage pipeline economics, and likely break the 23% IRR / 2.8x base case at 6x opening leverage where there is minimal margin for error.",
+    "driver": "Customer retention / churn assumption + Surgery Connect & Evonex upsell growth (re-rating thesis)"
+  },
+  {
+    "unit_id": "f062",
+    "title": "X-On Health Assignment Restrictions Require Customer Consent — IC Memos Silent",
+    "rationale": "Surgery Connect is built on X-On Health's platform and represents 55% of gross profit; if the underlying licence or IP agreement contains assignment restrictions requiring X-On's (or customer-level) consent on a change of control, the transaction itself could be blocked or subject to material renegotiation, directly undermining the core verticalisation thesis and threatening the single largest contributor to the base-case IRR/multiple.",
+    "driver": "Verticalisation / Surgery Connect GP contribution (Thesis Pillar 1) and deal execution risk"
+  },
+  {
+    "unit_id": "f075",
+    "title": "TalkTalk Right of First Refusal Over SCN — Absent from All IC Memos",
+    "rationale": "A right of first refusal held by TalkTalk over SCN (a key network/infrastructure asset or entity within the group) is a structural encumbrance that could directly impede PEP's ability to complete the acquisition, exit freely, or execute the M&A roll-up thesis — if exercisable on a change of control or asset transfer, it could allow TalkTalk to step in ahead of PEP or a future buyer, fundamentally threatening deal certainty, exit optionality, and the 2.8x base case.",
+    "driver": "Deal certainty / exit optionality; also M&A roll-up (pillar 3) if SCN is a platform entity"
+  },
+  {
+    "unit_id": "f106",
+    "title": "Mark Shraga Personally Owns Core Sales Methodology IP; License Only, No Assignment",
+    "rationale": "If the core sales methodology IP sits personally with a founder/key individual under a license rather than assigned to the group, it creates a critical dependency risk: the license could lapse, be disputed, or become a renegotiation lever post-close, directly threatening the M&A roll-up engine and the 'backable management' pillar, and would likely require SPA restructuring, escrow, or price adjustment to cure.",
+    "driver": "Industrialised M&A / backable management — sales methodology IP is the repeatable integration playbook underpinning the acquisition pipeline and EBITDA conversion assumptions"
+  },
+  {
+    "unit_id": "f107",
+    "title": "FY25 Organic Growth Inflated by WIP Timing; Base Case Entry Multiple Risk",
+    "rationale": "If FY25 organic growth is overstated by WIP timing pull-forwards, the true run-rate EBITDA used to set the 11.6x entry multiple is inflated, meaning the fund may be paying a materially higher real multiple than underwritten — directly eroding the base-case 2.8x / 23% IRR which relies on both an accurate entry point and organic growth momentum sustaining through the hold period.",
+    "driver": "Entry multiple / base-case EBITDA run-rate; thesis pillar on own-IP platform growth (Surgery Connect / Evonex ~30% growth narrative)"
+  },
+  {
+    "unit_id": "f138",
+    "title": "Acquisition ARR Contribution Declined 73% FY24–FY25; Inorganic Strategy Dependency Not Reassessed",
+    "rationale": "A 73% collapse in acquisition ARR contribution directly undermines thesis pillar (3) — industrialised M&A is a primary return engine (£6m near-term pipeline, ~50 acquisitions to date) and the base-case IRR depends on continued inorganic growth sustaining EBITDA trajectory at 11.6x entry; if deal productivity has structurally deteriorated and the memo has not reassessed the dependency, the M&A compounding assumption underpinning the 2.8x MoM is materially at risk.",
+    "driver": "Industrialised M&A / inorganic EBITDA accretion (thesis pillar 3)"
+  },
+  {
+    "unit_id": "f185",
+    "title": "Near-Term M&A Pipeline: Two Targets Carry Undisclosed Stress Flags",
+    "rationale": "Industrialised M&A is a core thesis pillar (£6m EBITDA near-term pipeline explicitly underpins the base-case 23% IRR / 2.8x MoM), and undisclosed stress flags on two pipeline targets create material downside risk to acquisition quality, integration assumptions, and the credibility of management's deal-sourcing discipline — all of which the IC is pricing at 11.6x LTM EBITDA with 6x opening leverage leaving no margin for error.",
+    "driver": "Industrialised M&A / near-term EBITDA pipeline"
+  },
+  {
+    "unit_id": "f214",
+    "title": "Surgery Connect GP Market Near-Saturation (80%) Not Stress-Tested in Returns Sensitivity",
+    "rationale": "Surgery Connect is the primary thesis pillar driving re-rating (30%→43% own-IP mix) and the highest-margin revenue stream (~30% growth, 55% GP share); if the GP market is ~80% penetrated and neither the base case nor sensitivity tables stress-test saturation, the growth assumptions underpinning both IRR (23%) and the earn-out structure are materially unvalidated, threatening the core return thesis.",
+    "driver": "Verticalisation / own-IP mix re-rating and Surgery Connect growth rate"
+  },
+  {
+    "unit_id": "f219",
+    "title": "Net Liability Position of £(178.5)m — Capital Structure Complexity Not Reflected in IC Memos",
+    "rationale": "A £178.5m net liability position at 6x opening leverage on a £655m EV is structurally material: if this liability sits outside the modelled debt quantum it could compress equity value by ~25–30% and directly break the 2.8x MoM base case, and the fact it is absent from IC memos means the IC has not stress-tested returns or pricing against the true capital structure.",
+    "driver": "Capital structure / equity return bridge — base-case IRR and MoM"
+  },
+  {
+    "unit_id": "f273",
+    "title": "EMIS / Accurx Competitive Encroachment on Surgery Connect Ecosystem Not Quantified",
+    "rationale": "Surgery Connect is the single largest thesis pillar (55% GP share, ~30% growth, re-rating catalyst from 30%→43% own-IP mix), and unquantified competitive encroachment from EMIS/Accurx — deeply embedded NHS clinical system incumbents with native comms functionality — directly threatens retention, growth trajectory, and the multiple re-rating that drives the 2.8x base case; if Surgery Connect stalls or loses GP penetration to integrated EMIS/Accurx workflows, the IRR compression is structural and not recoverable through M&A roll-up alone.",
+    "driver": "Verticalisation / Surgery Connect own-IP growth and GP share expansion underpinning re-rating thesis"
+  },
+  {
+    "unit_id": "f275",
+    "title": "Surgery Intellect: MHRA Class IIa Regulatory Approval Pending — Status Undisclosed",
+    "rationale": "Surgery Intellect is an AI ancillary product being upsold into Surgery Connect — a named key return driver — and an undisclosed pending MHRA Class IIa medical device approval means the product cannot lawfully be commercialised until granted, directly threatening the AI upsell revenue ramp embedded in the base-case IRR/MoM; non-disclosure to the IC also raises a warranty/disclosure risk that could affect SPA negotiations and price.",
+    "driver": "AI ancillary upsell into Surgery Connect (Thesis pillar 1 / key return driver)"
+  },
+  {
+    "unit_id": "f317",
+    "title": "Surgery Connect Margin Step-Up Driven by Methodology Change, Not Operations",
+    "rationale": "Surgery Connect is the primary thesis pillar (55% GP, ~30% growth, re-rating catalyst from 30%→43% own-IP mix); if the reported margin improvement reflects a reclassification or accounting methodology change rather than genuine operational leverage, it directly inflates the EBITDA base underpinning the 11.6x entry multiple and breaks the unit-economics narrative that justifies both the re-rating thesis and the 23% IRR base case.",
+    "driver": "Verticalisation / own-IP margin expansion (Thesis Pillar 1 and re-rating Pillar 4)"
+  },
+  {
+    "unit_id": "f382",
+    "title": "Unresolved FY23 Reserves Variance — Management Cannot Explain",
+    "rationale": "An unexplained FY23 reserves variance that management cannot reconcile directly undermines confidence in the quality and reliability of reported EBITDA, which is the sole basis for the 11.6x entry multiple and the 23% IRR / 2.8x base case — if reserves were misstated, the LTM earnings base, leverage covenant headroom at 6x opening, and earn-out mechanics are all potentially compromised before the deal even closes.",
+    "driver": "Earnings quality / reported EBITDA base underpinning entry price and all return drivers"
+  },
+  {
+    "unit_id": "f404",
+    "title": "Pervasive 30–90 Day Termination-for-Convenience Regime Not Disclosed in IC Memos",
+    "rationale": "A pervasive 30–90 day termination-for-convenience right across the customer base directly undermines the ~7% churn assumption embedded in the base case and collapses the recurring-revenue quality argument underpinning the 11.6x EV multiple — if counterparties can exit at will with minimal notice, the 'sticky one-stop-shop' thesis pillar and the revenue visibility supporting 6x leverage are both materially misrepresented, and the omission from IC memos means the IC has never stress-tested it.",
+    "driver": "Customer retention / churn assumption; recurring-revenue quality underpinning entry multiple and leverage covenant headroom"
+  },
+  {
+    "unit_id": "f417",
+    "title": "ARR Double-Counting and Manual Overlay Exposure Not Disclosed to IC",
+    "rationale": "Undisclosed ARR double-counting and manual overlay distort the revenue and churn metrics that underpin the 11.6x EV/EBITDA entry multiple, the ~30% platform growth narrative, and the re-rating thesis — if ARR is overstated, the base-case IRR/MoM and the earn-out trigger are both built on unreliable KPIs, constituting a fundamental integrity issue that a partner must see before pricing or signing.",
+    "driver": "Verticalisation growth narrative (Surgery Connect / Evonex ARR trajectory) and M&A re-rating thesis (own-IP mix 30%→43%)"
+  }
+]

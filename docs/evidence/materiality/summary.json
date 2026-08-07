@@ -1,0 +1,12 @@
+{
+  "total_units": 142,
+  "tier_counts": {
+    "1": 27,
+    "2": 72,
+    "3": 43
+  },
+  "model": "claude-sonnet-4-6",
+  "session_id": "b92a4e06-7dea-4067-ad92-259bb8e65756",
+  "deal_id": "c46b4129",
+  "generated": "2026-08-07"
+}
