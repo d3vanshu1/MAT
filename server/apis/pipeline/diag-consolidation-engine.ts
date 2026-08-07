@@ -1,20 +1,22 @@
 /**
- * Diagnostic API — Deal-Agnostic Consolidation Engine (MG-1)
+ * Diagnostic API — Deal-Agnostic Consolidation Engine (MG-1b)
  *
- * Standalone diagnostic that runs multi-pass agglomerative grouping on real OA
- * findings. Model proposes initial groups (Pass 1), then agglomerative passes
- * merge group representatives until a fixed-point or maxPasses is reached.
+ * Single-pass-per-invocation agglomerative grouping on real OA findings.
+ * Each invocation runs ONE model pass and persists results to a scratch table.
+ * Subsequent invocations resume from persisted state.
  *
- * NO dimension gate. NO production path changes. Measurement-only:
- * tells us the real collapse rate and over-merge rate before we build
- * the gate (MG-2) or wire it in (MG-3).
+ * NO dimension gate. NO production path changes. Measurement-only.
  *
- * Outputs:
- *   - Per-pass stats (groups, merges, token usage)
- *   - Final collapse ratio
- *   - Comparison to old SCG-hardcoded engine (deduplicateFindings)
- *   - Top-25 largest final groups (all member titles + reasons)
- *   - Flagged potential over-merge candidates
+ * Persistence: `diag_consolidation_sessions` table (CREATE IF NOT EXISTS).
+ * No migration needed — table auto-created on first use.
+ *
+ * Invocation pattern:
+ *   Pass 1: { runId: null, passNumber: 1, sessionId: null }
+ *           → creates session, runs model grouping on all findings, persists
+ *   Pass N: { runId: null, passNumber: N, sessionId: "<from pass 1>" }
+ *           → loads pass N-1, builds reps, runs model, persists
+ *   Convergence: when mergesPerformed = 0 or passNumber = 5,
+ *           computes final stats + old-engine comparison + over-merge candidates.
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
@@ -26,6 +28,7 @@ const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 const SCG_DEAL_ID = "c46b4129-8a16-48ae-ad3a-1da061255445";
 
 const MAX_INPUT_CHARS = 550_000;
+const MAX_PASSES = 5;
 
 // ─── Anthropic response schema ──────────────────────────────────────────────
 const MessageResponseSchema = z.object({
@@ -65,6 +68,18 @@ interface PassStats {
   inputTokens: number;
   outputTokens: number;
   durationMs: number;
+}
+
+/** Persisted state per pass */
+interface PersistedPassState {
+  groups: ConsolidatedGroup[];
+  ungroupedRefs: string[];
+  nextGroupId: number;
+  passStats: PassStats;
+  refToTitle: Record<string, string>;
+  findingCount: number;
+  runId: string;
+  converged: boolean;
 }
 
 // ─── System prompt (identical to MR-B1) ─────────────────────────────────────
@@ -111,14 +126,12 @@ function detectOverMerge(
 ): { flagged: boolean; signal: string } {
   if (group.memberRefs.length < 3) return { flagged: false, signal: "" };
 
-  // Heuristic: if any two members share zero distinctive nouns, flag
   const memberNouns: Array<{ ref: string; nouns: Set<string> }> = [];
   for (const ref of group.memberRefs) {
     const title = refToTitle.get(ref) || "";
     memberNouns.push({ ref, nouns: extractDistinctiveNouns(title) });
   }
 
-  // Check for pairs with zero overlap
   const zeroOverlapPairs: string[] = [];
   for (let i = 0; i < memberNouns.length && zeroOverlapPairs.length < 3; i++) {
     for (let j = i + 1; j < memberNouns.length && zeroOverlapPairs.length < 3; j++) {
@@ -134,20 +147,26 @@ function detectOverMerge(
   }
 
   if (zeroOverlapPairs.length > 0) {
-    return {
-      flagged: true,
-      signal: `Zero noun overlap: ${zeroOverlapPairs.join(", ")}`,
-    };
+    return { flagged: true, signal: `Zero noun overlap: ${zeroOverlapPairs.join(", ")}` };
   }
   return { flagged: false, signal: "" };
 }
 
-// ─── Model response parser (replicated from diag-model-grouper, not exported)
+// ─── Model response parser ──────────────────────────────────────────────────
 function parseModelResponse(text: string): ModelResponse | null {
   try {
     let cleaned = text.trim();
+    // Strip markdown code fences
     if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+    }
+    // Try to extract JSON object if wrapped in text
+    if (!cleaned.startsWith("{")) {
+      const jsonStart = cleaned.indexOf("{");
+      const jsonEnd = cleaned.lastIndexOf("}");
+      if (jsonStart >= 0 && jsonEnd > jsonStart) {
+        cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
+      }
     }
     const parsed = JSON.parse(cleaned);
     if (!parsed || !Array.isArray(parsed.groups) || !Array.isArray(parsed.ungrouped_refs)) {
@@ -171,11 +190,9 @@ async function callModel(
   inputText: string,
   label: string
 ): Promise<{ response: ModelResponse | null; inputTokens: number; outputTokens: number; error: string | null }> {
-  const findingLines = inputText; // already formatted
   const targetBatchChars = Math.floor(MAX_INPUT_CHARS * 0.8);
 
   if (inputText.length <= MAX_INPUT_CHARS) {
-    // Single call
     try {
       const result = await ai.apiRequest(
         {
@@ -201,7 +218,7 @@ async function callModel(
     }
   }
 
-  // Batch mode — split by lines (each "item" is separated by \n\n)
+  // Batch mode
   const items = inputText.split("\n\n");
   const batches: string[][] = [];
   let currentBatch: string[] = [];
@@ -260,20 +277,23 @@ async function callModel(
 // ═══════════════════════════════════════════════════════════════════════════════
 export default api({
   name: "DiagConsolidationEngine",
-  description: "Multi-pass agglomerative grouping diagnostic on real OA findings.",
+  description: "Single-pass-per-invocation agglomerative grouping diagnostic with persistence.",
   integrations: {
     db: postgres(IC_DILIGENCE_DB),
     ai: anthropic(ANTHROPIC_ID),
   },
   input: z.object({
     runId: z.string().nullable(),
-    maxPasses: z.number().nullable(),
+    passNumber: z.number().nullable(),
+    sessionId: z.string().nullable(),
   }),
   output: z.object({
+    sessionId: z.string(),
+    passNumber: z.number(),
     runId: z.string(),
     findingCount: z.number(),
     model: z.string(),
-    passStats: z.array(z.object({
+    thisPassStats: z.object({
       pass: z.number(),
       inputItems: z.number(),
       groupsFormed: z.number(),
@@ -282,40 +302,49 @@ export default api({
       inputTokens: z.number(),
       outputTokens: z.number(),
       durationMs: z.number(),
-    })),
-    finalGroups: z.number(),
-    finalUngrouped: z.number(),
-    collapseRatio: z.string(),
-    conservationOk: z.boolean(),
-    conservationErrors: z.array(z.string()),
-    oldEngineComparison: z.object({
-      oldFamiliesCreated: z.number(),
-      oldSuppressed: z.number(),
-      oldUngrouped: z.number(),
-      oldRuleVersion: z.string(),
-      oldFamilyCatalogue: z.array(z.string()),
     }),
-    top25Groups: z.array(z.object({
-      groupId: z.number(),
-      size: z.number(),
-      reasons: z.array(z.string()),
-      memberTitles: z.array(z.string()),
+    converged: z.boolean(),
+    // Trajectory: passN → effective count at that pass
+    trajectory: z.array(z.object({
+      pass: z.number(),
+      effectiveCount: z.number(),
+      merges: z.number(),
+      durationMs: z.number(),
     })),
-    overMergeCandidates: z.array(z.object({
-      groupId: z.number(),
-      size: z.number(),
-      signal: z.string(),
-      reasons: z.array(z.string()),
-      memberTitles: z.array(z.string()),
-    })),
-    totalInputTokens: z.number(),
-    totalOutputTokens: z.number(),
-    totalDurationMs: z.number(),
+    // Final analysis (only populated when converged)
+    finalAnalysis: z.object({
+      collapseRatio: z.string(),
+      conservationOk: z.boolean(),
+      conservationErrors: z.array(z.string()),
+      oldEngineComparison: z.object({
+        oldFamiliesCreated: z.number(),
+        oldSuppressed: z.number(),
+        oldUngrouped: z.number(),
+        oldRuleVersion: z.string(),
+        oldFamilyCatalogue: z.array(z.string()),
+      }),
+      top25Groups: z.array(z.object({
+        groupId: z.number(),
+        size: z.number(),
+        reasons: z.array(z.string()),
+        memberTitles: z.array(z.string()),
+      })),
+      overMergeCandidates: z.array(z.object({
+        groupId: z.number(),
+        size: z.number(),
+        signal: z.string(),
+        reasons: z.array(z.string()),
+        memberTitles: z.array(z.string()),
+      })),
+      totalInputTokens: z.number(),
+      totalOutputTokens: z.number(),
+    }).nullable(),
+    durationMs: z.number(),
     error: z.string().nullable(),
   }),
 
-  async run(ctx, { runId: inputRunId, maxPasses: maxPassesInput }) {
-    const maxPasses = maxPassesInput ?? 3;
+  async run(ctx, { runId: inputRunId, passNumber: passNumberInput, sessionId: sessionIdInput }) {
+    const passNumber = passNumberInput ?? 1;
     const model = getModuleModel("omission_audit");
     const startTime = Date.now();
 
@@ -324,287 +353,470 @@ export default api({
       throw new Error(`HAIKU_GUARD: model "${model}" is haiku — refusing to run consolidation diagnostic.`);
     }
 
-    // ── Auto-select run (largest completed OA run for SCG deal) ──────────
-    let resolvedRunId = inputRunId;
-    if (!resolvedRunId) {
-      const rows = await ctx.integrations.db.query(
-        `SELECT mr.id FROM module_runs mr
-         JOIN module_outputs mo ON mo.module_run_id = mr.id
-         WHERE mr.deal_id = $1
-           AND mr.module_id = 'omission_audit'
-           AND mr.status = 'completed'
-         ORDER BY jsonb_array_length(mo.findings) DESC
-         LIMIT 1`,
-        z.object({ id: z.string() }),
-        [SCG_DEAL_ID],
-        { label: "Auto-select largest OA run" }
+    // ── Ensure scratch table exists ─────────────────────────────────────────
+    await ctx.integrations.db.execute(
+      `CREATE TABLE IF NOT EXISTS diag_consolidation_sessions (
+        id            TEXT NOT NULL,
+        pass_number   INT NOT NULL,
+        state_json    JSONB NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (id, pass_number)
+      )`,
+      undefined,
+      { label: "Ensure diag_consolidation_sessions table" }
+    );
+
+    // ── Generate or validate session ID ─────────────────────────────────────
+    const sessionId = sessionIdInput || crypto.randomUUID();
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PASS 1: Initial model grouping on raw findings
+    // ════════════════════════════════════════════════════════════════════════
+    if (passNumber === 1) {
+      // Auto-select run
+      let resolvedRunId = inputRunId;
+      if (!resolvedRunId) {
+        const rows = await ctx.integrations.db.query(
+          `SELECT mr.id FROM module_runs mr
+           JOIN module_outputs mo ON mo.module_run_id = mr.id
+           WHERE mr.deal_id = $1
+             AND mr.module_id = 'omission_audit'
+             AND mr.status = 'completed'
+           ORDER BY jsonb_array_length(mo.findings) DESC
+           LIMIT 1`,
+          z.object({ id: z.string() }),
+          [SCG_DEAL_ID],
+          { label: "Auto-select largest OA run" }
+        );
+        if (rows.length === 0) throw new Error("No completed OA runs found for SCG deal");
+        resolvedRunId = rows[0].id;
+      }
+
+      // Load findings
+      const findingsRows = await ctx.integrations.db.query(
+        `SELECT mo.findings FROM module_outputs mo WHERE mo.module_run_id = $1`,
+        z.object({ findings: z.any() }),
+        [resolvedRunId],
+        { label: "Load OA findings" }
       );
-      if (rows.length === 0) throw new Error("No completed OA runs found for SCG deal");
-      resolvedRunId = rows[0].id;
+      if (findingsRows.length === 0) throw new Error(`No module_outputs found for run ${resolvedRunId}`);
+
+      const rawFindings: any[] = findingsRows[0].findings;
+      const findingCount = rawFindings.length;
+
+      // Build compact projection
+      const compactFindings = rawFindings.map((f: any, idx: number) => ({
+        ref: `f${String(idx).padStart(3, "0")}`,
+        title: (f.title || "").slice(0, 200),
+        detail_trimmed: (f.detail || f.full_analysis || "").slice(0, 400),
+        source_docs: (f.source_docs || []).slice(0, 3),
+      }));
+
+      const refToTitleObj: Record<string, string> = {};
+      for (const c of compactFindings) refToTitleObj[c.ref] = c.title;
+
+      // Build finding lines
+      const findingLines = compactFindings.map((c) => {
+        const docs = c.source_docs.length > 0 ? ` [Sources: ${c.source_docs.join(", ")}]` : "";
+        return `${c.ref}: ${c.title}\n  Detail: ${c.detail_trimmed}${docs}`;
+      });
+
+      const inputTextPass1 = findingLines.join("\n\n");
+
+      // Run model
+      const passStart = Date.now();
+      const pass1Result = await callModel(ctx.integrations.ai, model, inputTextPass1, "DiagConsolidation Pass 1");
+
+      if (pass1Result.error || !pass1Result.response) {
+        const errorStats: PassStats = {
+          pass: 1, inputItems: findingCount, groupsFormed: 0, mergesPerformed: 0,
+          ungroupedAfter: findingCount, inputTokens: pass1Result.inputTokens,
+          outputTokens: pass1Result.outputTokens, durationMs: Date.now() - passStart,
+        };
+        return {
+          sessionId, passNumber: 1, runId: resolvedRunId, findingCount, model,
+          thisPassStats: errorStats, converged: false,
+          trajectory: [{ pass: 1, effectiveCount: findingCount, merges: 0, durationMs: errorStats.durationMs }],
+          finalAnalysis: null, durationMs: Date.now() - startTime,
+          error: pass1Result.error || "Unknown pass 1 failure",
+        };
+      }
+
+      // Build groups from pass 1
+      const allOriginalRefs = new Set(compactFindings.map((c) => c.ref));
+      let ungroupedRefs = new Set(allOriginalRefs);
+      const groups: ConsolidatedGroup[] = [];
+      let nextGroupId = 1;
+
+      for (const g of pass1Result.response.groups) {
+        if (g.member_refs.length >= 2) {
+          groups.push({ groupId: nextGroupId++, memberRefs: [...g.member_refs], reasons: [g.reason] });
+          for (const ref of g.member_refs) ungroupedRefs.delete(ref);
+        }
+      }
+      // Account for model's ungrouped + any missed refs
+      const accountedPass1 = new Set<string>();
+      for (const g of groups) for (const r of g.memberRefs) accountedPass1.add(r);
+      for (const r of pass1Result.response.ungrouped_refs) accountedPass1.add(r);
+      for (const r of allOriginalRefs) {
+        if (!accountedPass1.has(r)) ungroupedRefs.add(r);
+      }
+
+      const passStats: PassStats = {
+        pass: 1,
+        inputItems: findingCount,
+        groupsFormed: groups.length,
+        mergesPerformed: groups.length,
+        ungroupedAfter: ungroupedRefs.size,
+        inputTokens: pass1Result.inputTokens,
+        outputTokens: pass1Result.outputTokens,
+        durationMs: Date.now() - passStart,
+      };
+
+      // Persist
+      const state: PersistedPassState = {
+        groups,
+        ungroupedRefs: [...ungroupedRefs],
+        nextGroupId,
+        passStats,
+        refToTitle: refToTitleObj,
+        findingCount,
+        runId: resolvedRunId,
+        converged: false,
+      };
+      await ctx.integrations.db.execute(
+        `INSERT INTO diag_consolidation_sessions (id, pass_number, state_json)
+         VALUES ($1, $2, $3::jsonb)
+         ON CONFLICT (id, pass_number) DO UPDATE SET state_json = EXCLUDED.state_json, created_at = NOW()`,
+        [sessionId, 1, JSON.stringify(state)],
+        { label: "Persist pass 1 state" }
+      );
+
+      const effectiveCount = groups.length + ungroupedRefs.size;
+      return {
+        sessionId,
+        passNumber: 1,
+        runId: resolvedRunId,
+        findingCount,
+        model,
+        thisPassStats: passStats,
+        converged: false,
+        trajectory: [{ pass: 1, effectiveCount, merges: groups.length, durationMs: passStats.durationMs }],
+        finalAnalysis: null,
+        durationMs: Date.now() - startTime,
+        error: null,
+      };
     }
 
-    // ── Load findings ───────────────────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════════════════
+    // PASS N > 1: Load previous pass, run agglomerative, persist
+    // ════════════════════════════════════════════════════════════════════════
+    if (!sessionIdInput) {
+      throw new Error("sessionId is required for passNumber > 1");
+    }
+
+    // Load previous pass state
+    const prevRows = await ctx.integrations.db.query(
+      `SELECT state_json FROM diag_consolidation_sessions WHERE id = $1 AND pass_number = $2 LIMIT 1`,
+      z.object({ state_json: z.any() }),
+      [sessionId, passNumber - 1],
+      { label: `Load pass ${passNumber - 1} state` }
+    );
+    if (prevRows.length === 0) {
+      throw new Error(`No persisted state found for session ${sessionId}, pass ${passNumber - 1}. Run pass ${passNumber - 1} first.`);
+    }
+
+    const prevState: PersistedPassState = prevRows[0].state_json as PersistedPassState;
+    if (prevState.converged) {
+      throw new Error(`Session ${sessionId} already converged at pass ${passNumber - 1}. No further passes needed.`);
+    }
+
+    let groups = prevState.groups;
+    let ungroupedRefs = new Set(prevState.ungroupedRefs);
+    let nextGroupId = prevState.nextGroupId;
+    const refToTitleObj = prevState.refToTitle;
+    const refToTitle = new Map(Object.entries(refToTitleObj));
+    const findingCount = prevState.findingCount;
+    const resolvedRunId = prevState.runId;
+
+    // Build representatives
+    const repLines: string[] = [];
+    const repRefToGroupId = new Map<string, number>();
+
+    for (const g of groups) {
+      const repRef = `g${String(g.groupId).padStart(3, "0")}`;
+      const firstMemberTitle = refToTitle.get(g.memberRefs[0]) || "(unknown)";
+      const reason = g.reasons[g.reasons.length - 1] || "";
+      const repLine = `${repRef}: [GROUP of ${g.memberRefs.length}] ${firstMemberTitle}\n  Reason: ${reason}`;
+      repLines.push(repLine);
+      repRefToGroupId.set(repRef, g.groupId);
+    }
+
+    // Ungrouped as individual items
+    const ungroupedLines: string[] = [];
+    for (const ref of ungroupedRefs) {
+      const title = refToTitle.get(ref) || "(unknown)";
+      ungroupedLines.push(`${ref}: ${title}`);
+    }
+
+    const allPassItems = [...repLines, ...ungroupedLines];
+    const inputItemCount = allPassItems.length;
+
+    // Fixed-point early exit: if ≤1 items, converge immediately
+    if (inputItemCount <= 1) {
+      const trivialStats: PassStats = {
+        pass: passNumber, inputItems: inputItemCount, groupsFormed: groups.length,
+        mergesPerformed: 0, ungroupedAfter: ungroupedRefs.size,
+        inputTokens: 0, outputTokens: 0, durationMs: 0,
+      };
+      const finalState: PersistedPassState = {
+        groups, ungroupedRefs: [...ungroupedRefs], nextGroupId,
+        passStats: trivialStats, refToTitle: refToTitleObj,
+        findingCount, runId: resolvedRunId, converged: true,
+      };
+      await ctx.integrations.db.execute(
+        `INSERT INTO diag_consolidation_sessions (id, pass_number, state_json)
+         VALUES ($1, $2, $3::jsonb)
+         ON CONFLICT (id, pass_number) DO UPDATE SET state_json = EXCLUDED.state_json, created_at = NOW()`,
+        [sessionId, passNumber, JSON.stringify(finalState)],
+        { label: `Persist pass ${passNumber} (trivial convergence)` }
+      );
+      const finalAnalysis = await computeFinalAnalysis(ctx, groups, ungroupedRefs, refToTitle, findingCount, resolvedRunId, sessionId, passNumber);
+      return {
+        sessionId, passNumber, runId: resolvedRunId, findingCount, model,
+        thisPassStats: trivialStats, converged: true,
+        trajectory: await buildTrajectory(ctx, sessionId, passNumber),
+        finalAnalysis, durationMs: Date.now() - startTime, error: null,
+      };
+    }
+
+    // Run model call
+    const passStart = Date.now();
+    const passInputText = allPassItems.join("\n\n");
+    const passResult = await callModel(ctx.integrations.ai, model, passInputText, `DiagConsolidation Pass ${passNumber}`);
+
+    if (passResult.error || !passResult.response) {
+      // Treat parse failure on pass N>1 as convergence (model couldn't produce
+      // valid new merges → fixed point). Persist current state as converged.
+      const errorStats: PassStats = {
+        pass: passNumber, inputItems: inputItemCount, groupsFormed: groups.length,
+        mergesPerformed: 0, ungroupedAfter: ungroupedRefs.size,
+        inputTokens: passResult.inputTokens, outputTokens: passResult.outputTokens,
+        durationMs: Date.now() - passStart,
+      };
+      const convergedState: PersistedPassState = {
+        groups, ungroupedRefs: [...ungroupedRefs], nextGroupId,
+        passStats: errorStats, refToTitle: refToTitleObj,
+        findingCount, runId: resolvedRunId, converged: true,
+      };
+      await ctx.integrations.db.execute(
+        `INSERT INTO diag_consolidation_sessions (id, pass_number, state_json)
+         VALUES ($1, $2, $3::jsonb)
+         ON CONFLICT (id, pass_number) DO UPDATE SET state_json = EXCLUDED.state_json, created_at = NOW()`,
+        [sessionId, passNumber, JSON.stringify(convergedState)],
+        { label: `Persist pass ${passNumber} (parse-failure convergence)` }
+      );
+      const finalAnalysis = await computeFinalAnalysis(ctx, groups, ungroupedRefs, refToTitle, findingCount, resolvedRunId, sessionId, passNumber);
+      const trajectory = await buildTrajectory(ctx, sessionId, passNumber);
+      return {
+        sessionId, passNumber, runId: resolvedRunId, findingCount, model,
+        thisPassStats: errorStats, converged: true,
+        trajectory,
+        finalAnalysis, durationMs: Date.now() - startTime,
+        error: `Converged via parse failure: ${passResult.error || "unknown"}`,
+      };
+    }
+
+    const passResponse = passResult.response;
+
+    // Resolve merges back to original groups
+    let mergesThisPass = 0;
+    const newGroups: ConsolidatedGroup[] = [];
+    const consumedGroupIds = new Set<number>();
+    const consumedUngroupedRefs = new Set<string>();
+
+    for (const mg of passResponse.groups) {
+      if (mg.member_refs.length < 2) continue;
+
+      const mergedOriginalRefs: string[] = [];
+      const mergedReasons: string[] = [mg.reason];
+
+      for (const mref of mg.member_refs) {
+        if (mref.startsWith("g")) {
+          const gid = repRefToGroupId.get(mref);
+          if (gid !== undefined) {
+            const existing = groups.find((g) => g.groupId === gid);
+            if (existing) {
+              mergedOriginalRefs.push(...existing.memberRefs);
+              mergedReasons.push(...existing.reasons);
+              consumedGroupIds.add(gid);
+            }
+          }
+        } else if (mref.startsWith("f")) {
+          mergedOriginalRefs.push(mref);
+          consumedUngroupedRefs.add(mref);
+        }
+      }
+
+      if (mergedOriginalRefs.length >= 2) {
+        newGroups.push({ groupId: nextGroupId++, memberRefs: mergedOriginalRefs, reasons: mergedReasons });
+        mergesThisPass++;
+      }
+    }
+
+    // Keep unconsumed groups
+    for (const g of groups) {
+      if (!consumedGroupIds.has(g.groupId)) {
+        newGroups.push(g);
+      }
+    }
+
+    // Update ungrouped
+    for (const ref of consumedUngroupedRefs) ungroupedRefs.delete(ref);
+
+    groups = newGroups;
+
+    const passStats: PassStats = {
+      pass: passNumber,
+      inputItems: inputItemCount,
+      groupsFormed: newGroups.length,
+      mergesPerformed: mergesThisPass,
+      ungroupedAfter: ungroupedRefs.size,
+      inputTokens: passResult.inputTokens,
+      outputTokens: passResult.outputTokens,
+      durationMs: Date.now() - passStart,
+    };
+
+    const isConverged = mergesThisPass === 0 || passNumber >= MAX_PASSES;
+
+    // Persist
+    const state: PersistedPassState = {
+      groups,
+      ungroupedRefs: [...ungroupedRefs],
+      nextGroupId,
+      passStats,
+      refToTitle: refToTitleObj,
+      findingCount,
+      runId: resolvedRunId,
+      converged: isConverged,
+    };
+    await ctx.integrations.db.execute(
+      `INSERT INTO diag_consolidation_sessions (id, pass_number, state_json)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (id, pass_number) DO UPDATE SET state_json = EXCLUDED.state_json, created_at = NOW()`,
+      [sessionId, passNumber, JSON.stringify(state)],
+      { label: `Persist pass ${passNumber} state` }
+    );
+
+    // Build trajectory
+    const trajectory = await buildTrajectory(ctx, sessionId, passNumber);
+
+    // If converged, compute final analysis
+    let finalAnalysis = null;
+    if (isConverged) {
+      finalAnalysis = await computeFinalAnalysis(ctx, groups, ungroupedRefs, refToTitle, findingCount, resolvedRunId, sessionId, passNumber);
+    }
+
+    return {
+      sessionId,
+      passNumber,
+      runId: resolvedRunId,
+      findingCount,
+      model,
+      thisPassStats: passStats,
+      converged: isConverged,
+      trajectory,
+      finalAnalysis,
+      durationMs: Date.now() - startTime,
+      error: null,
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Helper: Build trajectory from all persisted passes
+// ═══════════════════════════════════════════════════════════════════════════════
+async function buildTrajectory(
+  ctx: any,
+  sessionId: string,
+  upThroughPass: number
+): Promise<Array<{ pass: number; effectiveCount: number; merges: number; durationMs: number }>> {
+  const rows = await ctx.integrations.db.query(
+    `SELECT pass_number, state_json FROM diag_consolidation_sessions
+     WHERE id = $1 AND pass_number <= $2
+     ORDER BY pass_number ASC`,
+    z.object({ pass_number: z.number(), state_json: z.any() }),
+    [sessionId, upThroughPass],
+    { label: "Load trajectory passes" }
+  );
+
+  return rows.map((r: any) => {
+    const s: PersistedPassState = r.state_json;
+    const effectiveCount = s.groups.length + s.ungroupedRefs.length;
+    return {
+      pass: r.pass_number,
+      effectiveCount,
+      merges: s.passStats.mergesPerformed,
+      durationMs: s.passStats.durationMs,
+    };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Helper: Compute final analysis on convergence
+// ═══════════════════════════════════════════════════════════════════════════════
+async function computeFinalAnalysis(
+  ctx: any,
+  groups: ConsolidatedGroup[],
+  ungroupedRefs: Set<string>,
+  refToTitle: Map<string, string>,
+  findingCount: number,
+  resolvedRunId: string,
+  sessionId: string,
+  passNumber: number
+) {
+  // Conservation check
+  const allOriginalRefs = new Set<string>();
+  for (let i = 0; i < findingCount; i++) {
+    allOriginalRefs.add(`f${String(i).padStart(3, "0")}`);
+  }
+
+  const refCounts = new Map<string, number>();
+  for (const g of groups) {
+    for (const r of g.memberRefs) refCounts.set(r, (refCounts.get(r) || 0) + 1);
+  }
+  for (const r of ungroupedRefs) refCounts.set(r, (refCounts.get(r) || 0) + 1);
+
+  const conservationErrors: string[] = [];
+  for (const ref of allOriginalRefs) {
+    const count = refCounts.get(ref) || 0;
+    if (count === 0) conservationErrors.push(`MISSING: ${ref}`);
+    if (count > 1) conservationErrors.push(`DUPLICATED: ${ref} (×${count})`);
+  }
+  for (const ref of refCounts.keys()) {
+    if (!allOriginalRefs.has(ref)) conservationErrors.push(`INVENTED: ${ref}`);
+  }
+
+  // Collapse ratio
+  const finalGroupCount = groups.length;
+  const finalUngrouped = ungroupedRefs.size;
+  const effectiveFindingCount = finalGroupCount + finalUngrouped;
+  const collapseRatio = `${findingCount} → ${effectiveFindingCount} (${((1 - effectiveFindingCount / findingCount) * 100).toFixed(1)}% reduction)`;
+
+  // Old engine comparison
+  let oldEngineComparison = {
+    oldFamiliesCreated: 0, oldSuppressed: 0, oldUngrouped: 0,
+    oldRuleVersion: "", oldFamilyCatalogue: [] as string[],
+  };
+  try {
     const findingsRows = await ctx.integrations.db.query(
       `SELECT mo.findings FROM module_outputs mo WHERE mo.module_run_id = $1`,
       z.object({ findings: z.any() }),
       [resolvedRunId],
-      { label: "Load OA findings" }
+      { label: "Load findings for old-engine comparison" }
     );
-    if (findingsRows.length === 0) throw new Error(`No module_outputs found for run ${resolvedRunId}`);
-
-    const rawFindings: any[] = findingsRows[0].findings;
-    const findingCount = rawFindings.length;
-
-    // ── Build compact projection ────────────────────────────────────────────
-    interface CompactFinding {
-      ref: string;
-      title: string;
-      detail_trimmed: string;
-      source_docs: string[];
-    }
-    const compactFindings: CompactFinding[] = rawFindings.map((f: any, idx: number) => ({
-      ref: `f${String(idx).padStart(3, "0")}`,
-      title: (f.title || "").slice(0, 200),
-      detail_trimmed: (f.detail || f.full_analysis || "").slice(0, 400),
-      source_docs: (f.source_docs || []).slice(0, 3),
-    }));
-
-    const refToTitle = new Map<string, string>();
-    for (const c of compactFindings) refToTitle.set(c.ref, c.title);
-
-    // ── Build finding lines for model ───────────────────────────────────────
-    const findingLines = compactFindings.map((c) => {
-      const docs = c.source_docs.length > 0 ? ` [Sources: ${c.source_docs.join(", ")}]` : "";
-      return `${c.ref}: ${c.title}\n  Detail: ${c.detail_trimmed}${docs}`;
-    });
-
-    // ════════════════════════════════════════════════════════════════════════
-    // PASS 1: Initial model grouping (all findings)
-    // ════════════════════════════════════════════════════════════════════════
-    const passStatsList: PassStats[] = [];
-    let groups: ConsolidatedGroup[] = [];
-    let ungroupedRefs: Set<string> = new Set(compactFindings.map((c) => c.ref));
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-
-    const pass1Start = Date.now();
-    const inputTextPass1 = findingLines.join("\n\n");
-    const pass1Result = await callModel(ctx.integrations.ai, model, inputTextPass1, "DiagConsolidation Pass 1");
-
-    if (pass1Result.error || !pass1Result.response) {
-      return {
-        runId: resolvedRunId,
-        findingCount,
-        model,
-        passStats: [],
-        finalGroups: 0,
-        finalUngrouped: findingCount,
-        collapseRatio: "N/A (pass 1 failed)",
-        conservationOk: false,
-        conservationErrors: [pass1Result.error || "Unknown pass 1 failure"],
-        oldEngineComparison: { oldFamiliesCreated: 0, oldSuppressed: 0, oldUngrouped: 0, oldRuleVersion: "", oldFamilyCatalogue: [] },
-        top25Groups: [],
-        overMergeCandidates: [],
-        totalInputTokens: pass1Result.inputTokens,
-        totalOutputTokens: pass1Result.outputTokens,
-        totalDurationMs: Date.now() - startTime,
-        error: pass1Result.error,
-      };
-    }
-
-    totalInputTokens += pass1Result.inputTokens;
-    totalOutputTokens += pass1Result.outputTokens;
-
-    // Build initial consolidated groups from pass 1
-    const pass1Response = pass1Result.response;
-    let nextGroupId = 1;
-    for (const g of pass1Response.groups) {
-      if (g.member_refs.length >= 2) {
-        groups.push({ groupId: nextGroupId++, memberRefs: [...g.member_refs], reasons: [g.reason] });
-        for (const ref of g.member_refs) ungroupedRefs.delete(ref);
-      }
-    }
-    // Anything model put in ungrouped_refs stays ungrouped
-    // Also add back any refs model may have missed
-    const allOriginalRefs = new Set(compactFindings.map((c) => c.ref));
-    const accountedPass1 = new Set<string>();
-    for (const g of groups) for (const r of g.memberRefs) accountedPass1.add(r);
-    for (const r of pass1Response.ungrouped_refs) accountedPass1.add(r);
-    // Any not accounted for = missed by model → add to ungrouped
-    for (const r of allOriginalRefs) {
-      if (!accountedPass1.has(r)) ungroupedRefs.add(r);
-    }
-
-    passStatsList.push({
-      pass: 1,
-      inputItems: findingCount,
-      groupsFormed: groups.length,
-      mergesPerformed: groups.length, // each group is a "merge" in pass 1
-      ungroupedAfter: ungroupedRefs.size,
-      inputTokens: pass1Result.inputTokens,
-      outputTokens: pass1Result.outputTokens,
-      durationMs: Date.now() - pass1Start,
-    });
-
-    // ════════════════════════════════════════════════════════════════════════
-    // AGGLOMERATIVE PASSES 2..maxPasses
-    // ════════════════════════════════════════════════════════════════════════
-    for (let passNum = 2; passNum <= maxPasses; passNum++) {
-      const passStart = Date.now();
-
-      // Build representatives: for each group, use first member's title + reason
-      // Use gNNN prefix for group representatives to avoid collision with fNNN
-      const repLines: string[] = [];
-      const repRefToGroupId = new Map<string, number>();
-
-      for (const g of groups) {
-        const repRef = `g${String(g.groupId).padStart(3, "0")}`;
-        const firstMemberTitle = refToTitle.get(g.memberRefs[0]) || "(unknown)";
-        const reason = g.reasons[g.reasons.length - 1] || "";
-        const repLine = `${repRef}: [GROUP of ${g.memberRefs.length}] ${firstMemberTitle}\n  Reason: ${reason}`;
-        repLines.push(repLine);
-        repRefToGroupId.set(repRef, g.groupId);
-      }
-
-      // Also include ungrouped as individual items
-      const ungroupedLines: string[] = [];
-      for (const ref of ungroupedRefs) {
-        const title = refToTitle.get(ref) || "(unknown)";
-        ungroupedLines.push(`${ref}: ${title}`);
-      }
-
-      const allPassItems = [...repLines, ...ungroupedLines];
-      const inputItemCount = allPassItems.length;
-
-      // Fixed-point check: if only 1 or fewer groupable items, stop
-      if (inputItemCount <= 1) break;
-
-      const passInputText = allPassItems.join("\n\n");
-      const passResult = await callModel(ctx.integrations.ai, model, passInputText, `DiagConsolidation Pass ${passNum}`);
-
-      totalInputTokens += passResult.inputTokens;
-      totalOutputTokens += passResult.outputTokens;
-
-      if (passResult.error || !passResult.response) {
-        passStatsList.push({
-          pass: passNum,
-          inputItems: inputItemCount,
-          groupsFormed: 0,
-          mergesPerformed: 0,
-          ungroupedAfter: ungroupedRefs.size,
-          inputTokens: passResult.inputTokens,
-          outputTokens: passResult.outputTokens,
-          durationMs: Date.now() - passStart,
-        });
-        break; // Stop on error
-      }
-
-      const passResponse = passResult.response;
-
-      // Resolve merges back to original groups
-      let mergesThisPass = 0;
-      const newGroups: ConsolidatedGroup[] = [];
-      const consumedGroupIds = new Set<number>();
-      const consumedUngroupedRefs = new Set<string>();
-
-      for (const mg of passResponse.groups) {
-        if (mg.member_refs.length < 2) continue;
-
-        // Collect all original finding refs from this merged group
-        const mergedOriginalRefs: string[] = [];
-        const mergedReasons: string[] = [mg.reason];
-
-        for (const mref of mg.member_refs) {
-          if (mref.startsWith("g")) {
-            // This is a group representative
-            const gid = repRefToGroupId.get(mref);
-            if (gid !== undefined) {
-              const existing = groups.find((g) => g.groupId === gid);
-              if (existing) {
-                mergedOriginalRefs.push(...existing.memberRefs);
-                mergedReasons.push(...existing.reasons);
-                consumedGroupIds.add(gid);
-              }
-            }
-          } else if (mref.startsWith("f")) {
-            // This is an ungrouped finding
-            mergedOriginalRefs.push(mref);
-            consumedUngroupedRefs.add(mref);
-          }
-        }
-
-        if (mergedOriginalRefs.length >= 2) {
-          newGroups.push({ groupId: nextGroupId++, memberRefs: mergedOriginalRefs, reasons: mergedReasons });
-          mergesThisPass++;
-        }
-      }
-
-      // Keep unconsumed groups
-      for (const g of groups) {
-        if (!consumedGroupIds.has(g.groupId)) {
-          newGroups.push(g);
-        }
-      }
-
-      // Update ungrouped
-      for (const ref of consumedUngroupedRefs) ungroupedRefs.delete(ref);
-
-      groups = newGroups;
-
-      passStatsList.push({
-        pass: passNum,
-        inputItems: inputItemCount,
-        groupsFormed: newGroups.length,
-        mergesPerformed: mergesThisPass,
-        ungroupedAfter: ungroupedRefs.size,
-        inputTokens: passResult.inputTokens,
-        outputTokens: passResult.outputTokens,
-        durationMs: Date.now() - passStart,
-      });
-
-      // Fixed-point: no merges → stop
-      if (mergesThisPass === 0) break;
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // CONSERVATION CHECK
-    // ════════════════════════════════════════════════════════════════════════
-    const refCounts = new Map<string, number>();
-    for (const g of groups) {
-      for (const r of g.memberRefs) refCounts.set(r, (refCounts.get(r) || 0) + 1);
-    }
-    for (const r of ungroupedRefs) refCounts.set(r, (refCounts.get(r) || 0) + 1);
-
-    const conservationErrors: string[] = [];
-    for (const ref of allOriginalRefs) {
-      const count = refCounts.get(ref) || 0;
-      if (count === 0) conservationErrors.push(`MISSING: ${ref}`);
-      if (count > 1) conservationErrors.push(`DUPLICATED: ${ref} (×${count})`);
-    }
-    for (const ref of refCounts.keys()) {
-      if (!allOriginalRefs.has(ref)) conservationErrors.push(`INVENTED: ${ref}`);
-    }
-    const conservationOk = conservationErrors.length === 0;
-
-    // ════════════════════════════════════════════════════════════════════════
-    // COLLAPSE RATIO
-    // ════════════════════════════════════════════════════════════════════════
-    const finalGroupCount = groups.length;
-    const finalUngrouped = ungroupedRefs.size;
-    const effectiveFindingCount = finalGroupCount + finalUngrouped;
-    const collapseRatio = `${findingCount} → ${effectiveFindingCount} (${((1 - effectiveFindingCount / findingCount) * 100).toFixed(1)}% reduction)`;
-
-    // ════════════════════════════════════════════════════════════════════════
-    // OLD ENGINE COMPARISON (SCG-hardcoded deduplicateFindings)
-    // ════════════════════════════════════════════════════════════════════════
-    let oldEngineComparison = {
-      oldFamiliesCreated: 0,
-      oldSuppressed: 0,
-      oldUngrouped: 0,
-      oldRuleVersion: "",
-      oldFamilyCatalogue: [] as string[],
-    };
-    try {
+    if (findingsRows.length > 0) {
+      const rawFindings: any[] = findingsRows[0].findings;
       const asCanonical: CanonicalFinding[] = rawFindings.map((f: any, idx: number) => ({
         finding_id: f.finding_id || `synth_${idx}`,
         severity: f.severity || "info",
@@ -626,63 +838,59 @@ export default api({
         oldRuleVersion: oldResult.ruleVersion,
         oldFamilyCatalogue: oldResult.familyCatalogue,
       };
-    } catch (e: any) {
-      oldEngineComparison.oldRuleVersion = `ERROR: ${e.message || String(e)}`;
     }
+  } catch (e: any) {
+    oldEngineComparison.oldRuleVersion = `ERROR: ${e.message || String(e)}`;
+  }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // TOP 25 LARGEST GROUPS
-    // ════════════════════════════════════════════════════════════════════════
-    const sortedBySize = [...groups].sort((a, b) => b.memberRefs.length - a.memberRefs.length);
-    const top25 = sortedBySize.slice(0, 25).map((g) => ({
-      groupId: g.groupId,
-      size: g.memberRefs.length,
-      reasons: g.reasons,
-      memberTitles: g.memberRefs.map((r) => `${r}: ${refToTitle.get(r) || "(unknown)"}`),
-    }));
+  // Top 25 largest groups
+  const sortedBySize = [...groups].sort((a, b) => b.memberRefs.length - a.memberRefs.length);
+  const top25 = sortedBySize.slice(0, 25).map((g) => ({
+    groupId: g.groupId,
+    size: g.memberRefs.length,
+    reasons: g.reasons,
+    memberTitles: g.memberRefs.map((r) => `${r}: ${refToTitle.get(r) || "(unknown)"}`),
+  }));
 
-    // ════════════════════════════════════════════════════════════════════════
-    // OVER-MERGE CANDIDATES (up to 20)
-    // ════════════════════════════════════════════════════════════════════════
-    const overMergeCandidates: Array<{
-      groupId: number;
-      size: number;
-      signal: string;
-      reasons: string[];
-      memberTitles: string[];
-    }> = [];
-
-    for (const g of sortedBySize) {
-      if (overMergeCandidates.length >= 20) break;
-      const { flagged, signal } = detectOverMerge(g, refToTitle);
-      if (flagged) {
-        overMergeCandidates.push({
-          groupId: g.groupId,
-          size: g.memberRefs.length,
-          signal,
-          reasons: g.reasons,
-          memberTitles: g.memberRefs.map((r) => `${r}: ${refToTitle.get(r) || "(unknown)"}`),
-        });
-      }
+  // Over-merge candidates
+  const overMergeCandidates: Array<{
+    groupId: number; size: number; signal: string; reasons: string[]; memberTitles: string[];
+  }> = [];
+  for (const g of sortedBySize) {
+    if (overMergeCandidates.length >= 20) break;
+    const { flagged, signal } = detectOverMerge(g, refToTitle);
+    if (flagged) {
+      overMergeCandidates.push({
+        groupId: g.groupId, size: g.memberRefs.length, signal,
+        reasons: g.reasons,
+        memberTitles: g.memberRefs.map((r) => `${r}: ${refToTitle.get(r) || "(unknown)"}`),
+      });
     }
+  }
 
-    return {
-      runId: resolvedRunId,
-      findingCount,
-      model,
-      passStats: passStatsList,
-      finalGroups: finalGroupCount,
-      finalUngrouped,
-      collapseRatio,
-      conservationOk,
-      conservationErrors: conservationErrors.slice(0, 50),
-      oldEngineComparison,
-      top25Groups: top25,
-      overMergeCandidates,
-      totalInputTokens,
-      totalOutputTokens,
-      totalDurationMs: Date.now() - startTime,
-      error: null,
-    };
-  },
-});
+  // Sum tokens from all passes
+  const allPassRows = await ctx.integrations.db.query(
+    `SELECT state_json FROM diag_consolidation_sessions WHERE id = $1 ORDER BY pass_number ASC`,
+    z.object({ state_json: z.any() }),
+    [sessionId],
+    { label: "Load all passes for token sum" }
+  );
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  for (const r of allPassRows) {
+    const s: PersistedPassState = r.state_json;
+    totalInputTokens += s.passStats.inputTokens;
+    totalOutputTokens += s.passStats.outputTokens;
+  }
+
+  return {
+    collapseRatio,
+    conservationOk: conservationErrors.length === 0,
+    conservationErrors: conservationErrors.slice(0, 50),
+    oldEngineComparison,
+    top25Groups: top25,
+    overMergeCandidates,
+    totalInputTokens,
+    totalOutputTokens,
+  };
+}
