@@ -50,171 +50,81 @@ DISCARD them — do not propagate or consolidate them into your output.
 
 ## SIGNIFICANCE GROUNDING — Severity Must Be Source-Anchored
 
-Every finding's severity and impact characterization MUST be anchored to verifiable evidence. Apply these rules:
-
-### Fact vs. Characterization Separation
-
-In every finding's "full_analysis", you MUST clearly separate:
-1. **Sourced facts** (what the source documents actually state) — prefix with "[SOURCED]"
-2. **Significance/impact claims** (your assessment of why it matters) — prefix with "[SIGNIFICANCE]"
-
-A significance claim is ONLY valid when it is:
-- **Directly stated in the source** (e.g., "the legal DD states this constitutes a s.19 criminal offence"), OR
-- **Directly computable from sourced figures against a materiality floor** (e.g., "£12m write-down = 1.8% of EV, above the £5m materiality threshold")
-
-### Severity Anchoring Rules
+Every finding's severity MUST be anchored to verifiable evidence:
 
 - **critical**: Requires EITHER (a) an explicit source statement of material risk (e.g., "criminal offence", "regulatory breach", "going concern doubt"), OR (b) a quantified £ impact exceeding 1% of transaction value (£6.5m on a £655m deal)
 - **warning**: Requires a quantified £ impact exceeding £1m, or a source-stated risk with identified mitigation
 - **info**: Everything else — including items where significance cannot be source-anchored
 
-### Prohibited Characterizations (Without Source Anchoring)
-
-You MUST NOT attach these characterizations unless the source explicitly states them or you can quantify them against the £655m transaction:
-- "material revenue-generating asset" — unless the source states materiality or revenue > £5m/yr
-- "operational cliff" / "existential threat" — unless the source describes business continuity risk
-- "critical dependency" — unless the source identifies single-point-of-failure
-- "threatens [year] projections" — unless you can cite the specific £ impact and its % of projected figures
-
-Example — WRONG: A £118k/yr office lease described as "a material revenue-generating asset with an operational cliff threatening 2031 projections." £118k = 0.018% of EV. The source says nothing about materiality or operational dependency. This is fabricated significance → demote to housekeeping.
-
-Example — CORRECT: "FCA authorisation under s.19 FSMA — the legal DD states that operating without proper consumer-hire authorisation constitutes a criminal offence (s.19 breach)." The source directly states the severity anchor. This is grounded → critical is justified.
-
-### severity_anchor Field (Required)
-
-Every finding MUST include a "severity_anchor" field — one sentence stating the £ figure or source statement that justifies the assigned severity. If you cannot articulate a severity anchor, the finding MUST be info/housekeeping.
-
-Examples:
-- "severity_anchor": "Legal DD states s.19 breach is a criminal offence (source-stated risk)"
-- "severity_anchor": "£12m contingent liability = 1.8% of EV, exceeds £6.5m critical threshold"
-- "severity_anchor": "£118k/yr rent = 0.018% of EV — below all materiality thresholds"
+If you cannot articulate a severity anchor, the finding MUST be info/housekeeping.
 
 ## MATERIALITY GATE — IC-Chair Standard
 
-Apply this test to EVERY finding before including it in principal output:
-
 "Would this plausibly change an IC member's assessment of a £655m transaction, or is it a standard DD-workstream, post-close housekeeping, or process-stage item?"
 
-**Principal findings** (category = "principal_finding"): Items that meet the materiality threshold. Target envelope: single digits to low teens of findings. These appear in the main findings output.
+- **Principal findings** (category = "principal_finding"): Meet the materiality threshold. Target: single digits to low teens.
+- **Housekeeping items** (category = "housekeeping"): Factually correct but immaterial. DEMOTED, never dropped.
+- **Human review flags** (category = "human_review_flag"): Emphasis-judgment findings (opinions, not facts).
 
-**Housekeeping items** (category = "housekeeping"): Sub-threshold items that are factually correct but immaterial to the IC decision. These include:
-- Standard DD workstream tracking items
-- Post-close administrative tasks
-- Process-stage confirmations
-- Minor procedural observations
-These are DEMOTED, not deleted. They appear in a separate housekeeping appendix section (after principal findings).
+## Output Structure — FINDINGS FIRST
 
-**Human review flags** (category = "human_review_flag"): Emphasis-judgment findings that failed the six-point rubric. These are opinions ("underweighted", "de-emphasised") not facts.
-
-Every finding MUST include a "materiality_rationale" field — one sentence justifying its IC relevance. A finding without a clear materiality rationale is automatically demoted to housekeeping.
-
-## Output Structure
-
-You MUST respond with these XML tags exactly:
-
-<executive_header>
-3-4 sentences for a busy IC chair. State the key risk posture and most material findings.
-</executive_header>
+IMPORTANT: Emit <findings_json> FIRST, then <executive_header>, then <housekeeping_appendix>.
+This ordering ensures findings survive if output is truncated.
 
 <findings_json>
 A JSON array of PRINCIPAL findings only (category = "principal_finding"). Each object has:
 - "severity": "critical" | "warning" | "info"
 - "title": short title, 5-10 words
 - "detail": 2-3 sentences with specific document references
-- "full_analysis": full paragraph with complete reasoning and evidence
+- "full_analysis": One concise paragraph (max 4 sentences). State the factual gap or risk, the source anchor, and the IC implication. No preamble, no subheadings.
 - "source_docs": array of filename strings
-- "claim_ids": array of claim ID strings (e.g. ["c0-3", "c2-7"]) — these are the stable IDs from the extraction step. Preserve them exactly. Every finding must trace back to at least one source claim.
-- "merged_from_finding_ids": (REQUIRED) array of finding_id strings from the INPUT findings that were consolidated into this output finding. Every input finding_id must appear in at least one output finding's merged_from_finding_ids array. If a finding is carried unchanged, its own finding_id goes here.
-- "issue_key": (REQUIRED) normalized snake_case identifier for the specific issue this finding describes (e.g. "fca_authorisation_risk", "one_park_lane_lease", "revenue_growth_mismatch"). Preserve exactly from extraction — when consolidating duplicate findings, keep the issue_key unchanged. Findings about the same underlying issue MUST share the same issue_key.
-- "absence_confidence": (REQUIRED for omission/gap findings) "verified_absent" | "likely_absent" | "unverified" — classification of whether the claimed absence has been cross-checked against all available extractions. Omit only for findings that do not assert something is missing.
-- "gap_type": (REQUIRED for omission/gap findings) "diligence_gap" | "memo_omission" | "open_item_acknowledged". Use "memo_omission" when the information IS present in evidence/reference documents but absent from the subject memo. Use "diligence_gap" when the information is absent from BOTH the subject memo AND all evidence documents. Use "open_item_acknowledged" when the deal record itself discloses the item as open/pending (e.g., results TBD, workstream staged post-IC) — this is distinct from omission. Omit for non-omission findings.
-- "evidence_docs": (REQUIRED when gap_type = "memo_omission") array of filenames of the evidence documents where the information WAS found. Omit when gap_type = "diligence_gap".
-- "independent": (REQUIRED when gap_type = "memo_omission") boolean. Set to false when ALL evidence_docs are prior IC memos (document_tag = ic_memo) — meaning the corroboration comes only from the team's own prior work, not from independent third-party sources. Set to true when at least one evidence_doc is NOT an ic_memo (e.g. financial model, CIM, customer data, contract). This flag helps the IC distinguish findings backed by outside evidence from those merely restating prior internal positions.
-- "evidence": array of evidence trace objects. REQUIRED for any finding that cites a specific number or quantitative claim. Each object: {"figure": "the number cited", "source_doc": "filename", "verbatim_snippet": "exact text from source containing this figure", "verified": true/false}. A figure with verified=false means it could not be traced to source text and is labeled numeric_unverified.
-- "materiality_rationale": (REQUIRED for all findings) One sentence explaining why this finding would plausibly change an IC member's assessment of a £655m transaction. Sub-threshold items are demoted to housekeeping.
-- "category": "principal_finding" | "housekeeping" | "human_review_flag". Default is "principal_finding". Use "housekeeping" for sub-materiality items (standard DD workstreams, post-close admin, process-stage items). Use "human_review_flag" for emphasis-judgment findings that failed the six-point rubric.
-- "numeric_unverified": boolean. Set to true when the finding's core quantitative claim could NOT be traced to verbatim source text (e.g., chart-derived or vision-inferred figures). Such findings MUST be severity "info" maximum.
-- "severity_anchor": (REQUIRED for all findings) One sentence stating the £ figure or explicit source statement that justifies the assigned severity. Format: "[£X = Y% of EV, exceeds Z threshold]" for quantified anchors, or "[Source document states: verbatim risk language]" for source-stated anchors. If no anchor can be articulated, severity MUST be "info" and category MUST be "housekeeping".
-- "finding_kind": (REQUIRED) "data_divergence" | "source_stated_risk" | "absence_claim" | "process_observation". Use "data_divergence" for findings derived from the Numeric Verification Report (cross-version divergences, model-vs-narrative gaps, reconciliation deltas where two values are compared). Use "source_stated_risk" for risks explicitly stated in DD source documents. Use "absence_claim" for findings asserting something is missing or not disclosed. Use "process_observation" for workflow/admin observations.
-- "structured_impact": (OPTIONAL) Array of impact objects when the finding has quantifiable monetary impact. Each object: {"amount": number (the value in stated units, e.g. 19000 for £19k), "currency": "GBP"|"USD"|"EUR"|"other", "unit_multiplier": number (1000 for thousands, 1000000 for millions, 1 for raw), "role": "delta"|"exposure"|"annual_impact"|"deal_value"|"threshold"|"context", "source_doc": "filename where amount appears", "source_coordinate": "page/cell/row reference", "verified": boolean (true only if confirmed by NumericVerify)}. Roles: "delta" = the discrepancy amount; "exposure" = maximum downside; "annual_impact" = recurring effect; "deal_value" = reference EV (cannot drive threshold alone); "threshold" = materiality comparison value; "context" = contextual reference (cannot drive threshold). Only entries with role=delta/exposure/annual_impact and verified=true may drive the materiality gate.
-- "analysis_gap_disclosed": (OPTIONAL) boolean. Set to true ONLY when the finding explicitly acknowledges that full analysis was not possible due to data limitations. This flags findings where the conclusion may be understated.
-
-Note: The gap_type-dependent fields (absence_confidence, gap_type, evidence_docs, independent) apply only to findings that carry a gap_type value. Findings without gap_type omit these fields entirely.
+- "claim_ids": array of claim ID strings (e.g. ["c0-3", "c2-7"]) — stable IDs from extraction. Preserve exactly.
+- "merged_from_finding_ids": (REQUIRED) array of finding_id strings from INPUT findings consolidated into this output finding. Every input finding_id must appear in at least one output finding's merged_from_finding_ids. If carried unchanged, its own finding_id goes here.
+- "issue_key": (REQUIRED) normalized snake_case identifier for the specific issue. Preserve exactly from extraction.
+- "absence_confidence": (REQUIRED for omission/gap findings) "verified_absent" | "likely_absent" | "unverified"
+- "gap_type": (REQUIRED for omission/gap findings) "diligence_gap" | "memo_omission" | "open_item_acknowledged"
+- "evidence_docs": (REQUIRED when gap_type = "memo_omission") array of evidence filenames
+- "independent": (REQUIRED when gap_type = "memo_omission") boolean
+- "evidence": array of evidence trace objects for quantitative claims. Each: {"figure": "number", "source_doc": "filename", "verbatim_snippet": "exact text", "verified": true/false}
+- "materiality_rationale": (REQUIRED) One sentence justifying IC relevance
+- "category": "principal_finding" | "housekeeping" | "human_review_flag"
+- "numeric_unverified": boolean — true when core quantitative claim unverifiable
+- "severity_anchor": (REQUIRED) One sentence: the £ figure or source statement justifying severity
+- "finding_kind": (REQUIRED) "data_divergence" | "source_stated_risk" | "absence_claim" | "process_observation"
+- "structured_impact": (OPTIONAL) Array of impact objects: {"amount": number, "currency": "GBP"|"USD"|"EUR"|"other", "unit_multiplier": number, "role": "delta"|"exposure"|"annual_impact"|"deal_value"|"threshold"|"context", "source_doc": "filename", "source_coordinate": "reference", "verified": boolean}
+- "analysis_gap_disclosed": (OPTIONAL) boolean — true when finding acknowledges data limitations
 </findings_json>
 
-## MITIGATION-CARRY RULE — Graded DD Item Attribution
-<!-- Motivated by exhibits F2 (tax DD) and F7 (insurance DD) where source documents themselves
-     grade or mitigate the item but the finding omitted that context, creating false alarm. -->
-
-When a finding references a due diligence item that the source document ITSELF grades, mitigates, or
-risk-rates, you MUST state in the finding's "full_analysis":
-1. The source document's own grade/rating (e.g., "Red Book rates this as 'low risk'", "Adviser flags as 'Amber'")
-2. The source's mitigation summary (e.g., "Indemnity agreed at £2m cap", "Insurance novation confirmed pre-close")
-
-A finding that cites a graded DD item WITHOUT carrying forward the source's own assessment is
-incomplete — the IC chair cannot distinguish a genuinely unmitigated risk from one the adviser
-already resolved. If the source provides no grade or mitigation, state: "Source does not grade or mitigate."
+<executive_header>
+3-4 sentences for a busy IC chair. State the key risk posture and most material findings.
+</executive_header>
 
 <housekeeping_appendix>
 A JSON array of sub-materiality findings (category = "housekeeping"). Same schema as findings_json.
-These are factually correct observations that do NOT meet the IC-chair materiality threshold.
-
-MANDATORY — DEMOTE, NEVER DROP: You MUST always emit this tag, even when the array is empty ("[]").
-Every finding that fails the materiality gate is DEMOTED here — it is NEVER silently deleted.
-The housekeeping appendix is a completeness record: its presence guarantees no finding was lost.
-
-Worked example: A finding "Post-close admin: trademark registrations pending in 3 jurisdictions" is
-factually correct but sub-threshold for a £655m transaction. It is DEMOTED to housekeeping with
-category "housekeeping" and materiality_rationale "Standard post-close admin, no impact on IC decision."
-It is NOT deleted.
-
-Also include any "human_review_flag" items here (emphasis-judgment findings demoted by the rubric).
+MANDATORY — DEMOTE, NEVER DROP. Emit this tag even when empty ("[]").
+Also include any "human_review_flag" items here.
 </housekeeping_appendix>
 
-## SEMANTIC DEDUPLICATION — Same-Issue Consolidation
+## MITIGATION-CARRY RULE
 
-Before outputting findings, perform a final normalization pass:
+When a finding references a DD item that the source document itself grades or mitigates, state in full_analysis:
+1. The source's own grade/rating
+2. The source's mitigation summary
+If the source provides neither, state: "Source does not grade or mitigate."
 
-1. **Cluster by issue identity, not title string**: Two findings describe the same underlying issue if they share the same issue_key, reference the same factual gap, the same document deficiency, or the same risk — regardless of how the title is worded.
-2. **Merge duplicates**: When multiple findings describe the same underlying issue, consolidate into ONE finding with:
-   - The highest severity from the cluster
-   - Combined source_docs from all duplicates
-   - Combined claim_ids from all duplicates (union, not replace)
-   - Combined evidence arrays
-   - The most complete full_analysis
-   - The issue_key preserved unchanged
-3. **Size guideline**: Target output should be single digits to low teens of principal findings. If you have >15 principal findings, you likely have unresolved duplicates.
+## SEMANTIC DEDUPLICATION
 
-## ADVERSARIAL NUMERIC TRACE-BACK — Mandatory Pre-Output Pass
+Before output, cluster by issue_key. Merge duplicates into ONE finding with highest severity, combined source_docs/claim_ids/evidence, and most complete full_analysis.
 
-Before finalizing findings, execute this numeric verification pass on EVERY drafted finding that contains a specific number:
+## RETRIEVAL VERIFICATION GATE (Six-Point Rubric)
 
-1. **Identify all numeric claims**: For each finding, extract every specific figure (percentages, currency amounts, ratios, counts).
-2. **Source retrieval**: For each figure, search the input extraction sets for a verbatim text snippet containing that exact number. The snippet must come from a named source document.
-3. **Match verification**: The figure in the finding must EXACTLY match the figure in the source snippet. Transpositions (e.g., 49% cited as 94%), rounding artifacts, and cross-document arithmetic are ALL failures.
-4. **Label unverifiable figures**: Any figure that cannot be matched to verbatim source text — including chart-derived values, vision-inferred numbers, or AI-computed aggregates — MUST be:
-   - Labeled with "numeric_unverified": true on the finding
-   - Capped at severity "info"
-   - Flagged in the evidence array with verified=false
-5. **Populate evidence array**: For EVERY numeric finding, produce an evidence object per figure: {"figure": "the number", "source_doc": "filename", "verbatim_snippet": "exact surrounding text", "verified": true/false}.
-
-Known failure patterns to catch:
-- NPS transposition: citing segment scores in wrong order or transposed digits
-- Revenue fabrication: asserting decline when P&L actually shows growth (e.g., claiming £250m→£194m when actuals are £144.8m→£168.2m→£192.5m)
-- Coupon mismatch: confusing 12% vs 14% preference coupon rates across instruments
-
-## RETRIEVAL VERIFICATION GATE — Mandatory Pre-Output Check (Six-Point Rubric)
-
-Before emitting ANY finding, apply ALL six checks. A finding that fails ANY check is DEMOTED to severity "info" with category "human_review_flag" or DROPPED entirely:
-
-1. **Quote-anchored**: The finding cites a verbatim quote or specific numeric figure from a named source document. Paraphrased or inferred claims without direct textual evidence FAIL.
-2. **Fact-of-process, not emphasis-judgment**: The finding states an objective factual gap or contradiction — NOT a subjective judgment about emphasis, tone, or weighting. Phrases like "underweighted", "de-emphasised", "insufficiently discussed", "should have been highlighted more" are emphasis-judgments and FAIL. Demote to human_review_flag.
-3. **Two-sided verified**: For any absence/omission claim, the opposite has been checked — the analyst searched for the topic under alternate terminology and across all document sets. A claim with no verification trail FAILS.
-4. **Numbers traced**: Every specific number in the finding matches a verbatim figure in the source text. A number that cannot be traced to exact source text is labeled numeric_unverified. Findings whose core claim depends on an unverified number FAIL.
-5. **Post-IC staging respected**: If the deal's own DD/adviser table explicitly stages a workstream as "post IC" or "kick off post IC", that topic is classified as open_item_acknowledged, NEVER as an omission or gap. A finding that flags explicitly staged work as missing FAILS.
-6. **IC-chair materiality**: The finding would plausibly change an IC member's assessment of the transaction. Standard housekeeping, process-stage items, and minor administrative matters are below threshold — demote to housekeeping appendix.
-
-Findings that contain emphasis-judgment language ("underweighted", "de-emphasised", "insufficiently stressed", "could have been more prominent") MUST be demoted to category "human_review_flag" with severity "info" — they represent editorial opinion, not factual findings.
+Before emitting ANY finding, apply all six checks. Failure → demote to human_review_flag or drop:
+1. **Quote-anchored**: Cites verbatim quote or specific numeric figure from a named source document
+2. **Fact-of-process, not emphasis-judgment**: No "underweighted", "de-emphasised", "insufficiently discussed"
+3. **Two-sided verified**: Absence claims checked under alternate terminology across all document sets
+4. **Numbers traced**: Every figure matches verbatim source text; unverifiable → numeric_unverified
+5. **Post-IC staging respected**: Items staged "post IC" → open_item_acknowledged, not omission
+6. **IC-chair materiality**: Would plausibly change IC assessment; otherwise → housekeeping
 
 {{FINDINGS_REQUIREMENT}}`;
 

@@ -4643,6 +4643,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // we have the full set from intermediate rounds to fall back on.
   let accumulatedFindings: MergedFinding[] = [];
   let accumulatedHousekeeping: MergedFinding[] = [];
+  let oaFlatModeDone = false;
 
   // FIX 2: Track round summaries for root-completion manifest
   const mergeRoundSummaries: RoundSummary[] = [];
@@ -4884,9 +4885,14 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           // Round 2+: cap at 180s (final merge can be very large).
           // Merge calls run in parallel within a batch (MERGE_CONCURRENCY=5),
           // so a batch takes ~maxTimeout wall-clock, not N×maxTimeout.
+          // Headroom is computed against the REAL platform ceiling (EFFECTIVE_CAP_MS),
+          // not the soft graceful-exit budget (TIME_BUDGET_MS). The batch-level
+          // graceful-exit guard already prevents overrun — clamping per-call against
+          // TIME_BUDGET_MS was double-counting safety margin and starving later groups.
           const timeoutCap = currentRound >= 2 ? 180_000 : 165_000;
-          const perCallTimeout = Math.min(timeoutCap, Math.max(30_000, timeRemaining() - 30_000));
-          console.log(`[pipeline:merge] R${currentRound}:G${group.idx + 1}/${totalGroupsThisRound} — timeout=${Math.round(perCallTimeout / 1000)}s, budget=${Math.round(timeRemaining() / 1000)}s, inputLen=${setBlocks.join("").length}`);
+          const realHeadroom = EFFECTIVE_CAP_MS - (Date.now() - startTime) - 30_000;
+          const perCallTimeout = Math.min(timeoutCap, Math.max(30_000, realHeadroom));
+          console.log(`[pipeline:merge] R${currentRound}:G${group.idx + 1}/${totalGroupsThisRound} — timeout=${Math.round(perCallTimeout / 1000)}s, realHeadroom=${Math.round(realHeadroom / 1000)}s, budget=${Math.round(timeRemaining() / 1000)}s, inputLen=${setBlocks.join("").length}`);
           const mergeResult = await callAnthropic(
             ctx,
             {
@@ -5245,7 +5251,31 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       { label: `Save merge-round manifest R${currentRound}` }
     );
 
-    nodes = nextNodes;
+    if (moduleId === "omission_audit" && !oaFlatModeDone) {
+      oaFlatModeDone = true;
+      // Bracket bypass: L2/L3/root merge collapses nothing (verified 491→491→491) and
+      // only carries findings up through truncation-prone calls. Flatten all L1 findings
+      // into one synthetic root node; MG-3 in the post-merge stage dedups the flat set.
+      const flatFindings = nextNodes.flatMap(n => n.findings ?? []);
+      const flatHousekeeping = nextNodes.flatMap(n => n.housekeepingFindings ?? []);
+      console.log(`[pipeline:OA-flat] Bracket bypass — ${flatFindings.length} L1 findings flattened, skipping remaining bracket rounds`);
+
+      // Step 3: Deterministic interim executive header (no LLM call — findings quality is priority).
+      // Built from severity counts + top 3 finding titles so the report isn't headerless.
+      const sevCounts = { critical: 0, warning: 0, info: 0 };
+      for (const f of flatFindings) {
+        const sev = (f as any).severity as string;
+        if (sev === "critical") sevCounts.critical++;
+        else if (sev === "warning") sevCounts.warning++;
+        else sevCounts.info++;
+      }
+      const topTitles = flatFindings.slice(0, 3).map(f => (f as any).title || "(untitled)").join("; ");
+      const interimHeader = `Omission Audit: ${flatFindings.length} findings (${sevCounts.critical} critical, ${sevCounts.warning} warning, ${sevCounts.info} info). Key issues: ${topTitles}.`;
+
+      nodes = [{ text: "", executiveHeader: interimHeader, findings: flatFindings, housekeepingFindings: flatHousekeeping }];
+    } else {
+      nodes = nextNodes;
+    }
   }
 
   // --- FIX 2: Persist root-completion manifest after merge tree fully reduces ---
