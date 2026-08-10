@@ -1962,78 +1962,7 @@ function extractTag(text: string, tag: string): string {
   return match ? match[1].trim() : "";
 }
 
-/**
- * Tolerant extraction for <findings_json>. When the model is truncated mid-array
- * (stop_reason = max_tokens), the closing </findings_json> is never emitted and
- * extractTag returns "". This helper recovers all complete array elements by:
- *   1. Trying the normal closed-tag extract first (fast path).
- *   2. If no match, taking the substring after <findings_json>, tracking bracket
- *      depth, truncating at the last position where a complete top-level array
- *      element closes (i.e. depth returns to 1), and appending ']'.
- * Exported for unit testing.
- */
-export function extractFindingsJsonTolerant(text: string): string {
-  // Fast path: closed tag present
-  const closed = extractTag(text, "findings_json");
-  if (closed) return closed;
 
-  // Tolerant path: find the opening tag
-  const openTagMatch = text.match(/<findings_json>/i);
-  if (!openTagMatch || openTagMatch.index === undefined) return "";
-
-  const startIdx = openTagMatch.index + openTagMatch[0].length;
-  const remaining = text.slice(startIdx);
-
-  // Find the start of the array
-  const arrayStart = remaining.indexOf("[");
-  if (arrayStart === -1) return "";
-
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  let lastCompleteElementEnd = -1;
-
-  for (let i = arrayStart; i < remaining.length; i++) {
-    const ch = remaining[i];
-
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (ch === "\\" && inString) {
-      escape = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-
-    if (ch === "[" || ch === "{") {
-      depth++;
-    } else if (ch === "]" || ch === "}") {
-      depth--;
-      // When depth returns to 1, we just closed a top-level array element (object)
-      if (depth === 1 && ch === "}") {
-        lastCompleteElementEnd = i;
-      }
-      // If depth hits 0, the array itself closed — use the full thing
-      if (depth === 0) {
-        return remaining.slice(arrayStart, i + 1).trim();
-      }
-    }
-  }
-
-  // Truncated mid-array — use everything up to last complete element
-  if (lastCompleteElementEnd > arrayStart) {
-    const recovered = remaining.slice(arrayStart, lastCompleteElementEnd + 1) + "]";
-    console.log(`[extractFindingsJsonTolerant] Recovered truncated array: ${recovered.length} chars, cut at position ${lastCompleteElementEnd}`);
-    return recovered.trim();
-  }
-
-  return "";
-}
 
 /**
  * Truncate a merge node's text to MERGE_NODE_TEXT_CAP chars.
@@ -4959,15 +4888,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           const setBlocks = group.members.map((m, i) => `## Analysis Set ${i + 1}\n\n${truncateMergeNodeText(m.text, MERGE_NODE_TEXT_CAP)}`);
           const mergeInput = setBlocks.join("\n\n---\n\n") + structuredFindingsBlocks + numericBlock + coverageMapBlock + dealProcessContextBlock;
 
-          // Dynamic timeout: later rounds have much larger payloads and need more time.
-          // Round 0-1: cap at 165s (raised from 120s — Freeze Exception #3, prompt growth).
-          // Round 2+: cap at 180s (final merge can be very large).
-          // Merge calls run in parallel within a batch (MERGE_CONCURRENCY=5),
-          // so a batch takes ~maxTimeout wall-clock, not N×maxTimeout.
-          // Headroom is computed against the REAL platform ceiling (EFFECTIVE_CAP_MS),
-          // not the soft graceful-exit budget (TIME_BUDGET_MS). The batch-level
-          // graceful-exit guard already prevents overrun — clamping per-call against
-          // TIME_BUDGET_MS was double-counting safety margin and starving later groups.
+          // Per-call timeout clamps against EFFECTIVE_CAP_MS (not the soft TIME_BUDGET_MS) so late-in-invocation calls aren't starved to the 30s floor.
           const timeoutCap = currentRound >= 2 ? 180_000 : 165_000;
           const realHeadroom = EFFECTIVE_CAP_MS - (Date.now() - startTime) - 30_000;
           const perCallTimeout = Math.min(timeoutCap, Math.max(30_000, realHeadroom));
