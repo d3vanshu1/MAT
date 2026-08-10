@@ -4150,7 +4150,18 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     // Budget gate: need at least 130s for a meaningful analysis batch
     const WORKER_BUDGET_GATE_MS = 130_000;
     const workerBudgetRemaining = EFFECTIVE_CAP_MS - (Date.now() - startTime);
+    const _diagElapsed1 = Date.now() - startTime;
+    await ctx.integrations.db.execute(
+      `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+      [runId, "gate", _diagElapsed1, JSON.stringify({ workerBudgetRemaining: Math.round(workerBudgetRemaining), gateMs: WORKER_BUDGET_GATE_MS, passed: workerBudgetRemaining >= WORKER_BUDGET_GATE_MS })],
+      { label: "DIAG: budget gate" }
+    );
     if (workerBudgetRemaining < WORKER_BUDGET_GATE_MS) {
+      await ctx.integrations.db.execute(
+        `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+        [runId, "gateTripped", Date.now() - startTime, JSON.stringify({ reason: "returning_in_progress" })],
+        { label: "DIAG: budget gate tripped" }
+      );
       logReturn("in_progress", "analysis", "worker_budget_insufficient", {
         remaining_ms: Math.round(workerBudgetRemaining),
         gate_ms: WORKER_BUDGET_GATE_MS,
@@ -4163,6 +4174,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     const workerInvocationId = `worker_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const batchSize = Math.min(ANALYSIS_WORKER_BATCH_SIZE, WORKER_BATCH_SIZE);
     const { claimed, recovered } = await claimBatch(ctx, runId!, workerInvocationId, batchSize, generationId);
+    await ctx.integrations.db.execute(
+      `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+      [runId, "claimed", Date.now() - startTime, JSON.stringify({ batchSize: claimed.length })],
+      { label: "DIAG: post-claim" }
+    );
 
     if (recovered > 0) {
       console.log(`[analysis-worker] Recovered ${recovered} expired lease(s)`);
@@ -4203,6 +4219,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
       const workerResults = await Promise.allSettled(
         claimed.map(async (item) => {
+          const chunkCallStart = Date.now();
           const row = routed[item.chunk_index];
           if (!row) {
             throw new Error(`Work item chunk_index ${item.chunk_index} exceeds routed array length ${routed.length}`);
@@ -4217,6 +4234,12 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
           const userContent = `--- Extracted text from "${chunkLabel}" ---\n\n${chunkText}\n\nAnalyze this chunk now.${coverageMapBlock}`;
 
+          const llmStart = Date.now();
+          await ctx.integrations.db.execute(
+            `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+            [runId, "chunkStart", Date.now() - startTime, JSON.stringify({ idx: item.chunk_index })],
+            { label: "DIAG: chunk start" }
+          );
           const result = await callAnthropic(
             ctx,
             {
@@ -4230,6 +4253,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             120_000,
             startTime
           );
+          const llmDurationMs = Date.now() - llmStart;
 
           const textBlock = result.content.find((c: { type: string }) => c.type === "text");
           const extraction = `### Extraction from: ${chunkLabel}\n\n${textBlock?.text ?? ""}`;
@@ -4243,6 +4267,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
           };
 
           // Fenced dual-write: pipeline_analysis + mark work item complete
+          const dbWriteStart = Date.now();
           const { accepted } = await completeItem(ctx, item, {
             label: chunkLabel,
             extraction,
@@ -4250,9 +4275,22 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             truncated,
             content_identity: contentIdentity,
           }, getModuleModel(moduleId), workerInvocationId);
+          const dbWriteDurationMs = Date.now() - dbWriteStart;
+          const totalChunkMs = Date.now() - chunkCallStart;
+
+          await ctx.integrations.db.execute(
+            `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+            [runId, "chunkEnd", Date.now() - startTime, JSON.stringify({ idx: item.chunk_index, llmMs: llmDurationMs, dbWriteMs: dbWriteDurationMs, totalMs: totalChunkMs })],
+            { label: "DIAG: chunk end" }
+          );
 
           return { label: chunkLabel, chunkIndex: item.chunk_index, truncated, accepted };
         })
+      );
+      await ctx.integrations.db.execute(
+        `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+        [runId, "allSettled", Date.now() - startTime, null],
+        { label: "DIAG: allSettled" }
       );
 
       // Process results — derive durable progress from queue counts (not promises)
@@ -4281,6 +4319,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         [runId],
         { label: "Refresh triggered_at (worker heartbeat)" }
       );
+      await ctx.integrations.db.execute(
+        `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+        [runId, "batchDone", Date.now() - startTime, null],
+        { label: "DIAG: batch fully done" }
+      );
 
       // Cancel gate
       if (await checkCancelled(ctx, runId, "analysis_worker_batch")) {
@@ -4295,6 +4338,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
       // Check if more work remains
       if (!(await isAnalysisComplete(ctx, runId!, generationId, popResult.expectedCount))) {
+        await ctx.integrations.db.execute(
+          `INSERT INTO diag_timeout_trace (run_id, marker, elapsed_ms, extra) VALUES ($1, $2, $3, $4)`,
+          [runId, "gracefulExit", Date.now() - startTime, JSON.stringify({ reason: "more_work_remains" })],
+          { label: "DIAG: graceful exit" }
+        );
         exitPhase("analysis_worker");
         return returnInProgress("analysis");
       }
