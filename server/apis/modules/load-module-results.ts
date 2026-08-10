@@ -110,6 +110,13 @@ export default api({
         }
       } catch (err) {
         console.error(`[LoadModuleResults] Fail-closed:`, err instanceof Error ? err.message : err);
+        const d = (err as { detail?: { invalid?: Array<{ title: string; issues: string }>; malformed_count?: number } })?.detail;
+        if (d) {
+          console.error(
+            `[LoadModuleResults] Module dropped from results — module_id=${row.module_id} run_id=${row.run_id} malformed=${d.malformed_count ?? 0}`,
+            (d.invalid ?? []).slice(0, 10)
+          );
+        }
         outputCorrupt = true;
       }
 

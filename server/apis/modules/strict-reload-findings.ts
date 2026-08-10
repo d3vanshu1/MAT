@@ -52,9 +52,18 @@ export function strictReloadFindings(
     ]
       .filter(Boolean)
       .join(", ");
-    throw new Error(
+    const detail = {
+      malformed_count: result.malformed_count,
+      invalid: result.invalid.map((inv) => ({
+        title: inv.finding.title,
+        issues: inv.issues.join("; "),
+      })),
+    };
+    const err = new Error(
       `[${source}] Corrupt persisted findings — fail closed: ${details}`
     );
+    (err as Error & { detail?: unknown }).detail = detail;
+    throw err;
   }
 
   return { findings: result.findings };
