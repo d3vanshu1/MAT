@@ -365,7 +365,7 @@ export function parseCanonicalFindings(
 
     // --- classification ---
     const finding_kind = parseEnum(obj.finding_kind, [
-      "data_divergence", "source_stated_risk", "absence_claim", "process_observation",
+      "data_divergence", "cross_version", "source_stated_risk", "absence_claim", "process_observation",
     ] as const, itemSource, itemIssues);
 
     const category = parseEnum(obj.category, [
@@ -421,6 +421,27 @@ export function parseCanonicalFindings(
       ? obj.merged_from_finding_ids.filter(id => typeof id === "string" && isValidUUID(id))
       : undefined;
 
+    // --- MG-4 materiality tiering + consolidation audit trail ---
+    const materiality_tier = typeof obj.materiality_tier === "number"
+      ? obj.materiality_tier
+      : undefined;
+
+    const tier_rationale = typeof obj.tier_rationale === "string" && obj.tier_rationale.trim()
+      ? obj.tier_rationale
+      : undefined;
+
+    const tier_driver = typeof obj.tier_driver === "string" && obj.tier_driver.trim()
+      ? obj.tier_driver
+      : undefined;
+
+    const consolidated_analyses = Array.isArray(obj.consolidated_analyses) && obj.consolidated_analyses.length > 0
+      ? obj.consolidated_analyses.map(String)
+      : undefined;
+
+    const absence_verification = parseEnum(obj.absence_verification, [
+      "contradicted_by_memo", "memo_absent_confirmed",
+    ] as const, itemSource, itemIssues);
+
     // --- Apply numeric_unverified severity cap ---
     const finalSeverity = numeric_unverified === true && severity !== "info" ? "info" : severity;
     if (finalSeverity !== severity) {
@@ -453,6 +474,11 @@ export function parseCanonicalFindings(
     if (independent !== undefined) finding.independent = independent;
     if (verification !== undefined) finding.verification = verification;
     if (claim_ids && claim_ids.length > 0) finding.claim_ids = claim_ids;
+    if (materiality_tier !== undefined) finding.materiality_tier = materiality_tier;
+    if (tier_rationale !== undefined) finding.tier_rationale = tier_rationale;
+    if (tier_driver !== undefined) finding.tier_driver = tier_driver;
+    if (consolidated_analyses && consolidated_analyses.length > 0) finding.consolidated_analyses = consolidated_analyses;
+    if (absence_verification !== undefined) finding.absence_verification = absence_verification;
 
     if (!isValid || itemIssues.length > 0) {
       invalid.push({ finding, valid: isValid, issues: itemIssues });
