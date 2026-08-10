@@ -84,6 +84,7 @@ import { getPipelineVersion } from "./pipeline-version.js";
 import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
 import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE } from "./pipeline-config.js";
+import { extractFindingsJsonTolerant } from "./extract-findings-tolerant.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
 import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isAnalysisComplete, detectMismatches, isWorkerEnabledForRun, WORKER_BATCH_SIZE } from "./analysis-worker.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance, serializeOriginMap, deserializeOriginMap, computeOriginMapFingerprint } from "./claim-origin-map.js";
@@ -99,14 +100,14 @@ import { matchAbsenceFindings, type FindingInput, type MatcherOutput } from "./a
 // Config
 // ---------------------------------------------------------------------------
 const SUB_AGENT_MAX_TOKENS = 4096;
-const MERGE_MAX_TOKENS = 8000;
+const MERGE_MAX_TOKENS = 9500;
 
 const ANALYSIS_CONCURRENCY = 15;
 const MERGE_CONCURRENCY = 5;
-const MERGE_GROUP_SIZE = 4;
+const MERGE_GROUP_SIZE = 2;
 const MAX_MERGE_GROUP_FAILURES = 5; // Skip (use fallback) after this many error checkpoints across invocations
 const MAX_PARTIAL_RETRIES = 2; // Accept truncated merge checkpoints after this many re-merges still truncate
-const MERGE_NODE_TEXT_CAP = 3000; // Max chars per node's text in merge input — prevents token overflow
+const MERGE_NODE_TEXT_CAP = 2000; // Max chars per node's text in merge input — prevents token overflow
 // TIME_BUDGET_MS is imported from pipeline-config.ts (derived from EFFECTIVE_CAP_MS - 100s, floor 120s)
 
 // Report formatting config (inline, post-merge)
@@ -1959,6 +1960,79 @@ function extractTag(text: string, tag: string): string {
   const regex = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i");
   const match = text.match(regex);
   return match ? match[1].trim() : "";
+}
+
+/**
+ * Tolerant extraction for <findings_json>. When the model is truncated mid-array
+ * (stop_reason = max_tokens), the closing </findings_json> is never emitted and
+ * extractTag returns "". This helper recovers all complete array elements by:
+ *   1. Trying the normal closed-tag extract first (fast path).
+ *   2. If no match, taking the substring after <findings_json>, tracking bracket
+ *      depth, truncating at the last position where a complete top-level array
+ *      element closes (i.e. depth returns to 1), and appending ']'.
+ * Exported for unit testing.
+ */
+export function extractFindingsJsonTolerant(text: string): string {
+  // Fast path: closed tag present
+  const closed = extractTag(text, "findings_json");
+  if (closed) return closed;
+
+  // Tolerant path: find the opening tag
+  const openTagMatch = text.match(/<findings_json>/i);
+  if (!openTagMatch || openTagMatch.index === undefined) return "";
+
+  const startIdx = openTagMatch.index + openTagMatch[0].length;
+  const remaining = text.slice(startIdx);
+
+  // Find the start of the array
+  const arrayStart = remaining.indexOf("[");
+  if (arrayStart === -1) return "";
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let lastCompleteElementEnd = -1;
+
+  for (let i = arrayStart; i < remaining.length; i++) {
+    const ch = remaining[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === "[" || ch === "{") {
+      depth++;
+    } else if (ch === "]" || ch === "}") {
+      depth--;
+      // When depth returns to 1, we just closed a top-level array element (object)
+      if (depth === 1 && ch === "}") {
+        lastCompleteElementEnd = i;
+      }
+      // If depth hits 0, the array itself closed — use the full thing
+      if (depth === 0) {
+        return remaining.slice(arrayStart, i + 1).trim();
+      }
+    }
+  }
+
+  // Truncated mid-array — use everything up to last complete element
+  if (lastCompleteElementEnd > arrayStart) {
+    const recovered = remaining.slice(arrayStart, lastCompleteElementEnd + 1) + "]";
+    console.log(`[extractFindingsJsonTolerant] Recovered truncated array: ${recovered.length} chars, cut at position ${lastCompleteElementEnd}`);
+    return recovered.trim();
+  }
+
+  return "";
 }
 
 /**
@@ -4846,6 +4920,11 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
       pendingGroups.push(group);
     }
 
+    // Subdivision queue: groups that timeout at L1 are split in half and re-queued.
+    // With MERGE_GROUP_SIZE=2, each subdivision yields two single-member sub-groups
+    // which are promoted as passthrough nodes (no AI merge needed for singletons).
+    const subdivisionQueue: Array<{ parentIdx: number; subIdx: number; members: MergeNode[] }> = [];
+
     // Process pending groups in batches (parallel within batch, sequential across batches)
     for (let bStart = 0; bStart < pendingGroups.length; ) {
       // Batch-aware graceful exit: real platform clock against worst-case batch duration
@@ -4910,7 +4989,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           const mergeText = mergeResult.content.find((c: { type: string }) => c.type === "text")?.text ?? "";
           const truncated = mergeResult.stop_reason === "max_tokens";
           const executiveHeader = extractTag(mergeText, "executive_header") || "Analysis complete.";
-          const findingsRaw = extractTag(mergeText, "findings_json");
+          const findingsRaw = extractFindingsJsonTolerant(mergeText);
 
           let findings: MergedFinding[] = [];
           if (findingsRaw) {
@@ -5172,37 +5251,55 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             { label: `Save merge checkpoint R${currentRound}:G${group.idx} (status=${cpStatus})` }
           );
         } else {
-          // Merge call failed — use a placeholder so the tree can still reduce
+          // Merge call failed (timeout or API error)
           mergeFailedGroups++;
           const errMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
           console.warn(`[pipeline:merge] Group R${currentRound}:G${group.idx} failed: ${errMsg.slice(0, 200)}`);
           if (!mergeFirstError) {
             mergeFirstError = errMsg;
           }
-          // Use first member's text as fallback so tree reduction can continue
-          // Preserve input members' findings so they aren't lost
-          const memberFindings = group.members.flatMap(m => m.findings ?? []);
-          accumulatedFindings.push(...memberFindings);
-          const fallback: MergeNode = { text: group.members[0].text, executiveHeader: "Merge failed", findings: memberFindings };
-          nextNodes[group.idx] = fallback;
-          groupsDone++;
 
-          // Save error checkpoint with incremented failureCount.
-          // ON CONFLICT DO UPDATE overwrites the single row — failureCount inside the JSON
-          // is the durable cross-invocation counter (not row count).
-          const errCpKey = `${currentRound}:${group.idx}`;
-          const prevFailures = errorCountMap.get(errCpKey) ?? 0;
-          const newFailureCount = prevFailures + 1;
-          errorCountMap.set(errCpKey, newFailureCount); // update in-memory for same-invocation re-encounters
-          errorMessageMap.set(errCpKey, errMsg); // preserve latest error message
-          await ctx.integrations.db.execute(
-            `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
-             VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'error')
-             ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = 'error'
-               WHERE merge_checkpoints.status <> 'complete'`,
-            [runId, currentRound, group.idx, JSON.stringify({ error: errMsg, failureCount: newFailureCount, timestamp: new Date().toISOString() }), getModuleModel(moduleId, useOpus), currentVersion],
-            { label: `Save merge error checkpoint R${currentRound}:G${group.idx} (failure #${newFailureCount})` }
-          );
+          // ---------------------------------------------------------------
+          // Task 3: Subdivide-on-timeout at L1.
+          // If the group has >1 member, split in half and queue each half for
+          // a separate merge call. Single-member groups cannot subdivide —
+          // use the existing passthrough fallback. This complements
+          // MAX_PARTIAL_RETRIES (which handles truncation, not timeouts) and
+          // MAX_MERGE_GROUP_FAILURES (which fires on resume, not same-invocation).
+          // ---------------------------------------------------------------
+          if (group.members.length > 1 && currentRound === 1) {
+            const mid = Math.ceil(group.members.length / 2);
+            const leftMembers = group.members.slice(0, mid);
+            const rightMembers = group.members.slice(mid);
+            console.log(`[pipeline:subdivide] R${currentRound}:G${group.idx} timed out with ${group.members.length} members — subdividing into [${leftMembers.length}, ${rightMembers.length}]`);
+            subdivisionQueue.push(
+              { parentIdx: group.idx, subIdx: 0, members: leftMembers },
+              { parentIdx: group.idx, subIdx: 1, members: rightMembers }
+            );
+            // Don't save error checkpoint yet — subdivision will resolve this group
+          } else {
+            // Cannot subdivide (single member or non-L1): use passthrough fallback
+            const memberFindings = group.members.flatMap(m => m.findings ?? []);
+            accumulatedFindings.push(...memberFindings);
+            const fallback: MergeNode = { text: group.members[0].text, executiveHeader: "Merge failed", findings: memberFindings };
+            nextNodes[group.idx] = fallback;
+            groupsDone++;
+
+            // Save error checkpoint with incremented failureCount.
+            const errCpKey = `${currentRound}:${group.idx}`;
+            const prevFailures = errorCountMap.get(errCpKey) ?? 0;
+            const newFailureCount = prevFailures + 1;
+            errorCountMap.set(errCpKey, newFailureCount);
+            errorMessageMap.set(errCpKey, errMsg);
+            await ctx.integrations.db.execute(
+              `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'error')
+               ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = 'error'
+                 WHERE merge_checkpoints.status <> 'complete'`,
+              [runId, currentRound, group.idx, JSON.stringify({ error: errMsg, failureCount: newFailureCount, timestamp: new Date().toISOString() }), getModuleModel(moduleId, useOpus), currentVersion],
+              { label: `Save merge error checkpoint R${currentRound}:G${group.idx} (failure #${newFailureCount})` }
+            );
+          }
         }
       }
 

@@ -5,6 +5,7 @@ import { getModuleModel } from "../pipeline/model-config.js";
 import { LEGAL_TAX_REGULATORY_SCOPE_BOUNDARY } from "./analyze-chunk.js";
 import { parseCanonicalFindings, type CanonicalFinding } from "../pipeline/canonical-finding.js";
 import { enforceNarrativeBoundary } from "../pipeline/narrative-enforcement.js";
+import { extractFindingsJsonTolerant } from "../pipeline/extract-findings-tolerant.js";
 
 // ---------------------------------------------------------------------------
 // Integration
@@ -62,7 +63,7 @@ If you cannot articulate a severity anchor, the finding MUST be info/housekeepin
 
 "Would this plausibly change an IC member's assessment of a £655m transaction, or is it a standard DD-workstream, post-close housekeeping, or process-stage item?"
 
-- **Principal findings** (category = "principal_finding"): Meet the materiality threshold. Target: single digits to low teens.
+- **Principal findings** (category = "principal_finding"): Meet the materiality threshold.
 - **Housekeeping items** (category = "housekeeping"): Factually correct but immaterial. DEMOTED, never dropped.
 - **Human review flags** (category = "human_review_flag"): Emphasis-judgment findings (opinions, not facts).
 
@@ -551,7 +552,7 @@ No deterministic numeric verification was performed for this analysis. All figur
       extractTag(output, "executive_header") ||
       "Analysis complete. See findings below.";
 
-    const findingsRaw = extractTag(output, "findings_json");
+    const findingsRaw = extractFindingsJsonTolerant(output);
 
     // Determine if LLM output was truncated (max_tokens reached)
     const wasTruncated = result.stop_reason === "max_tokens";
