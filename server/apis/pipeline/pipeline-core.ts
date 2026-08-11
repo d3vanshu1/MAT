@@ -100,7 +100,7 @@ import { matchAbsenceFindings, type FindingInput, type MatcherOutput } from "./a
 // Config
 // ---------------------------------------------------------------------------
 const SUB_AGENT_MAX_TOKENS = 4096;
-const MERGE_MAX_TOKENS = 9500;
+const MERGE_MAX_TOKENS = 15000;
 
 const ANALYSIS_CONCURRENCY = 15;
 const MERGE_CONCURRENCY = 5;
