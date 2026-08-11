@@ -112,6 +112,7 @@ import RecoverRun7bbeab48 from './pipeline/recover-run-7bbeab48.js';
 import RunMigration019 from './pipeline/run-migration-019.js';
 import RunMigration020 from './pipeline/run-migration-020.js';
 import ReadDiagTrace from './pipeline/read-diag-trace.js';
+import ResetMergeTruncation from './pipeline/reset-merge-truncation.js';
 import AdaptiveMergeRecovery from './pipeline/adaptive-merge-recovery.js';
 import ValidateTreeRoot from './pipeline/validate-tree-root.js';
 import FindingReductionGate from './pipeline/finding-reduction-gate.js';
@@ -202,7 +203,7 @@ const apis = {
   RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree, PromoteRootFindings,
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
-  RunMigration019, RunMigration020, ReadDiagTrace, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality,
+  RunMigration019, RunMigration020, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
