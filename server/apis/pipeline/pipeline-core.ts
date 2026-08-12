@@ -4668,6 +4668,29 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     });
   }
 
+  // --- FIX: Post-checkpointMap sanitizer for reset partial nodes ---
+  // When truncation_count is explicitly reset to 0 (via ResetMergeTruncation), the node
+  // MUST be retried regardless of how checkpoint loading categorized it. This catches
+  // edge cases where stale OPA code or race conditions placed a partial-truncated node
+  // into checkpointMap despite it needing a retry.
+  const forcedRetryKeys: string[] = [];
+  for (const cp of mergeCheckpoints) {
+    if (cp.node_index < 0) continue;
+    const cpKey = `${cp.tree_level}:${cp.node_index}`;
+    if (!checkpointMap.has(cpKey)) continue; // already excluded — good
+    const cpData = typeof cp.merged_json === "string" ? JSON.parse(cp.merged_json) : cp.merged_json;
+    const cpStatus = parseCheckpointStatus(cp.status);
+    // Detect reset-to-retry: partial + truncated + truncation_count explicitly 0
+    if (cpStatus === "partial" && cpData.truncated === true && cpData.truncation_count === 0) {
+      checkpointMap.delete(cpKey);
+      truncationCountMap.set(cpKey, 0);
+      forcedRetryKeys.push(cpKey);
+    }
+  }
+  if (forcedRetryKeys.length > 0) {
+    console.log(`[pipeline:forced-retry] Evicted ${forcedRetryKeys.length} reset-partial nodes from checkpointMap: [${forcedRetryKeys.join(", ")}]`);
+  }
+
   // Initialize nodes from analysis results
   let nodes: MergeNode[] = analysisResults.map(a => ({
     text: a.extraction,
@@ -4895,6 +4918,30 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
         continue;
       }
       pendingGroups.push(group);
+    }
+
+    // --- FIX: Priority-sort pendingGroups: partial retries first ---
+    // Nodes that were previously processed but need retry (truncation_count exists in
+    // truncationCountMap or were evicted by the forced-retry sanitizer) should be processed
+    // BEFORE never-yet-attempted groups. This prevents graceful exit from starving retries
+    // when many new groups also need processing.
+    if (pendingGroups.length > 1) {
+      const retrySet = new Set<number>();
+      for (const g of pendingGroups) {
+        const k = `${currentRound}:${g.idx}`;
+        if (truncationCountMap.has(k) || forcedRetryKeys.includes(k)) {
+          retrySet.add(g.idx);
+        }
+      }
+      if (retrySet.size > 0) {
+        pendingGroups.sort((a, b) => {
+          const aRetry = retrySet.has(a.idx) ? 0 : 1;
+          const bRetry = retrySet.has(b.idx) ? 0 : 1;
+          if (aRetry !== bRetry) return aRetry - bRetry;
+          return a.idx - b.idx; // stable: preserve index order within each tier
+        });
+        console.log(`[pipeline:retry-priority] ${retrySet.size} retry group(s) promoted to front of pendingGroups (total pending: ${pendingGroups.length})`);
+      }
     }
 
     // Subdivision queue: groups that timeout at L1 are split in half and re-queued.
