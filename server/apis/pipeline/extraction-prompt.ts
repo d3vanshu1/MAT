@@ -52,6 +52,17 @@ For each flag identified:
 - Adviser severity: "high" | "medium" | "low" | null. Emit the rating ONLY when the source explicitly assigns a priority/severity/materiality grade to this flag. Do not synthesise a rating that was not assigned. Null when the document does not rate the flag.
 - Adviser disposition (string or null): the adviser's stated recommendation or stance toward the flag, in their own words. Examples: "For information only", "We recommend that the Group obtains a confirmatory deed of assignment", "we expect that the risk of enforcement is low". Null when the source offers no recommendation.
 
+Structured diligence findings
+Legal and financial DD reports commonly present each finding in a fixed four-part structure:
+    Concern              — what the issue is
+    Potential Impact     — the risk, AND the mitigating factors
+    Suggested Resolution — the adviser's recommendation, often "For information only"
+    Severity             — a High / Medium / Low priority indicator
+
+When extracting from such a document, capture ALL FOUR parts. The severity rating and the suggested resolution are as material as the concern itself.
+
+Do NOT extract the risk statement in isolation. Where the Potential Impact section lists mitigating factors or concludes that the risk is low, capture that conclusion — it is part of the finding, not commentary on it.
+
 ### 5. Omissions & Missing Information
 - Missing data, sections, time periods, benchmarks, or risk factors that should be present
 - Cross-reference against PE checklist: customer concentration, churn/retention, key man risk, revenue recognition, regulatory exposure, competitive response, management incentives, exit assumptions, QoE items, capex requirements
