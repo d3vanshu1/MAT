@@ -1,0 +1,42 @@
+# NOTPERSISTED: Pipeline Analysis Input Chunk Text
+
+## What was requested
+The raw input text that the analysis model saw for each of the 378 pipeline_analysis chunks.
+
+## Tables Checked
+
+| Table | Column | Stores chunk input text? | Notes |
+|-------|--------|--------------------------|-------|
+| `pipeline_analysis` | `result_json->>'extraction'` | NO — this is model OUTPUT | The extraction/analysis result, not the input text |
+| `universal_extractions` | `extraction_json` | NO — this is model OUTPUT | The extraction result from L1 phase |
+| `universal_extractions` | `content_hash` | NO — hash only | SHA256 of the input text, not the text itself |
+| `document_chunks` | `content` | DIFFERENT chunks | QA chunks: 2000-char non-overlapping splits used for Q&A retrieval, NOT the pipeline analysis chunks |
+| `documents` | `parsed_text` | SOURCE material only | Full document text from which chunks are derived at runtime |
+
+## How the pipeline analysis input text is computed
+
+From `extraction-phase.ts`:
+1. Load `documents.parsed_text` for each document
+2. Split into chunks of ~5000 chars (fixed chunk size, configurable)
+3. Each chunk is sent to the LLM along with the extraction prompt
+4. The LLM output is stored in `universal_extractions.extraction_json`
+5. The input text itself is NOT stored — only `content_hash` is kept for cache invalidation
+
+The pipeline analysis phase then takes `universal_extractions.extraction_json` as ITS input
+and runs the omission_audit analysis prompt on each extraction. So:
+- L1 input text (raw document chunk) → NOT persisted (derivable from parsed_text + chunk params)
+- L1 output (extraction_json) → stored in `universal_extractions`
+- L2 input (extraction_json) → same as L1 output; persisted in `universal_extractions`
+- L2 output (analysis result) → stored in `pipeline_analysis.result_json`
+
+## How to reconstruct input text (if needed)
+1. Read `documents.parsed_text` via DiagnoseParsedText API
+2. Apply same chunking logic: ~5000 char chunks (extraction-phase.ts CHUNK_SIZE constant)
+3. Chunk N of document D = substring of D's parsed_text from offset N*CHUNK_SIZE
+
+## document_chunks — different purpose
+The `document_chunks` table contains Q&A chunks (2000 chars, 200 char overlap), used for
+the Q&A search feature. These are NOT aligned with pipeline analysis chunks. The deal has:
+- 1,232 QA chunks for Excel documents (81758515 + 3ea34aa1)
+- 1,598 total QA chunks across the deal
+- QA chunk boundaries ≠ pipeline analysis chunk boundaries

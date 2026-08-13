@@ -1,7 +1,7 @@
 {
   "issue_key": "churn_rate_cohort_vs_group_level_discrepancy",
   "finding_id": "b061d50c-fc79-4eb8-a851-eb54381cd4c1",
-  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object.",
   "absence_confidence": "verified_absent",
   "finding_kind": "data_divergence",
   "severity": "warning",
@@ -10,33 +10,30 @@
     {
       "document_id": "e5d69a30-d768-4988-998f-bfdcb1a28058",
       "document_name": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
-      "role": "primary evidence source"
+      "tag": "financial_model",
+      "global_analysis_range": "310-377 (68 chunks)"
     }
   ],
-  "evidence_resolution": [
+  "evidence": [
     {
       "document_id": "e5d69a30-d768-4988-998f-bfdcb1a28058",
-      "chunk_index": 33,
+      "filename": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
+      "local_chunk_index": "UNKNOWN — merge_checkpoint stores chunk_index=33. Vendor FDD has 68 routed chunks (global 310-377) and 71 total extraction chunks. Chunk_index=33 could be per-document local index 33 (within bounds 0-70).",
+      "merge_checkpoint_chunk_index": 33,
+      "global_analysis_index": "CANNOT_RESOLVE with certainty. Two interpretations: (A) If merge uses per-document index: local 33 → global 310+33 = 343. (B) If merge uses pipeline_analysis index: global 33 = '3rd IC Memo part 3' (wrong document). Interpretation (A) is more consistent since document_id matches Vendor FDD.",
+      "global_analysis_index_if_local_interpretation": 343,
+      "global_analysis_index_if_global_interpretation": 33,
+      "best_guess_global_index": 343,
+      "best_guess_reasoning": "chunk_index=33 with document_id=Vendor FDD suggests per-document local index. Local 33 within Vendor FDD's 68 routed chunks → global 310+33 = 343. This is the most consistent interpretation since the finding's evidence text discusses churn data from the Vendor FDD.",
       "role": "Contains churn data (6.5%) cited in evidence text",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 0
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 0 }
     }
   ],
+  "index_mapping_gap": "The merge_checkpoint chunk_index=33 has two interpretations: (A) per-document local index for Vendor FDD → global 343, or (B) pipeline_analysis global index → global 33 (3rd IC Memo, wrong document). Since finding.document_id=Vendor FDD, interpretation (A) is correct. This finding's index mapping is PARTIALLY RESOLVABLE. Best guess: global_analysis_index = 343 (Vendor FDD part 34 in pipeline_analysis, label = 'SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf (part 34)').",
   "suppression_gates": {
-    "authoritative_source": {
-      "passed": false,
-      "reason": "Sources lack structured doc_class"
-    },
-    "materiality": {
-      "passed": false,
-      "reason": "Info-severity findings are secondary observations only"
-    },
-    "genuine_contradiction": {
-      "passed": true,
-      "reason": null
-    }
+    "authoritative_source": { "passed": false, "reason": "Sources lack structured doc_class" },
+    "materiality": { "passed": false, "reason": "Info-severity findings are secondary observations only" },
+    "genuine_contradiction": { "passed": true, "reason": null }
   },
-  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result."
+  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. This is the only WARNING-severity finding (all others are info)."
 }

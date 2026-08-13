@@ -1,7 +1,7 @@
 {
   "issue_key": "general_conditions_compliance_breach",
   "finding_id": "b5bd8c87-3b86-4193-9181-f522062a000d",
-  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object.",
   "absence_confidence": "verified_absent",
   "finding_kind": "omission",
   "severity": "info",
@@ -10,51 +10,43 @@
     {
       "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
       "document_name": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
-      "role": "primary evidence source"
+      "tag": "consultant_report",
+      "global_analysis_range": "135-309 (175 chunks)"
     }
   ],
-  "evidence_resolution": [
+  "evidence": [
     {
       "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
-      "chunk_index": 196,
+      "filename": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+      "local_chunk_index": "UNKNOWN — merge_checkpoint stores chunk_index=196. Legal DD has 175 extraction chunks (indices 0-174). Value 196 exceeds document bounds.",
+      "merge_checkpoint_chunk_index": 196,
+      "global_analysis_index": "CANNOT_RESOLVE — same numbering gap. If interpreted as pipeline_analysis.chunk_index, global 196 = Legal DD part 62 (196-135=61, part 62). UNCONFIRMED.",
+      "global_analysis_index_if_global": 196,
       "role": "Legal DD chunk with GC breach language",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 0
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 0 }
     },
     {
       "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
-      "chunk_index": 197,
+      "filename": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+      "merge_checkpoint_chunk_index": 197,
+      "global_analysis_index_if_global": 197,
       "role": "Legal DD chunk with GC breach language (continued)",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 1
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 1 }
     },
     {
       "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
-      "chunk_index": 198,
+      "filename": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+      "merge_checkpoint_chunk_index": 198,
+      "global_analysis_index_if_global": 198,
       "role": "Legal DD chunk with GC breach language (continued)",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 2
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 2 }
     }
   ],
+  "index_mapping_gap": "Merge_checkpoint chunk_indices 196-198 exceed Legal DD's per-document extraction count (175). If these ARE global pipeline_analysis indices, they map to Legal DD parts 62-64 (since Legal DD global_start=135). This interpretation produces a reasonable consecutive-chunk cluster for a single finding. UNCONFIRMED without direct merge_checkpoints table inspection.",
   "suppression_gates": {
-    "authoritative_source": {
-      "passed": false,
-      "reason": "Sources lack structured doc_class"
-    },
-    "materiality": {
-      "passed": false,
-      "reason": "Info-severity findings are secondary observations only"
-    },
-    "genuine_contradiction": {
-      "passed": false,
-      "reason": "Informational observation"
-    }
+    "authoritative_source": { "passed": false, "reason": "Sources lack structured doc_class" },
+    "materiality": { "passed": false, "reason": "Info-severity findings are secondary observations only" },
+    "genuine_contradiction": { "passed": false, "reason": "Informational observation" }
   },
-  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result. Evidence text contains 'technically in breach of the GCs' language from Legal DD chunks 196-198."
+  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. Evidence text contains 'technically in breach of the GCs' language from Legal DD chunks 196-198 (merge numbering)."
 }

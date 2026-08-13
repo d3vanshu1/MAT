@@ -1,66 +1,59 @@
 {
   "issue_key": "exit_multiple_sensitivity_not_documented_in_memos",
   "finding_id": "5f6d096b-9d56-4fb7-9d88-ffc53990258b",
-  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object.",
   "absence_confidence": "unverified",
   "finding_kind": "process_observation",
   "severity": "info",
   "independent": false,
   "malformed_flags": [
-    "no verbatim_snippet (evidence array absent)",
-    "no confidence match (absence_confidence = unverified)",
-    "finding_kind = process_observation (not omission or data_divergence)",
-    "independent = false"
+    "no verbatim_snippet (evidence array absent from finding)",
+    "no confidence match (absence_confidence = unverified, should be verified_absent for legitimate omission)",
+    "finding_kind = process_observation (non-standard for omission_audit module)",
+    "independent = false (unusual for a standalone finding)"
   ],
   "source_docs": [
     {
       "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
       "document_name": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
-      "role": "IC memo chunks referencing exit multiple"
+      "tag": "ic_memo",
+      "global_analysis_range": "31-54 (24 chunks)"
     }
   ],
-  "evidence_resolution": [
+  "evidence": [
     {
       "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
-      "chunk_index": 35,
+      "filename": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+      "local_chunk_index": "UNKNOWN — merge_checkpoint stores chunk_index=35. 3rd IC Memo has 24 extraction chunks (indices 0-23). Value 35 exceeds document bounds.",
+      "merge_checkpoint_chunk_index": 35,
+      "global_analysis_index": "CANNOT_RESOLVE — same numbering gap as other findings. If interpreted as pipeline_analysis.chunk_index, global 35 = '3rd IC Memo part 5'. UNCONFIRMED.",
+      "global_analysis_index_if_global": 35,
       "role": "IC memo chunk discussing exit multiple sensitivity",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 0
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 0 }
     },
     {
       "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
-      "chunk_index": 49,
+      "filename": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+      "merge_checkpoint_chunk_index": 49,
+      "global_analysis_index_if_global": 49,
       "role": "IC memo chunk with exit multiple data",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 24
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 24 }
     },
     {
       "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
-      "chunk_index": 58,
+      "filename": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+      "merge_checkpoint_chunk_index": 58,
+      "global_analysis_index": "CANNOT_RESOLVE — global 58 = Screening Memo part 4 (not 3rd IC Memo). This confirms the merge_checkpoint indices are NOT pipeline_analysis global indices for this finding.",
+      "global_analysis_index_if_global": 58,
       "role": "IC memo chunk referencing sensitivity analysis",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 28
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 28 }
     }
   ],
+  "index_mapping_gap": "CRITICAL: For this finding, chunk_index=58 is attributed to 3rd IC Memo but global 58 = Screening Memo (part 4). This PROVES the merge_checkpoint chunk_indices are NOT pipeline_analysis global indices. They use a separate numbering scheme internal to the merge tree. The mapping between merge_checkpoint chunk_index and pipeline_analysis.chunk_index is NOT stored anywhere accessible via current diagnostic APIs.",
   "suppression_gates": {
-    "authoritative_source": {
-      "passed": false,
-      "reason": "Sources lack structured doc_class"
-    },
-    "materiality": {
-      "passed": false,
-      "reason": "Info-severity findings are secondary observations only"
-    },
-    "genuine_contradiction": {
-      "passed": false,
-      "reason": "Informational observation"
-    }
+    "authoritative_source": { "passed": false, "reason": "Sources lack structured doc_class" },
+    "materiality": { "passed": false, "reason": "Info-severity findings are secondary observations only" },
+    "genuine_contradiction": { "passed": false, "reason": "Informational observation" }
   },
-  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result. This is the MALFORMED FINDING: no evidence array, no verbatim_snippet, absence_confidence='unverified' (should be verified_absent for any legitimate omission), finding_kind='process_observation' (non-standard), independent=false. The merge LLM produced a structurally deficient finding that should have been rejected by schema validation."
+  "lineage_note": "MALFORMED FINDING: no evidence array in original finding object, no verbatim_snippet, absence_confidence='unverified' (should be verified_absent for legitimate omission), finding_kind='process_observation' (non-standard), independent=false. The merge LLM produced a structurally deficient finding that should have been rejected by schema validation."
 }

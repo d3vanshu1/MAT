@@ -1,7 +1,7 @@
 {
   "issue_key": "senior_executive_restrictive_covenant_deficiency",
   "finding_id": "87f2dd86-df2f-4de6-9ed5-4d80f67ed787",
-  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object.",
   "absence_confidence": "verified_absent",
   "finding_kind": "omission",
   "severity": "info",
@@ -10,51 +10,27 @@
     {
       "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
       "document_name": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
-      "role": "primary evidence source"
+      "tag": "consultant_report",
+      "global_analysis_range": "135-309 (175 chunks)"
     }
   ],
-  "evidence_resolution": [
+  "evidence": [
     {
       "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
-      "chunk_index": 190,
+      "filename": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+      "local_chunk_index": "UNKNOWN — merge_checkpoint stores chunk_index=190. Legal DD has 175 extraction chunks (indices 0-174). Value 190 exceeds document bounds.",
+      "merge_checkpoint_chunk_index": 190,
+      "global_analysis_index": "CANNOT_RESOLVE — chunk_index 190 exceeds Legal DD's 175 extraction chunks. Same numbering-scheme gap as other findings. If interpreted as pipeline_analysis.chunk_index, global 190 = Legal DD part 56 (135 + 55 = 190). This interpretation is UNCONFIRMED.",
+      "global_analysis_index_if_global": 190,
       "role": "Legal DD chunk discussing restrictive covenant gaps for senior executives",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 0
-      }
-    },
-    {
-      "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
-      "chunk_index": 190,
-      "role": "Same chunk also maps to merge nodes 1, 2",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 1
-      }
-    },
-    {
-      "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
-      "chunk_index": 190,
-      "role": "Same chunk also maps to merge node 2",
-      "merge_checkpoint": {
-        "tree_level": 1,
-        "node_index": 2
-      }
+      "merge_checkpoint": { "tree_level": 1, "node_index": 0 }
     }
   ],
+  "index_mapping_gap": "The merge_checkpoint chunk_index=190 cannot be a per-document index (Legal DD has only 175 chunks, indices 0-174). If it IS a global pipeline_analysis index, then global 190 = Legal DD part 56 (since Legal DD starts at global 135, so 190-135=55, part 56). This interpretation is plausible but UNCONFIRMED without direct SQL verification of the merge_checkpoints table schema.",
   "suppression_gates": {
-    "authoritative_source": {
-      "passed": false,
-      "reason": "Sources lack structured doc_class"
-    },
-    "materiality": {
-      "passed": false,
-      "reason": "Info-severity findings are secondary observations only"
-    },
-    "genuine_contradiction": {
-      "passed": false,
-      "reason": "Informational observation"
-    }
+    "authoritative_source": { "passed": false, "reason": "Sources lack structured doc_class" },
+    "materiality": { "passed": false, "reason": "Info-severity findings are secondary observations only" },
+    "genuine_contradiction": { "passed": false, "reason": "Informational observation" }
   },
-  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result. Single source chunk (190) from Legal DD mapped to multiple merge nodes."
+  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. Single source chunk from Legal DD mapped to multiple merge nodes."
 }
