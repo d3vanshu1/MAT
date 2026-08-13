@@ -133,6 +133,7 @@ import DiagExportExtraction from './pipeline/diag-export-extraction.js';
 import DiagExportFinding from './pipeline/diag-export-finding.js';
 import DiagBulkExtract from './pipeline/diag-bulk-extract.js';
 import GetExtractionManifest from './pipeline/get-extraction-manifest.js';
+import OaDiagQuery from './pipeline/oa-diag-query.js';
 // import PurgeDealPipelineState from './pipeline/purge-deal-pipeline-state.js';
 
 // Database setup
@@ -199,6 +200,7 @@ import PurgeDealHistory from './checkpoints/purge-deal-history.js';
 import PurgePipelineCheckpoints from './checkpoints/purge-pipeline-checkpoints.js';
 import ResumeCompletedRun from './checkpoints/resume-completed-run.js';
 import DiagFailedExtractions from './checkpoints/diag-failed-extractions.js';
+import ResetFailedChunks from './checkpoints/reset-failed-chunks.js';
 
 // Audit
 import ExtractReportSnippets from './audit/extract-report-snippets.js';
@@ -215,7 +217,7 @@ const apis = {
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
-  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest,
+  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
@@ -230,7 +232,7 @@ const apis = {
   // Checkpoints
   SaveExtractions, LoadExtractions, SaveMergeCheckpoint, LoadMergeCheckpoints,
   UpdateRunStatus, GetRunProgress, SaveRunCoverage, LoadRunCoverage,
-  CancelModuleRun, CheckRunCancelled, PurgeStaleRuns, ResurrectModuleRun, ReconcileFindings, GetExtractionStatus, PurgeExtractions, PurgeDocumentExtractions, PurgeDealHistory, PurgePipelineCheckpoints, DiagFailedExtractions, ResumeCompletedRun,
+  CancelModuleRun, CheckRunCancelled, PurgeStaleRuns, ResurrectModuleRun, ReconcileFindings, GetExtractionStatus, PurgeExtractions, PurgeDocumentExtractions, PurgeDealHistory, PurgePipelineCheckpoints, DiagFailedExtractions, ResetFailedChunks, ResumeCompletedRun,
   // Audit
   ExtractReportSnippets, FramingPatternAudit,
 } as const;

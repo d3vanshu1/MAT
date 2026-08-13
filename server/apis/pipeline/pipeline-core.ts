@@ -3672,11 +3672,12 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
   // --- Step 1: Load universal extractions + route ---
   enterPhase("analysis_preparation");
   // Page sizes tuned per table to stay under the 4MB gRPC response limit.
-  // Row payload varies significantly: extraction_json ~2-4KB, result_json ~3-6KB,
+  // Row payload varies significantly: extraction_json 5-38KB (mean ~21.5KB), result_json ~3-6KB,
   // merged_json ~8-20KB for intermediate nodes BUT up to 2MB+ for final-round nodes
   // (which accumulate ALL findings from the full run). Page sizes MUST account for
   // the worst-case row in each table, not just the average.
-  const EXTRACTION_PAGE_SIZE = 200;  // ~2-4KB/row → ~400-800KB/page
+  const EXTRACTION_PAGE_SIZE = 50;   // Measured: rows are 5-38KB, mean ~21.5KB → 50 rows ≈ 1.05MB
+                                       // (4× headroom under 4MB gRPC ceiling; was 200 before SCG hit 4.3MB)
   const ANALYSIS_PAGE_SIZE = 150;    // ~3-6KB/row → ~450-900KB/page
   const MERGE_CP_PAGE_SIZE = 20;     // Reduced from 75: final-round nodes can be 200KB-2MB each
                                        // (381 findings × 3-10KB/finding + mergedText). At 20 rows/page,

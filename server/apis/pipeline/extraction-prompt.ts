@@ -43,6 +43,7 @@ For each metric/data point:
 - Whether stated explicitly or derived
 - Perspective: "deal_team" | "management" | "unclear"
 - Scope qualifier (required, never null): the cohort, time window, scenario, or perimeter the value applies to. Record the scope exactly as the source states it — do not normalise, do not invent, do not infer a scope that is not written. Scope qualifiers frequently appear in footnotes, table headers, column labels, and parentheticals — not in the sentence containing the number. Look for them there. If the source states no scope for this figure, emit "NONE_STATED". If scope is meaningless for the fact (e.g. a founding date, a person's name), emit "UNSCOPED_BY_NATURE". Keep scope text brief but do not cap word count.
+  NONE_STATED and UNSCOPED_BY_NATURE are exclusive values. Emit one of them as the ENTIRE field value, or do not use them at all. Never append them to descriptive scope text. Never combine them with other words. Never create variants such as NONE_STATED_GEOGRAPHY. If you have any scope information at all, record that information alone and do not add a sentinel.
 
 ### 4. Flags & Risks
 For each flag identified:
