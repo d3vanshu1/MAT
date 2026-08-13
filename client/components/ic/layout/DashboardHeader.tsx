@@ -1,8 +1,10 @@
 import { Play, Zap, Sparkles } from "lucide-react";
 import type { DealStatus } from "@/types/deal";
 import ICButton from "../ui/ICButton";
+import ExportExtractionsButton from "../documents/ExportExtractionsButton";
 
 interface DashboardHeaderProps {
+  dealId: string;
   dealName: string;
   status: DealStatus;
   useOpus: boolean;
@@ -15,6 +17,7 @@ interface DashboardHeaderProps {
 }
 
 export default function DashboardHeader({
+  dealId,
   dealName,
   status,
   useOpus,
@@ -68,6 +71,8 @@ export default function DashboardHeader({
               <span className="text-[10px] text-amber-400/70 font-light">~3× slower</span>
             )}
           </div>
+
+          <ExportExtractionsButton dealId={dealId} dealName={dealName} />
 
           <ICButton size="lg" glow onClick={onRunAll} disabled={disableRunAll}>
             <Play className="w-4 h-4" />

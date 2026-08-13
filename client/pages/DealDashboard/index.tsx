@@ -2628,6 +2628,7 @@ export default function DealDashboardPage() {
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-auto">
         <DashboardHeader
+          dealId={dealId!}
           dealName={deal.name}
           status={deal.status}
           useOpus={useOpus}

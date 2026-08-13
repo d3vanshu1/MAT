@@ -111,6 +111,7 @@ import TestOaEvidenceAdmissionSynthesis from './pipeline/test-oa-evidence-admiss
 import RecoverRun7bbeab48 from './pipeline/recover-run-7bbeab48.js';
 import RunMigration019 from './pipeline/run-migration-019.js';
 import RunMigration020 from './pipeline/run-migration-020.js';
+import RunMigration021 from './pipeline/run-migration-021.js';
 import ReadDiagTrace from './pipeline/read-diag-trace.js';
 import ResetMergeTruncation from './pipeline/reset-merge-truncation.js';
 import AdaptiveMergeRecovery from './pipeline/adaptive-merge-recovery.js';
@@ -126,6 +127,11 @@ import DiagNode17State from './pipeline/diag-node17-state.js';
 import DiagFinalizationState from './pipeline/diag-finalization-state.js';
 import DiagSuppressedFindings from './pipeline/diag-suppressed-findings.js';
 import DiagDumpAnalysisRows from './pipeline/diag-dump-analysis-rows.js';
+import DiagExportIndexMap from './pipeline/diag-export-index-map.js';
+import DiagExportExtraction from './pipeline/diag-export-extraction.js';
+import DiagExportFinding from './pipeline/diag-export-finding.js';
+import DiagBulkExtract from './pipeline/diag-bulk-extract.js';
+import GetExtractionManifest from './pipeline/get-extraction-manifest.js';
 // import PurgeDealPipelineState from './pipeline/purge-deal-pipeline-state.js';
 
 // Database setup
@@ -207,7 +213,8 @@ const apis = {
   RegenerateQ2Candidates, PersistAndProveQ2, ReadPersistedQ2Artifact, DiagnoseSaveFailure, RunMigration016, FinalizePipelineOutput, CompleteMergeTree, PromoteRootFindings,
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
-  RunMigration019, RunMigration020, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
+  RunMigration019, RunMigration020, RunMigration021, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
+  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
