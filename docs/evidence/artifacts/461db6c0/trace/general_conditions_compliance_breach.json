@@ -1,0 +1,60 @@
+{
+  "issue_key": "general_conditions_compliance_breach",
+  "finding_id": "b5bd8c87-3b86-4193-9181-f522062a000d",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "absence_confidence": "verified_absent",
+  "finding_kind": "omission",
+  "severity": "info",
+  "independent": true,
+  "source_docs": [
+    {
+      "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
+      "document_name": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+      "role": "primary evidence source"
+    }
+  ],
+  "evidence_resolution": [
+    {
+      "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
+      "chunk_index": 196,
+      "role": "Legal DD chunk with GC breach language",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 0
+      }
+    },
+    {
+      "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
+      "chunk_index": 197,
+      "role": "Legal DD chunk with GC breach language (continued)",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 1
+      }
+    },
+    {
+      "document_id": "e27d46c9-c384-42ed-bc8c-6f04ba8bc474",
+      "chunk_index": 198,
+      "role": "Legal DD chunk with GC breach language (continued)",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 2
+      }
+    }
+  ],
+  "suppression_gates": {
+    "authoritative_source": {
+      "passed": false,
+      "reason": "Sources lack structured doc_class"
+    },
+    "materiality": {
+      "passed": false,
+      "reason": "Info-severity findings are secondary observations only"
+    },
+    "genuine_contradiction": {
+      "passed": false,
+      "reason": "Informational observation"
+    }
+  },
+  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result. Evidence text contains 'technically in breach of the GCs' language from Legal DD chunks 196-198."
+}

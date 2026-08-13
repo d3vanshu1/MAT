@@ -1,0 +1,257 @@
+[
+  {
+    "title": "Legal DD Flags Restrictive Covenant Weaknesses in Senior Executive Contracts",
+    "detail": "The Legal Due Diligence Report (28 November 2025) explicitly flags that SBD Executive restrictive covenants are rated 'Low' concern but notes specific deficiencies, stating: 'the employer may be unable to prevent employees from setting up a competing business or soliciting/poaching its customers or employees.' The IC memos do not disclose this specific contractual weakness in senior executive agreements. The Legal DD report rates this as a concern requiring attention.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "Low concern rating",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "the employer may be unable to prevent employees from setting up a competing business or soliciting/poaching its customers or employees. This is less likely to be a concern where employees who are employed on such contracts are not senior, do not hold managerial positions, and do not have significant influence"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "senior_executive_restrictive_covenant_deficiency",
+    "finding_id": "87f2dd86-df2f-4de6-9ed5-4d80f67ed787",
+    "independent": true,
+    "source_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf", "2026-06-21 Saint IC update_vS.pdf", "2026-06-15 SCG - 3rd IC Memo vS.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf"],
+    "full_analysis": "The Legal Due Diligence Report identifies that while SBD Executive employment agreements are 'comprehensive' in many respects, the restrictive covenants contain noted weaknesses that could leave the Group unable to prevent departing senior personnel from competing or poaching customers and staff. This is a material key-man and competitive risk for a business whose buy-and-build strategy is heavily dependent on leadership continuity. The latest IC memo (2026-06-21) does not surface this specific contractual gap identified in the Legal DD. The IC should receive explicit confirmation of whether remediation of these covenant terms is being pursued as a condition of or concurrent with transaction close, and what documentation exists to evidence that.",
+    "severity_anchor": "Legal DD explicitly states the Group 'may be unable to prevent employees from setting up a competing business' — a source-stated risk directly relevant to a £655m leadership-dependent platform.",
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": false,
+    "materiality_rationale": "A buy-and-build platform valued at £655m is acutely exposed to key executive departure risk; unenforceable non-competes could allow departing management to directly compete or strip customers."
+  },
+  {
+    "title": "Change of Control Provisions Could Trigger Key Customer and PIK Facility Termination",
+    "detail": "The Legal Due Diligence Report identifies that the Openwork Services Agreement and other named customer contracts contain change of control provisions enabling customer termination upon transaction completion. Separately, the PIK Facilities Agreement designates a Change of Control as a mandatory prepayment event. The latest IC memo does not quantify the revenue or debt-repayment exposure from these triggers.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "Change of Control — mandatory prepayment event",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "A Change of Control constitutes a mandatory prepayment event under the PIK Facilities Agreement. Upon a Change of Control, Facility 1 and Facility 2 will each"
+      },
+      {
+        "figure": "Customer termination right",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "The following agreements contain change of control provision which enables the customer to terminate the contract on or following completion of the Transaction: (a) Openwork Services Agreement contains a change of control provision which enables the cust"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "change_of_control_customer_and_debt_triggers",
+    "finding_id": "36c05bb8-58d7-4cab-91e0-823df940a0c7",
+    "independent": true,
+    "source_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf", "2026-06-21 Saint IC update_vS.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf"],
+    "full_analysis": "Two distinct change-of-control risks are documented in the Legal DD: (1) certain customer contracts — including the Openwork Services Agreement — permit the counterparty to terminate upon transaction completion, creating potential revenue loss at close; and (2) the PIK Facilities Agreement triggers mandatory prepayment on Change of Control, with Facility 1 and Facility 2 each bearing a 12.00% interest rate. The IC memos do not disclose the aggregate revenue at risk from customer termination rights, nor confirm whether PIK facility prepayment has been fully factored into sources and uses. This raises a legal and financing question that the data room does not show has been independently addressed in the IC record. The IC should receive a written summary of the aggregate ARR/GP under contracts with live change-of-control termination rights and confirmation that PIK refinancing is fully costed in the transaction structure.",
+    "severity_anchor": "Legal DD explicitly identifies mandatory PIK prepayment and named customer termination rights triggered at transaction close — source-stated risks of direct transactional consequence.",
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": true,
+    "materiality_rationale": "Customer ARR attrition at close and forced PIK debt repayment could each independently affect transaction economics and day-one cash position at a £655m deal size."
+  },
+  {
+    "title": "General Conditions Compliance Breach Identified — Regulatory Enforcement Risk",
+    "detail": "The Legal Due Diligence Report states: 'The Group is technically in breach of the GCs and therefore there is a risk of investigation and possible enforcement.' This relates to the Ombudsman finding that cease charges were improperly included in final invoices. The IC memos do not disclose this regulatory breach or the enforcement risk it carries.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "Regulatory breach — enforcement risk",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "The Group is technically in breach of the GCs and therefore there is a risk of investigation and possible enforcement"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "general_conditions_compliance_breach",
+    "finding_id": "b5bd8c87-3b86-4193-9181-f522062a000d",
+    "independent": true,
+    "source_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf", "2026-06-21 Saint IC update_vS.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf"],
+    "full_analysis": "The Legal DD identifies an active compliance breach with regulatory General Conditions, noting the Group was required by the Ombudsman to remove cease charges from final invoices and pay £200 in goodwill to a complainant, and concludes the Group is 'technically in breach of the GCs' with 'a risk of investigation and possible enforcement.' This raises a regulatory question that the data room does not show has been independently addressed — specifically, whether regulatory counsel has assessed the scope of this breach, whether remediation steps have been taken, and what the range of enforcement outcomes could be. None of the four IC memo versions surface this finding. The IC should receive a written legal opinion or regulatory counsel confirmation addressing the scope of the breach and whether systemic billing practices have been corrected.",
+    "severity_anchor": "Legal DD explicitly states 'The Group is technically in breach of the GCs and therefore there is a risk of investigation and possible enforcement' — a source-stated regulatory risk.",
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": true,
+    "materiality_rationale": "A confirmed regulatory breach with stated enforcement risk — absent from all IC memo versions — represents a potential liability that could affect deal pricing, conditions, or post-close operations."
+  },
+  {
+    "title": "Unregistered Trade Marks — IP Ownership Risk Unaddressed in IC Memos",
+    "detail": "The Legal Due Diligence Report states: 'The Group uses certain trade names and/or logos... The Group has not registered any of these trade names and/or logos as trade marks in any jurisdiction.' Additionally, the IPO Statement for a technology supplier 'does not contain the requisite provisions to assign intellectual property rights in existing deliverables.' Neither finding appears in any IC memo version.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "No trade mark registration",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "The Group has not registered any of these trade names and/or logos as trade marks in any jurisdiction."
+      },
+      {
+        "figure": "IP assignment deficiency",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "the IPO Statement does not contain the requisite provisions to assign intellectual property rights in existing deliverables"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "unregistered_trademarks_and_ip_assignment_gap",
+    "finding_id": "b6e964f3-2d51-459b-aa50-82ccc3f20aa6",
+    "independent": true,
+    "source_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf", "2026-06-21 Saint IC update_vS.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf"],
+    "full_analysis": "The Legal DD identifies two distinct IP exposures: the Group's own brand assets are unregistered trade marks, reducing the Group's ability to enforce brand protection; and a third-party developer's IPO Statement lacks assignment provisions for existing deliverables, leaving the legal ownership of previously created IP uncertain. These are documentary observations — the data room does not show that an independent IP counsel review or formal remediation plan has been completed for either gap. The IC memos' absence of any mention of IP title risk is notable for a business whose equity value is partly predicated on proprietary platform technology (Evonex, X-on). The IC should confirm whether trade mark registration is underway and whether a deed of assignment has been obtained from Courts Design or equivalent supplier.",
+    "severity_anchor": "Legal DD identifies absence of registered trade marks and missing IP assignment provisions — source-stated risks to a business where own-IP platforms generate 33% of total GP per the IM.",
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": false,
+    "materiality_rationale": "For a software-first platform where own-IP hosted voice generates 33% of total GP, failure to hold registered or properly assigned IP title is a source-stated risk to equity value."
+  },
+  {
+    "title": "Vendor FDD Churn Definition Differs From IC Memo Headline Churn Claim",
+    "detail": "The IC memos cite '5% annual recurring revenue churn for customers spending over £200/month in FY25.' The Vendor FDD (PwC) presents a materially different picture: group ARR churn of 6.5% in FY23, 7.5% in FY24, and 6.9% in FY25 on a total-base definition. The IC memo's 5% figure applies only to a higher-value customer sub-cohort, but this scoping is not consistently disclosed.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "Group ARR churn: 6.5% FY23, 7.5% FY24, 6.9% FY25",
+        "verified": false,
+        "source_doc": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
+        "verbatim_snippet": "New wins 13.0% 9.8% 11.7% Churn (6.5%) (7.5%) (6.9%)"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "warning",
+    "issue_key": "churn_rate_cohort_vs_group_level_discrepancy",
+    "finding_id": "b061d50c-fc79-4eb8-a851-eb54381cd4c1",
+    "independent": true,
+    "source_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf", "SCG - Project Saint-IM_vF.pdf", "2026-06-21 Saint IC update_vS.pdf"],
+    "finding_kind": "data_divergence",
+    "evidence_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf"],
+    "full_analysis": "The PwC Vendor FDD ARR bridge shows churn of (6.5%) in FY23, (7.5%) in FY24, and (6.9%) in FY25 against opening ARR on a group basis, whereas the IC memo headline — reinforced across all four memo versions — cites 5% churn for customers above £200/month. The IC memos do not clearly disclose that the 5% figure is a filtered sub-cohort metric, not the group-level churn rate, nor do they reconcile the two figures. For an investment thesis heavily dependent on recurring revenue quality and low churn, the presentation of the more favourable cohort figure as the primary churn disclosure — without surfacing the 6.5%–7.5% group-level rates — is a material framing issue. The IC should receive a clear bridging table distinguishing cohort churn from total-base churn and the revenue weighting of each.",
+    "severity_anchor": "PwC Vendor FDD documents group ARR churn of (7.5%) in FY24 versus the IC memo's 5% cohort headline — a quantified discrepancy in the primary recurring revenue quality metric.",
+    "absence_confidence": "verified_absent",
+    "numeric_unverified": false,
+    "materiality_rationale": "Group-level ARR churn of 6.5%–7.5% is 30–50% higher than the 5% cohort figure presented in the IC memos; the gap could affect recurring revenue growth assumptions and valuation."
+  },
+  {
+    "title": "QoE Identifies Earn-Out Contingent Consideration Up to £20.5m — Not Disclosed in Latest IC Memo",
+    "detail": "The PwC Vendor FDD notes: 'contingent consideration was paid on completion [for X-on], with up to £20.5m payable in the 16-month period following [close], based on a 2-year earn-out period.' The IC memos do not disclose the quantum or timing of this contingent consideration obligation as a specific liability.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "Up to £20.5m contingent consideration",
+        "verified": false,
+        "source_doc": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
+        "verbatim_snippet": "Contingent consideration unwind: in relation to X-on, £6.5m consideration was paid on completion, with up to £20.5m payable in the 16 month period following the previous MBO"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "xon_earnout_contingent_consideration_omission",
+    "finding_id": "990d4599-b9c6-481c-adc0-7b2c89d6d12c",
+    "independent": true,
+    "source_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf", "2026-06-21 Saint IC update_vS.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf"],
+    "full_analysis": "The PwC QoE section identifies up to £20.5m in contingent consideration payable to X-on vendors over a 16-month post-close earn-out period; £6.5m was paid at completion. This is a material post-close cash obligation that reduces free cash flow available for debt service or further M&A in the near term. The IC memos reference X-on as an acquisition but do not surface the earn-out quantum as a specific liability in the deal structure or sources and uses discussion. The IC should confirm whether this obligation is captured in net debt or the purchase price bridge, and whether the earn-out is performance-contingent or substantially certain.",
+    "severity_anchor": "PwC Vendor FDD explicitly states up to £20.5m contingent consideration payable post-close — exceeding the £6.5m threshold for critical relevance on a £655m transaction.",
+    "structured_impact": [
+      {
+        "role": "exposure",
+        "amount": 20500000,
+        "currency": "GBP",
+        "verified": false,
+        "source_doc": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
+        "unit_multiplier": 1,
+        "source_coordinate": "chunk 176"
+      }
+    ],
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": false,
+    "materiality_rationale": "A contingent liability of up to £20.5m representing approximately 3% of deal value, payable within 16 months of close, is a source-stated obligation that could plausibly affect an IC member's view of net debt and near-term cash flow."
+  },
+  {
+    "title": "NHS / Public Sector Customer Exposure and Contract Risk Not Quantified in IC Memos",
+    "detail": "The Legal DD identifies NHS Trust and public sector entities (Barts Health NHS Trust, Somerset Council, The ExtraCare Charitable Trust) as customers, noting these are flagged 'for information only.' The Vendor FDD references an X-on NHS Digital Strategy Initiative that materially impacted working capital and FY24 revenue timing. IC memos do not quantify NHS/public sector revenue concentration or contract renewal risk.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "NHS Digital Strategy Initiative — timing distortion",
+        "verified": false,
+        "source_doc": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
+        "verbatim_snippet": "Digital Strategy Initiative installations to fulfil FY24 orders. Growth should be assessed across the full period to normalise these effects"
+      },
+      {
+        "figure": "Public sector customers listed",
+        "verified": false,
+        "source_doc": "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf",
+        "verbatim_snippet": "Somerset Council, The ExtraCare Charitable Trust, Possibly Block Solutions Ltd (providing services to Barts Health NHS Trust)"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "nhs_public_sector_revenue_concentration_unquantified",
+    "finding_id": "c7916963-1666-4094-8981-5930cd021ce6",
+    "independent": true,
+    "source_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf", "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf", "2026-06-21 Saint IC update_vS.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf", "Project Saint - Legal Due Diligence Report - 28 November 2025_.pdf"],
+    "full_analysis": "The PwC Vendor FDD notes that the X-on NHS Digital Strategy Initiative caused installation timing distortions in FY24, stating 'Growth should be assessed across the full period to normalise these effects,' and separately that NWC balances were impacted. The Legal DD lists NHS/public sector entities as customers with change-of-control or sector-specific procurement risks. Public sector contracts typically carry different renewal dynamics, procurement constraints, and budgetary risk compared to SME commercial contracts. The IC memos do not disclose what proportion of ARR derives from public sector customers, nor whether public sector contract terms have been reviewed for procurement compliance. This is a diligence gap in the IC record that the data room partially addresses at the objective-source level but does not resolve.",
+    "severity_anchor": "Vendor FDD states X-on NHS Digital Strategy Initiative materially distorted FY24 growth figures, requiring multi-period normalisation — a source-stated quality-of-earnings impact.",
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": true,
+    "materiality_rationale": "Undisclosed public sector revenue concentration, combined with documented FY24 revenue timing distortions from an NHS initiative, could affect the IC's assessment of recurring revenue quality and growth trajectory."
+  },
+  {
+    "title": "CDD Identifies UCaaS Margin Compression Risk From Competitive Standardisation",
+    "detail": "The Altman Solon buyside CDD (April 2026) states: 'Higher margin pool driven by software and integration complexity, though moderating over time as competition increases and solutions standardise.' This competitive margin compression dynamic is not addressed in the latest IC memo's discussion of the FY31 EBITDA plan.",
+    "category": "principal_finding",
+    "evidence": [
+      {
+        "figure": "Margin compression — moderating over time",
+        "verified": false,
+        "source_doc": "09 04 2026 Altman Solon - Providence Equity Partners - Buyside CDD - Phase I_vFinal Report.pdf",
+        "verbatim_snippet": "Higher margin pool driven by software and integration complexity, though moderating over time as competition increases and solutions standardise"
+      }
+    ],
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "ucaas_competitive_margin_compression_unaddressed",
+    "finding_id": "f6a99c13-5ebc-4089-99bb-fbde4e1ade4c",
+    "independent": true,
+    "source_docs": ["09 04 2026 Altman Solon - Providence Equity Partners - Buyside CDD - Phase I_vFinal Report.pdf", "2026-06-21 Saint IC update_vS.pdf", "SCG - Project Saint-IM_vF.pdf"],
+    "finding_kind": "source_stated_risk",
+    "evidence_docs": ["09 04 2026 Altman Solon - Providence Equity Partners - Buyside CDD - Phase I_vFinal Report.pdf"],
+    "full_analysis": "The Altman Solon Phase I CDD explicitly flags that UCaaS margin pools are 'moderating over time as competition increases and solutions standardise,' yet the IC memo record presents a plan to grow EBITDA from £62m to £140m by FY31 — more than doubling — without acknowledging this structural margin headwind. The IM's three-pillar strategy relies on verticalisation and own-IP growth to defend margins, but the IC memos do not articulate how verticalisation will offset the commoditisation trend identified by the independent CDD advisor. This is a thesis coherence issue: the IC record would benefit from explicit reconciliation between the independent CDD's margin compression warning and management's EBITDA growth plan.",
+    "severity_anchor": "Independent CDD explicitly identifies margin pool moderation from competitive standardisation — a source-stated headwind not reconciled with the doubling of EBITDA in the IC-presented plan.",
+    "absence_confidence": "likely_absent",
+    "numeric_unverified": true,
+    "materiality_rationale": "A plan to double EBITDA by FY31 that does not address the independent CDD's finding of structural margin compression in the core UCaaS market could lead to IC members misassessing the probability of achieving the financial plan."
+  },
+  {
+    "title": "Exit Multiple Assumptions Not Documented Across All IC Memo Versions",
+    "detail": "The deal room contains valuation and comparable transaction references in the Legal DD and Vendor FDD, but the IC memos do not consistently document the exit multiple assumptions underpinning the returns model or provide sensitivity analysis on exit multiples. The latest IC memo (2026-06-21) does not present a range of exit scenarios.",
+    "category": "principal_finding",
+    "gap_type": "memo_omission",
+    "severity": "info",
+    "issue_key": "exit_multiple_sensitivity_not_documented_in_memos",
+    "finding_id": "5f6d096b-9d56-4fb7-9d88-ffc53990258b",
+    "independent": false,
+    "source_docs": ["2026-06-21 Saint IC update_vS.pdf", "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf"],
+    "finding_kind": "process_observation",
+    "evidence_docs": ["SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf"],
+    "full_analysis": "While valuation data exists in objective sources, the IC memo record does not surface explicit exit multiple assumptions or returns sensitivities. For a £655m transaction, IC members would ordinarily expect to see entry vs. exit multiple analysis and downside scenario returns. The coverage scan confirms exit comparables are present in the data room but the IC memo record's treatment of this topic cannot be confirmed from the extractions provided. This raises a process observation that the IC should confirm exit assumptions are formally documented and sensitivity-tested in the final investment paper.",
+    "severity_anchor": "Cannot be source-anchored to a £ figure; classified info as process observation.",
+    "absence_confidence": "unverified",
+    "numeric_unverified": true,
+    "materiality_rationale": "Exit multiple assumptions are a primary driver of PE return calculations; their absence from the IC memo record is a presentation gap for a £655m transaction."
+  }
+]

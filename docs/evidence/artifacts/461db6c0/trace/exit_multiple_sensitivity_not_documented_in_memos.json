@@ -1,0 +1,66 @@
+{
+  "issue_key": "exit_multiple_sensitivity_not_documented_in_memos",
+  "finding_id": "5f6d096b-9d56-4fb7-9d88-ffc53990258b",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "absence_confidence": "unverified",
+  "finding_kind": "process_observation",
+  "severity": "info",
+  "independent": false,
+  "malformed_flags": [
+    "no verbatim_snippet (evidence array absent)",
+    "no confidence match (absence_confidence = unverified)",
+    "finding_kind = process_observation (not omission or data_divergence)",
+    "independent = false"
+  ],
+  "source_docs": [
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "document_name": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+      "role": "IC memo chunks referencing exit multiple"
+    }
+  ],
+  "evidence_resolution": [
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "chunk_index": 35,
+      "role": "IC memo chunk discussing exit multiple sensitivity",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 0
+      }
+    },
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "chunk_index": 49,
+      "role": "IC memo chunk with exit multiple data",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 24
+      }
+    },
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "chunk_index": 58,
+      "role": "IC memo chunk referencing sensitivity analysis",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 28
+      }
+    }
+  ],
+  "suppression_gates": {
+    "authoritative_source": {
+      "passed": false,
+      "reason": "Sources lack structured doc_class"
+    },
+    "materiality": {
+      "passed": false,
+      "reason": "Info-severity findings are secondary observations only"
+    },
+    "genuine_contradiction": {
+      "passed": false,
+      "reason": "Informational observation"
+    }
+  },
+  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result. This is the MALFORMED FINDING: no evidence array, no verbatim_snippet, absence_confidence='unverified' (should be verified_absent for any legitimate omission), finding_kind='process_observation' (non-standard), independent=false. The merge LLM produced a structurally deficient finding that should have been rejected by schema validation."
+}

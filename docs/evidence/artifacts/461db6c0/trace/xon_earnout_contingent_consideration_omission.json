@@ -1,0 +1,65 @@
+{
+  "issue_key": "xon_earnout_contingent_consideration_omission",
+  "finding_id": "990d4599-b9c6-481c-adc0-7b2c89d6d12c",
+  "merged_from_finding_ids": "NOT_PERSISTED — field absent from finding object. Finding was synthesized directly by the merge LLM call, not consolidated from pre-identified sub-findings.",
+  "absence_confidence": "verified_absent",
+  "finding_kind": "omission",
+  "severity": "info",
+  "independent": true,
+  "source_docs": [
+    {
+      "document_id": "e5d69a30-d768-4988-998f-bfdcb1a28058",
+      "document_name": "SCG - Project Saint - Vendor Financial Due Diligence Report - 28.11.2025.pdf",
+      "role": "primary evidence source (chunk 176 referenced by IC memos)"
+    },
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "document_name": "2026-06-15 SCG - 3rd IC Memo vS.pdf",
+      "role": "IC memo referencing earn-out"
+    }
+  ],
+  "evidence_resolution": [
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "chunk_index": 34,
+      "role": "IC memo chunk referencing £20.5m earn-out",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 0
+      }
+    },
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "chunk_index": 41,
+      "role": "IC memo chunk with earn-out details",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 0
+      }
+    },
+    {
+      "document_id": "31b3df2f-1653-42e5-8ad1-e58ab74e0399",
+      "chunk_index": 137,
+      "role": "IC memo referencing Vendor FDD chunk 176",
+      "merge_checkpoint": {
+        "tree_level": 1,
+        "node_index": 0
+      }
+    }
+  ],
+  "suppression_gates": {
+    "authoritative_source": {
+      "passed": false,
+      "reason": "Sources lack structured doc_class"
+    },
+    "materiality": {
+      "passed": false,
+      "reason": "Info-severity findings are secondary observations only"
+    },
+    "genuine_contradiction": {
+      "passed": false,
+      "reason": "Informational observation"
+    }
+  },
+  "lineage_note": "Finding appears ONLY at tree_level=1 in merge_checkpoints. NOT present in pipeline_analysis by finding_id. merged_from_finding_ids lineage is NOT persisted — gap result. Evidence references Vendor FDD chunk 176 indirectly through IC memo citations."
+}

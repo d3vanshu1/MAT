@@ -1,0 +1,42 @@
+ARTIFACT B: chunks/<document_id>.json — chunkDocument output
+
+STATUS: NOT PERSISTED IN ACCESSIBLE FORMAT
+
+INVESTIGATION:
+- Checked DiagnoseChunks API (server/apis/pipeline/diagnose-chunks.ts):
+  Returns COUNTS of extraction_chunks and qa_chunks per document, NOT chunk text.
+  Query: SELECT d.id, d.file_name, COUNT(DISTINCT ue.chunk_index) AS extraction_chunks,
+         COUNT(DISTINCT qa.chunk_index) AS qa_chunks
+  FROM documents d
+  LEFT JOIN universal_extractions ue ON ue.document_id = d.id
+  LEFT JOIN pipeline_analysis pa ON pa.document_id = d.id
+
+- Checked DiagnoseChunkDetail API (server/apis/pipeline/diagnose-chunk-detail.ts):
+  Returns pipeline_analysis.result_json for specific chunk_indices by run_id.
+  Does NOT return the original chunk text — only the analysis result.
+
+- Checked LoadExtractions API (server/apis/checkpoints/load-extractions.ts):
+  Returns universal_extractions.extraction_json for a deal (LIMIT 500).
+  Contains extracted findings per chunk, NOT the chunk text itself.
+
+- No API exists that returns: [{chunkIndex, contentHash, charStart, charEnd, text}]
+
+TABLES CHECKED:
+- documents: has parsed_text (full) but no chunk boundaries
+- universal_extractions: has chunk_index + extraction_json, but no chunk text
+- pipeline_analysis: has chunk_index + result_json (analysis output), no source text
+- No "chunks" or "document_chunks" table found via available APIs
+
+CONCLUSION:
+The chunk boundaries (charStart, charEnd) and chunk text are not persisted in a
+queryable table. They are computed at runtime during the pipeline's chunkDocument
+step and passed ephemerally to downstream workers. The chunk_index is stored on
+universal_extractions and pipeline_analysis rows as a foreign key, but the
+actual chunk content is not separately stored.
+
+To reconstruct chunk text, one would need:
+1. The chunking algorithm parameters (chunk_size, overlap)
+2. The full parsed_text (available in documents table)
+3. Re-run the chunking logic
+
+This is a confirmed architectural gap — chunk text is transient.

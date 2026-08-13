@@ -1,0 +1,15 @@
+NOTPERSISTED: final/report.md
+
+Table checked: module_outputs
+Column checked: full_report_markdown
+Query: SELECT full_report_markdown FROM module_outputs WHERE module_run_id = '461db6c0-c8a7-4073-96d6-832ff506469b'
+Result: 0 rows returned
+
+No report markdown was generated or persisted for this run.
+The pipeline failed after the finding_reduction_gate suppressed all 9 findings.
+The canonical finalization stage (which generates the report) was never reached.
+
+Additionally checked:
+- merge_checkpoints tree_level=98 (L3 export): 0 rows
+- merge_checkpoints tree_level=99 (diagnostic): 0 rows
+- merge_checkpoints tree_level=0 (merge root): 0 rows

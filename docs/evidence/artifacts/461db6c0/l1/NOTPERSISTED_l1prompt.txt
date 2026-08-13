@@ -1,0 +1,34 @@
+L1 EXTRACTION PROMPTS — NOT PERSISTED
+======================================
+
+Table checked: pipeline_analysis
+Columns checked: result_json (contains extraction output only)
+Additional tables checked: universal_extractions (extraction_json only)
+
+The original LLM prompt payload sent during L1 extraction is NOT stored anywhere
+in the database. Only the model's response (result_json) is persisted in
+pipeline_analysis.
+
+What IS available:
+- pipeline_analysis.result_json: The model's extraction output per chunk
+  (accessed via DiagnoseChunkDetail API as "extractionSnippet")
+- pipeline_analysis.chunk_index: Global chunk index within the run
+- pipeline_analysis.run_id: The module run ID
+
+What is NOT available:
+- The system prompt template used for extraction
+- The user prompt (which would have contained the chunk text + instructions)
+- The raw model response envelope (token counts, model ID, etc.)
+- Per-document chunk mapping (pipeline_analysis uses global run-level indices)
+
+Architecture note:
+- DiagnoseChunkDetail queries by (run_id, chunk_index) globally — no document filter
+- Chunk indices are sequential across ALL documents in the run
+- Findings reference (document_id, chunk_index) pairs but these are per-document indices
+- There is NO persisted mapping between global pipeline_analysis chunk indices and
+  per-document chunk indices — this mapping was computed at runtime during chunking
+- This means we CANNOT definitively verify which pipeline_analysis row corresponds
+  to which (document_id, chunk_index) pair from a finding's evidence_resolution
+
+Gap: The prompt text (containing chunk source text + extraction instructions) is
+constructed ephemerally at pipeline runtime and not written to any durable store.

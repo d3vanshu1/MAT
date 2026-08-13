@@ -1,0 +1,44 @@
+ARTIFACT A — PARSED TEXT EXTRACTION STATUS
+============================================
+
+Table:   documents
+Column:  parsed_text
+API:     DiagnoseParsedText (offset/length substring extraction)
+
+CONFIRMED DOCUMENT SIZES (from DiagnoseParsedText totalLength field):
+  - Vendor FDD (e5d69a30-d768-4988-998f-bfdcb1a28058): 351,023 chars
+  - Legal DD  (e27d46c9-c384-42ed-bc8c-6f04ba8bc474): 870,824 chars
+
+EXTRACTION CONSTRAINT:
+  The testApi tool returns a maximum of ~25,000 characters per response.
+  Full extraction of Vendor FDD requires 15 API calls; Legal DD requires 35.
+  Total payload: 1,221,847 characters — exceeds practical transfer capacity
+  within a single session (context window limitations).
+
+WHAT WAS VERIFIED:
+  - Vendor FDD text exists, begins with "V\nProject Saint\nFinancial vendor
+    due diligence report\n28 November 2025\nDraft\n..."
+  - Text is the post-vision, pre-chunk parsed output from PwC FDD PDF
+  - First 200,000 chars verified via 8 sequential DiagnoseParsedText calls
+  - Contains cover page, TOC, Executive Report, Quality of Earnings,
+    ARR/ARGP analysis, Direct costs, Plan FY25-28, Net assets, NWC,
+    Selected Information through Product Analysis sections
+
+CHUNK-RELEVANT SECTIONS CONFIRMED PRESENT:
+  - Chunk 33 region (~chars 160,000-165,000): Contains churn data tables
+    (churn_rate finding b061d50c sources from this region)
+  - Chunk 176 region: Within Vendor FDD — earn-out data referenced by
+    IC memo findings
+
+TO COMPLETE FULL EXTRACTION:
+  Run DiagnoseParsedText with:
+    documentId = "e5d69a30-d768-4988-998f-bfdcb1a28058" (Vendor FDD)
+    or
+    documentId = "e27d46c9-c384-42ed-bc8c-6f04ba8bc474" (Legal DD)
+  
+  Offsets: 1, 25001, 50001, 75001, ..., up to totalLength
+  Length: 25000 per call
+  Concatenate all .sample fields in offset order.
+
+  Alternative: Use GetDocumentTexts API with dealId (loads all docs with
+  automatic slicing, but loads entire deal — 10 documents, ~5MB total).
