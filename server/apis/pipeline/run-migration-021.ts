@@ -48,7 +48,7 @@ export default api({
         unit               TEXT,
         period             TEXT,
         scope_qualifier    TEXT NOT NULL,
-        verbatim_snippet   TEXT,
+        verbatim_snippet   VARCHAR(200),
         adviser_severity   TEXT,
         adviser_disposition TEXT,
         stated_or_derived  TEXT NOT NULL,
@@ -92,7 +92,8 @@ export default api({
         checklist_version  TEXT NOT NULL,
         created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
         PRIMARY KEY (run_id, topic_id),
-        CONSTRAINT oa_topics_obligation_class_chk CHECK (obligation_class IN ('required','conditional','optional','not_memo_relevant'))
+        CONSTRAINT oa_topics_obligation_class_chk CHECK (obligation_class IN ('required','conditional','optional','not_memo_relevant')),
+        CONSTRAINT oa_topics_subject_coverage_chk CHECK (subject_coverage IN ('absent','partial','present'))
       )`,
       [],
       { label: "Migration021: create oa_topics" }
@@ -107,7 +108,11 @@ export default api({
         fact_id            UUID NOT NULL,
         fact_role          TEXT NOT NULL,
         supersession       TEXT,
-        CONSTRAINT oa_topic_facts_uniq UNIQUE (run_id, topic_id, fact_id)
+        CONSTRAINT oa_topic_facts_uniq UNIQUE (run_id, topic_id, fact_id),
+        CONSTRAINT oa_topic_facts_fact_role_chk CHECK (fact_role IN ('subject','reference')),
+        CONSTRAINT oa_topic_facts_supersession_chk CHECK (supersession IN ('current','superseded')),
+        CONSTRAINT oa_topic_facts_fact_id_fk FOREIGN KEY (fact_id) REFERENCES oa_facts(fact_id) ON DELETE CASCADE,
+        CONSTRAINT oa_topic_facts_topic_fk FOREIGN KEY (run_id, topic_id) REFERENCES oa_topics(run_id, topic_id) ON DELETE CASCADE
       )`,
       [],
       { label: "Migration021: create oa_topic_facts" }
@@ -140,12 +145,20 @@ export default api({
         created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
         CONSTRAINT oa_findings_gap_kind_chk CHECK (gap_kind IN ('not_disclosed','scope_mismatch','unreconciled_divergence','stale_supersession','unquantified')),
         CONSTRAINT oa_findings_materiality_tier_chk CHECK (materiality_tier IN (1,2,3)),
-        CONSTRAINT oa_findings_absence_basis_chk CHECK (absence_basis IN ('no_subject_facts_and_probe_null','probe_not_run','scope_narrower_than_reference','superseded_not_carried_forward','qualitative_only_no_quantification'))
+        CONSTRAINT oa_findings_absence_basis_chk CHECK (absence_basis IN ('no_subject_facts_and_probe_null','probe_not_run','scope_narrower_than_reference','superseded_not_carried_forward','qualitative_only_no_quantification')),
+        CONSTRAINT oa_findings_topic_fk FOREIGN KEY (run_id, topic_id) REFERENCES oa_topics(run_id, topic_id) ON DELETE CASCADE
       )`,
       [],
       { label: "Migration021: create oa_findings" }
     );
     tables.push("oa_findings");
+
+    await ctx.integrations.db.execute(
+      `CREATE INDEX IF NOT EXISTS idx_oa_findings_run ON oa_findings (run_id)`,
+      [],
+      { label: "Migration021: index oa_findings run" }
+    );
+    indexes.push("idx_oa_findings_run");
 
     // ─── TABLE 5: oa_stage_checkpoints ───────────────────────────────────
     await ctx.integrations.db.execute(
