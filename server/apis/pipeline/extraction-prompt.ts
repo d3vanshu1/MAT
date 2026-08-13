@@ -42,12 +42,15 @@ For each metric/data point:
 - Category: "revenue" | "margin" | "customer" | "cost" | "capital" | "financing" | "entry_exit" | "returns" | "operational" | "other"
 - Whether stated explicitly or derived
 - Perspective: "deal_team" | "management" | "unclear"
+- Scope qualifier: a short tag (≤8 words) identifying the cohort, time window, scenario, or perimeter the value applies to. Examples: "FY25 base case", "top-10 customers", "ex-M&A", "management upside". Null when the value is unconditional or the scope is obvious from the metric name itself.
 
 ### 4. Flags & Risks
 For each flag identified:
 - Type: "risk" | "gap" | "contradiction" | "assumption" | "omission"
 - Description (direct statement of the issue)
 - Severity: "critical" | "moderate" | "low"
+- Adviser severity: the adviser's own characterization of severity if explicitly stated (quote their exact words, e.g. "material weakness", "key risk"), or null if the document does not characterize it
+- Adviser disposition: adviser's stated recommendation or stance toward the flag if present (e.g. "acceptable given mitigants", "requires further diligence"), or null if not stated
 
 ### 5. Omissions & Missing Information
 - Missing data, sections, time periods, benchmarks, or risk factors that should be present
@@ -92,8 +95,8 @@ Required top-level keys:
 - "document_type" (string): CIM | IC_MEMO | CUSTOMER_DATA | CONSULTANT_REPORT | FINANCIAL_MODEL | LEGAL | OTHER
 - "source_perspective" (string): deal_team | management | third_party | unclear
 - "key_claims" (array): each with "id" (leave as empty string — will be assigned post-extraction), "claim", "claim_type", "source_type", "location", "confidence", "dimension"
-- "data_points" (array): each with "metric", "value", "context", "category", "stated_or_derived", "perspective"
-- "flags" (array): each with "type", "description", "severity"
+- "data_points" (array): each with "metric", "value", "context", "scope_qualifier" (string or null), "category", "stated_or_derived", "perspective"
+- "flags" (array): each with "type", "description", "severity", "adviser_severity" (string or null), "adviser_disposition" (string or null)
 - "omissions" (array of strings): missing items relative to PE diligence standards
 - "competitive_market" (array): each with "claim", "named_competitors" (string[]), "figures_cited" (string or null)
 - "management_leadership" (array): each with "name", "title", "background_claims" (string or null), "retention_detail" (string or null)

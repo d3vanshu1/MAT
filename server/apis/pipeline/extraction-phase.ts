@@ -146,6 +146,8 @@ export type ExtractionPhaseResult =
 interface ExtractionLLMResult {
   text: string;
   truncated: boolean;
+  outputTokens: number;
+  inputTokens: number;
 }
 
 async function callExtractionLLM(
@@ -216,7 +218,12 @@ async function callExtractionLLM(
       // was cut off mid-generation. The text may be incomplete/invalid JSON.
       const truncated = result.stop_reason === "max_tokens";
 
-      return { text: textBlock.text.trim(), truncated };
+      return {
+        text: textBlock.text.trim(),
+        truncated,
+        outputTokens: result.usage.output_tokens,
+        inputTokens: result.usage.input_tokens,
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       attemptErrors.push(`attempt_${attempt}: ${msg.slice(0, 200)}`);
@@ -470,7 +477,16 @@ export async function runExtractionPhase(
           // Solo chunks get a fresh startTime so their internal timeout measures
           // from call start. Budget is clamped to platform headroom via soloBudgetOverride.
           const chunkStart = isSolo ? Date.now() : startTime;
-          const { text: rawText, truncated } = await callExtractionLLM(ctx, chunk, totalChunks, chunkStart, 3, isSolo, soloBudgetOverride);
+          const { text: rawText, truncated, outputTokens, inputTokens } = await callExtractionLLM(ctx, chunk, totalChunks, chunkStart, 3, isSolo, soloBudgetOverride);
+
+          // ADD-2: Truncation guard diagnostic — record token usage per chunk
+          const charCount = rawText.length;
+          const pctCap = Math.round((outputTokens / EXTRACTION_MAX_TOKENS) * 100);
+          console.log(
+            `[extraction:diag] chunk="${sanitizeBraces(chunk.label)}:${chunk.chunkIndex}" ` +
+            `output_tokens=${outputTokens} input_tokens=${inputTokens} ` +
+            `chars=${charCount} pct_cap=${pctCap}% truncated=${truncated}`
+          );
 
           // If truncated, mark it so future runs will retry this chunk
           if (truncated) {
@@ -738,8 +754,17 @@ export async function runExtractionPhase(
       const tag = tagByDocId[chunk.documentId] ?? "other";
 
       try {
-        const { text: rawText, truncated } = await callExtractionLLM(
+        const { text: rawText, truncated, outputTokens, inputTokens } = await callExtractionLLM(
           ctx, chunk, totalChunks, chunkStart, 3, true, clampedBudget
+        );
+
+        // ADD-2: Truncation guard diagnostic — escalation path
+        const charCount = rawText.length;
+        const pctCap = Math.round((outputTokens / EXTRACTION_MAX_TOKENS) * 100);
+        console.log(
+          `[extraction:diag:escalation] chunk="${sanitizeBraces(chunk.label)}:${chunk.chunkIndex}" ` +
+          `output_tokens=${outputTokens} input_tokens=${inputTokens} ` +
+          `chars=${charCount} pct_cap=${pctCap}% truncated=${truncated} attempt=${attempts + 1}`
         );
 
         if (truncated) {
