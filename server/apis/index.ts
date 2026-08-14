@@ -138,6 +138,11 @@ import RunMigration022 from './pipeline/run-migration-022.js';
 import RunMigration023 from './pipeline/run-migration-023.js';
 import OaFactNormalization from './pipeline/oa-fact-normalization.js';
 import OaNormalizationReport from './pipeline/oa-normalization-report.js';
+import OaTopicAssignment from './pipeline/oa-topic-assignment.js';
+import OaIndexAssembly from './pipeline/oa-index-assembly.js';
+import OaAbsenceProbe from './pipeline/oa-absence-probe.js';
+import OaGapComparison from './pipeline/oa-gap-comparison.js';
+import OaMateriality from './pipeline/oa-materiality.js';
 // import PurgeDealPipelineState from './pipeline/purge-deal-pipeline-state.js';
 
 // Database setup
@@ -221,7 +226,7 @@ const apis = {
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
-  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, RunMigration022, RunMigration023, OaFactNormalization, OaNormalizationReport,
+  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, RunMigration022, RunMigration023, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

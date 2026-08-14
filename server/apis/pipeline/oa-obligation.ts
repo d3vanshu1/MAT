@@ -142,25 +142,22 @@ export async function classifyEmergentTopics(
   const response = await aiFn(
     {
       method: "POST",
-      path: "/chat/completions",
+      path: "/v1/messages",
       body: {
-        model: "anthropic/claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-6",
+        max_tokens: 4096,
         messages: [
           { role: "user", content: prompt },
         ],
-        temperature: 0,
-        max_tokens: 4096,
       },
     },
     { response: z.any() },
     { label: "Classify emergent topics (batched)" }
   );
 
-  // Extract the text content from the response
-  const rawText: string =
-    response?.choices?.[0]?.message?.content ??
-    response?.content?.[0]?.text ??
-    "[]";
+  // Extract the text content from the response (Anthropic Messages format)
+  const textBlock = response?.content?.find((c: any) => c.type === "text");
+  const rawText: string = textBlock?.text ?? "[]";
 
   // Parse JSON — strip markdown fences if present
   const cleaned = rawText.replace(/^```(?:json)?\s*/m, "").replace(/```\s*$/m, "").trim();
