@@ -133,6 +133,14 @@ const QueryInput = z.discriminatedUnion("query", [
     sheetOrPage: z.string().optional(),
     limit: z.number().int().min(1).max(5).default(3),
   }),
+  z.object({
+    query: z.literal("emergent_topics_with_facts"),
+    runId: z.string(),
+  }),
+  z.object({
+    query: z.literal("doc_tables_cell_stats"),
+    documentIds: z.array(z.string()),
+  }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -586,6 +594,93 @@ export default api({
           { label: "doc_tables_sample" }
         );
         return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // emergent_topics_with_facts: all non-seeded topics with their fact counts
+      // -----------------------------------------------------------------------
+      case "emergent_topics_with_facts": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT t.topic_id, t.obligation_class, t.obligation_basis,
+                  COALESCE(fc.fact_count, 0)::int AS fact_count
+           FROM oa_topics t
+           LEFT JOIN (
+             SELECT topic_id, COUNT(*)::int AS fact_count
+             FROM oa_topic_facts
+             WHERE run_id = $1
+             GROUP BY topic_id
+           ) fc ON fc.topic_id = t.topic_id
+           WHERE t.run_id = $1
+             AND t.obligation_basis = 'model_proposed_unclassified'
+           ORDER BY t.topic_id`,
+          z.object({
+            topic_id: z.string(),
+            obligation_class: z.string().nullable(),
+            obligation_basis: z.string().nullable(),
+            fact_count: z.coerce.number(),
+          }),
+          [input.runId],
+          { label: "emergent_topics_with_facts" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // doc_tables_cell_stats: cell counts, junk rates per sheet
+      // -----------------------------------------------------------------------
+      case "doc_tables_cell_stats": {
+        // Per-sheet cell count
+        const perSheet = await ctx.integrations.db.query(
+          `SELECT document_id, sheet_or_page,
+                  COALESCE(jsonb_array_length(data->'cells'), 0)::int AS cell_count
+           FROM doc_tables
+           WHERE document_id = ANY($1::uuid[])
+             AND sheet_or_page != '__generation_manifest__'
+           ORDER BY cell_count DESC`,
+          z.object({
+            document_id: z.string(),
+            sheet_or_page: z.string(),
+            cell_count: z.coerce.number(),
+          }),
+          [input.documentIds],
+          { label: "doc_tables_cell_stats: per sheet" }
+        );
+
+        // Total cells
+        const totalCells = perSheet.reduce((sum, r) => sum + r.cell_count, 0);
+
+        // Junk cell count (value = 'x' or empty string)
+        const junkResult = await ctx.integrations.db.query(
+          `WITH all_cells AS (
+             SELECT jsonb_array_elements(data->'cells') AS cell
+             FROM doc_tables
+             WHERE document_id = ANY($1::uuid[])
+               AND sheet_or_page != '__generation_manifest__'
+           )
+           SELECT
+             COUNT(*)::int AS total_cells,
+             COUNT(*) FILTER (WHERE cell->>'value' = 'x')::int AS x_cells,
+             COUNT(*) FILTER (WHERE cell->>'value' = '')::int AS empty_cells,
+             COUNT(*) FILTER (WHERE cell->>'value' = 'x' OR cell->>'value' = '')::int AS junk_cells
+           FROM all_cells`,
+          z.object({
+            total_cells: z.coerce.number(),
+            x_cells: z.coerce.number(),
+            empty_cells: z.coerce.number(),
+            junk_cells: z.coerce.number(),
+          }),
+          [input.documentIds],
+          { label: "doc_tables_cell_stats: junk rate" }
+        );
+
+        return {
+          rows: [{
+            total_cells: totalCells,
+            per_sheet: perSheet,
+            junk: junkResult[0] ?? { total_cells: 0, x_cells: 0, empty_cells: 0, junk_cells: 0 },
+          }],
+          rowCount: perSheet.length,
+        };
       }
 
       default: {

@@ -196,7 +196,7 @@ export const CanonicalFindingSchema = z.object({
   independent: z.boolean().optional(),
   /** Absence verification result (populated by absence-verification-phase) */
   verification: VerificationSchema.optional(),
-  /** Code-enforced absence gate result (populated by verifyAbsenceClaims) */
+  /** Code-enforced absence gate result */
   absence_verification: z.enum(["contradicted_by_memo", "memo_absent_confirmed"]).optional(),
 
   // --- Provenance ---
