@@ -175,7 +175,7 @@ export default api({
       // Check checkpoint
       const cp = await db.query(
         `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'materiality' AND unit_key = $2`,
-        z.array(z.any()),
+        z.any(),
         [runId, finding.finding_id],
         { label: `Check checkpoint ${finding.finding_id}` }
       );
@@ -200,7 +200,7 @@ export default api({
         // Check if D1 ran a probe on this topic
         const probeCheckpoint = await db.query(
           `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'absence_probe' AND unit_key = $2`,
-          z.array(z.any()),
+          z.any(),
           [runId, finding.topic_id],
           { label: `Probe check for ${finding.topic_id}` }
         );
@@ -227,6 +227,7 @@ export default api({
           body: {
             model: "claude-sonnet-4-6",
             max_tokens: 1024,
+            temperature: 0,
             messages: [{ role: "user", content: prompt }],
           },
         },

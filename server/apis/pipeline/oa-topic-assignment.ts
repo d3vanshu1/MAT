@@ -229,7 +229,7 @@ export default api({
       const unitKey = `${currentDocId}:${docBatchOrdinal}`;
       const existing = await db.query(
         `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'topic_assignment' AND unit_key = $2`,
-        z.array(z.any()),
+        z.any(),
         [runId, unitKey],
         { label: `Check checkpoint ${unitKey}` }
       );
@@ -258,6 +258,7 @@ export default api({
           body: {
             model: "claude-sonnet-4-6",
             max_tokens: 8192,
+            temperature: 0,
             messages: [{ role: "user", content: prompt }],
           },
         },

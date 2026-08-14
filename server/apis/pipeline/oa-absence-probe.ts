@@ -170,6 +170,7 @@ export default api({
         body: {
           model: "claude-sonnet-4-6",
           max_tokens: 4096,
+          temperature: 0,
           messages: [{ role: "user", content: prompt }],
         },
       },
@@ -243,7 +244,7 @@ export default api({
       // Check checkpoint
       const cp = await db.query(
         `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'absence_probe' AND unit_key = $2`,
-        z.array(z.any()),
+        z.any(),
         [runId, topic.topic_id],
         { label: `Check checkpoint ${topic.topic_id}` }
       );

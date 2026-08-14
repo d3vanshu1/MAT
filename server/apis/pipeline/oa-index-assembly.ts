@@ -138,7 +138,7 @@ export default api({
       // Check checkpoint
       const cp = await db.query(
         `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'index_assembly' AND unit_key = $2`,
-        z.array(z.any()),
+        z.any(),
         [runId, topic_id],
         { label: `Check checkpoint ${topic_id}` }
       );
