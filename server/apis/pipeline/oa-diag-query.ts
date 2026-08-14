@@ -93,6 +93,14 @@ const QueryInput = z.discriminatedUnion("query", [
     offset: z.number().int().min(0).default(0),
     limit: z.number().int().min(1).max(200).default(50),
   }),
+  z.object({
+    query: z.literal("flag_type_dist"),
+    dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("fact_count_by_document"),
+    dealId: z.string(),
+  }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -340,6 +348,41 @@ export default api({
           FieldProbeSchema,
           [input.dealId, input.limit, input.offset],
           { label: `extraction_field_probe (field=${input.fieldName}, offset=${input.offset})` }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // flag_type_dist: distribution of source_metadata->>'type' for fact_type='flag'
+      // -----------------------------------------------------------------------
+      case "flag_type_dist": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT source_metadata->>'type' AS flag_type, COUNT(*)::int AS count
+           FROM oa_facts
+           WHERE deal_id = $1 AND fact_type = 'flag'
+           GROUP BY 1 ORDER BY 2 DESC`,
+          z.object({ flag_type: z.string().nullable(), count: z.coerce.number() }),
+          [input.dealId],
+          { label: "flag_type distribution" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // fact_count_by_document: facts per document with role and name
+      // -----------------------------------------------------------------------
+      case "fact_count_by_document": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT f.document_id, f.document_role, d.file_name, COUNT(*)::int AS fact_count
+           FROM oa_facts f
+           JOIN documents d ON d.id = f.document_id
+           WHERE f.deal_id = $1
+             AND NOT (f.fact_type = 'flag' AND f.source_metadata->>'type' IN ('gap', 'omission'))
+           GROUP BY f.document_id, f.document_role, d.file_name
+           ORDER BY f.document_role, f.document_id`,
+          z.object({ document_id: z.string(), document_role: z.string(), file_name: z.string(), fact_count: z.coerce.number() }),
+          [input.dealId],
+          { label: "fact_count_by_document" }
         );
         return { rows, rowCount: rows.length };
       }

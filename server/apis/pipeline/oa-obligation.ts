@@ -15,6 +15,11 @@ import {
   OBLIGATION_CHECKLIST_VERSION,
 } from "./oa-taxonomy.js";
 
+// Budget guard constants (used when called standalone)
+const HARD_KILL_MS = 200_000;
+const SAFETY_MARGIN_MS = 45_000;
+const DEFAULT_UNIT_DURATION_MS = 15_000;
+
 // ---------------------------------------------------------------------------
 // Output type
 // ---------------------------------------------------------------------------
@@ -106,10 +111,12 @@ const ClassificationResultSchema = z.array(
  * - Emergent topics are batched into ONE prompt. The 5-minute kill makes
  *   per-topic calls unworkable.
  * - Every emergent topic receives a parent_topic_id from the seeded set.
+ * - Optional invocationStart param enables budget guard from caller context.
  */
 export async function classifyEmergentTopics(
   topics: Array<{ topic_id: string; topic_label: string }>,
   aiFn: AiFn,
+  invocationStart?: number,
 ): Promise<ClassifiedEmergentTopic[]> {
   // Separate seeded from emergent
   const seeded: ClassifiedEmergentTopic[] = [];
@@ -134,6 +141,20 @@ export async function classifyEmergentTopics(
   // If no emergent topics, skip model call entirely
   if (emergent.length === 0) {
     return seeded;
+  }
+
+  // ─── BUDGET GUARD ─────────────────────────────────────────────────────
+  const start = invocationStart ?? Date.now();
+  const timeRemaining = () => HARD_KILL_MS - (Date.now() - start);
+  if (timeRemaining() < SAFETY_MARGIN_MS + DEFAULT_UNIT_DURATION_MS) {
+    console.warn(`[oa-obligation] YIELDING FOR BUDGET: ${timeRemaining()}ms remaining. Defaulting emergent topics to optional.`);
+    const fallback: ClassifiedEmergentTopic[] = emergent.map((t) => ({
+      topic_id: t.topic_id,
+      obligation_class: "optional" as ObligationClass,
+      obligation_basis: "Yielded for budget — defaulted to optional",
+      parent_topic_id: "dd.coverage",
+    }));
+    return [...seeded, ...fallback];
   }
 
   // Single batched LLM call for all emergent topics

@@ -22,6 +22,11 @@ import { SONNET_MODEL } from "./model-config.js";
 const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
+// Budget guard constants
+const HARD_KILL_MS = 200_000;          // conservative: yield well before platform kill
+const SAFETY_MARGIN_MS = 45_000;       // do not start work inside this window
+const DEFAULT_UNIT_DURATION_MS = 15_000; // conservative seed for LLM call
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -104,7 +109,10 @@ export default api({
     reset: z.boolean().optional().default(false),
   }),
   output: z.object({
-    report: z.record(z.string(), z.any()),
+    status: z.enum(["complete", "in_progress"]),
+    topics_completed: z.number(),
+    topics_remaining: z.number(),
+    report: z.record(z.string(), z.any()).optional(),
   }),
 
   async run(ctx, { dealId, runId, reset }) {
@@ -132,7 +140,22 @@ export default api({
     console.log(`[D1] ${absentTopics.length} topics with coverage=absent`);
 
     if (absentTopics.length === 0) {
-      return { report: { M1_topics_probed: 0, M2_topics_with_hits: 0, detail: [] } };
+      return { status: "complete" as const, topics_completed: 0, topics_remaining: 0, report: { M1_topics_probed: 0, M2_topics_with_hits: 0, detail: [] } };
+    }
+
+    // Budget guard
+    const invocationStart = Date.now();
+    const timeRemaining = () => HARD_KILL_MS - (Date.now() - invocationStart);
+
+    // ─── BUDGET GUARD: check before the single LLM call ────────────────
+    if (timeRemaining() < SAFETY_MARGIN_MS + DEFAULT_UNIT_DURATION_MS) {
+      console.log(`[D1] YIELDING FOR BUDGET before LLM call: ${timeRemaining()}ms remaining`);
+      return {
+        status: "in_progress" as const,
+        topics_completed: 0,
+        topics_remaining: absentTopics.length,
+        report: { message: "Yielded for budget before query formulation LLM call", run_id: runId },
+      };
     }
 
     // ─── Load reference predicates for each absent topic ─────────────────
@@ -311,6 +334,6 @@ export default api({
     };
 
     console.log("[D1] REPORT:", JSON.stringify(report, null, 2));
-    return { report };
+    return { status: "complete" as const, topics_completed: probeResults.length, topics_remaining: 0, report };
   },
 });

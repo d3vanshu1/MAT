@@ -2,14 +2,14 @@
  * oa-taxonomy.ts — Seeded topic spine for the OA rebuild.
  *
  * Pure constants. No DB access, no LLM calls, no side effects.
- * 44 seeded topics across 4 obligation classes.
+ * 47 seeded topics across 4 obligation classes.
  */
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export const OBLIGATION_CHECKLIST_VERSION = "v1.0.0";
+export const OBLIGATION_CHECKLIST_VERSION = "v1.1.0";
 
 export type ObligationClass =
   | "required"
@@ -26,7 +26,7 @@ export interface SeededTopic {
 }
 
 // ---------------------------------------------------------------------------
-// Seeded Topics (44 total: 21 required, 14 conditional, 5 optional, 4 excluded)
+// Seeded Topics (47 total: 21 required, 16 conditional, 5 optional, 5 excluded)
 // ---------------------------------------------------------------------------
 
 export const SEEDED_TOPICS: SeededTopic[] = [
@@ -53,7 +53,7 @@ export const SEEDED_TOPICS: SeededTopic[] = [
   { topic_id: "risk.customer-contract",    topic_label: "Change-of-control / termination risk",    obligation_class: "required", obligation_basis: "IC memo must address", parent_topic_id: null },
   { topic_id: "dd.coverage",               topic_label: "Diligence scope and open items",          obligation_class: "required", obligation_basis: "IC memo must address", parent_topic_id: null },
 
-  // ─── CONDITIONAL (14) ──────────────────────────────────────────────────
+  // ─── CONDITIONAL (16) ──────────────────────────────────────────────────
   { topic_id: "tech.debt",                 topic_label: "Technical debt",                          obligation_class: "conditional", obligation_basis: "Required if reference set carries material content", parent_topic_id: null },
   { topic_id: "tech.ip-ownership",         topic_label: "IP ownership and protection",             obligation_class: "conditional", obligation_basis: "Required if reference set carries material content", parent_topic_id: null },
   { topic_id: "esg.material",              topic_label: "Material ESG considerations",             obligation_class: "conditional", obligation_basis: "Required if reference set carries material content", parent_topic_id: null },
@@ -68,6 +68,8 @@ export const SEEDED_TOPICS: SeededTopic[] = [
   { topic_id: "data-protection",           topic_label: "Data protection and privacy",             obligation_class: "conditional", obligation_basis: "Required if reference set carries material content", parent_topic_id: null },
   { topic_id: "employment.material",       topic_label: "Material employment matters",             obligation_class: "conditional", obligation_basis: "Required if reference set carries material content", parent_topic_id: null },
   { topic_id: "property.leases",           topic_label: "Property and lease obligations",          obligation_class: "conditional", obligation_basis: "Required if reference set carries material content", parent_topic_id: null },
+  { topic_id: "acquisition.historic-terms", topic_label: "Terms of Group's prior acquisitions — warranties, earn-outs, consideration", obligation_class: "conditional", obligation_basis: "Required if reference set shows material unresolved exposure from prior M&A", parent_topic_id: null },
+  { topic_id: "partner.channel-agreements", topic_label: "Dealer, reseller and channel partner agreements", obligation_class: "conditional", obligation_basis: "Required if channel is a material route to market", parent_topic_id: null },
 
   // ─── OPTIONAL (5) ──────────────────────────────────────────────────────
   { topic_id: "market.tam",                topic_label: "Total addressable market",                obligation_class: "optional", obligation_basis: "Surfaced only at Tier 3", parent_topic_id: null },
@@ -76,11 +78,12 @@ export const SEEDED_TOPICS: SeededTopic[] = [
   { topic_id: "culture",                   topic_label: "Organisational culture",                  obligation_class: "optional", obligation_basis: "Surfaced only at Tier 3", parent_topic_id: null },
   { topic_id: "nps-csat",                  topic_label: "NPS / CSAT scores",                       obligation_class: "optional", obligation_basis: "Surfaced only at Tier 3", parent_topic_id: null },
 
-  // ─── NOT MEMO RELEVANT (4) ────────────────────────────────────────────
+  // ─── NOT MEMO RELEVANT (5) ────────────────────────────────────────────
   { topic_id: "adviser.methodology",       topic_label: "Adviser methodology description",         obligation_class: "not_memo_relevant", obligation_basis: "Never compared", parent_topic_id: null },
   { topic_id: "adviser.scope-limitations", topic_label: "Adviser scope limitations",               obligation_class: "not_memo_relevant", obligation_basis: "Never compared", parent_topic_id: null },
   { topic_id: "adviser.boilerplate",       topic_label: "Adviser boilerplate and disclaimers",     obligation_class: "not_memo_relevant", obligation_basis: "Never compared", parent_topic_id: null },
   { topic_id: "document.formatting",       topic_label: "Document formatting and structure",       obligation_class: "not_memo_relevant", obligation_basis: "Never compared", parent_topic_id: null },
+  { topic_id: "entity.corporate-structure", topic_label: "Corporate structure, share capital, registration, addresses, corporate history", obligation_class: "not_memo_relevant", obligation_basis: "Group corporate hygiene; not an IC memo disclosure obligation", parent_topic_id: null },
 ];
 
 // ---------------------------------------------------------------------------

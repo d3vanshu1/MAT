@@ -37,6 +37,11 @@ const DEAL_EV_GBP = 655_000_000;
 const TIER1_THRESHOLD_GBP = 6_550_000; // 1% of EV
 const TIER2_THRESHOLD_GBP = 2_750_000; // 5% of EBITDA (£55m)
 
+// Budget guard constants
+const HARD_KILL_MS = 200_000;          // conservative: yield well before platform kill
+const SAFETY_MARGIN_MS = 45_000;       // do not start work inside this window
+const DEFAULT_UNIT_DURATION_MS = 15_000; // conservative seed for rolling average
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -130,7 +135,10 @@ export default api({
     reset: z.boolean().optional().default(false),
   }),
   output: z.object({
-    report: z.record(z.string(), z.any()),
+    status: z.enum(["complete", "in_progress"]),
+    findings_completed: z.number(),
+    findings_remaining: z.number(),
+    report: z.record(z.string(), z.any()).optional(),
   }),
 
   async run(ctx, { dealId, runId, reset }) {
@@ -169,7 +177,17 @@ export default api({
     let tier3Count = 0;
     let llmCalls = 0;
     let failClosedCount = 0;
+    let yieldedForBudget = false;
     const tierDetails: Array<{ finding_id: string; topic_id: string; gap_kind: string; tier: number; basis: string }> = [];
+
+    // Budget guard
+    const invocationStart = Date.now();
+    const timeRemaining = () => HARD_KILL_MS - (Date.now() - invocationStart);
+    const unitDurations: number[] = [];
+    const estimatedUnitDuration = () =>
+      unitDurations.length > 0
+        ? unitDurations.reduce((a, b) => a + b, 0) / unitDurations.length
+        : DEFAULT_UNIT_DURATION_MS;
 
     for (const finding of findings) {
       // Check checkpoint
@@ -181,7 +199,17 @@ export default api({
       );
       if (cp.length > 0) continue;
 
-      // ─── Get adviser_severity_max for this topic ───────────────────────
+      // ─── BUDGET GUARD ─────────────────────────────────────────────────
+      const remaining = timeRemaining();
+      const estUnit = estimatedUnitDuration();
+      if (remaining < SAFETY_MARGIN_MS + estUnit) {
+        console.log(`[P7] YIELDING FOR BUDGET: ${remaining}ms remaining, est unit ${estUnit.toFixed(0)}ms`);
+        yieldedForBudget = true;
+        break;
+      }
+
+      // ─── Get adviser_severity_max for this topic ───────────────────
+      const unitStart = Date.now();
       const severityResult = await db.query(
         `SELECT MAX(f.adviser_severity) as max_severity
          FROM oa_topic_facts tf
@@ -309,6 +337,24 @@ export default api({
         z.any(), [runId, finding.finding_id],
         { label: `Checkpoint ${finding.finding_id}` }
       );
+
+      // Record unit duration for budget guard
+      unitDurations.push(Date.now() - unitStart);
+    }
+
+    // ─── BUDGET YIELD: early return ──────────────────────────────────────
+    if (yieldedForBudget) {
+      const completedCps = await db.query(
+        `SELECT COUNT(*) as cnt FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'materiality' AND status = 'complete'`,
+        z.object({ cnt: z.coerce.number() }), [runId], { label: "Count completed materiality checkpoints" }
+      );
+      const completed = completedCps[0]?.cnt ?? 0;
+      return {
+        status: "in_progress" as const,
+        findings_completed: completed,
+        findings_remaining: findings.length - completed,
+        report: { message: "Yielded for budget — re-invoke to resume", run_id: runId, llm_calls_this_invocation: llmCalls },
+      };
     }
 
     // ─── M3-M8: Report ─────────────────────────────────────────────────
@@ -343,6 +389,6 @@ export default api({
     };
 
     console.log("[P7] REPORT:", JSON.stringify(report, null, 2));
-    return { report };
+    return { status: "complete" as const, findings_completed: findings.length, findings_remaining: 0, report };
   },
 });

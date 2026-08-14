@@ -29,6 +29,11 @@ const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 const ENABLE_STALE_SUPERSESSION = false;
 
+// Budget guard constants
+const HARD_KILL_MS = 200_000;          // conservative: yield well before platform kill
+const SAFETY_MARGIN_MS = 45_000;       // do not start work inside this window
+const DEFAULT_UNIT_DURATION_MS = 15_000; // conservative seed for rolling average
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -131,7 +136,10 @@ export default api({
     reset: z.boolean().optional().default(false),
   }),
   output: z.object({
-    report: z.record(z.string(), z.any()),
+    status: z.enum(["complete", "in_progress"]),
+    topics_completed: z.number(),
+    topics_remaining: z.number(),
+    report: z.record(z.string(), z.any()).optional(),
   }),
 
   async run(ctx, { dealId, runId, reset }) {
@@ -168,8 +176,18 @@ export default api({
     let topicsSkipped = 0;
     let topicsNoGap = 0;
     let llmCalls = 0;
+    let yieldedForBudget = false;
     const gapsByKind: Record<string, number> = {};
     const findings: Array<{ topic_id: string; gap_kind: string; narrative: string }> = [];
+
+    // Budget guard
+    const invocationStart = Date.now();
+    const timeRemaining = () => HARD_KILL_MS - (Date.now() - invocationStart);
+    const unitDurations: number[] = [];
+    const estimatedUnitDuration = () =>
+      unitDurations.length > 0
+        ? unitDurations.reduce((a, b) => a + b, 0) / unitDurations.length
+        : DEFAULT_UNIT_DURATION_MS;
 
     for (const topic of topics) {
       // Check checkpoint
@@ -240,7 +258,17 @@ export default api({
         continue;
       }
 
+      // ─── BUDGET GUARD ─────────────────────────────────────────────────
+      const remaining = timeRemaining();
+      const estUnit = estimatedUnitDuration();
+      if (remaining < SAFETY_MARGIN_MS + estUnit) {
+        console.log(`[P6] YIELDING FOR BUDGET: ${remaining}ms remaining, est unit ${estUnit.toFixed(0)}ms`);
+        yieldedForBudget = true;
+        break;
+      }
+
       // ─── Topic has some subject facts — load both sets for LLM comparison ───
+      const unitStart = Date.now();
       const topicFacts = await db.query(
         `SELECT tf.fact_id, tf.fact_role, f.predicate, f.value, f.scope_qualifier, f.fact_type, tf.supersession
          FROM oa_topic_facts tf
@@ -350,6 +378,24 @@ export default api({
         z.any(), [runId, topic.topic_id],
         { label: `Checkpoint ${topic.topic_id}` }
       );
+
+      // Record unit duration for budget guard
+      unitDurations.push(Date.now() - unitStart);
+    }
+
+    // ─── BUDGET YIELD: early return ──────────────────────────────────────
+    if (yieldedForBudget) {
+      const completedCps = await db.query(
+        `SELECT COUNT(*) as cnt FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'gap_comparison' AND status = 'complete'`,
+        z.object({ cnt: z.coerce.number() }), [runId], { label: "Count completed gap_comparison checkpoints" }
+      );
+      const completed = completedCps[0]?.cnt ?? 0;
+      return {
+        status: "in_progress" as const,
+        topics_completed: completed,
+        topics_remaining: topics.length - completed,
+        report: { message: "Yielded for budget — re-invoke to resume", run_id: runId, llm_calls_this_invocation: llmCalls },
+      };
     }
 
     // ─── G1-G6: Report ─────────────────────────────────────────────────
@@ -373,6 +419,6 @@ export default api({
     };
 
     console.log("[P6] REPORT:", JSON.stringify(report, null, 2));
-    return { report };
+    return { status: "complete" as const, topics_completed: topics.length - topicsSkipped, topics_remaining: 0, report };
   },
 });
