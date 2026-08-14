@@ -233,15 +233,17 @@ export default api({
       case "facts_by_topic": {
         const rows = await ctx.integrations.db.query(
           `SELECT
-            f.id AS fact_id,
+            f.fact_id AS fact_id,
             f.predicate,
-            f.object_value,
-            f.confidence,
-            f.source_document_id,
-            f.source_chunk_index,
-            f.created_at::text
+            f.value AS object_value,
+            f.scope_qualifier AS confidence,
+            f.document_id AS source_document_id,
+            f.memo_order AS source_chunk_index,
+            f.document_name AS created_at
           FROM oa_topic_facts tf
-          JOIN oa_facts f ON f.id = tf.fact_id
+          JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = (
+            SELECT deal_id FROM oa_stage_checkpoints WHERE run_id = $1 LIMIT 1
+          )
           WHERE tf.run_id = $1
             AND tf.topic_id = $2
           ORDER BY f.predicate

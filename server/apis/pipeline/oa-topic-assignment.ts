@@ -190,7 +190,12 @@ function parseCompactResponse(
         return { assignments: [], errors, hardFail: true };
       }
       numericAssignedIndices.add(batchIdx);
-      assignments.push({ batchIdx, topicId: TOPIC_NUM_TO_ID[topicNum], isEmergent: false });
+      const mapped = TOPIC_NUM_TO_ID[topicNum];
+      if (!mapped) {
+        errors.push(`HARD FAIL: topic number ${topicNum} has no mapping`);
+        return { assignments: [], errors, hardFail: true };
+      }
+      assignments.push({ batchIdx, topicId: mapped, isEmergent: false });
     }
   }
 
@@ -287,7 +292,7 @@ async function ensureEmergentTopics(
     seen.add(a.topicId);
     await db.query(
       `INSERT INTO oa_topics (run_id, topic_id, deal_id, topic_label, parent_topic_id, obligation_class, obligation_basis, checklist_version)
-       VALUES ($1, $2, $3, $4, NULL, 'not_memo_relevant', 'model_proposed_unclassified', $5)
+       VALUES ($1, $2, $3, $4, NULL, 'optional', 'model_proposed_unclassified', $5)
        ON CONFLICT (run_id, topic_id) DO NOTHING`,
       z.any(),
       [runId, a.topicId, dealId, a.topicId.replace(/[.\-_]/g, " "), OBLIGATION_CHECKLIST_VERSION],
