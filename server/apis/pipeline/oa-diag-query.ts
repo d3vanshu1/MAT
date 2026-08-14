@@ -76,6 +76,7 @@ const QueryInput = z.discriminatedUnion("query", [
   z.object({
     query: z.literal("facts_by_predicate"),
     dealId: z.string(),
+    runId: z.string().optional(),
     predicateLike: z.string(),
     offset: z.number().int().min(0).default(0),
     limit: z.number().int().min(1).max(200).default(50),
@@ -100,6 +101,12 @@ const QueryInput = z.discriminatedUnion("query", [
   z.object({
     query: z.literal("fact_count_by_document"),
     dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("source_window"),
+    documentId: z.string(),
+    charStart: z.number().int().min(0),
+    charEnd: z.number().int().min(1),
   }),
 ]);
 
@@ -261,25 +268,21 @@ export default api({
       case "facts_by_predicate": {
         const rows = await ctx.integrations.db.query(
           `SELECT
-            f.id AS fact_id,
+            f.fact_id,
             f.predicate,
-            f.object_value,
-            f.confidence,
-            f.source_document_id,
-            f.source_chunk_index,
+            f.value AS object_value,
+            f.scope_qualifier AS confidence,
+            f.document_id AS source_document_id,
+            f.chunk_index AS source_chunk_index,
             tf.topic_id
           FROM oa_facts f
-          LEFT JOIN oa_topic_facts tf ON tf.fact_id = f.id AND tf.run_id IN (
-            SELECT id FROM module_runs WHERE deal_id = $1 ORDER BY created_at DESC LIMIT 1
-          )
-          WHERE f.run_id IN (
-            SELECT id FROM module_runs WHERE deal_id = $1 ORDER BY created_at DESC LIMIT 1
-          )
+          LEFT JOIN oa_topic_facts tf ON tf.fact_id = f.fact_id AND tf.run_id = $3
+          WHERE f.deal_id = $1
             AND f.predicate ILIKE $2
           ORDER BY f.predicate
-          LIMIT $3 OFFSET $4`,
+          LIMIT $4 OFFSET $5`,
           FactByPredicateSchema,
-          [input.dealId, input.predicateLike, input.limit, input.offset],
+          [input.dealId, input.predicateLike, input.runId ?? "", input.limit, input.offset],
           { label: `facts_by_predicate (pattern=${input.predicateLike}, offset=${input.offset})` }
         );
         return { rows, rowCount: rows.length };
@@ -385,6 +388,20 @@ export default api({
           z.object({ document_id: z.string(), document_role: z.string(), file_name: z.string(), fact_count: z.coerce.number() }),
           [input.dealId],
           { label: "fact_count_by_document" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // source_window: retrieve substring from documents.parsed_text
+      // -----------------------------------------------------------------------
+      case "source_window": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT substring(parsed_text FROM $2 + 1 FOR $3 - $2) AS source_window
+           FROM documents WHERE id = $1 AND parsed_text IS NOT NULL`,
+          z.object({ source_window: z.string().nullable() }),
+          [input.documentId, input.charStart, input.charEnd],
+          { label: `source_window: ${input.documentId} [${input.charStart}:${input.charEnd}]` }
         );
         return { rows, rowCount: rows.length };
       }

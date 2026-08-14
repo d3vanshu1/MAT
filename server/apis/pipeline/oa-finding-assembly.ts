@@ -159,13 +159,23 @@ OUTPUT: Return ONLY the narrative text. No markdown headings, no metadata, no JS
 // ---------------------------------------------------------------------------
 
 /**
+ * Normalise smart/curly quotes to straight ASCII double quotes.
+ * Models frequently emit \u201C/\u201D instead of \x22.
+ */
+function normaliseQuoteChars(s: string): string {
+  return s.replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"');
+}
+
+/**
  * Extracts all double-quoted spans of ≥5 words from text.
+ * Smart quotes are normalised before extraction.
  */
 function extractQuotedSpans(text: string): string[] {
+  const normalised = normaliseQuoteChars(text);
   const regex = /"([^"]{10,})"/g;
   const quotes: string[] = [];
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(text)) !== null) {
+  while ((match = regex.exec(normalised)) !== null) {
     const candidate = match[1].trim();
     // ≥5 words
     if (candidate.split(/\s+/).length >= 5) {
@@ -282,6 +292,10 @@ export default api({
     runId: z.string(),
     reset: z.boolean().optional().default(false),
     dryRun: z.boolean().optional().default(false),
+    testMode: z.object({
+      narrative: z.string(),
+      sourceWindows: z.array(z.string()),
+    }).optional(),
   }),
   output: z.object({
     status: z.enum(["complete", "in_progress"]),
@@ -290,7 +304,24 @@ export default api({
     report: z.record(z.string(), z.any()).optional(),
   }),
 
-  async run(ctx, { dealId, runId, reset, dryRun }) {
+  async run(ctx, { dealId, runId, reset, dryRun, testMode }) {
+    // ─── TEST MODE: pure validator unit test, no DB/LLM ─────────────────
+    if (testMode) {
+      const quotesExtracted = extractQuotedSpans(testMode.narrative);
+      const result = validateQuotes(testMode.narrative, testMode.sourceWindows);
+      return {
+        status: "complete" as const,
+        findings_completed: 0,
+        findings_remaining: 0,
+        report: {
+          testMode: true,
+          valid: result.valid,
+          failedQuotes: result.failedQuotes,
+          quotesExtracted,
+        },
+      };
+    }
+
     const { db } = ctx.integrations;
     const aiFn: AiFn = ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai) as any;
     const invocationStart = Date.now();
@@ -623,4 +654,4 @@ async function loadFactDetails(
 // ---------------------------------------------------------------------------
 // Exported validators for unit testing (B4 / dry-run verification)
 // ---------------------------------------------------------------------------
-export { extractQuotedSpans, normaliseWhitespace, validateQuotes };
+export { extractQuotedSpans, normaliseWhitespace, validateQuotes, normaliseQuoteChars };
