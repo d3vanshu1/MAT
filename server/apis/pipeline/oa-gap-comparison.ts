@@ -203,7 +203,21 @@ export default api({
       }
 
       // ─── Determine if topic is absent (code-path: not_disclosed) ───────
+      // FIX 2: Only required/conditional topics can produce not_disclosed.
+      // Optional/emergent topics are reference-only by construction.
       if (topic.subject_coverage === "absent") {
+        // Gate: only required or conditional obligation classes qualify for not_disclosed
+        if (topic.obligation_class !== "required" && topic.obligation_class !== "conditional") {
+          // Optional/emergent topic with no subject facts — skip, no gap to report
+          topicsNoGap++;
+          await db.query(
+            `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, payload_json)
+             VALUES ($1, 'gap_comparison', $2, 'complete', $3::jsonb) ON CONFLICT DO NOTHING`,
+            z.any(), [runId, topic.topic_id, JSON.stringify({ skipped_reason: "optional_absent" })],
+            { label: `Checkpoint (optional absent) ${topic.topic_id}` }
+          );
+          continue;
+        }
         // Determine absence_basis from probe results
         // Check if a probe was run on this topic
         const probeCheckpoint = await db.query(
@@ -269,20 +283,36 @@ export default api({
 
       // ─── Topic has some subject facts — load both sets for LLM comparison ───
       const unitStart = Date.now();
-      const topicFacts = await db.query(
+
+      // FIX 1: Separate queries to avoid LIMIT bias when one role dominates
+      const FACT_CAP = 150;
+
+      const subjectFacts = await db.query(
         `SELECT tf.fact_id, tf.fact_role, f.predicate, f.value, f.scope_qualifier, f.fact_type, tf.supersession
          FROM oa_topic_facts tf
          JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $2
-         WHERE tf.run_id = $1 AND tf.topic_id = $3
-         ORDER BY tf.fact_role, f.predicate
-         LIMIT 200`,
+         WHERE tf.run_id = $1 AND tf.topic_id = $3 AND tf.fact_role = 'subject'
+         ORDER BY f.predicate
+         LIMIT ${FACT_CAP}`,
         TopicFactDetail,
         [runId, dealId, topic.topic_id],
-        { label: `Load facts for ${topic.topic_id}` }
+        { label: `Load subject facts for ${topic.topic_id}` }
       );
 
-      const subjectFacts = topicFacts.filter((f) => f.fact_role === "subject");
-      const referenceFacts = topicFacts.filter((f) => f.fact_role === "reference");
+      const referenceFacts = await db.query(
+        `SELECT tf.fact_id, tf.fact_role, f.predicate, f.value, f.scope_qualifier, f.fact_type, tf.supersession
+         FROM oa_topic_facts tf
+         JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $2
+         WHERE tf.run_id = $1 AND tf.topic_id = $3 AND tf.fact_role = 'reference'
+         ORDER BY f.predicate
+         LIMIT ${FACT_CAP}`,
+        TopicFactDetail,
+        [runId, dealId, topic.topic_id],
+        { label: `Load reference facts for ${topic.topic_id}` }
+      );
+
+      const subjectTruncated = subjectFacts.length >= FACT_CAP;
+      const referenceTruncated = referenceFacts.length >= FACT_CAP;
 
       if (referenceFacts.length === 0) {
         // No reference facts — can't compare
@@ -346,16 +376,9 @@ export default api({
       }
 
       if (gapResult.gap_detected && gapResult.gap_kind) {
-        // Build evidence JSONB
-        const subjectEvidence = (gapResult.subject_evidence_refs ?? []).map((idx) => {
-          const f = subjectFacts[idx];
-          return f ? { fact_id: f.fact_id, predicate: f.predicate, value: f.value } : null;
-        }).filter(Boolean);
-
-        const referenceEvidence = (gapResult.reference_evidence_refs ?? []).map((idx) => {
-          const f = referenceFacts[idx];
-          return f ? { fact_id: f.fact_id, predicate: f.predicate, value: f.value } : null;
-        }).filter(Boolean);
+        // Build evidence JSONB — store fact_id arrays (plain UUIDs for G6 resolution)
+        const subjectEvidence = subjectFacts.map((f) => f.fact_id);
+        const referenceEvidence = referenceFacts.map((f) => f.fact_id);
 
         await db.query(
           `INSERT INTO oa_findings (finding_id, run_id, deal_id, topic_id, gap_kind, materiality_tier, materiality_basis, subject_evidence, reference_evidence, narrative)
@@ -372,10 +395,16 @@ export default api({
         topicsNoGap++;
       }
 
-      // Checkpoint
+      // Checkpoint — include truncation flags
       await db.query(
-        `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status) VALUES ($1, 'gap_comparison', $2, 'complete') ON CONFLICT DO NOTHING`,
-        z.any(), [runId, topic.topic_id],
+        `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, payload_json)
+         VALUES ($1, 'gap_comparison', $2, 'complete', $3::jsonb) ON CONFLICT DO NOTHING`,
+        z.any(), [runId, topic.topic_id, JSON.stringify({
+          subject_count: subjectFacts.length,
+          reference_count: referenceFacts.length,
+          subject_truncated: subjectTruncated,
+          reference_truncated: referenceTruncated,
+        })],
         { label: `Checkpoint ${topic.topic_id}` }
       );
 

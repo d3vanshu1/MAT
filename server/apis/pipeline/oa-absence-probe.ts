@@ -5,27 +5,22 @@
  * For each such topic:
  * 1. Generate ≥3 query formulations from topic_label + reference fact predicates
  *    (ONE batched LLM call for ALL absent topics)
- * 2. Run ILIKE against parsed_text of SUBJECT documents (ic_memos) only
+ * 2. Run substring search against parsed_text of SUBJECT documents (ic_memos) only
  * 3. If any query hits, the topic is NOT truly absent — update coverage to 'partial'
  *    and set probe result as evidence
  * 4. If no query hits, the topic remains absent and probe proves it
  *
- * Persists probe results to oa_findings.retrieval_probe JSONB.
  * This runs BEFORE gap comparison (P6), so P6 can reference probe results
  * when determining absence_basis.
+ *
+ * PERFORMANCE: Bulk checkpoint handling. Single LLM call. In-memory text search.
  *
  * Report: M1 (topics probed), M2 (topics with hits → reclassified)
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
-import { SONNET_MODEL } from "./model-config.js";
 
 const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
-
-// Budget guard constants
-const HARD_KILL_MS = 200_000;          // conservative: yield well before platform kill
-const SAFETY_MARGIN_MS = 45_000;       // do not start work inside this window
-const DEFAULT_UNIT_DURATION_MS = 15_000; // conservative seed for LLM call
 
 // ---------------------------------------------------------------------------
 // Types
@@ -50,11 +45,11 @@ const RefPredicateRow = z.object({
 const SubjectDocRow = z.object({
   document_id: z.string(),
   file_name: z.string(),
+  parsed_text: z.string(),
 });
 
-const ParsedTextRow = z.object({
-  document_id: z.string(),
-  parsed_text: z.string(),
+const CheckpointRow = z.object({
+  unit_key: z.string(),
 });
 
 // ---------------------------------------------------------------------------
@@ -66,7 +61,7 @@ function buildQueryFormulationPrompt(
 ): string {
   const topicLines = topics.map((t) => {
     const preds = t.predicates.length > 0
-      ? t.predicates.slice(0, 10).join("; ")
+      ? t.predicates.slice(0, 5).join("; ")
       : "(no reference predicates)";
     return `  ${t.topic_id} | ${t.topic_label} | reference predicates: ${preds}`;
   }).join("\n");
@@ -122,7 +117,7 @@ export default api({
     // ─── RESET ────────────────────────────────────────────────────────────
     if (reset) {
       await db.query(
-        `DELETE FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'absence_probe'`,
+        `DELETE FROM oa_stage_checkpoints WHERE run_id = $1::uuid AND stage = 'absence_probe'`,
         z.any(), [runId],
         { label: "Reset: delete absence_probe checkpoints" }
       );
@@ -132,7 +127,7 @@ export default api({
     // ─── Load topics with subject_coverage = 'absent' ────────────────────
     const absentTopics = await db.query(
       `SELECT topic_id, topic_label FROM oa_topics
-       WHERE run_id = $1 AND subject_coverage = 'absent'`,
+       WHERE run_id = $1::uuid AND subject_coverage = 'absent'`,
       AbsentTopicRow,
       [runId],
       { label: "Load absent topics" }
@@ -143,32 +138,32 @@ export default api({
       return { status: "complete" as const, topics_completed: 0, topics_remaining: 0, report: { M1_topics_probed: 0, M2_topics_with_hits: 0, detail: [] } };
     }
 
-    // Budget guard
-    const invocationStart = Date.now();
-    const timeRemaining = () => HARD_KILL_MS - (Date.now() - invocationStart);
+    // ─── Load existing checkpoints — skip already probed ─────────────────
+    const existingCps = await db.query(
+      `SELECT unit_key FROM oa_stage_checkpoints WHERE run_id = $1::uuid AND stage = 'absence_probe'`,
+      CheckpointRow,
+      [runId],
+      { label: "Load existing checkpoints" }
+    );
+    const completedSet = new Set(existingCps.map((r) => r.unit_key));
+    const pendingTopics = absentTopics.filter((t) => !completedSet.has(t.topic_id));
+    console.log(`[D1] Already checkpointed: ${completedSet.size}, pending: ${pendingTopics.length}`);
 
-    // ─── BUDGET GUARD: check before the single LLM call ────────────────
-    if (timeRemaining() < SAFETY_MARGIN_MS + DEFAULT_UNIT_DURATION_MS) {
-      console.log(`[D1] YIELDING FOR BUDGET before LLM call: ${timeRemaining()}ms remaining`);
-      return {
-        status: "in_progress" as const,
-        topics_completed: 0,
-        topics_remaining: absentTopics.length,
-        report: { message: "Yielded for budget before query formulation LLM call", run_id: runId },
-      };
+    if (pendingTopics.length === 0) {
+      console.log("[D1] All topics already probed — skipping to report");
     }
 
-    // ─── Load reference predicates for each absent topic ─────────────────
-    const topicIds = absentTopics.map((t) => t.topic_id);
+    // ─── Load reference predicates (bulk, once) ──────────────────────────
+    const topicIds = pendingTopics.map((t) => t.topic_id);
     const refPredicates = await db.query(
       `SELECT tf.topic_id, f.predicate
        FROM oa_topic_facts tf
-       JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $2
-       WHERE tf.run_id = $1 AND tf.topic_id = ANY($3) AND tf.fact_role = 'reference' AND f.predicate IS NOT NULL
-       LIMIT 500`,
+       JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $2::uuid
+       WHERE tf.run_id = $1::uuid AND tf.topic_id = ANY($3::text[]) AND tf.fact_role = 'reference' AND f.predicate IS NOT NULL
+       LIMIT 1000`,
       RefPredicateRow,
       [runId, dealId, topicIds],
-      { label: "Load reference predicates for absent topics" }
+      { label: "Bulk load reference predicates" }
     );
 
     // Group predicates by topic
@@ -178,162 +173,193 @@ export default api({
       predsByTopic.get(r.topic_id)!.push(r.predicate);
     }
 
-    // ─── LLM: Generate query formulations (one batched call) ─────────────
-    const topicsForPrompt = absentTopics.map((t) => ({
-      topic_id: t.topic_id,
-      topic_label: t.topic_label,
-      predicates: predsByTopic.get(t.topic_id) ?? [],
-    }));
-
-    const prompt = buildQueryFormulationPrompt(topicsForPrompt);
-    const response = await aiFn(
-      {
-        method: "POST",
-        path: "/v1/messages",
-        body: {
-          model: "claude-sonnet-4-6",
-          max_tokens: 4096,
-          temperature: 0,
-          messages: [{ role: "user", content: prompt }],
-        },
-      },
-      { response: z.any() },
-      { label: "Generate absence probe queries (batched)" }
-    );
-
-    const textBlock = response?.content?.find((c: any) => c.type === "text");
-    const rawText: string = textBlock?.text ?? "[]";
-    const cleaned = rawText.replace(/^```(?:json)?\s*/m, "").replace(/```\s*$/m, "").trim();
-
-    let queryFormulations: Array<{ topic_id: string; queries: string[] }> = [];
-    try {
-      const parsed = JSON.parse(cleaned);
-      queryFormulations = parsed;
-    } catch {
-      console.warn("[D1] Failed to parse query formulations, using fallback");
-      // Fallback: use topic_label words as queries
-      queryFormulations = absentTopics.map((t) => ({
-        topic_id: t.topic_id,
-        queries: t.topic_label.split(/\s+/).filter((w) => w.length > 3).slice(0, 3),
-      }));
-    }
-
-    // Build lookup
-    const queriesByTopic = new Map<string, string[]>();
-    for (const qf of queryFormulations) {
-      queriesByTopic.set(qf.topic_id, qf.queries);
-    }
-
-    // ─── Load subject documents (ic_memos) ───────────────────────────────
-    const subjectDocs = await db.query(
-      `SELECT id as document_id, file_name FROM documents
-       WHERE deal_id = $1 AND document_tag = 'ic_memo'`,
-      SubjectDocRow,
+    // ─── Load IC memo parsed_text one-by-one (gRPC 4MB cap) ────────────
+    const docListRows = await db.query(
+      `SELECT id AS document_id, file_name FROM documents
+       WHERE deal_id = $1::uuid AND document_tag = 'ic_memo' AND parsed_text IS NOT NULL`,
+      z.object({ document_id: z.string(), file_name: z.string() }),
       [dealId],
-      { label: "Load subject documents" }
+      { label: "List IC memo documents" }
     );
-    console.log(`[D1] ${subjectDocs.length} subject documents for probing`);
+    console.log(`[D1] ${docListRows.length} IC memos to load`);
 
-    // Load parsed text for subject docs
-    const subjectDocIds = subjectDocs.map((d) => d.document_id);
-    const parsedTexts: Array<{ document_id: string; parsed_text: string }> = [];
-    for (const docId of subjectDocIds) {
-      const rows = await db.query(
-        `SELECT document_id, parsed_text FROM document_texts
-         WHERE document_id = $1 AND parsed_text IS NOT NULL
-         LIMIT 1`,
-        ParsedTextRow,
-        [docId],
-        { label: `Load parsed_text for ${docId}` }
+    const subjectDocs: Array<{ document_id: string; file_name: string; parsed_text: string }> = [];
+    for (const doc of docListRows) {
+      const textRows = await db.query(
+        `SELECT parsed_text FROM documents WHERE id = $1::uuid AND parsed_text IS NOT NULL`,
+        z.object({ parsed_text: z.string() }),
+        [doc.document_id],
+        { label: `Load text: ${doc.file_name}` }
       );
-      if (rows.length > 0) parsedTexts.push(rows[0]);
+      if (textRows.length > 0) {
+        subjectDocs.push({ ...doc, parsed_text: textRows[0].parsed_text });
+      }
     }
+    console.log(`[D1] Loaded ${subjectDocs.length} IC memos (total text: ${subjectDocs.reduce((s, d) => s + d.parsed_text.length, 0)} chars)`);
 
-    // Combine all subject text
-    const allSubjectText = parsedTexts.map((r) => r.parsed_text).join("\n\n");
-    console.log(`[D1] Combined subject text length: ${allSubjectText.length}`);
+    // Combine for search
+    const allSubjectText = subjectDocs.map((d) => d.parsed_text).join("\n\n");
+    const allSubjectTextLower = allSubjectText.toLowerCase();
 
-    // ─── Run probes per topic ────────────────────────────────────────────
-    const probeResults: Array<{
-      topic_id: string;
-      queries: string[];
-      hits: Array<{ query: string; snippet: string }>;
-      verdict: "verified_absent" | "found_in_text";
-    }> = [];
+    if (pendingTopics.length > 0) {
+      // ─── LLM: Generate query formulations ────────────────────────────────
+      // Split into batches of 75 topics to keep prompt/response manageable
+      const LLM_BATCH = 50;
+      const queriesByTopic = new Map<string, string[]>();
 
-    let topicsWithHits = 0;
+      for (let i = 0; i < pendingTopics.length; i += LLM_BATCH) {
+        const batch = pendingTopics.slice(i, i + LLM_BATCH);
+        const topicsForPrompt = batch.map((t) => ({
+          topic_id: t.topic_id,
+          topic_label: t.topic_label,
+          predicates: predsByTopic.get(t.topic_id) ?? [],
+        }));
 
-    for (const topic of absentTopics) {
-      // Check checkpoint
-      const cp = await db.query(
-        `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'absence_probe' AND unit_key = $2`,
-        z.any(),
-        [runId, topic.topic_id],
-        { label: `Check checkpoint ${topic.topic_id}` }
-      );
-      if (cp.length > 0) continue;
+        const prompt = buildQueryFormulationPrompt(topicsForPrompt);
+        console.log(`[D1] LLM batch ${Math.floor(i / LLM_BATCH) + 1}: ${batch.length} topics`);
 
-      const queries = queriesByTopic.get(topic.topic_id) ?? [topic.topic_label];
-      const hits: Array<{ query: string; snippet: string }> = [];
+        const response = await aiFn(
+          {
+            method: "POST",
+            path: "/v1/messages",
+            body: {
+              model: "claude-sonnet-4-6",
+              max_tokens: 8192,
+              temperature: 0,
+              messages: [{ role: "user", content: prompt }],
+            },
+          },
+          { response: z.any() },
+          { label: `Generate probe queries (batch ${Math.floor(i / LLM_BATCH) + 1})` }
+        );
 
-      for (const query of queries) {
-        // Simple ILIKE search against combined subject text
-        const lowerQuery = query.toLowerCase();
-        const lowerText = allSubjectText.toLowerCase();
-        const idx = lowerText.indexOf(lowerQuery);
-        if (idx >= 0) {
-          const start = Math.max(0, idx - 50);
-          const end = Math.min(allSubjectText.length, idx + query.length + 50);
-          hits.push({
-            query,
-            snippet: allSubjectText.slice(start, end),
-          });
+        const textBlock = response?.content?.find((c: any) => c.type === "text");
+        const rawText: string = textBlock?.text ?? "[]";
+        const cleaned = rawText.replace(/^```(?:json)?\s*/m, "").replace(/```\s*$/m, "").trim();
+
+        try {
+          const parsed = JSON.parse(cleaned);
+          for (const qf of parsed) {
+            if (qf.topic_id && Array.isArray(qf.queries)) {
+              queriesByTopic.set(qf.topic_id, qf.queries);
+            }
+          }
+        } catch {
+          console.warn(`[D1] Failed to parse LLM batch ${Math.floor(i / LLM_BATCH) + 1}, using fallback`);
+          for (const t of batch) {
+            queriesByTopic.set(t.topic_id, t.topic_label.split(/[\s.\-]+/).filter((w) => w.length > 3).slice(0, 3));
+          }
         }
       }
 
-      const verdict = hits.length > 0 ? "found_in_text" : "verified_absent";
+      // ─── Run probes (in-memory, fast) ───────────────────────────────────
+      const probeResults: Array<{
+        topic_id: string;
+        queries: string[];
+        hits: Array<{ query: string; snippet: string; document: string }>;
+        verdict: "verified_absent" | "found_in_text";
+      }> = [];
 
-      if (hits.length > 0) {
-        topicsWithHits++;
-        // Update coverage from 'absent' to 'partial' — the text mentions it but no structured fact was extracted
-        await db.query(
-          `UPDATE oa_topics SET subject_coverage = 'partial',
-           coverage_basis = $3
-           WHERE run_id = $1 AND topic_id = $2`,
-          z.any(),
-          [runId, topic.topic_id, `Probe found ${hits.length} text hits but no extracted facts`],
-          { label: `Reclassify ${topic.topic_id} to partial` }
-        );
+      let topicsWithHits = 0;
+      const reclassifyTopicIds: string[] = [];
+      const reclassifyBases: string[] = [];
+
+      for (const topic of pendingTopics) {
+        const queries = queriesByTopic.get(topic.topic_id) ?? [topic.topic_label];
+        const hits: Array<{ query: string; snippet: string; document: string }> = [];
+
+        for (const query of queries) {
+          const lowerQuery = query.toLowerCase();
+          // Search in each document separately to report which doc had the hit
+          for (const doc of subjectDocs) {
+            const docTextLower = doc.parsed_text.toLowerCase();
+            const idx = docTextLower.indexOf(lowerQuery);
+            if (idx >= 0) {
+              const start = Math.max(0, idx - 80);
+              const end = Math.min(doc.parsed_text.length, idx + query.length + 80);
+              hits.push({
+                query,
+                snippet: doc.parsed_text.slice(start, end),
+                document: doc.file_name,
+              });
+              break; // One hit per query is enough
+            }
+          }
+        }
+
+        const verdict = hits.length > 0 ? "found_in_text" : "verified_absent";
+
+        if (hits.length > 0) {
+          topicsWithHits++;
+          reclassifyTopicIds.push(topic.topic_id);
+          reclassifyBases.push(`Probe found ${hits.length} text hit(s) but no extracted facts`);
+        }
+
+        probeResults.push({
+          topic_id: topic.topic_id,
+          queries,
+          hits,
+          verdict,
+        });
       }
 
-      probeResults.push({
-        topic_id: topic.topic_id,
-        queries,
-        hits,
-        verdict,
-      });
+      // ─── Bulk reclassify topics with hits ─────────────────────────────────
+      if (reclassifyTopicIds.length > 0) {
+        // Update each one (can't easily bulk-update with different basis per row without VALUES)
+        for (let i = 0; i < reclassifyTopicIds.length; i++) {
+          await db.query(
+            `UPDATE oa_topics SET subject_coverage = 'partial', coverage_basis = $3
+             WHERE run_id = $1::uuid AND topic_id = $2`,
+            z.any(),
+            [runId, reclassifyTopicIds[i], reclassifyBases[i]],
+            { label: `Reclassify to partial: ${reclassifyTopicIds[i]}` }
+          );
+        }
+      }
 
-      // Checkpoint
-      await db.query(
-        `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status) VALUES ($1, 'absence_probe', $2, 'complete') ON CONFLICT DO NOTHING`,
-        z.any(), [runId, topic.topic_id],
-        { label: `Checkpoint ${topic.topic_id}` }
-      );
+      // ─── Persist probe results to checkpoints with payload_json ─────────
+      if (pendingTopics.length > 0) {
+        for (const result of probeResults) {
+          const payload = JSON.stringify({
+            verdict: result.verdict,
+            queries: result.queries,
+            hits: result.hits,
+          });
+          await db.query(
+            `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, payload_json)
+             VALUES ($1::uuid, 'absence_probe', $2, 'complete', $3::jsonb)
+             ON CONFLICT (run_id, stage, unit_key) DO UPDATE SET payload_json = $3::jsonb, updated_at = now()`,
+            z.any(),
+            [runId, result.topic_id, payload],
+            { label: `Checkpoint+payload: ${result.topic_id}` }
+          );
+        }
+      }
+
+      // ─── Build report ───────────────────────────────────────────────────
+      const hitDetails = probeResults.filter((r) => r.verdict === "found_in_text");
+
+      const report = {
+        M1_topics_probed: probeResults.length,
+        M1_topics_with_hits: topicsWithHits,
+        M1_topics_verified_absent: probeResults.length - topicsWithHits,
+        M2_hit_details: hitDetails.map((r) => ({
+          topic_id: r.topic_id,
+          queries: r.queries,
+          hits: r.hits,
+        })),
+      };
+
+      console.log(`[D1] COMPLETE: ${probeResults.length} probed, ${topicsWithHits} hits, ${probeResults.length - topicsWithHits} verified absent`);
+      return { status: "complete" as const, topics_completed: probeResults.length, topics_remaining: 0, report };
     }
 
-    const report = {
-      M1_topics_probed: probeResults.length,
-      M2_topics_with_hits: topicsWithHits,
-      M2_reclassified_to_partial: topicsWithHits,
-      detail: probeResults.map((r) => ({
-        topic_id: r.topic_id,
-        queries_run: r.queries.length,
-        hits: r.hits.length,
-        verdict: r.verdict,
-      })),
+    // If all were already checkpointed, return a summary report
+    return {
+      status: "complete" as const,
+      topics_completed: completedSet.size,
+      topics_remaining: 0,
+      report: { M1_topics_probed: completedSet.size, message: "All topics were already checkpointed from prior run" },
     };
-
-    console.log("[D1] REPORT:", JSON.stringify(report, null, 2));
-    return { status: "complete" as const, topics_completed: probeResults.length, topics_remaining: 0, report };
   },
 });

@@ -141,6 +141,54 @@ const QueryInput = z.discriminatedUnion("query", [
     query: z.literal("doc_tables_cell_stats"),
     documentIds: z.array(z.string()),
   }),
+  z.object({
+    query: z.literal("coverage_state"),
+    runId: z.string(),
+  }),
+  z.object({
+    query: z.literal("unassigned_breakdown"),
+    runId: z.string(),
+    dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("absent_topics_full"),
+    runId: z.string(),
+    offset: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(500).default(200),
+  }),
+  z.object({
+    query: z.literal("subject_fact_reconciliation"),
+    runId: z.string(),
+    dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("seeded_topic_list"),
+    runId: z.string(),
+  }),
+  z.object({
+    query: z.literal("unassigned_split"),
+    runId: z.string(),
+    dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("probe_checkpoint"),
+    runId: z.string(),
+    topicIds: z.array(z.string()).min(1).max(10),
+  }),
+  z.object({
+    query: z.literal("gap_gate_report"),
+    runId: z.string(),
+    dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("gap_gate_slim"),
+    runId: z.string(),
+  }),
+  z.object({
+    query: z.literal("topic_dist_by_document"),
+    runId: z.string(),
+    documentId: z.string(),
+  }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -327,17 +375,30 @@ export default api({
       case "findings_for_run": {
         const rows = await ctx.integrations.db.query(
           `SELECT
-            id,
-            title,
-            body,
-            materiality_tier,
+            finding_id,
+            topic_id,
             gap_kind,
-            created_at::text
+            materiality_tier::text,
+            materiality_basis,
+            absence_basis,
+            narrative,
+            subject_evidence,
+            reference_evidence
           FROM oa_findings
-          WHERE run_id = $1
-          ORDER BY materiality_tier, gap_kind, title
+          WHERE run_id = $1::uuid
+          ORDER BY gap_kind, topic_id
           LIMIT $2 OFFSET $3`,
-          FindingSchema,
+          z.object({
+            finding_id: z.string(),
+            topic_id: z.string().nullable(),
+            gap_kind: z.string().nullable(),
+            materiality_tier: z.string().nullable(),
+            materiality_basis: z.string().nullable(),
+            absence_basis: z.string().nullable(),
+            narrative: z.string().nullable(),
+            subject_evidence: z.any(),
+            reference_evidence: z.any(),
+          }),
           [input.runId, input.limit, input.offset],
           { label: `findings_for_run (offset=${input.offset})` }
         );
@@ -681,6 +742,521 @@ export default api({
           }],
           rowCount: perSheet.length,
         };
+      }
+
+      // -----------------------------------------------------------------------
+      // coverage_state: full coverage distribution after probe
+      // -----------------------------------------------------------------------
+      case "coverage_state": {
+        const dist = await ctx.integrations.db.query(
+          `SELECT subject_coverage, COUNT(*)::int AS cnt,
+                  coverage_basis
+           FROM oa_topics WHERE run_id = $1::uuid
+           GROUP BY subject_coverage, coverage_basis
+           ORDER BY subject_coverage, cnt DESC`,
+          z.object({ subject_coverage: z.string().nullable(), cnt: z.number(), coverage_basis: z.string().nullable() }),
+          [input.runId],
+          { label: "Coverage distribution with basis" }
+        );
+        const partial_details = await ctx.integrations.db.query(
+          `SELECT topic_id, obligation_class, coverage_basis
+           FROM oa_topics WHERE run_id = $1::uuid AND subject_coverage = 'partial'
+           ORDER BY obligation_class, topic_id`,
+          z.object({ topic_id: z.string(), obligation_class: z.string().nullable(), coverage_basis: z.string().nullable() }),
+          [input.runId],
+          { label: "Partial topics detail" }
+        );
+        return { rows: dist, rowCount: dist.length, partial_details, partial_count: partial_details.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // unassigned_breakdown: split the 1,335 into flag-excluded vs genuinely unassigned
+      // -----------------------------------------------------------------------
+      case "unassigned_breakdown": {
+        // (a) Subject facts that are gap/omission flags — excluded by design
+        const flagExcluded = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.document_role = 'subject'
+             AND f.fact_type = 'flag' AND f.source_metadata->>'type' IN ('gap', 'omission')
+             AND NOT EXISTS (
+               SELECT 1 FROM oa_topic_facts tf WHERE tf.run_id = $2::uuid AND tf.fact_id = f.fact_id
+             )`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId, input.runId],
+          { label: "Unassigned: gap/omission flags" }
+        );
+
+        // (b) Subject facts not in topic_facts AND not gap/omission flags — genuinely unassigned
+        const genuinelyUnassigned = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.document_role = 'subject'
+             AND NOT EXISTS (
+               SELECT 1 FROM oa_topic_facts tf WHERE tf.run_id = $2::uuid AND tf.fact_id = f.fact_id
+             )
+             AND NOT (f.fact_type = 'flag' AND f.source_metadata->>'type' IN ('gap', 'omission'))`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId, input.runId],
+          { label: "Unassigned: genuinely unassigned (not flags)" }
+        );
+
+        // Total for cross-check
+        const totalUnassigned = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.document_role = 'subject'
+             AND NOT EXISTS (
+               SELECT 1 FROM oa_topic_facts tf WHERE tf.run_id = $2::uuid AND tf.fact_id = f.fact_id
+             )`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId, input.runId],
+          { label: "Unassigned: total" }
+        );
+
+        return {
+          rows: [{
+            total_unassigned: totalUnassigned[0]?.cnt ?? 0,
+            flag_excluded: flagExcluded[0]?.cnt ?? 0,
+            genuinely_unassigned: genuinelyUnassigned[0]?.cnt ?? 0,
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // absent_topics_full: all topics with subject_coverage='absent'
+      // -----------------------------------------------------------------------
+      case "absent_topics_full": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT t.topic_id, t.obligation_class, t.subject_coverage,
+                  (SELECT COUNT(*)::int FROM oa_topic_facts tf
+                   WHERE tf.run_id = t.run_id AND tf.topic_id = t.topic_id
+                     AND tf.fact_role = 'reference') AS reference_fact_count
+           FROM oa_topics t
+           WHERE t.run_id = $1::uuid
+             AND t.subject_coverage = 'absent'
+           ORDER BY t.obligation_class, t.topic_id
+           OFFSET $2 LIMIT $3`,
+          z.object({
+            topic_id: z.string(),
+            obligation_class: z.string().nullable(),
+            subject_coverage: z.string(),
+            reference_fact_count: z.coerce.number(),
+          }),
+          [input.runId, input.offset, input.limit],
+          { label: "absent_topics_full" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // subject_fact_reconciliation: account for subject fact count differences
+      // -----------------------------------------------------------------------
+      case "subject_fact_reconciliation": {
+        // Total subject facts in oa_facts for this deal
+        const totalInOaFacts = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts
+           WHERE deal_id = $1::uuid AND document_role = 'subject'`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId],
+          { label: "reconciliation: total subject facts in oa_facts" }
+        );
+
+        // Total subject facts in oa_topic_facts for this run
+        const totalInTopicFacts = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_topic_facts
+           WHERE run_id = $1::uuid AND fact_role = 'subject'`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "reconciliation: subject facts in oa_topic_facts" }
+        );
+
+        // Subject facts in oa_facts NOT in oa_topic_facts for this run
+        const unassigned = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.document_role = 'subject'
+             AND NOT EXISTS (
+               SELECT 1 FROM oa_topic_facts tf
+               WHERE tf.run_id = $2::uuid AND tf.fact_id = f.fact_id
+             )`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId, input.runId],
+          { label: "reconciliation: unassigned subject facts" }
+        );
+
+        // Subject facts in oa_topic_facts that appear on multiple topics (double-counted in supersession)
+        const multiAssigned = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM (
+             SELECT fact_id FROM oa_topic_facts
+             WHERE run_id = $1::uuid AND fact_role = 'subject'
+             GROUP BY fact_id HAVING COUNT(DISTINCT topic_id) > 1
+           ) sub`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "reconciliation: multi-assigned subject facts" }
+        );
+
+        // Total supersession marks (one per topic-fact pair, not per unique fact)
+        const supersessionTotal = await ctx.integrations.db.query(
+          `SELECT
+             COUNT(*) FILTER (WHERE supersession = 'current')::int AS current_marks,
+             COUNT(*) FILTER (WHERE supersession = 'superseded')::int AS superseded_marks,
+             COUNT(*) FILTER (WHERE supersession IS NULL)::int AS null_marks
+           FROM oa_topic_facts
+           WHERE run_id = $1::uuid AND fact_role = 'subject'`,
+          z.object({
+            current_marks: z.coerce.number(),
+            superseded_marks: z.coerce.number(),
+            null_marks: z.coerce.number(),
+          }),
+          [input.runId],
+          { label: "reconciliation: supersession mark distribution" }
+        );
+
+        return {
+          rows: [{
+            total_subject_in_oa_facts: totalInOaFacts[0]?.cnt ?? 0,
+            total_subject_in_topic_facts: totalInTopicFacts[0]?.cnt ?? 0,
+            unassigned_subject_facts: unassigned[0]?.cnt ?? 0,
+            multi_assigned_facts: multiAssigned[0]?.cnt ?? 0,
+            supersession: supersessionTotal[0] ?? { current_marks: 0, superseded_marks: 0, null_marks: 0 },
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // seeded_topic_list: all non-emergent topics (obligation_basis != 'model_proposed_unclassified')
+      // -----------------------------------------------------------------------
+      case "seeded_topic_list": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT topic_id, obligation_basis, obligation_class, subject_coverage
+           FROM oa_topics
+           WHERE run_id = $1::uuid AND obligation_basis != 'model_proposed_unclassified'
+           ORDER BY topic_id`,
+          z.object({
+            topic_id: z.string(),
+            obligation_basis: z.string().nullable(),
+            obligation_class: z.string().nullable(),
+            subject_coverage: z.string().nullable(),
+          }),
+          [input.runId],
+          { label: "seeded_topic_list" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // unassigned_split: break unassigned subject facts into flags vs genuinely unassigned
+      // -----------------------------------------------------------------------
+      case "unassigned_split": {
+        // (a) Subject facts that are excluded gap/omission flags
+        const flagCount = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.document_role = 'subject'
+             AND NOT EXISTS (
+               SELECT 1 FROM oa_topic_facts tf
+               WHERE tf.run_id = $2::uuid AND tf.fact_id = f.fact_id
+             )
+             AND f.fact_type = 'flag'`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId, input.runId],
+          { label: "unassigned_split: flags" }
+        );
+
+        // (b) Subject facts not in topic_facts AND not flags — genuinely unassigned
+        const genuineCount = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.document_role = 'subject'
+             AND NOT EXISTS (
+               SELECT 1 FROM oa_topic_facts tf
+               WHERE tf.run_id = $2::uuid AND tf.fact_id = f.fact_id
+             )
+             AND (f.fact_type IS NULL OR f.fact_type != 'flag')`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId, input.runId],
+          { label: "unassigned_split: genuine unassigned" }
+        );
+
+        // Total excluded flags regardless of role for context
+        const totalFlags = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_facts f
+           WHERE f.deal_id = $1::uuid AND f.fact_type = 'flag'`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.dealId],
+          { label: "unassigned_split: total flags in deal" }
+        );
+
+        return {
+          rows: [{
+            unassigned_subject_flags: flagCount[0]?.cnt ?? 0,
+            genuinely_unassigned_subject: genuineCount[0]?.cnt ?? 0,
+            total_flags_in_deal: totalFlags[0]?.cnt ?? 0,
+            total_unassigned: (flagCount[0]?.cnt ?? 0) + (genuineCount[0]?.cnt ?? 0),
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // probe_checkpoint: retrieve raw absence_probe checkpoint payloads
+      // -----------------------------------------------------------------------
+      case "probe_checkpoint": {
+        const placeholders = input.topicIds.map((_, i) => `$${i + 2}`).join(", ");
+        const rows = await ctx.integrations.db.query(
+          `SELECT unit_key, payload_json
+           FROM oa_stage_checkpoints
+           WHERE run_id = $1::uuid
+             AND stage = 'absence_probe'
+             AND unit_key IN (${placeholders})
+           ORDER BY unit_key`,
+          z.object({
+            unit_key: z.string(),
+            payload_json: z.any(),
+          }),
+          [input.runId, ...input.topicIds],
+          { label: "probe_checkpoint: lookup by topic" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // gap_gate_report: all G1-G6 metrics in one call
+      // -----------------------------------------------------------------------
+      case "gap_gate_report": {
+        // G1: topics evaluated, seeded vs non-seeded, gaps emitted, topics silent
+        const g1 = await ctx.integrations.db.query(
+          `WITH evaluated AS (
+             SELECT DISTINCT unit_key AS topic_id FROM oa_stage_checkpoints
+             WHERE run_id = $1::uuid AND stage = 'gap_comparison'
+           ),
+           topic_meta AS (
+             SELECT topic_id, obligation_basis FROM oa_topics WHERE deal_id = $2::uuid
+           ),
+           gap_topics AS (
+             SELECT DISTINCT topic_id FROM oa_findings WHERE run_id = $1::uuid
+           )
+           SELECT
+             (SELECT COUNT(*)::int FROM evaluated) AS topics_evaluated,
+             (SELECT COUNT(*)::int FROM evaluated e JOIN topic_meta s ON e.topic_id = s.topic_id WHERE s.obligation_basis != 'model_proposed_unclassified') AS seeded_evaluated,
+             (SELECT COUNT(*)::int FROM evaluated e JOIN topic_meta s ON e.topic_id = s.topic_id WHERE s.obligation_basis = 'model_proposed_unclassified') AS non_seeded_evaluated,
+             (SELECT COUNT(*)::int FROM gap_topics) AS topics_with_gaps,
+             (SELECT COUNT(*)::int FROM evaluated e WHERE e.topic_id NOT IN (SELECT topic_id FROM gap_topics)) AS topics_silent`,
+          z.object({
+            topics_evaluated: z.coerce.number(),
+            seeded_evaluated: z.coerce.number(),
+            non_seeded_evaluated: z.coerce.number(),
+            topics_with_gaps: z.coerce.number(),
+            topics_silent: z.coerce.number(),
+          }),
+          [input.runId, input.dealId],
+          { label: "gap_gate_report: G1 topic stats" }
+        );
+
+        // G2: gap count by gap_kind
+        const g2 = await ctx.integrations.db.query(
+          `SELECT gap_kind, COUNT(*)::int AS cnt
+           FROM oa_findings WHERE run_id = $1::uuid
+           GROUP BY gap_kind ORDER BY cnt DESC`,
+          z.object({ gap_kind: z.string(), cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "gap_gate_report: G2 by gap_kind" }
+        );
+
+        // G3: full list of findings with topic details
+        const g3 = await ctx.integrations.db.query(
+          `SELECT f.finding_id, f.topic_id, f.gap_kind, f.absence_basis,
+                  f.materiality_tier, f.materiality_basis,
+                  t.obligation_class,
+                  jsonb_array_length(COALESCE(f.subject_evidence, '[]'::jsonb))::int AS subject_fact_count,
+                  jsonb_array_length(COALESCE(f.reference_evidence, '[]'::jsonb))::int AS reference_fact_count
+           FROM oa_findings f
+           LEFT JOIN oa_topics t ON f.topic_id = t.topic_id AND t.deal_id = $2::uuid
+           WHERE f.run_id = $1::uuid
+           ORDER BY f.gap_kind, f.topic_id`,
+    z.object({
+      finding_id: z.string(),
+      topic_id: z.string(),
+      gap_kind: z.string(),
+      absence_basis: z.string().nullable(),
+      materiality_tier: z.coerce.string().nullable(),
+      materiality_basis: z.string().nullable(),
+      obligation_class: z.string().nullable(),
+      subject_fact_count: z.coerce.number(),
+      reference_fact_count: z.coerce.number(),
+    }),
+    [input.runId, input.dealId],
+    { label: "gap_gate_report: G3 full findings list" }
+        );
+
+        // G4: stale_supersession count
+        const g4 = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_findings
+           WHERE run_id = $1::uuid AND gap_kind = 'stale_supersession'`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "gap_gate_report: G4 stale_supersession" }
+        );
+
+        // G5: churn finding
+        const g5 = await ctx.integrations.db.query(
+          `SELECT finding_id, gap_kind, subject_evidence, reference_evidence, narrative,
+                  materiality_tier, absence_basis
+           FROM oa_findings
+           WHERE run_id = $1::uuid AND topic_id = 'revenue-quality.churn'`,
+    z.object({
+      finding_id: z.string(),
+      gap_kind: z.string(),
+      subject_evidence: z.any(),
+      reference_evidence: z.any(),
+      narrative: z.string().nullable(),
+      materiality_tier: z.coerce.string().nullable(),
+      absence_basis: z.string().nullable(),
+    }),
+    [input.runId],
+    { label: "gap_gate_report: G5 churn" }
+        );
+
+        // G6: orphan fact_ids in evidence arrays
+        const g6 = await ctx.integrations.db.query(
+          `WITH subject_ids AS (
+             SELECT DISTINCT jsonb_array_elements_text(subject_evidence) AS fact_id
+             FROM oa_findings
+             WHERE run_id = $1::uuid AND subject_evidence IS NOT NULL AND jsonb_array_length(subject_evidence) > 0
+           ),
+           reference_ids AS (
+             SELECT DISTINCT jsonb_array_elements_text(reference_evidence) AS fact_id
+             FROM oa_findings
+             WHERE run_id = $1::uuid AND reference_evidence IS NOT NULL AND jsonb_array_length(reference_evidence) > 0
+           ),
+           all_ids AS (
+             SELECT fact_id FROM subject_ids UNION SELECT fact_id FROM reference_ids
+           ),
+           orphans AS (
+             SELECT a.fact_id FROM all_ids a
+             LEFT JOIN oa_facts f ON f.fact_id::text = a.fact_id
+             WHERE f.fact_id IS NULL
+           )
+           SELECT COUNT(*)::int AS orphan_count FROM orphans`,
+          z.object({ orphan_count: z.coerce.number() }),
+          [input.runId],
+          { label: "gap_gate_report: G6 orphan fact_ids" }
+        );
+
+        return {
+          rows: [{
+            g1: g1[0] ?? null,
+            g2,
+            g3,
+            g4_stale_supersession_count: g4[0]?.cnt ?? 0,
+            g5_churn_findings: g5,
+            g6_orphan_count: g6[0]?.orphan_count ?? 0,
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // gap_gate_slim: G4/G5/G6 without the large G3 array
+      // -----------------------------------------------------------------------
+      case "gap_gate_slim": {
+        // G4: stale_supersession count
+        const g4 = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_findings
+           WHERE run_id = $1::uuid AND gap_kind = 'stale_supersession'`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "gap_gate_slim: G4" }
+        );
+
+        // G5: churn finding
+        const g5 = await ctx.integrations.db.query(
+          `SELECT finding_id, gap_kind, 
+                  jsonb_array_length(COALESCE(subject_evidence,'[]'::jsonb))::int AS subj_count,
+                  jsonb_array_length(COALESCE(reference_evidence,'[]'::jsonb))::int AS ref_count,
+                  narrative, materiality_tier::text AS materiality_tier, absence_basis
+           FROM oa_findings
+           WHERE run_id = $1::uuid AND topic_id = 'revenue-quality.churn'`,
+          z.object({
+            finding_id: z.string(),
+            gap_kind: z.string(),
+            subj_count: z.coerce.number(),
+            ref_count: z.coerce.number(),
+            narrative: z.string().nullable(),
+            materiality_tier: z.string().nullable(),
+            absence_basis: z.string().nullable(),
+          }),
+          [input.runId],
+          { label: "gap_gate_slim: G5 churn" }
+        );
+
+        // G6: orphan fact_ids — handles both plain UUID arrays and object arrays
+        const g6 = await ctx.integrations.db.query(
+          `WITH evidence_elements AS (
+             SELECT jsonb_array_elements(subject_evidence) AS elem
+             FROM oa_findings
+             WHERE run_id = $1::uuid AND subject_evidence IS NOT NULL AND jsonb_array_length(subject_evidence) > 0
+             UNION ALL
+             SELECT jsonb_array_elements(reference_evidence) AS elem
+             FROM oa_findings
+             WHERE run_id = $1::uuid AND reference_evidence IS NOT NULL AND jsonb_array_length(reference_evidence) > 0
+           ),
+           extracted_ids AS (
+             SELECT DISTINCT
+               CASE
+                 WHEN jsonb_typeof(elem) = 'string' THEN elem #>> '{}'
+                 WHEN jsonb_typeof(elem) = 'object' THEN elem ->> 'fact_id'
+                 ELSE NULL
+               END AS fact_id
+             FROM evidence_elements
+           ),
+           valid_ids AS (
+             SELECT fact_id FROM extracted_ids WHERE fact_id IS NOT NULL
+           ),
+           orphans AS (
+             SELECT v.fact_id FROM valid_ids v
+             LEFT JOIN oa_facts f ON f.fact_id::text = v.fact_id
+             WHERE f.fact_id IS NULL
+           )
+           SELECT COUNT(*)::int AS orphan_count FROM orphans`,
+          z.object({ orphan_count: z.coerce.number() }),
+          [input.runId],
+          { label: "gap_gate_slim: G6 orphans" }
+        );
+
+        // G3 summary: finding count and gap_kind breakdown (no full list)
+        const g3Count = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS total_findings FROM oa_findings WHERE run_id = $1::uuid`,
+          z.object({ total_findings: z.coerce.number() }),
+          [input.runId],
+          { label: "gap_gate_slim: total findings count" }
+        );
+
+        return {
+          rows: [{
+            g3_total_findings: g3Count[0]?.total_findings ?? 0,
+            g4_stale_supersession_count: g4[0]?.cnt ?? 0,
+            g5_churn: g5.length > 0 ? g5[0] : null,
+            g6_orphan_count: g6[0]?.orphan_count ?? 0,
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // topic_dist_by_document: T9 — topic_id counts for a single document
+      // -----------------------------------------------------------------------
+      case "topic_dist_by_document": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT tf.topic_id, COUNT(*)::int AS fact_count
+           FROM oa_topic_facts tf
+           JOIN oa_facts f ON f.fact_id = tf.fact_id
+           WHERE tf.run_id = $1 AND f.document_id = $2::uuid
+           GROUP BY tf.topic_id
+           ORDER BY fact_count DESC`,
+          z.object({ topic_id: z.string(), fact_count: z.coerce.number() }),
+          [input.runId, input.documentId],
+          { label: `T9: topic distribution for document ${input.documentId.slice(0, 8)}` }
+        );
+        return { rows, rowCount: rows.length };
       }
 
       default: {
