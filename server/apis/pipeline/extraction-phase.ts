@@ -487,6 +487,15 @@ export async function runExtractionPhase(
             `output_tokens=${outputTokens} input_tokens=${inputTokens} ` +
             `chars=${charCount} pct_cap=${pctCap}% truncated=${truncated}`
           );
+          // Durable diagnostic write — fire-and-forget, non-fatal
+          try {
+            await ctx.integrations.db.execute(
+              `INSERT INTO extraction_diag (deal_id, document_id, chunk_index, output_tokens, input_tokens, char_count, pct_cap, truncated, stop_reason, attempt, path)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              [dealId, chunk.documentId, chunk.chunkIndex, outputTokens, inputTokens, charCount, pctCap, truncated, truncated ? "max_tokens" : "end_turn", 1, "primary"],
+              { label: `Diag: chunk ${chunk.chunkIndex} primary` }
+            );
+          } catch (_diagErr) { /* non-fatal */ }
 
           // If truncated, mark it so future runs will retry this chunk
           if (truncated) {
@@ -766,6 +775,15 @@ export async function runExtractionPhase(
           `output_tokens=${outputTokens} input_tokens=${inputTokens} ` +
           `chars=${charCount} pct_cap=${pctCap}% truncated=${truncated} attempt=${attempts + 1}`
         );
+        // Durable diagnostic write — fire-and-forget, non-fatal
+        try {
+          await ctx.integrations.db.execute(
+            `INSERT INTO extraction_diag (deal_id, document_id, chunk_index, output_tokens, input_tokens, char_count, pct_cap, truncated, stop_reason, attempt, path)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            [dealId, chunk.documentId, chunk.chunkIndex, outputTokens, inputTokens, charCount, pctCap, truncated, truncated ? "max_tokens" : "end_turn", attempts + 1, "escalation"],
+            { label: `Diag: chunk ${chunk.chunkIndex} escalation` }
+          );
+        } catch (_diagErr) { /* non-fatal */ }
 
         if (truncated) {
           // Save as truncated — will be retried at next level

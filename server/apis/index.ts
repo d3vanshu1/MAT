@@ -135,6 +135,7 @@ import DiagBulkExtract from './pipeline/diag-bulk-extract.js';
 import GetExtractionManifest from './pipeline/get-extraction-manifest.js';
 import OaDiagQuery from './pipeline/oa-diag-query.js';
 import RunMigration022 from './pipeline/run-migration-022.js';
+import RunMigration023 from './pipeline/run-migration-023.js';
 import OaFactNormalization from './pipeline/oa-fact-normalization.js';
 import OaNormalizationReport from './pipeline/oa-normalization-report.js';
 // import PurgeDealPipelineState from './pipeline/purge-deal-pipeline-state.js';
@@ -220,7 +221,7 @@ const apis = {
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
-  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, RunMigration022, OaFactNormalization, OaNormalizationReport,
+  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, RunMigration022, RunMigration023, OaFactNormalization, OaNormalizationReport,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

@@ -40,16 +40,27 @@ export default api({
   }),
 
   async run(ctx, { dealId }) {
-    const rows = await ctx.integrations.db.query(
-      `SELECT document_id, chunk_index, content_hash, extraction_json
-       FROM universal_extractions
-       WHERE deal_id = $1
-       ORDER BY document_id, chunk_index
-       LIMIT 500`,
-      StoredExtractionSchema,
-      [dealId],
-      { label: "Load cached extractions for deal" }
-    );
+    // Paginated load: rows are 5-38KB (mean ~21.5KB), 50 rows ≈ 1.05MB,
+    // well under the 4MB gRPC ceiling. Matches pipeline-core.ts page size.
+    const PAGE_SIZE = 50;
+    let offset = 0;
+    const rows: Array<{ document_id: string; chunk_index: number; content_hash: string; extraction_json?: any }> = [];
+
+    while (true) {
+      const page = await ctx.integrations.db.query(
+        `SELECT document_id, chunk_index, content_hash, extraction_json
+         FROM universal_extractions
+         WHERE deal_id = $1
+         ORDER BY document_id, chunk_index
+         LIMIT ${PAGE_SIZE} OFFSET ${offset}`,
+        StoredExtractionSchema,
+        [dealId],
+        { label: `Load cached extractions page offset=${offset}` }
+      );
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
 
     const extractions = rows.map((row) => {
       const ext = typeof row.extraction_json === "string"
