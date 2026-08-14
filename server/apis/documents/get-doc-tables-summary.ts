@@ -7,8 +7,8 @@ const SummaryRowSchema = z.object({
   file_name: z.string(),
   sheet_or_page: z.string(),
   caption: z.string().nullable(),
-  cell_count: z.number(),
-  data_length: z.number(),
+  cell_count: z.coerce.number().nullable(),
+  data_length: z.coerce.number(),
 });
 
 export default api({
@@ -31,7 +31,7 @@ export default api({
         fileName: z.string(),
         sheetOrPage: z.string(),
         caption: z.string().nullable(),
-        cellCount: z.number(),
+        cellCount: z.number().nullable(),
         dataLengthBytes: z.number(),
       })
     ),
@@ -44,7 +44,7 @@ export default api({
          d.file_name,
          dt.sheet_or_page,
          dt.caption,
-         jsonb_array_length(dt.data->'cells') AS cell_count,
+         COALESCE(jsonb_array_length(dt.data->'cells'), 0) AS cell_count,
          length(dt.data::text) AS data_length
        FROM doc_tables dt
        JOIN documents d ON dt.document_id = d.id

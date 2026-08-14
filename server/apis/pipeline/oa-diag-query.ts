@@ -108,6 +108,31 @@ const QueryInput = z.discriminatedUnion("query", [
     charStart: z.number().int().min(0),
     charEnd: z.number().int().min(1),
   }),
+  z.object({
+    query: z.literal("topic_diagnostic"),
+    runId: z.string(),
+  }),
+  z.object({
+    query: z.literal("dedup_violations"),
+    dealId: z.string(),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  z.object({
+    query: z.literal("extraction_diag_summary"),
+    dealId: z.string(),
+  }),
+  z.object({
+    query: z.literal("extraction_diag_truncated"),
+    dealId: z.string(),
+    offset: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  z.object({
+    query: z.literal("doc_tables_sample"),
+    documentId: z.string(),
+    sheetOrPage: z.string().optional(),
+    limit: z.number().int().min(1).max(5).default(3),
+  }),
 ]);
 
 // ---------------------------------------------------------------------------
@@ -402,6 +427,163 @@ export default api({
           z.object({ source_window: z.string().nullable() }),
           [input.documentId, input.charStart, input.charEnd],
           { label: `source_window: ${input.documentId} [${input.charStart}:${input.charEnd}]` }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // topic_diagnostic: breakdown of oa_topics by run, obligation class, emergent
+      // -----------------------------------------------------------------------
+      case "topic_diagnostic": {
+        const byRun = await ctx.integrations.db.query(
+          `SELECT run_id, COUNT(*)::int AS cnt FROM oa_topics GROUP BY run_id ORDER BY cnt DESC LIMIT 10`,
+          z.object({ run_id: z.string(), cnt: z.coerce.number() }),
+          [],
+          { label: "topic_diagnostic: by run" }
+        );
+        const forRun = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt FROM oa_topics WHERE run_id = $1`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "topic_diagnostic: count for run" }
+        );
+        const emergent = await ctx.integrations.db.query(
+          `SELECT topic_id, obligation_class, obligation_basis FROM oa_topics WHERE run_id = $1 AND obligation_basis = 'model_proposed_unclassified' ORDER BY topic_id LIMIT 200`,
+          z.object({ topic_id: z.string(), obligation_class: z.string().nullable(), obligation_basis: z.string().nullable() }),
+          [input.runId],
+          { label: "topic_diagnostic: emergent for run" }
+        );
+        const distinctAssigned = await ctx.integrations.db.query(
+          `SELECT COUNT(DISTINCT topic_id)::int AS cnt FROM oa_topic_facts WHERE run_id = $1`,
+          z.object({ cnt: z.coerce.number() }),
+          [input.runId],
+          { label: "topic_diagnostic: distinct topics in topic_facts" }
+        );
+        return {
+          rows: [{
+            by_run: byRun,
+            count_for_run: forRun[0]?.cnt ?? 0,
+            emergent_topics: emergent,
+            emergent_count: emergent.length,
+            distinct_topics_assigned: distinctAssigned[0]?.cnt ?? 0,
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // dedup_violations: rows with duplicate (predicate, value, document_id, scope_qualifier)
+      // -----------------------------------------------------------------------
+      case "dedup_violations": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT predicate, value, document_id, scope_qualifier, COUNT(*)::int AS cnt,
+                  array_agg(fact_id ORDER BY fact_id) AS fact_ids
+           FROM oa_facts
+           WHERE deal_id = $1
+           GROUP BY predicate, value, document_id, scope_qualifier
+           HAVING COUNT(*) > 1
+           ORDER BY cnt DESC
+           LIMIT $2`,
+          z.object({ predicate: z.string().nullable(), value: z.string().nullable(), document_id: z.string(), scope_qualifier: z.string().nullable(), cnt: z.coerce.number(), fact_ids: z.array(z.string()) }),
+          [input.dealId, input.limit],
+          { label: "dedup_violations" }
+        );
+        // Also: total null-predicate + null-value facts
+        const nullFacts = await ctx.integrations.db.query(
+          `SELECT COUNT(*)::int AS cnt, 
+                  COUNT(*) FILTER (WHERE fact_type = 'flag') AS flag_cnt,
+                  COUNT(*) FILTER (WHERE fact_type = 'data_point') AS dp_cnt,
+                  COUNT(*) FILTER (WHERE fact_type = 'claim') AS claim_cnt
+           FROM oa_facts WHERE deal_id = $1 AND predicate IS NULL AND value IS NULL`,
+          z.object({ cnt: z.coerce.number(), flag_cnt: z.coerce.number(), dp_cnt: z.coerce.number(), claim_cnt: z.coerce.number() }),
+          [input.dealId],
+          { label: "dedup_violations: null predicate+value" }
+        );
+        return {
+          rows: [{ violations: rows, null_predicate_null_value: nullFacts[0] }],
+          rowCount: rows.length,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // extraction_diag_summary: aggregate extraction_diag stats for a deal
+      // -----------------------------------------------------------------------
+      case "extraction_diag_summary": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT
+             COUNT(*)::int AS total_rows,
+             MAX(output_tokens)::int AS max_output_tokens,
+             MAX(pct_cap)::numeric AS max_pct_cap,
+             COUNT(*) FILTER (WHERE truncated = true)::int AS truncated_count,
+             COUNT(*) FILTER (WHERE path = 'primary')::int AS primary_count,
+             COUNT(*) FILTER (WHERE path = 'escalation')::int AS escalation_count
+           FROM extraction_diag
+           WHERE deal_id = $1`,
+          z.object({
+            total_rows: z.coerce.number(),
+            max_output_tokens: z.coerce.number().nullable(),
+            max_pct_cap: z.coerce.number().nullable(),
+            truncated_count: z.coerce.number(),
+            primary_count: z.coerce.number(),
+            escalation_count: z.coerce.number(),
+          }),
+          [input.dealId],
+          { label: "extraction_diag_summary" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // extraction_diag_truncated: rows where truncated = true, paginated
+      // -----------------------------------------------------------------------
+      case "extraction_diag_truncated": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT document_id, chunk_index, output_tokens, pct_cap, stop_reason, attempt, path
+           FROM extraction_diag
+           WHERE deal_id = $1 AND truncated = true
+           ORDER BY pct_cap DESC, output_tokens DESC
+           OFFSET $2 LIMIT $3`,
+          z.object({
+            document_id: z.string(),
+            chunk_index: z.coerce.number(),
+            output_tokens: z.coerce.number(),
+            pct_cap: z.coerce.number(),
+            stop_reason: z.string().nullable(),
+            attempt: z.coerce.number(),
+            path: z.string(),
+          }),
+          [input.dealId, input.offset, input.limit],
+          { label: "extraction_diag_truncated" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // doc_tables_sample: full rows from doc_tables for a specific document/sheet
+      // -----------------------------------------------------------------------
+      case "doc_tables_sample": {
+        const whereClause = input.sheetOrPage
+          ? `WHERE document_id = $1 AND sheet_or_page = $2`
+          : `WHERE document_id = $1`;
+        const params = input.sheetOrPage
+          ? [input.documentId, input.sheetOrPage, input.limit]
+          : [input.documentId, input.limit];
+        const limitParam = input.sheetOrPage ? "$3" : "$2";
+        const rows = await ctx.integrations.db.query(
+          `SELECT id, document_id, sheet_or_page, caption, data
+           FROM doc_tables
+           ${whereClause}
+           ORDER BY sheet_or_page
+           LIMIT ${limitParam}`,
+          z.object({
+            id: z.string(),
+            document_id: z.string(),
+            sheet_or_page: z.string(),
+            caption: z.string().nullable(),
+            data: z.any(),
+          }),
+          params,
+          { label: "doc_tables_sample" }
         );
         return { rows, rowCount: rows.length };
       }
