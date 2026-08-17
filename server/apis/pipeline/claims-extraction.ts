@@ -29,6 +29,7 @@ import {
   type CanonicalClaimLedger,
 } from "./canonical-ic-claim.js";
 import { QUALITATIVE_EXTRACTION_PROMPT } from "./extract-canonical-claims.js";
+import { chunkDocumentWithOverlap } from "./extraction-prompt.js";
 
 // ---------------------------------------------------------------------------
 // Claim Schema — the typed ledger
@@ -110,11 +111,13 @@ export interface TerminalResult {
   file_name: string;
   status: TerminalStatus;
   claims_count: number;
-  /** True when the LLM response hit max_tokens — claims are partial (back of memo lost) */
+  /** True when ANY chunk hit max_tokens — claims are partial */
   output_truncated?: boolean;
-  /** Actual output tokens consumed for this memo's quantitative extraction */
+  /** Total output tokens consumed across all chunks for this memo */
   output_tokens?: number;
   error?: string;
+  /** Per-chunk extraction metrics */
+  chunk_results?: ChunkResult[];
 }
 
 /**
@@ -126,12 +129,26 @@ export interface ExtractionResult {
   /** Qualitative canonical claims extracted from the same memo */
   qualitativeClaims: CanonicalIcClaim[];
   truncated: boolean;
-  /** True when the LLM response hit max_tokens (stop_reason = "max_tokens"). Output is silently incomplete. */
+  /** True when ANY chunk's LLM response hit max_tokens (stop_reason = "max_tokens"). */
   output_truncated: boolean;
-  /** Actual output tokens returned by the model (from usage.output_tokens) */
+  /** Total output tokens across all chunks */
   output_tokens: number;
   parseFailed: boolean;
   parseError?: string;
+  /** Per-chunk extraction metrics (populated when document is chunked) */
+  chunk_results?: ChunkResult[];
+}
+
+export interface ChunkResult {
+  index: number;
+  charStart: number;
+  charEnd: number;
+  claims: number;
+  output_tokens: number;
+  output_truncated: boolean;
+  elapsed_ms: number;
+  /** True when 0 claims extracted despite >500 output tokens — indicates silent parse loss */
+  parse_recovered_empty?: boolean;
 }
 
 export interface ClaimsLedger {
@@ -524,7 +541,6 @@ Return a JSON array of claim objects. Each claim:
   "basis": "<measurement basis if stated — e.g. 'OCF basis', 'ARR', 'contracted GP'. null if not stated>",
   "scenario": "<sensitivity/scenario parameter — e.g. '14.2% CAGR', 'no M&A', 'base case'. null if unconditional>",
   "basis_note": "<what this number refers to>",
-  "source_doc": "<filename>",
   "source_page": "<page/section reference or null>",
   "verbatim_snippet": "<exact text from the memo>",
   "source_locations": [{"source_page": "...", "verbatim_snippet": "..."}] or null,
@@ -576,6 +592,38 @@ export interface ClaimsExtractionOptions {
    * Halves LLM time per memo. Quantitative extraction is unaffected.
    */
   skipQualitative?: boolean;
+  /**
+   * Concurrency for chunk-level LLM calls within a single memo.
+   * Default: 2 (pipeline), override to 8 for diagnostics.
+   */
+  chunkConcurrency?: number;
+  /**
+   * Chunk cursor — tracks which chunks are already extracted per memo.
+   * Map of memoId → array of completed chunk indices.
+   * Used for resume: completed chunks are skipped on re-entry.
+   */
+  chunkCursor?: Record<string, number[]>;
+  /**
+   * Called after each chunk completes extraction. The harness uses this to
+   * persist incremental progress so timeouts lose at most one chunk.
+   * Receives the memoId, completed chunk index, claims from that chunk,
+   * and the running ChunkResult.
+   */
+  onChunkComplete?: (event: ChunkCompleteEvent) => Promise<void>;
+}
+
+export interface ChunkCompleteEvent {
+  memoId: string;
+  memoFileName: string;
+  chunkIndex: number;
+  chunkClaims: Claim[];
+  chunkResult: ChunkResult;
+  /** All claims extracted so far for this memo (across all completed chunks) */
+  accumulatedClaims: Claim[];
+  /** All chunk results so far */
+  accumulatedChunkResults: ChunkResult[];
+  /** Raw LLM response text — populated only when parse_recovered_empty is true */
+  rawResponseText?: string;
 }
 
 export async function runClaimsExtraction(
@@ -660,11 +708,16 @@ export async function runClaimsExtraction(
     return priorLedger!; // priorLedger is defined and complete if we reach here
   }
 
-  // Concurrency limit (2 for pipeline, 4 for bypass/diagnostics)
-  const CONCURRENCY = options?.bypassHeadroom ? 4 : 2;
+  // Concurrency: memo-level pool stays at 1 (sequential memos),
+  // chunk-level pool runs chunks in parallel within each memo.
+  const MEMO_CONCURRENCY = 1; // Process one memo at a time (chunks run concurrently within)
+  const CHUNK_CONCURRENCY = options?.chunkConcurrency ?? (options?.bypassHeadroom ? 8 : 2);
 
   // Time-budget reserve: stop launching new work when less than this remains
   const BUDGET_RESERVE_MS = 30_000;
+
+  // Chunk cursor — which chunks are already done (for resume)
+  const chunkCursor = options?.chunkCursor ?? {};
 
   const extractMemo = async (memo: { id: string; file_name: string; parsed_text: string | null }): Promise<ExtractionResult> => {
     // Truncate very long memos to fit in context window (Sonnet: ~200K tokens)
@@ -677,69 +730,305 @@ export async function runClaimsExtraction(
 
     console.log(`[ClaimsExtraction] Processing: "${memo.file_name}" (${Math.round(text.length / 1000)}K chars)`);
 
-    let response: LLMResponse;
-    const llmBody = {
-      model: SONNET_MODEL,
-      max_tokens: 16_384,
-      temperature: 0, // Deterministic extraction — no sampling variance
-      system: CLAIMS_EXTRACTION_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: `## Document: ${memo.file_name}\n\nExtract all quantitative financial claims from this IC memo:\n\n${text}`,
-        },
-      ],
-    };
+    // --- C2: Chunk the document with overlap for extraction ---
+    // Gate C sizing: 4,500 chars per chunk with 500-char overlap.
+    // Adaptive subdivide: one halving to 2,250, floor 2,000. If a 2,000-char
+    // chunk truncates, accept truncation — do not subdivide further.
+    const EXTRACTION_CHUNK_CHARS = 4500;
+    const OVERLAP = 500;
+    const chunks = chunkDocumentWithOverlap(memo.file_name, memo.id, text, { overlap: OVERLAP, chunkSize: EXTRACTION_CHUNK_CHARS });
 
-    if (options?.bypassHeadroom) {
-      // Direct call — no headroom guard (diagnostic/test path)
-      response = await ctx.integrations.ai.apiRequest(
-        { method: "POST", path: "/v1/messages", body: llmBody },
-        { response: MessageResponseSchema },
-        { label: `ClaimsExtraction: ${memo.file_name}` },
-      );
-    } else {
-      // Pipeline path — full headroom guard
-      response = await callLLMWithHeadroom(
-        ctx,
-        llmBody,
-        `ClaimsExtraction: ${memo.file_name}`,
-        { pipelineStartTime, maxPerCallTimeout: 180_000, retries: 1 },
-      );
-    }
-
-    // Parse the response
-    const responseText = response.content[0]?.text ?? "";
-    const parseResult = parseClaimsResponse(responseText, memo.file_name);
-
-    // --- Edit 1: Output truncation detection ---
-    // Check stop_reason to detect when the model hit max_tokens mid-output.
-    // The repair heuristic still runs and claims are still returned — this only
-    // adds a loud label so downstream consumers know the count is incomplete.
-    const outputTruncated = response.stop_reason === "max_tokens";
-    const outputTokens = response.usage.output_tokens;
-    if (outputTruncated) {
-      console.warn(
-        `[ClaimsExtraction] OUTPUT TRUNCATED: "${memo.file_name}" hit max_tokens ` +
-        `(${outputTokens} output tokens). ${parseResult.claims.length} claims recovered via repair. ` +
-        `Back-of-memo claims are systematically lost.`
-      );
-    }
+    // Resume: skip chunks already completed per cursor
+    const completedIndices = new Set(chunkCursor[memo.id] ?? []);
+    const pendingChunks = chunks.filter(c => !completedIndices.has(c.chunkIndex));
 
     console.log(
-      `[ClaimsExtraction] "${memo.file_name}": ${parseResult.claims.length} claims ` +
-      `(${parseResult.claims.filter(c => c.claim_category === "operating_metric").length} operating, ` +
-      `${parseResult.claims.filter(c => c.claim_category === "deal_mechanics").length} deal-mechanics, ` +
-      `${parseResult.claims.filter(c => c.claim_category === "valuation_structuring").length} valuation, ` +
-      `${parseResult.claims.filter(c => c.claim_category === "returns_projection").length} returns)` +
-      `${parseResult.failed ? " [PARSE FAILED]" : ""}${truncated ? " [INPUT TRUNCATED]" : ""}` +
-      `${outputTruncated ? " [OUTPUT TRUNCATED]" : ""}`
+      `[ClaimsExtraction] "${memo.file_name}": ${chunks.length} chunk(s) (${EXTRACTION_CHUNK_CHARS} chars, ${OVERLAP} overlap), ` +
+      `${completedIndices.size} already done, ${pendingChunks.length} pending — concurrency ${CHUNK_CONCURRENCY}`
     );
 
-    // --- Edit 2: skipQualitative gate ---
+    // Shared accumulators (protected by sequential callback execution)
+    const allChunkClaims: Claim[] = [];
+    const chunkResults: ChunkResult[] = [];
+    let totalOutputTokens = 0;
+    let anyTruncated = false;
+
+    // Build chunk jobs for the worker pool
+    const chunkJobs: WorkerPoolJob<{ claims: Claim[]; result: ChunkResult }>[] = pendingChunks.map((chunk) => ({
+      id: `${memo.id}:${chunk.chunkIndex}`,
+      label: `${memo.file_name} chunk ${chunk.chunkIndex + 1}/${chunks.length}`,
+      execute: async () => {
+        const chunkStart = Date.now();
+
+        const llmBody = {
+          model: SONNET_MODEL,
+          max_tokens: 16_384,
+          temperature: 0, // Deterministic extraction — no sampling variance
+          system: CLAIMS_EXTRACTION_PROMPT,
+          messages: [
+            {
+              role: "user",
+              content: `## Document: ${memo.file_name} (chunk ${chunk.chunkIndex + 1}/${chunks.length})\n\nExtract all quantitative financial claims from this section:\n\n${chunk.text}`,
+            },
+          ],
+        };
+
+        let response: LLMResponse;
+        if (options?.bypassHeadroom) {
+          response = await ctx.integrations.ai.apiRequest(
+            { method: "POST", path: "/v1/messages", body: llmBody },
+            { response: MessageResponseSchema },
+            { label: `ClaimsExtraction: ${memo.file_name} chunk ${chunk.chunkIndex + 1}/${chunks.length}` },
+          );
+        } else {
+          response = await callLLMWithHeadroom(
+            ctx,
+            llmBody,
+            `ClaimsExtraction: ${memo.file_name} chunk ${chunk.chunkIndex + 1}/${chunks.length}`,
+            { pipelineStartTime, maxPerCallTimeout: 180_000, retries: 1 },
+          );
+        }
+
+        const responseText = response.content[0]?.text ?? "";
+        const parseResult = parseClaimsResponse(responseText, memo.file_name);
+        const chunkTruncated = response.stop_reason === "max_tokens";
+        const chunkTokens = response.usage.output_tokens;
+        const chunkElapsed = Date.now() - chunkStart;
+
+        if (chunkTruncated) {
+          console.warn(
+            `[ClaimsExtraction] CHUNK TRUNCATED: "${memo.file_name}" chunk ${chunk.chunkIndex + 1}/${chunks.length} ` +
+            `(chars ${chunk.charStart}-${chunk.charEnd}) hit max_tokens (${chunkTokens} tokens). ` +
+            `${parseResult.claims.length} claims recovered via repair.`
+          );
+        }
+
+        console.log(
+          `[ClaimsExtraction] "${memo.file_name}" chunk ${chunk.chunkIndex + 1}/${chunks.length}: ` +
+          `${parseResult.claims.length} claims, ${chunkTokens} tokens, ${Math.round(chunkElapsed / 1000)}s` +
+          `${chunkTruncated ? " [TRUNCATED]" : ""}`
+        );
+
+        // Detect silent loss: model generated substantial output but 0 valid claims survived parsing
+        const parseRecoveredEmpty = parseResult.claims.length === 0 && chunkTokens > 500 && !parseResult.failed;
+        if (parseRecoveredEmpty) {
+          console.warn(
+            `[ClaimsExtraction] SILENT LOSS: "${memo.file_name}" chunk ${chunk.chunkIndex + 1}/${chunks.length} ` +
+            `produced ${chunkTokens} tokens but 0 valid claims. Raw response preserved for diagnosis.`
+          );
+        }
+
+        const cr: ChunkResult = {
+          index: chunk.chunkIndex,
+          charStart: chunk.charStart,
+          charEnd: chunk.charEnd,
+          claims: parseResult.claims.length,
+          output_tokens: chunkTokens,
+          output_truncated: chunkTruncated,
+          elapsed_ms: chunkElapsed,
+          parse_recovered_empty: parseRecoveredEmpty || undefined,
+        };
+
+        // Persist immediately on chunk completion (before pool collects)
+        if (options?.onChunkComplete) {
+          await options.onChunkComplete({
+            memoId: memo.id,
+            memoFileName: memo.file_name,
+            chunkIndex: chunk.chunkIndex,
+            chunkClaims: parseResult.claims,
+            chunkResult: cr,
+            accumulatedClaims: [], // Filled post-pool for ordering
+            accumulatedChunkResults: [], // Filled post-pool for ordering
+            rawResponseText: parseRecoveredEmpty ? responseText : undefined,
+          });
+        }
+
+        return { claims: parseResult.claims, result: cr };
+      },
+    }));
+
+    // Run chunk pool with bounded concurrency
+    const poolResult = await runWorkerPool(chunkJobs, { concurrency: CHUNK_CONCURRENCY });
+
+    // Collect results in chunk-index order for determinism
+    const settledByIndex: Map<number, { claims: Claim[]; result: ChunkResult }> = new Map();
+    for (const r of poolResult.results) {
+      if (r.status === "fulfilled" && r.value) {
+        settledByIndex.set(r.value.result.index, r.value);
+      } else if (r.status === "rejected") {
+        const chunkIdx = parseInt(r.job.id.split(":")[1], 10);
+        console.error(`[ClaimsExtraction] Chunk ${chunkIdx} failed: ${r.reason}`);
+      }
+    }
+
+    // --- Adaptive subdivide: re-extract truncated chunks at half size ---
+    // Gate C: one halving only. Floor 2,000 chars — if a 2,000-char chunk
+    // truncates, stop and report. Do not subdivide further.
+    const MIN_SUBDIVIDE_CHARS = 2000;
+    const MAX_SUBDIVIDE_DEPTH = 1;
+    let subdividePass = 0;
+
+    while (subdividePass < MAX_SUBDIVIDE_DEPTH) {
+      const truncatedIndices = [...settledByIndex.entries()]
+        .filter(([_, v]) => v.result.output_truncated)
+        .map(([idx, v]) => ({ idx, charStart: v.result.charStart, charEnd: v.result.charEnd }));
+
+      if (truncatedIndices.length === 0) break;
+
+      const chunkWidth = truncatedIndices[0].charEnd - truncatedIndices[0].charStart;
+      const halfWidth = Math.floor(chunkWidth / 2);
+      if (halfWidth < MIN_SUBDIVIDE_CHARS) {
+        console.warn(
+          `[ClaimsExtraction] ${truncatedIndices.length} chunks still truncated at ${chunkWidth} chars — ` +
+          `half (${halfWidth}) below minimum ${MIN_SUBDIVIDE_CHARS}. Accepting truncation.`
+        );
+        break;
+      }
+
+      subdividePass++;
+      console.log(
+        `[ClaimsExtraction] Subdivide pass ${subdividePass}: ${truncatedIndices.length} truncated chunk(s) ` +
+        `(${chunkWidth} chars) → splitting to ${halfWidth} chars each`
+      );
+
+      // Build sub-chunk jobs for all truncated chunks
+      const subJobs: WorkerPoolJob<{ parentIdx: number; claims: Claim[]; results: ChunkResult[] }>[] =
+        truncatedIndices.map(({ idx: parentIdx, charStart, charEnd }) => ({
+          id: `subdivide:${parentIdx}`,
+          label: `${memo.file_name} subdivide chunk ${parentIdx}`,
+          execute: async () => {
+            const midpoint = charStart + halfWidth;
+            const subChunks = [
+              { start: charStart, end: midpoint, text: text.slice(charStart, midpoint) },
+              { start: midpoint, end: charEnd, text: text.slice(midpoint, charEnd) },
+            ];
+
+            const subResults: ChunkResult[] = [];
+            const subClaims: Claim[] = [];
+
+            for (let si = 0; si < subChunks.length; si++) {
+              const sc = subChunks[si];
+              const subStart = Date.now();
+
+              const subBody = {
+                model: SONNET_MODEL,
+                max_tokens: 16_384,
+                temperature: 0,
+                system: CLAIMS_EXTRACTION_PROMPT,
+                messages: [
+                  {
+                    role: "user",
+                    content: `## Document: ${memo.file_name} (chunk ${parentIdx + 1}/${chunks.length}, sub-part ${si + 1}/2)\n\nExtract all quantitative financial claims from this section:\n\n${sc.text}`,
+                  },
+                ],
+              };
+
+              let subResp: LLMResponse;
+              if (options?.bypassHeadroom) {
+                subResp = await ctx.integrations.ai.apiRequest(
+                  { method: "POST", path: "/v1/messages", body: subBody },
+                  { response: MessageResponseSchema },
+                  { label: `ClaimsExtraction: subdivide ${memo.file_name} chunk ${parentIdx + 1} sub ${si + 1}/2` },
+                );
+              } else {
+                subResp = await callLLMWithHeadroom(
+                  ctx, subBody,
+                  `ClaimsExtraction: subdivide ${memo.file_name} chunk ${parentIdx + 1} sub ${si + 1}/2`,
+                  { pipelineStartTime, maxPerCallTimeout: 180_000, retries: 1 },
+                );
+              }
+
+              const subText = subResp.content[0]?.text ?? "";
+              const subParse = parseClaimsResponse(subText, memo.file_name);
+              const subTrunc = subResp.stop_reason === "max_tokens";
+              const subTokens = subResp.usage.output_tokens;
+              const subElapsed = Date.now() - subStart;
+
+              if (subTrunc) {
+                console.warn(
+                  `[ClaimsExtraction] SUBDIVIDE STILL TRUNCATED: chunk ${parentIdx} sub ${si + 1}/2 ` +
+                  `(${sc.end - sc.start} chars) → ${subParse.claims.length} claims, ${subTokens} tokens`
+                );
+              }
+
+              subClaims.push(...subParse.claims);
+              subResults.push({
+                index: parentIdx,
+                charStart: sc.start,
+                charEnd: sc.end,
+                claims: subParse.claims.length,
+                output_tokens: subTokens,
+                output_truncated: subTrunc,
+                elapsed_ms: subElapsed,
+              });
+            }
+
+            return { parentIdx, claims: subClaims, results: subResults };
+          },
+        }));
+
+      const subPoolResult = await runWorkerPool(subJobs, { concurrency: CHUNK_CONCURRENCY });
+
+      // Replace truncated parent results with subdivide results
+      for (const r of subPoolResult.results) {
+        if (r.status === "fulfilled" && r.value) {
+          const { parentIdx, claims, results } = r.value;
+          // Merge sub-results into a single entry with combined stats
+          const combinedTokens = results.reduce((sum, sr) => sum + sr.output_tokens, 0);
+          const combinedMs = results.reduce((sum, sr) => sum + sr.elapsed_ms, 0);
+          const stillTruncated = results.some((sr) => sr.output_truncated);
+          settledByIndex.set(parentIdx, {
+            claims,
+            result: {
+              index: parentIdx,
+              charStart: results[0].charStart,
+              charEnd: results[results.length - 1].charEnd,
+              claims: claims.length,
+              output_tokens: combinedTokens,
+              output_truncated: stillTruncated,
+              elapsed_ms: combinedMs,
+            },
+          });
+        }
+      }
+    }
+
+    // Process in index order — accumulate and fire onChunkComplete
+    const sortedIndices = [...settledByIndex.keys()].sort((a, b) => a - b);
+    for (const idx of sortedIndices) {
+      const { claims, result: cr } = settledByIndex.get(idx)!;
+      allChunkClaims.push(...claims);
+      chunkResults.push(cr);
+      totalOutputTokens += cr.output_tokens;
+      if (cr.output_truncated) anyTruncated = true;
+
+      // Fire persistence callback
+      if (options?.onChunkComplete) {
+        await options.onChunkComplete({
+          memoId: memo.id,
+          memoFileName: memo.file_name,
+          chunkIndex: idx,
+          chunkClaims: claims,
+          chunkResult: cr,
+          accumulatedClaims: [...allChunkClaims],
+          accumulatedChunkResults: [...chunkResults],
+        });
+      }
+    }
+
+    // Apply B3 coordinate dedup across chunks (overlap may produce duplicates)
+    const dedupedClaims = deduplicateClaimsByCoordinate(allChunkClaims);
+
+    console.log(
+      `[ClaimsExtraction] "${memo.file_name}": ${allChunkClaims.length} raw claims → ${dedupedClaims.length} after dedup ` +
+      `(${allChunkClaims.length - dedupedClaims.length} overlap duplicates removed). ` +
+      `Total ${totalOutputTokens} output tokens.` +
+      `${anyTruncated ? " [OUTPUT TRUNCATED]" : ""}${truncated ? " [INPUT TRUNCATED]" : ""}`
+    );
+
+    // --- skipQualitative gate ---
     let qualitativeClaims: CanonicalIcClaim[] = [];
     if (!options?.skipQualitative) {
-      // MAT-F01B: Qualitative extraction on the same memo
       qualitativeClaims = await extractQualitativeFromMemo(
         ctx, memo, text, pipelineStartTime, options,
       );
@@ -750,7 +1039,15 @@ export async function runClaimsExtraction(
       console.log(`[ClaimsExtraction][Qualitative] Skipped for "${memo.file_name}" (skipQualitative=true)`);
     }
 
-    return { claims: parseResult.claims, qualitativeClaims, truncated, output_truncated: outputTruncated, output_tokens: outputTokens, parseFailed: parseResult.failed, parseError: parseResult.error };
+    return {
+      claims: dedupedClaims,
+      qualitativeClaims,
+      truncated,
+      output_truncated: anyTruncated,
+      output_tokens: totalOutputTokens,
+      parseFailed: false,
+      chunk_results: chunkResults,
+    };
   };
 
   // Build job list for PENDING memos only (incremental — already-processed memos are retained)
@@ -773,8 +1070,9 @@ export async function runClaimsExtraction(
   };
 
   // Run with bounded concurrency + budget gating
+  // Memo-level concurrency = 1 (sequential) since chunks already run concurrently within
   const poolResult = await runWorkerPool(jobs, {
-    concurrency: CONCURRENCY,
+    concurrency: MEMO_CONCURRENCY,
     canLaunch: options?.bypassHeadroom ? undefined : canLaunch,
   });
 
@@ -807,6 +1105,7 @@ export async function runClaimsExtraction(
         output_truncated: extraction.output_truncated,
         output_tokens: extraction.output_tokens,
         error: extraction.parseError,
+        chunk_results: extraction.chunk_results,
       });
     } else {
       const errMsg = r.reason instanceof Error ? r.reason.message : String(r.reason);

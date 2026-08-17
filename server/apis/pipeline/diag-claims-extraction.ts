@@ -32,7 +32,7 @@
  *   );
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
-import { runClaimsExtraction, parseClaimsResponse, CLAIMS_EXTRACTION_PROMPT, type ClaimsLedger } from "./claims-extraction.js";
+import { runClaimsExtraction, parseClaimsResponse, CLAIMS_EXTRACTION_PROMPT, type ClaimsLedger, type ChunkCompleteEvent } from "./claims-extraction.js";
 import { MessageResponseSchema } from "./call-llm.js";
 import { SONNET_MODEL } from "./model-config.js";
 import type { PipelineContext } from "./pipeline-config.js";
@@ -241,11 +241,20 @@ export default api({
         memos_completed TEXT[] NOT NULL DEFAULT '{}',
         total_claims INTEGER NOT NULL DEFAULT 0,
         complete BOOLEAN NOT NULL DEFAULT FALSE,
+        chunk_cursor JSONB NOT NULL DEFAULT '{}',
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )`,
       z.any(),
       [],
       { label: "DiagCE: ensure ledger table" },
+    );
+
+    // Add chunk_cursor column if missing (for existing tables)
+    await ctx.integrations.db.query(
+      `ALTER TABLE diag_claims_ledger ADD COLUMN IF NOT EXISTS chunk_cursor JSONB NOT NULL DEFAULT '{}'`,
+      z.any(),
+      [],
+      { label: "DiagCE: ensure chunk_cursor column" },
     );
 
     await ctx.integrations.db.query(
@@ -285,19 +294,32 @@ export default api({
 
     // --- Load prior ledger from persistence ---
     const priorRows = await ctx.integrations.db.query(
-      `SELECT ledger, memos_completed, complete FROM diag_claims_ledger WHERE deal_id = $1 LIMIT 1`,
+      `SELECT ledger, memos_completed, complete, chunk_cursor FROM diag_claims_ledger WHERE deal_id = $1 LIMIT 1`,
       z.object({
         ledger: z.any(),
         memos_completed: z.array(z.string()),
         complete: z.boolean(),
+        chunk_cursor: z.any(),
       }),
       [dealId],
       { label: "DiagCE: load prior ledger" },
     );
 
     let priorLedger: ClaimsLedger | undefined;
+    let chunkCursor: Record<string, number[]> = {};
+    let persistedMemosCompleted: string[] = [];
+    let missingCompletedFileNames: string[] = [];
     if (priorRows.length > 0 && priorRows[0].ledger && priorRows[0].ledger.claims) {
       priorLedger = priorRows[0].ledger as ClaimsLedger;
+      chunkCursor = (priorRows[0].chunk_cursor as Record<string, number[]>) ?? {};
+      persistedMemosCompleted = priorRows[0].memos_completed ?? [];
+      console.log(`[DiagCE] Loaded chunk cursor: ${Object.keys(chunkCursor).length} memo(s) with progress`);
+      console.log(`[DiagCE] Persisted memos_completed: [${persistedMemosCompleted.join(", ")}]`);
+
+      // Inject synthetic "success" entries — deferred until after allMemos query
+      // (needs filename→UUID mapping). Flag for later injection.
+      const existingTerminalFiles = new Set(priorLedger.terminal_results.map(t => t.file_name));
+      missingCompletedFileNames = persistedMemosCompleted.filter(f => !existingTerminalFiles.has(f));
       // NOTE: Do NOT early-return based on stored `complete` flag.
       // The stored flag reflects a PREVIOUS call's target set. The current
       // call may have a different documentIds target set that hasn't been
@@ -313,6 +335,163 @@ export default api({
         priorLedger.terminal_results = priorLedger.terminal_results.filter(
           t => !(currentTargets.has(t.memo_id) && (t.status as string) === "filtered_out")
         );
+      }
+    }
+
+    // --- Reconstruction: if cursor is full but ledger has 0 claims, rebuild from events ---
+    // This handles the case where orchestrator timeout killed the process after all chunks
+    // completed but before the final ledger persist. Claims were saved per-chunk in events.
+    if (priorRows.length > 0 && chunkCursor && Object.keys(chunkCursor).length > 0) {
+      const ledgerClaims = (priorLedger?.claims ?? []).length;
+      if (ledgerClaims === 0) {
+        // Check if any target memo has a full cursor but no claims in ledger
+        const targetMemoIdsForRecon = documentIds && documentIds.length > 0
+          ? documentIds
+          : Object.keys(chunkCursor);
+
+        for (const memoId of targetMemoIdsForRecon) {
+          const cursorChunks = chunkCursor[memoId] ?? [];
+          if (cursorChunks.length > 0) {
+            console.log(
+              `[DiagCE] Reconstruction: memo ${memoId} has ${cursorChunks.length} chunks in cursor but 0 claims in ledger. Attempting rebuild from events.`
+            );
+
+            // Load persisted chunk_claims events for this deal+memo (deduplicate by chunk_index, keep latest)
+            const chunkEvents = await ctx.integrations.db.query(
+              `SELECT DISTINCT ON ((detail->>'chunk_index')::int) detail
+               FROM diag_claims_events
+               WHERE deal_id = $1 AND event_type = 'chunk_claims' AND detail->>'memo_id' = $2
+               ORDER BY (detail->>'chunk_index')::int ASC, ts DESC`,
+              z.object({ detail: z.any() }),
+              [dealId, memoId],
+              { label: `DiagCE: load chunk_claims events for reconstruction (${memoId})` },
+            );
+
+            if (chunkEvents.length > 0) {
+              console.log(`[DiagCE] Found ${chunkEvents.length} persisted chunk events for reconstruction`);
+
+              // Reconstruct claims and chunk results
+              const reconstructedClaims: any[] = [];
+              const reconstructedChunkResults: any[] = [];
+              let anyTruncated = false;
+              let totalTokens = 0;
+              let anyParseEmpty = false;
+
+              for (const evt of chunkEvents) {
+                const d = evt.detail;
+                if (d.claims && Array.isArray(d.claims)) {
+                  reconstructedClaims.push(...d.claims);
+                }
+                reconstructedChunkResults.push({
+                  index: d.chunk_index,
+                  charStart: d.char_start,
+                  charEnd: d.char_end,
+                  claims: d.claims_count ?? 0,
+                  output_tokens: d.output_tokens ?? 0,
+                  output_truncated: d.output_truncated ?? false,
+                  elapsed_ms: d.elapsed_ms ?? 0,
+                  parse_recovered_empty: d.parse_recovered_empty ?? false,
+                });
+                if (d.output_truncated) anyTruncated = true;
+                if (d.parse_recovered_empty) anyParseEmpty = true;
+                totalTokens += (d.output_tokens ?? 0);
+              }
+
+              // Look up file_name for this memo
+              const memoNameRows = await ctx.integrations.db.query(
+                `SELECT file_name FROM documents WHERE id = $1 LIMIT 1`,
+                z.object({ file_name: z.string() }),
+                [memoId],
+                { label: `DiagCE: lookup memo filename for reconstruction` },
+              );
+              const memoFileName = memoNameRows.length > 0 ? memoNameRows[0].file_name : memoId;
+
+              // Build a reconstructed ledger
+              const status = anyTruncated ? "partial" : "success";
+              priorLedger = {
+                claims: reconstructedClaims,
+                complete: true,
+                terminal_results: [{
+                  memo_id: memoId,
+                  file_name: memoFileName,
+                  status,
+                  claims_count: reconstructedClaims.length,
+                  output_truncated: anyTruncated,
+                  output_tokens: totalTokens,
+                  chunk_results: reconstructedChunkResults,
+                }],
+                extraction_metadata: {
+                  docs_processed: 1,
+                  pending: 0,
+                  total_claims: reconstructedClaims.length,
+                  operating_metric_claims: reconstructedClaims.filter((c: any) => c.claim_category === "operating_metric").length,
+                  deal_mechanics_claims: reconstructedClaims.filter((c: any) => c.claim_category === "deal_mechanics").length,
+                  valuation_structuring_claims: reconstructedClaims.filter((c: any) => c.claim_category === "valuation_structuring").length,
+                  returns_projection_claims: reconstructedClaims.filter((c: any) => c.claim_category === "returns_projection").length,
+                  cross_reference_claims: reconstructedClaims.filter((c: any) => c.claim_category === "cross_reference").length,
+                  extraction_model: SONNET_MODEL,
+                  extraction_timestamp: new Date().toISOString(),
+                },
+              };
+              persistedMemosCompleted = [memoFileName];
+
+              console.log(
+                `[DiagCE] Reconstruction complete: ${reconstructedClaims.length} claims, ` +
+                `${chunkEvents.length} chunks, truncated=${anyTruncated}, parseEmpty=${anyParseEmpty}`
+              );
+
+              // Persist the reconstructed ledger immediately
+              await ctx.integrations.db.query(
+                `INSERT INTO diag_claims_ledger (deal_id, ledger, memos_completed, total_claims, complete, chunk_cursor, updated_at)
+                 VALUES ($1, $2::jsonb, $3::text[], $4, $5, $6::jsonb, NOW())
+                 ON CONFLICT (deal_id)
+                 DO UPDATE SET ledger = $2::jsonb, memos_completed = $3::text[], total_claims = $4, complete = $5, chunk_cursor = $6::jsonb, updated_at = NOW()`,
+                z.any(),
+                [dealId, JSON.stringify(priorLedger), persistedMemosCompleted, reconstructedClaims.length, true, JSON.stringify(chunkCursor)],
+                { label: "DiagCE: persist reconstructed ledger" },
+              );
+
+              // Return immediately — no need to re-extract
+              const meta = priorLedger.extraction_metadata;
+              return {
+                complete: true,
+                total_claims: meta.total_claims,
+                memos_completed: persistedMemosCompleted,
+                memos_pending: [],
+                this_invocation: {
+                  memos_processed: 1,
+                  wall_clock_ms: Date.now() - startTime,
+                  per_memo: [{
+                    file_name: memoFileName,
+                    status,
+                    claims_count: reconstructedClaims.length,
+                    error: null,
+                  }],
+                },
+                category_counts: {
+                  operating_metric: meta.operating_metric_claims,
+                  deal_mechanics: meta.deal_mechanics_claims,
+                  valuation_structuring: meta.valuation_structuring_claims,
+                  returns_projection: meta.returns_projection_claims,
+                  cross_reference: meta.cross_reference_claims,
+                  total: meta.total_claims,
+                  docs_processed: meta.docs_processed,
+                },
+                obstacles: anyTruncated ? ["RECONSTRUCTED: some chunks had output_truncated=true"] : [],
+              };
+            } else {
+              // No events found — cursor is stale. Clear it and force re-extraction.
+              console.log(`[DiagCE] No chunk_claims events found for ${memoId}. Clearing cursor to force re-extraction.`);
+              delete chunkCursor[memoId];
+              await ctx.integrations.db.query(
+                `UPDATE diag_claims_ledger SET chunk_cursor = $1::jsonb, updated_at = NOW() WHERE deal_id = $2`,
+                z.any(),
+                [JSON.stringify(chunkCursor), dealId],
+                { label: "DiagCE: clear stale cursor" },
+              );
+            }
+          }
+        }
       }
     }
 
@@ -358,6 +537,25 @@ export default api({
       [dealId],
       { label: "DiagCE: load memo list" },
     );
+
+    // Deferred injection: now that we have filename→UUID mapping, inject
+    // synthetic "success" entries for memos completed in prior invocations
+    // but missing from the ledger's terminal_results (overwrite bug).
+    if (priorLedger && missingCompletedFileNames.length > 0) {
+      const fileNameToId = new Map(allMemos.map(m => [m.file_name, m.id]));
+      for (const fileName of missingCompletedFileNames) {
+        const memoId = fileNameToId.get(fileName);
+        if (memoId) {
+          priorLedger.terminal_results.push({
+            memo_id: memoId,
+            file_name: fileName,
+            status: "success",
+            claims_count: 0,
+          });
+          console.log(`[DiagCE] Recovered completed memo: "${fileName}" (${memoId})`);
+        }
+      }
+    }
 
     const targetIds = documentIds && documentIds.length > 0
       ? new Set(documentIds)
@@ -416,6 +614,70 @@ export default api({
     // --- Run extraction ---
     const effectiveMaxWork = maxWorkUnits ?? 1;
 
+    // onChunkComplete callback: persist chunk cursor AND claims after each chunk resolves
+    const onChunkComplete = async (event: ChunkCompleteEvent): Promise<void> => {
+      // Update in-memory cursor
+      if (!chunkCursor[event.memoId]) {
+        chunkCursor[event.memoId] = [];
+      }
+      chunkCursor[event.memoId].push(event.chunkIndex);
+
+      // Persist cursor to DB (lightweight upsert — just the cursor, not the full ledger)
+      await ctx.integrations.db.query(
+        `INSERT INTO diag_claims_ledger (deal_id, chunk_cursor, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (deal_id)
+         DO UPDATE SET chunk_cursor = $2::jsonb, updated_at = NOW()`,
+        z.any(),
+        [dealId, JSON.stringify(chunkCursor)],
+        { label: `DiagCE: persist chunk cursor (${event.memoFileName} chunk ${event.chunkIndex})` },
+      );
+
+      // Persist chunk claims + result to events table (for reconstruction on timeout)
+      await ctx.integrations.db.query(
+        `INSERT INTO diag_claims_events (deal_id, event_type, memo_file, elapsed_ms, output_tokens, detail)
+         VALUES ($1, 'chunk_claims', $2, $3, $4, $5::jsonb)`,
+        z.any(),
+        [
+          dealId, event.memoFileName, event.chunkResult.elapsed_ms, event.chunkResult.output_tokens,
+          JSON.stringify({
+            memo_id: event.memoId,
+            chunk_index: event.chunkIndex,
+            char_start: event.chunkResult.charStart,
+            char_end: event.chunkResult.charEnd,
+            claims_count: event.chunkClaims.length,
+            output_truncated: event.chunkResult.output_truncated,
+            parse_recovered_empty: event.chunkResult.parse_recovered_empty ?? false,
+            claims: event.chunkClaims,
+          }),
+        ],
+        { label: `DiagCE: persist chunk claims (${event.memoFileName} chunk ${event.chunkIndex})` },
+      );
+
+      console.log(
+        `[DiagCE] Chunk persisted: ${event.memoFileName} chunk ${event.chunkIndex + 1} ` +
+        `(${event.chunkClaims.length} claims, ${event.chunkResult.output_tokens} tokens, ${Math.round(event.chunkResult.elapsed_ms / 1000)}s)` +
+        `${event.chunkResult.parse_recovered_empty ? " [SILENT_LOSS]" : ""}`
+      );
+
+      // P1: Persist raw LLM response for silent-loss chunks (0 claims, >500 tokens)
+      if (event.chunkResult.parse_recovered_empty && event.rawResponseText) {
+        await ctx.integrations.db.query(
+          `INSERT INTO diag_claims_events (deal_id, event_type, memo_file, detail)
+           VALUES ($1, 'silent_loss_raw_response', $2, $3::jsonb)`,
+          z.any(),
+          [dealId, event.memoFileName, JSON.stringify({
+            chunk_index: event.chunkIndex,
+            char_start: event.chunkResult.charStart,
+            char_end: event.chunkResult.charEnd,
+            output_tokens: event.chunkResult.output_tokens,
+            raw_response: event.rawResponseText,
+          })],
+          { label: `DiagCE: persist silent-loss raw response (chunk ${event.chunkIndex})` },
+        );
+      }
+    };
+
     const ledger: ClaimsLedger = await runClaimsExtraction(
       pipelineCtx,
       dealId,
@@ -426,6 +688,9 @@ export default api({
         priorLedger,
         maxWorkUnits: effectiveMaxWork,
         skipQualitative: skipQualitative ?? false,
+        chunkConcurrency: 8,
+        chunkCursor,
+        onChunkComplete,
       },
     );
 
@@ -444,10 +709,14 @@ export default api({
     );
 
     // --- Persist the accumulated ledger ---
-    // "memos_completed" = only REAL extractions (not filtered_out synthetics)
-    const reallyCompleted = ledger.terminal_results
+    // "memos_completed" = UNION of prior persisted completions + new extractions
+    // This prevents re-extraction of memos completed in earlier invocations.
+    const priorCompleted = new Set(priorRows.length > 0 ? priorRows[0].memos_completed : []);
+    const newlyCompleted = ledger.terminal_results
       .filter(t => t.status !== "pending" && (t.status as string) !== "filtered_out")
       .map(t => t.file_name);
+    for (const m of newlyCompleted) priorCompleted.add(m);
+    const reallyCompleted = [...priorCompleted];
 
     // "complete" = all TARGET memos have been extracted (not pending, not filtered_out)
     const targetMemoIds = new Set(allMemos.filter(m => targetIds.has(m.id)).map(m => m.id));
@@ -457,12 +726,12 @@ export default api({
     const isComplete = allTargetsDone;
 
     await ctx.integrations.db.query(
-      `INSERT INTO diag_claims_ledger (deal_id, ledger, memos_completed, total_claims, complete, updated_at)
-       VALUES ($1, $2::jsonb, $3::text[], $4, $5, NOW())
+      `INSERT INTO diag_claims_ledger (deal_id, ledger, memos_completed, total_claims, complete, chunk_cursor, updated_at)
+       VALUES ($1, $2::jsonb, $3::text[], $4, $5, $6::jsonb, NOW())
        ON CONFLICT (deal_id)
-       DO UPDATE SET ledger = $2::jsonb, memos_completed = $3::text[], total_claims = $4, complete = $5, updated_at = NOW()`,
+       DO UPDATE SET ledger = $2::jsonb, memos_completed = $3::text[], total_claims = $4, complete = $5, chunk_cursor = $6::jsonb, updated_at = NOW()`,
       z.any(),
-      [dealId, JSON.stringify(ledger), reallyCompleted, ledger.extraction_metadata.total_claims, isComplete],
+      [dealId, JSON.stringify(ledger), reallyCompleted, ledger.extraction_metadata.total_claims, isComplete, JSON.stringify(chunkCursor)],
       { label: "DiagCE: persist ledger" },
     );
 

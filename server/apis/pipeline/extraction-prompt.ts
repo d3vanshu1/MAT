@@ -267,7 +267,8 @@ export interface TextChunk {
 }
 
 /**
- * Split a document's parsed_text into fixed-size chunks.
+ * Split a document's parsed_text into fixed-size chunks (no overlap).
+ * Used by the production extraction pipeline — do NOT change stride logic.
  */
 export function chunkDocument(
   fileName: string,
@@ -299,6 +300,62 @@ export function chunkDocument(
         contentHash: computeContentHash(slice),
       });
       start = end;
+      idx++;
+    }
+  }
+  return chunks;
+}
+
+/**
+ * Split a document's parsed_text into fixed-size chunks with optional overlap.
+ * Overlap ensures figures near chunk boundaries appear in both adjacent chunks,
+ * allowing downstream dedup to collapse duplicates.
+ *
+ * Default overlap = 0 (backward compatible with chunkDocument behavior).
+ * Default chunkSize = CHUNK_CHARS (5000). Pass a smaller value for dense memos.
+ * Each chunk records its char_start and char_end for diagnostic reporting.
+ */
+export function chunkDocumentWithOverlap(
+  fileName: string,
+  documentId: string,
+  parsedText: string,
+  options?: { overlap?: number; chunkSize?: number }
+): (TextChunk & { charStart: number; charEnd: number })[] {
+  const chunkSize = options?.chunkSize ?? CHUNK_CHARS;
+  const overlap = options?.overlap ?? 0;
+  const stride = chunkSize - overlap;
+  if (stride <= 0) throw new Error(`overlap (${overlap}) must be less than chunkSize (${chunkSize})`);
+
+  const chunks: (TextChunk & { charStart: number; charEnd: number })[] = [];
+
+  if (parsedText.length <= chunkSize) {
+    chunks.push({
+      label: fileName,
+      sourceFile: fileName,
+      text: parsedText,
+      documentId,
+      chunkIndex: 0,
+      contentHash: computeContentHash(parsedText),
+      charStart: 0,
+      charEnd: parsedText.length,
+    });
+  } else {
+    let start = 0;
+    let idx = 0;
+    while (start < parsedText.length) {
+      const end = Math.min(start + chunkSize, parsedText.length);
+      const slice = parsedText.slice(start, end);
+      chunks.push({
+        label: `${fileName} (part ${idx + 1})`,
+        sourceFile: fileName,
+        text: slice,
+        documentId,
+        chunkIndex: idx,
+        contentHash: computeContentHash(slice),
+        charStart: start,
+        charEnd: end,
+      });
+      start += stride;
       idx++;
     }
   }

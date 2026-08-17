@@ -76,6 +76,7 @@ export default api({
     basis_unconfirmed_count: z.number(),
     scenario_excluded_count: z.number(),
     total_claims: z.number(),
+    total_collision_keys: z.number(),
     operating_metric_claims: z.number(),
     figures_loaded: z.number(),
     // Terminal results per memo (output_truncated, output_tokens)
@@ -85,10 +86,21 @@ export default api({
       claims_count: z.number(),
       output_truncated: z.boolean().nullable(),
       output_tokens: z.number().nullable(),
+      chunk_results: z.array(z.object({
+        index: z.number(),
+        charStart: z.number(),
+        charEnd: z.number(),
+        claims: z.number(),
+        output_tokens: z.number(),
+        output_truncated: z.boolean(),
+        elapsed_ms: z.number(),
+      })).nullable(),
     })),
     // Claims with non-null scenario or basis
     scenario_claim_count: z.number(),
     basis_claim_count: z.number(),
+    // NONE_STATED claims with no usable coordinate
+    no_coordinate_count: z.number(),
     // Pass criteria
     passes_collision_gate: z.boolean(), // < 10 multi-claim keys
     passes_scenario_gate: z.boolean(),  // at least 1 scenario exclusion (once ledger has scenarios)
@@ -97,6 +109,45 @@ export default api({
 
   async run(ctx, { dealId }) {
     const startTime = Date.now();
+
+    // P5: Size guard — check ledger byte size before loading full payload.
+    // If >3MB, return summary stats from SQL without loading the blob (avoids gRPC 4MB limit).
+    const sizeCheck = await ctx.integrations.db.query(
+      `SELECT octet_length(ledger::text) AS ledger_bytes,
+              jsonb_array_length(COALESCE(ledger->'claims', '[]'::jsonb)) AS claim_count
+       FROM diag_claims_ledger WHERE deal_id = $1 LIMIT 1`,
+      z.object({ ledger_bytes: z.coerce.number(), claim_count: z.coerce.number() }),
+      [dealId],
+      { label: "Size guard: check ledger byte size" }
+    );
+
+    if (sizeCheck.length > 0 && sizeCheck[0].ledger_bytes > 3_000_000) {
+      // Ledger too large for gRPC transport — return counts-only summary
+      console.warn(
+        `[DiagReconcilerKeys] Ledger size ${(sizeCheck[0].ledger_bytes / 1_000_000).toFixed(1)}MB exceeds 3MB guard. ` +
+        `Returning summary-only (${sizeCheck[0].claim_count} claims).`
+      );
+      return {
+        multi_claim_keys: [],
+        reconciled_count: 0,
+        unreconcilable_count: 0,
+        scope_mismatch_count: 0,
+        within_tolerance_count: 0,
+        basis_unconfirmed_count: 0,
+        scenario_excluded_count: 0,
+        total_claims: sizeCheck[0].claim_count,
+        total_collision_keys: 0,
+        operating_metric_claims: 0,
+        figures_loaded: 0,
+        terminal_results: [],
+        scenario_claim_count: 0,
+        basis_claim_count: 0,
+        no_coordinate_count: 0,
+        passes_collision_gate: false,
+        passes_scenario_gate: false,
+        error: `Ledger size (${(sizeCheck[0].ledger_bytes / 1_000_000).toFixed(1)}MB, ${sizeCheck[0].claim_count} claims) exceeds 3MB guard. Use DiagD1Query SQL for detailed diagnostics on large ledgers.`,
+      };
+    }
 
     // 1. Load claims from diag_claims_ledger (JSONB ledger blob)
     const ledgerRows = await ctx.integrations.db.query(
@@ -116,11 +167,13 @@ export default api({
         basis_unconfirmed_count: 0,
         scenario_excluded_count: 0,
         total_claims: 0,
+        total_collision_keys: 0,
         operating_metric_claims: 0,
         figures_loaded: 0,
         terminal_results: [],
         scenario_claim_count: 0,
         basis_claim_count: 0,
+        no_coordinate_count: 0,
         passes_collision_gate: true,
         passes_scenario_gate: false,
         error: "No claims found in diag_claims_ledger for this deal",
@@ -206,10 +259,11 @@ export default api({
       keyMap.get(key)!.push(claim);
     }
 
-    // Multi-claim keys (D1 format)
+    // Multi-claim keys (D1 format) — limit to top 10 to avoid response size overflow
     const multiClaimKeys = Array.from(keyMap.entries())
-      .filter(([_, cs]) => cs.length > 1)
+      .filter(([key, cs]) => cs.length > 1 && key.split("|")[1] !== "none_stated")
       .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, 10)
       .map(([key, cs]) => ({
         key,
         count: cs.length,
@@ -222,6 +276,10 @@ export default api({
           scenario: c.scenario ?? null,
         })),
       }));
+
+    // Total collision key count (before slice)
+    const totalCollisionKeyCount = Array.from(keyMap.entries())
+      .filter(([key, cs]) => cs.length > 1 && key.split("|")[1] !== "none_stated").length;
 
     // 4. Build ClaimsLedger and call runReconciliation
     const operatingMetricCount = claims.filter(c => c.claim_category === "operating_metric").length;
@@ -289,7 +347,7 @@ export default api({
     const operatingMetricClaims = claims.filter(c => c.claim_category === "operating_metric").length;
 
     // 6. Extract terminal results from the ledger
-    const terminalResults: Array<{ file_name: string; status: string; claims_count: number; output_truncated: boolean | null; output_tokens: number | null }> = [];
+    const terminalResults: Array<{ file_name: string; status: string; claims_count: number; output_truncated: boolean | null; output_tokens: number | null; chunk_results: Array<{ index: number; charStart: number; charEnd: number; claims: number; output_tokens: number; output_truncated: boolean; elapsed_ms: number }> | null }> = [];
     if (Array.isArray(rawLedger.terminal_results)) {
       for (const tr of rawLedger.terminal_results) {
         terminalResults.push({
@@ -298,6 +356,7 @@ export default api({
           claims_count: tr.claims_count ?? 0,
           output_truncated: tr.output_truncated ?? null,
           output_tokens: tr.output_tokens ?? null,
+          chunk_results: Array.isArray(tr.chunk_results) ? tr.chunk_results : null,
         });
       }
     }
@@ -305,6 +364,11 @@ export default api({
     // 7. Count claims with non-null scenario or basis
     const scenarioClaimCount = claims.filter(c => c.scenario !== null && c.scenario !== undefined).length;
     const basisClaimCount = claims.filter(c => c.basis !== null && c.basis !== undefined).length;
+
+    // 8. Count NONE_STATED claims (no usable coordinate — separate from unreconcilable)
+    const noCoordinateCount = claims.filter(c =>
+      c.scope_qualifier?.toUpperCase() === "NONE_STATED"
+    ).length;
 
     return {
       multi_claim_keys: multiClaimKeys,
@@ -315,12 +379,14 @@ export default api({
       basis_unconfirmed_count: basisUnconfirmedCount,
       scenario_excluded_count: scenarioExcluded,
       total_claims: claims.length,
+      total_collision_keys: totalCollisionKeyCount,
       operating_metric_claims: operatingMetricClaims,
       figures_loaded: figures.length,
       terminal_results: terminalResults,
       scenario_claim_count: scenarioClaimCount,
       basis_claim_count: basisClaimCount,
-      passes_collision_gate: multiClaimKeys.length < 10,
+      no_coordinate_count: noCoordinateCount,
+      passes_collision_gate: totalCollisionKeyCount < 10,
       passes_scenario_gate: scenarioExcluded > 0,
       error: reconciliationError,
     };
