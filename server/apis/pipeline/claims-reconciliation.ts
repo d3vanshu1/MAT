@@ -253,13 +253,15 @@ export interface NormalizedFigure {
   metric: string;         // Canonical metric family: "revenue", "ebitda", "gross_margin", etc.
   scope_qualifier: string; // Claims-vocabulary scope: "Total Group Revenue", "Adjusted EBITDA", etc.
   period: string;         // Normalized period string
+  basis: string | null;   // Measurement basis implied by the label mapping (null = not determinable)
 }
 
-/** Mapping rules: raw Excel label → {metric, scope_qualifier} in claims vocabulary */
+/** Mapping rules: raw Excel label → {metric, scope_qualifier, basis} in claims vocabulary */
 interface LabelMapping {
   pattern: RegExp;
   metric: string;
   scope_qualifier: string;
+  basis?: string;  // Measurement basis implied by this label (e.g. "OCF basis", "ARR")
 }
 
 const LABEL_MAPPINGS: LabelMapping[] = [
@@ -307,6 +309,7 @@ export function normalizeFigures(figures: Figure[]): NormalizedFigure[] {
           metric: mapping.metric,
           scope_qualifier: mapping.scope_qualifier,
           period: normalizePeriod(fig.period),
+          basis: mapping.basis ?? null,
         });
         mapped = true;
         break; // First matching pattern wins
@@ -437,7 +440,7 @@ function fuzzyPeriodLookup(
   // This handles edge cases where claim period didn't normalize the same way
   const results: NormalizedFigure[] = [];
   for (const [key, nfs] of index.entries()) {
-    const [km, ks, kp] = key.split("|");
+    const [km, ks, _kb, kp] = key.split("|");
     if (km === normalizedMetric && ks === normalizedScope && kp === normalizedPeriod) {
       results.push(...nfs);
     }
@@ -447,7 +450,7 @@ function fuzzyPeriodLookup(
   // Last resort: metric matches, period matches, scope is a substring match
   // (e.g., claim says "Adjusted EBITDA" but model normalized to "Cash EBITDA (Adjusted)")
   for (const [key, nfs] of index.entries()) {
-    const [km, ks, kp] = key.split("|");
+    const [km, ks, _kb2, kp] = key.split("|");
     if (km === normalizedMetric && kp === normalizedPeriod) {
       // Check if either scope contains the other
       if (ks.includes(normalizedScope) || normalizedScope.includes(ks)) {
@@ -473,6 +476,7 @@ function processMatch(
   nf: NormalizedFigure,
   figures: Figure[],
   findings: ReconciliationFinding[],
+  options?: { basisUnconfirmed?: boolean },
 ): MatchResult {
   const modelFig = nf.raw;
 
@@ -585,6 +589,28 @@ function processMatch(
   const severity: "critical" | "warning" = (deltaAbs >= CRITICAL_ABS_THRESHOLD || deltaPct >= CRITICAL_REL_THRESHOLD)
     ? "critical" : "warning";
 
+  // Basis-unconfirmed guard: a relaxed-basis match must never assert contradiction.
+  // Downgrade to scope_mismatch so it doesn't appear as a confirmed data_divergence.
+  if (options?.basisUnconfirmed) {
+    findings.push({
+      finding_kind: "scope_mismatch",
+      severity: "info",
+      title: `${claim.scope_qualifier} (${claim.period}): basis unconfirmed — model figure has no explicit basis`,
+      detail: `Claim carries basis "${claim.basis}" but model figure "${nf.raw.name}" has no confirmed basis. ` +
+        `Matched on relaxed coordinates (basis omitted). Delta not asserted as contradiction.`,
+      full_analysis: `[SCOPE_MISMATCH] Basis-relaxed match. Claim: "${claim.verbatim_snippet}" ` +
+        `(basis="${claim.basis}"). Model: "${nf.raw.name}" (no basis mapping). ` +
+        `Cannot confirm these measure the same thing.`,
+      severity_anchor: null,
+      source_docs: [claim.source_doc],
+      claim,
+      model_figure: nf.raw,
+      delta_abs: deltaAbs,
+      delta_pct: deltaPct,
+    });
+    return { kind: "scope_mismatch", finding: findings[findings.length - 1] };
+  }
+
   const sign = claimVal > modelVal ? "higher" : "lower";
   const deltaFormatted = deltaAbs >= 1_000_000
     ? `£${(deltaAbs / 1_000_000).toFixed(1)}m`
@@ -692,6 +718,8 @@ export interface SupersessionCandidate {
   claim_scope: string;
   claim_period: string;
   claim_source_doc: string;
+  claim_basis?: string | null;    // null for candidates predating the basis field
+  claim_scenario?: string | null; // null for candidates predating the scenario field
 }
 
 /**
@@ -723,12 +751,18 @@ export function validateSupersessionProof(
   }
 
   const claim = newFinding.claim;
-  const claimCoord = coordKey(claim.metric, claim.scope_qualifier, claim.period);
+  const claimCoord = coordKey(claim.metric, claim.scope_qualifier, claim.period, claim.basis ?? null, claim.scenario ?? null);
 
   // Corrective E3: Collect ONLY exact-match candidates; ignore non-matching entirely.
   const exactMatchIds = new Set<string>();
   for (const candidate of candidates) {
-    const candidateCoord = coordKey(candidate.claim_metric ?? "", candidate.claim_scope ?? "", candidate.claim_period ?? "");
+    const candidateCoord = coordKey(
+      candidate.claim_metric ?? "",
+      candidate.claim_scope ?? "",
+      candidate.claim_period ?? "",
+      candidate.claim_basis ?? null,
+      candidate.claim_scenario ?? null,
+    );
     const sourceMatch = claim.source_doc === candidate.claim_source_doc;
 
     if (claimCoord !== null && claimCoord === candidateCoord && sourceMatch) {
@@ -870,7 +904,7 @@ export async function runReconciliation(
     // Build lookup index: key = "metric|scope|basis|period" → NormalizedFigure[]
     const figureIndex = new Map<string, NormalizedFigure[]>();
     for (const nf of normalizedFigures) {
-      const key = coordKey(nf.metric, nf.scope_qualifier, nf.period);
+      const key = coordKey(nf.metric, nf.scope_qualifier, nf.period, nf.basis);
       if (key === null) continue; // should never happen for model figures
       if (!figureIndex.has(key)) figureIndex.set(key, []);
       figureIndex.get(key)!.push(nf);
@@ -878,9 +912,22 @@ export async function runReconciliation(
 
     // ----- Step 4: Coordinate-match each claim and compute delta -----
     for (const claim of reconcilableClaims) {
-      const key = coordKey(claim.metric, claim.scope_qualifier, claim.period);
+      const key = coordKey(claim.metric, claim.scope_qualifier, claim.period, claim.basis ?? null, claim.scenario ?? null);
       if (key === null) continue; // scenario claims excluded
-      const matches = figureIndex.get(key);
+      let matches = figureIndex.get(key) ?? null;
+      let basisUnconfirmed = false;
+
+      // Pass 2: if exact key (with basis) found nothing and claim carries a basis,
+      // retry without basis. A basis-relaxed match must never assert a contradiction.
+      if ((!matches || matches.length === 0) && claim.basis) {
+        const relaxedKey = coordKey(claim.metric, claim.scope_qualifier, claim.period, null, claim.scenario ?? null);
+        if (relaxedKey !== null) {
+          matches = figureIndex.get(relaxedKey) ?? null;
+          if (matches && matches.length > 0) {
+            basisUnconfirmed = true;
+          }
+        }
+      }
 
       if (!matches || matches.length === 0) {
         // Try fuzzy period matching (e.g., "FY Mar-26" vs "2026" or "Mar-26")
@@ -920,7 +967,7 @@ export async function runReconciliation(
 
       // Direct coordinate match found
       const nf = matches[0]; // Use first match (multiple only if duplicate periods)
-      const matchResult = processMatch(claim, nf, figures, findings);
+      const matchResult = processMatch(claim, nf, figures, findings, { basisUnconfirmed });
       if (matchResult.kind === "reconciled") reconciled_count++;
       else if (matchResult.kind === "within_tolerance") within_tolerance_count++;
       else if (matchResult.kind === "scope_mismatch") scope_mismatch_count++;
