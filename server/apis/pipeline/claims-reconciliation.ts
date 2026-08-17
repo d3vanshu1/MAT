@@ -25,6 +25,21 @@ import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { PipelineContext } from "./pipeline-config.js";
 
 // ---------------------------------------------------------------------------
+// UUID helper (cross-environment — avoids Node `crypto` import that Vite externalizes)
+// ---------------------------------------------------------------------------
+
+function generateUUID(): string {
+  if (typeof globalThis !== "undefined" && typeof (globalThis as any).crypto?.randomUUID === "function") {
+    return (globalThis as any).crypto.randomUUID() as string;
+  }
+  // Fallback: v4-like UUID from Math.random (sufficient for report IDs)
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -83,11 +98,42 @@ export interface ReconciliationResult {
   scope_mismatch_count: number;
   within_tolerance_count: number;
   cross_version_findings: number;
+  /** U7: Near-miss (same metric+period, different scope) count */
+  near_miss_count: number;
+  /** F1: Claims that hit an ambiguous multi-figure key (fail-closed, no assertion) */
+  ambiguous_reference_count: number;
   /** Internal error from LLM matching step (null if LLM succeeded or wasn't attempted) */
   matching_error?: string | null;
   /** Fix 20: Total supersession diagnostics emitted during this reconciliation.
    *  Corrective E2: No longer populated here — supersession moved to Stage 3.5. */
   supersession_diagnostics_count?: number;
+  /** U5: Stable pointer to persisted findings dump */
+  findings_report_id: string;
+  /** U5: True if findings were truncated to meet 3MB persistence guard */
+  findings_truncated?: boolean;
+  /** U6: Coverage denominator breakdown */
+  coverage: CoverageDenominator;
+}
+
+/** U6: Coverage denominator breakdown */
+export interface CoverageDenominator {
+  raw_claims: number;
+  distinct_claims: number;
+  scenario_excluded: number;
+  /** Informational: claims with NONE_STATED scope (routed to near-miss, NOT deducted from adjudicable) */
+  no_scope_count: number;
+  /** Claims with NONE_STATED scope that found a near-miss candidate */
+  no_scope_near_miss_eligible: number;
+  /** Claims with UNDATED period (excluded from adjudicable) */
+  no_period_count: number;
+  /** F1: Claims hitting ambiguous multi-figure key (in adjudicable, not in matched) */
+  ambiguous_reference_count: number;
+  adjudicable: number;
+  matched: number;
+  near_miss: number;
+  unmatched: number;
+  coverage_pct: number;
+  coverage_with_near_miss_pct: number;
 }
 
 /** LLM match proposal for a single claim */
@@ -844,7 +890,15 @@ export async function runReconciliation(
   let unreconcilable_count = 0;
   let scope_mismatch_count = 0;
   let within_tolerance_count = 0;
+  let near_miss_count = 0;
+  let ambiguous_reference_count = 0;
   let matching_error: string | null = null;
+
+  // --- U6: Coverage denominator tracking ---
+  let scenario_excluded = 0;
+  let no_coordinate_no_scope = 0;
+  let no_coordinate_no_period = 0;
+  let no_scope_near_miss_eligible = 0;
 
   // ----- Step 1: Filter to operating_metric claims only (reconcilable) -----
   const reconcilableClaims = ledger.claims.filter(c => c.claim_category === "operating_metric");
@@ -912,12 +966,88 @@ export async function runReconciliation(
 
     // ----- Step 4: Coordinate-match each claim and compute delta -----
     for (const claim of reconcilableClaims) {
+      // --- U3/F2: Exclude UNDATED period; route NONE_STATED scope to near-miss ---
+      const normalizedClaimPeriod = normalizePeriod(claim.period);
+      const isUndatedPeriod = claim.period === "UNDATED" || normalizedClaimPeriod === "undated";
+      const isNoScope = claim.scope_qualifier === "NONE_STATED";
+      if (isUndatedPeriod) { no_coordinate_no_period++; continue; }
+
+      // F2: NONE_STATED scope — skip exact/fuzzy matching, route directly to U7 near-miss
+      if (isNoScope) {
+        no_coordinate_no_scope++;
+        no_scope_near_miss_eligible++;
+        // Jump to near-miss: search all figures at same metric+period, any scope
+        const nearMissCandidates: Array<{ nf: NormalizedFigure; scopeDelta: string }> = [];
+        const normalizedMetric = claim.metric.toLowerCase().trim();
+        for (const [fkey, nfs] of figureIndex.entries()) {
+          const [fm, _fs, _fb, fp] = fkey.split("|");
+          if (fm === normalizedMetric && fp === normalizedClaimPeriod) {
+            for (const nf of nfs) {
+              nearMissCandidates.push({ nf, scopeDelta: nf.scope_qualifier });
+            }
+          }
+        }
+
+        if (nearMissCandidates.length > 0) {
+          const claimVal = normalizeClaimValue(claim);
+          const sorted = nearMissCandidates.sort((a, b) =>
+            Math.abs(claimVal - a.nf.raw.value) - Math.abs(claimVal - b.nf.raw.value)
+          );
+          const capped = sorted.slice(0, 3);
+          const suppressedCount = sorted.length - capped.length;
+
+          for (const { nf, scopeDelta } of capped) {
+            const modelFig = nf.raw;
+            const deltaAbs = Math.abs(claimVal - modelFig.value);
+            const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
+            findings.push({
+              finding_kind: "scope_mismatch",
+              severity: "info",
+              title: `NONE_STATED (${claim.period}): near-miss — model has "${scopeDelta}"`,
+              detail: `Memo cites ${claim.metric} (no scope): ${formatValue(claim)}. ` +
+                `Model has "${nf.raw.name}" (scope: ${scopeDelta}) at ${nf.raw.period}: ` +
+                `£${(modelFig.value / 1_000_000).toFixed(1)}m. Delta: £${(deltaAbs / 1_000_000).toFixed(1)}m (${(deltaPct * 100).toFixed(1)}%).` +
+                (suppressedCount > 0 ? ` [${suppressedCount} additional candidate(s) suppressed]` : ""),
+              full_analysis: `[NEAR_MISS:NO_SCOPE] Claim: "${claim.verbatim_snippet}" (NONE_STATED scope). ` +
+                `Routed to near-miss. Model has figure at same metric+period: "${scopeDelta}". ` +
+                `Not confirmed to be the same measure — no contradiction asserted.`,
+              severity_anchor: null,
+              source_docs: [claim.source_doc],
+              claim,
+              model_figure: modelFig,
+              delta_abs: deltaAbs,
+              delta_pct: deltaPct,
+            });
+          }
+          near_miss_count++;
+        } else {
+          // No model figure at this metric+period at all
+          findings.push({
+            finding_kind: "unreconcilable",
+            severity: "info",
+            title: `NONE_STATED (${claim.period}): no model counterpart for metric "${claim.metric}"`,
+            detail: `Memo cites ${claim.metric} (no scope): ${formatValue(claim)} (${claim.period}). ` +
+              `No matching metric found in the operating model at any scope.`,
+            full_analysis: `[UNRECONCILABLE:NO_SCOPE] Claim: "${claim.verbatim_snippet}" (NONE_STATED scope). ` +
+              `No figure found for metric "${claim.metric}" at period "${claim.period}" at any scope.`,
+            severity_anchor: null,
+            source_docs: [claim.source_doc],
+            claim,
+            model_figure: null,
+            delta_abs: null,
+            delta_pct: null,
+          });
+          unreconcilable_count++;
+        }
+        continue;
+      }
+
       const key = coordKey(claim.metric, claim.scope_qualifier, claim.period, claim.basis ?? null, claim.scenario ?? null);
-      if (key === null) continue; // scenario claims excluded
+      if (key === null) { scenario_excluded++; continue; } // scenario claims excluded
       let matches = figureIndex.get(key) ?? null;
       let basisUnconfirmed = false;
 
-      // Pass 2: if exact key (with basis) found nothing and claim carries a basis,
+      // Pass 2a: if exact key (with basis) found nothing and CLAIM carries a basis,
       // retry without basis. A basis-relaxed match must never assert a contradiction.
       if ((!matches || matches.length === 0) && claim.basis) {
         const relaxedKey = coordKey(claim.metric, claim.scope_qualifier, claim.period, null, claim.scenario ?? null);
@@ -929,11 +1059,77 @@ export async function runReconciliation(
         }
       }
 
+      // U4 — Pass 2b: if exact key found nothing and any FIGURE at same metric+scope+period
+      // carries a basis that the claim does not, retry by matching that figure without basis.
+      // This handles the case where the model label implies a basis the memo omits.
+      if ((!matches || matches.length === 0) && !claim.basis) {
+        // Look for any figure at same metric+scope+period with any basis
+        const normalizedMetric = claim.metric.toLowerCase().trim();
+        const normalizedScope = claim.scope_qualifier.toLowerCase().trim();
+        for (const [fkey, nfs] of figureIndex.entries()) {
+          const [fm, fs, fb, fp] = fkey.split("|");
+          if (fm === normalizedMetric && fs === normalizedScope && fp === normalizedClaimPeriod && fb !== "") {
+            matches = nfs;
+            basisUnconfirmed = true;
+            break;
+          }
+        }
+      }
+
       if (!matches || matches.length === 0) {
         // Try fuzzy period matching (e.g., "FY Mar-26" vs "2026" or "Mar-26")
         const fuzzyMatches = fuzzyPeriodLookup(figureIndex, claim.metric, claim.scope_qualifier, claim.period);
 
         if (fuzzyMatches.length === 0) {
+          // --- U7: Near-miss pass — same metric + same period, any scope ---
+          const nearMissCandidates: Array<{ nf: NormalizedFigure; scopeDelta: string }> = [];
+          for (const [fkey, nfs] of figureIndex.entries()) {
+            const [fm, _fs, _fb, fp] = fkey.split("|");
+            if (fm === claim.metric.toLowerCase().trim() && fp === normalizedClaimPeriod) {
+              for (const nf of nfs) {
+                if (nf.scope_qualifier.toLowerCase() !== claim.scope_qualifier.toLowerCase()) {
+                  nearMissCandidates.push({ nf, scopeDelta: nf.scope_qualifier });
+                }
+              }
+            }
+          }
+
+          if (nearMissCandidates.length > 0) {
+            // Order by absolute delta ascending, cap at 3
+            const claimVal = normalizeClaimValue(claim);
+            const sorted = nearMissCandidates.sort((a, b) =>
+              Math.abs(claimVal - a.nf.raw.value) - Math.abs(claimVal - b.nf.raw.value)
+            );
+            const capped = sorted.slice(0, 3);
+            const suppressedCount = sorted.length - capped.length;
+
+            for (const { nf, scopeDelta } of capped) {
+              const modelFig = nf.raw;
+              const deltaAbs = Math.abs(claimVal - modelFig.value);
+              const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
+              findings.push({
+                finding_kind: "scope_mismatch",
+                severity: "info",
+                title: `${claim.scope_qualifier} (${claim.period}): near-miss — model has "${scopeDelta}"`,
+                detail: `Memo cites ${claim.scope_qualifier}: ${formatValue(claim)}. ` +
+                  `Model has "${nf.raw.name}" (scope: ${scopeDelta}) at ${nf.raw.period}: ` +
+                  `£${(modelFig.value / 1_000_000).toFixed(1)}m. Delta: £${(deltaAbs / 1_000_000).toFixed(1)}m (${(deltaPct * 100).toFixed(1)}%).` +
+                  (suppressedCount > 0 ? ` [${suppressedCount} additional candidate(s) suppressed]` : ""),
+                full_analysis: `[NEAR_MISS] Claim: "${claim.verbatim_snippet}" (${claim.scope_qualifier}). ` +
+                  `Model has figure at same metric+period but different scope: "${scopeDelta}". ` +
+                  `Not confirmed to be the same measure — no contradiction asserted.`,
+                severity_anchor: null,
+                source_docs: [claim.source_doc],
+                claim,
+                model_figure: modelFig,
+                delta_abs: deltaAbs,
+                delta_pct: deltaPct,
+              });
+            }
+            near_miss_count++;
+            continue;
+          }
+
           // No model counterpart for this coordinate
           findings.push({
             finding_kind: "unreconcilable",
@@ -965,8 +1161,42 @@ export async function runReconciliation(
         continue;
       }
 
-      // Direct coordinate match found
-      const nf = matches[0]; // Use first match (multiple only if duplicate periods)
+      // --- F1: Ambiguity guard — if multiple figures at this key disagree, fail closed ---
+      if (matches.length > 1) {
+        const values = matches.map(m => m.raw.value);
+        const maxVal = Math.max(...values);
+        const minVal = Math.min(...values);
+        const spread = Math.abs(maxVal - minVal);
+        const avgVal = (maxVal + minVal) / 2;
+        const relSpread = Math.abs(avgVal) > 1000 ? spread / Math.abs(avgVal) : 0;
+        // De minimis: £100k absolute AND 0.5% relative — same figure, rounding only
+        if (spread > 100_000 || relSpread > 0.005) {
+          findings.push({
+            finding_kind: "unreconcilable",
+            severity: "info",
+            title: `${claim.scope_qualifier} (${claim.period}): ambiguous model reference — ${matches.length} figures at same coordinate`,
+            detail: `Memo cites ${claim.scope_qualifier}: ${formatValue(claim)} (${claim.period}). ` +
+              `Model has ${matches.length} figures at this coordinate with differing values: ` +
+              matches.map(m => `"${m.raw.name}" = £${(m.raw.value / 1_000_000).toFixed(1)}m [${m.raw.source_cell}]`).join("; ") +
+              `. Spread: £${(spread / 1_000_000).toFixed(1)}m (${(relSpread * 100).toFixed(1)}%). No assertion possible.`,
+            full_analysis: `[AMBIGUOUS_REFERENCE] Claim: "${claim.verbatim_snippet}" (${claim.scope_qualifier}). ` +
+              `Coordinate key "${key}" resolves to ${matches.length} model figures with materially different values. ` +
+              `Cannot determine which is the correct reference. Figures: ` +
+              matches.map(m => `${m.raw.name} (${m.raw.source_sheet}) = ${m.raw.value}`).join("; ") + ".",
+            severity_anchor: null,
+            source_docs: [claim.source_doc],
+            claim,
+            model_figure: null,
+            delta_abs: null,
+            delta_pct: null,
+          });
+          ambiguous_reference_count++;
+          continue;
+        }
+      }
+
+      // Direct coordinate match found — use first (all agree within de minimis)
+      const nf = matches[0];
       const matchResult = processMatch(claim, nf, figures, findings, { basisUnconfirmed });
       if (matchResult.kind === "reconciled") reconciled_count++;
       else if (matchResult.kind === "within_tolerance") within_tolerance_count++;
@@ -1016,21 +1246,118 @@ export async function runReconciliation(
   // current-run finding IDs are available as deletion targets.
   // Prior-run IDs must NEVER be used as targets since they are unstable across runs.
 
+  // ----- U5: Findings dump — generate stable report ID & apply 3MB guard -----
+  const findings_report_id = generateUUID();
+  const MAX_PAYLOAD_BYTES = 3 * 1024 * 1024; // 3MB
+  let findings_truncated = false;
+  const payloadEstimate = JSON.stringify(findings).length;
+  if (payloadEstimate > MAX_PAYLOAD_BYTES) {
+    // Truncate findings to fit within 3MB — keep the first N findings
+    // that fit under the cap. Priority: critical > warning > info.
+    const sorted = [...findings].sort((a, b) => {
+      const sevOrder = { critical: 0, warning: 1, info: 2 };
+      return (sevOrder[a.severity] ?? 3) - (sevOrder[b.severity] ?? 3);
+    });
+    let accum = 0;
+    let cutoff = sorted.length;
+    for (let i = 0; i < sorted.length; i++) {
+      accum += JSON.stringify(sorted[i]).length + 50; // overhead per entry
+      if (accum > MAX_PAYLOAD_BYTES * 0.9) { // leave 10% headroom for envelope
+        cutoff = i;
+        break;
+      }
+    }
+    findings.length = 0;
+    findings.push(...sorted.slice(0, cutoff));
+    findings_truncated = true;
+    console.log(
+      `[Reconciliation] U5: Findings truncated from ${sorted.length} to ${cutoff} ` +
+      `to fit 3MB guard (estimated ${(payloadEstimate / 1_048_576).toFixed(1)}MB)`
+    );
+  }
+
+  // ----- F3: Persist findings to own table (non-fatal) -----
+  try {
+    await ctx.integrations.db.execute(
+      `CREATE TABLE IF NOT EXISTS reconciliation_findings (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         report_id text NOT NULL,
+         deal_id text,
+         findings jsonb NOT NULL,
+         findings_count integer NOT NULL,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )`,
+      [],
+      { label: "Ensure reconciliation_findings table exists" }
+    );
+    await ctx.integrations.db.execute(
+      `CREATE INDEX IF NOT EXISTS idx_reconciliation_findings_report_id
+       ON reconciliation_findings(report_id)`,
+      [],
+      { label: "Ensure report_id index" }
+    );
+    await ctx.integrations.db.execute(
+      `INSERT INTO reconciliation_findings (report_id, deal_id, findings, findings_count)
+       VALUES ($1, $2, $3::jsonb, $4)`,
+      [findings_report_id, null, JSON.stringify(findings), findings.length],
+      { label: "Persist reconciliation findings" }
+    );
+  } catch (err) {
+    console.warn(
+      `[Reconciliation] F3: Failed to persist findings (non-fatal): ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+
+  // ----- U6: Coverage denominator math -----
+  // Adjudicable = reconcilableClaims − scenario-excluded − UNDATED period
+  // NONE_STATED scope claims ARE adjudicable (routed to near-miss), NOT deducted.
+  const distinctClaims = new Set(
+    reconcilableClaims.map(c =>
+      coordKey(c.metric, c.scope_qualifier, c.period, c.basis ?? null, c.scenario ?? null)
+    )
+  ).size;
+  const adjudicable = reconcilableClaims.length - scenario_excluded - no_coordinate_no_period;
+  const matched = reconciled_count + within_tolerance_count;
+  const coverage_pct = adjudicable > 0 ? matched / adjudicable : 0;
+  const coverage_with_near_miss_pct = adjudicable > 0 ? (matched + near_miss_count) / adjudicable : 0;
+
   console.log(
     `[Reconciliation] Complete: ${findings.length} findings ` +
     `(${reconciled_count} reconciled, ${within_tolerance_count} within tolerance, ` +
     `${unreconcilable_count} unreconcilable, ${scope_mismatch_count} scope mismatches, ` +
-    `${cross_version_findings} cross-version). Elapsed: ${Math.round((Date.now() - phaseStart) / 1000)}s`
+    `${near_miss_count} near-misses, ${ambiguous_reference_count} ambiguous, ${cross_version_findings} cross-version). ` +
+    `Coverage: ${matched}/${adjudicable} = ${(coverage_pct * 100).toFixed(1)}% ` +
+    `(with near-miss: ${(coverage_with_near_miss_pct * 100).toFixed(1)}%). ` +
+    `Elapsed: ${Math.round((Date.now() - phaseStart) / 1000)}s`
   );
 
   return {
     findings,
+    findings_report_id,
+    findings_truncated,
     reconciled_count,
     unreconcilable_count,
     scope_mismatch_count,
     within_tolerance_count,
     cross_version_findings,
+    near_miss_count,
+    ambiguous_reference_count,
     matching_error,
+    coverage: {
+      raw_claims: ledger.claims.length,
+      distinct_claims: distinctClaims,
+      scenario_excluded,
+      no_scope_count: no_coordinate_no_scope,
+      no_scope_near_miss_eligible,
+      no_period_count: no_coordinate_no_period,
+      ambiguous_reference_count,
+      adjudicable,
+      matched,
+      near_miss: near_miss_count,
+      unmatched: adjudicable - matched - near_miss_count,
+      coverage_pct,
+      coverage_with_near_miss_pct,
+    },
   };
 }
 

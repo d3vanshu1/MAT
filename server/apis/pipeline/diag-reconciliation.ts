@@ -177,22 +177,60 @@ export default api({
         console.warn(`[DiagReconciliation] Reconciliation threw: ${msg}`);
         reconciliation = {
           findings: [],
+          findings_report_id: "error-stub",
+          findings_truncated: false,
           reconciled_count: 0,
           unreconcilable_count: ledger.extraction_metadata.operating_metric_claims,
           scope_mismatch_count: 0,
           within_tolerance_count: 0,
           cross_version_findings: 0,
+          near_miss_count: 0,
+          ambiguous_reference_count: 0,
+          coverage: {
+            raw_claims: ledger.claims.length,
+            distinct_claims: 0,
+            scenario_excluded: 0,
+            no_scope_count: 0,
+            no_scope_near_miss_eligible: 0,
+            no_period_count: 0,
+            ambiguous_reference_count: 0,
+            adjudicable: 0,
+            matched: 0,
+            near_miss: 0,
+            unmatched: 0,
+            coverage_pct: 0,
+            coverage_with_near_miss_pct: 0,
+          },
         };
       }
     } else {
       // No figures — everything is unreconcilable
       reconciliation = {
         findings: [],
+        findings_report_id: "no-figures-stub",
+        findings_truncated: false,
         reconciled_count: 0,
         unreconcilable_count: ledger.extraction_metadata.operating_metric_claims,
         scope_mismatch_count: 0,
         within_tolerance_count: 0,
         cross_version_findings: 0,
+        near_miss_count: 0,
+        ambiguous_reference_count: 0,
+        coverage: {
+          raw_claims: ledger.claims.length,
+          distinct_claims: 0,
+          scenario_excluded: 0,
+          no_scope_count: 0,
+          no_scope_near_miss_eligible: 0,
+          no_period_count: 0,
+          ambiguous_reference_count: 0,
+          adjudicable: 0,
+          matched: 0,
+          near_miss: 0,
+          unmatched: 0,
+          coverage_pct: 0,
+          coverage_with_near_miss_pct: 0,
+        },
       };
       console.warn(`[DiagReconciliation] No figures available — all claims unreconcilable`);
     }
