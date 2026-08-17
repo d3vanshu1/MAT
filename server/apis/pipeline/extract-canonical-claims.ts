@@ -139,6 +139,8 @@ export function buildCanonicalLedgerFromExtractions(params: {
     period: string;
     value: number;
     unit: string;
+    basis: string | null;
+    scenario: string | null;
     basis_note: string;
     source_doc: string;
     source_page: string | null;

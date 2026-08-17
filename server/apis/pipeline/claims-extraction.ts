@@ -76,6 +76,15 @@ export const ClaimSchema = z.object({
   source_doc: z.string(),
   source_page: z.string().nullable(),
   verbatim_snippet: z.string().describe("The EXACT memo text containing this claim — REQUIRED for auditability"),
+  source_locations: z.array(z.object({
+    source_page: z.string(),
+    verbatim_snippet: z.string(),
+  })).nullable().default(null).describe(
+    "Additional locations where this same figure appears in the memo. " +
+    "The primary location stays in source_page + verbatim_snippet at top level. " +
+    "This array captures EXTRA occurrences (same metric, scope, period, value, unit) from other sections. " +
+    "Null when the figure appears only once."
+  ),
   claim_category: z.enum([
     "operating_metric",       // Revenue, EBITDA, margins, costs — reconcilable against operating model
     "deal_mechanics",         // M&A pacing, deal-sizing multiples, IRR targets, exit assumptions
@@ -155,6 +164,66 @@ export interface ClaimsLedger {
    * backward compatibility. Only populated after conversion step completes.
    */
   canonical_claims?: CanonicalIcClaim[];
+}
+
+// ---------------------------------------------------------------------------
+// B3: Code-level dedup — collapse on (metric, scope_qualifier, basis, period, value, unit)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deduplicates claims by coordinate identity: (metric, scope_qualifier, basis, period, value, unit).
+ * When duplicates are found, the first occurrence is kept as-is and subsequent occurrences'
+ * source locations are merged into the first's source_locations array.
+ *
+ * This is a BACKSTOP for the prompt-level dedup instruction (B2).
+ * DO NOT confuse with the claim_id dedup in buildCanonicalLedger — that one
+ * keys on (exact_claim_text, page) and is an idempotency guard for re-extraction.
+ */
+function deduplicateClaimsByCoordinate(claims: Claim[]): Claim[] {
+  const keyMap = new Map<string, Claim>();
+
+  for (const claim of claims) {
+    // Key: metric|scope_qualifier|basis|period|value|unit (all lowercased/normalized)
+    const key = [
+      claim.metric,
+      claim.scope_qualifier.toLowerCase().trim(),
+      (claim.basis ?? "").toLowerCase().trim(),
+      claim.period.toLowerCase().trim(),
+      String(claim.value),
+      claim.unit,
+    ].join("|");
+
+    const existing = keyMap.get(key);
+    if (!existing) {
+      keyMap.set(key, claim);
+    } else {
+      // Merge this claim's location into existing's source_locations
+      const newLocation = {
+        source_page: claim.source_page ?? claim.source_doc,
+        verbatim_snippet: claim.verbatim_snippet,
+      };
+
+      if (!existing.source_locations) {
+        existing.source_locations = [newLocation];
+      } else {
+        existing.source_locations.push(newLocation);
+      }
+
+      // Also merge any source_locations the duplicate itself carried
+      if (claim.source_locations) {
+        existing.source_locations.push(...claim.source_locations);
+      }
+    }
+  }
+
+  const deduplicated = Array.from(keyMap.values());
+  if (deduplicated.length < claims.length) {
+    console.log(
+      `[ClaimsExtraction][B3-dedup] Collapsed ${claims.length} → ${deduplicated.length} claims ` +
+      `(${claims.length - deduplicated.length} coordinate-level duplicates merged)`
+    );
+  }
+  return deduplicated;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,16 +468,24 @@ NEVER put the parenthetical into the period field.
 
 ## Sensitivity Grid Cells — DO NOT EXTRACT
 
-Sensitivity tables show computed outputs (IRR, MoM, EBITDA multiples) for many scenario cells.
-Do NOT extract these computed grid cells — they are derived outputs, not stated claims.
+Sensitivity tables show computed outputs (IRR, MoM, EBITDA, EV) for many scenario cells.
+These are arithmetic the deal team performed — no reference document can contradict them.
+Do NOT extract these computed grid cells.
 
-Only extract from sensitivity tables:
-- The INPUT ASSUMPTIONS (e.g. "organic CAGR range 8–14%", "exit multiple 12–16x")
-- The LABELLED BASE CASE output row (the single row the memo highlights as the central case)
+### What to skip (examples):
+- Entry multiple at each scenario cell ("11.1x at £57m", "12.2x at £54m")
+- IRR/MoM at each exit-multiple × CAGR intersection
+- FY31 EBITDA under each organic CAGR assumption
+- Any value that appears inside a matrix body (row × column output)
 
-Do NOT extract:
-- Each individual cell of a sensitivity matrix (e.g. "IRR = 23.4% at 12x exit / 10% CAGR")
-- Interpolated values between labelled cases
+### What to extract from sensitivity sections:
+- The AXIS ASSUMPTIONS themselves: "organic CAGR range tested 8–14%", "exit multiples tested 11–15x", "leverage: 4.5–5.5x"
+- Entry multiple, exit multiple, and leverage stated as THE DEAL's chosen assumption (not each scenario variant)
+- The single LABELLED BASE/CENTRAL CASE if the memo explicitly highlights one row as "our base case"
+
+### Self-check for sensitivity context:
+If you are about to emit a claim and the source text is inside a table with BOTH row headers (e.g. CAGR %) AND column headers (e.g. exit multiple), it is a sensitivity grid cell — SKIP IT.
+If the same metric appears 4+ times with different values in the same section, you are likely extracting grid cells — STOP and only take the axis labels and the one highlighted case.
 
 ## Extraction Rules
 
@@ -423,6 +500,17 @@ Do NOT extract:
 9. For growth rates (CAGRs), use the scope of what's growing: "Organic Cash EBITDA" CAGR → scope = "Organic Cash EBITDA", NOT "Total Group Revenue".
 10. scope_qualifier must NEVER be a metric enum value (e.g. never "other_financial", "net_debt", "cash_flow"). If no qualifier is stated, emit "NONE_STATED".
 11. Split compound period strings: temporal part → period, methodology → basis, assumption → scenario.
+
+## Deduplication: Repeated Figures → One Claim with source_locations
+
+IC memos repeat key figures across sections (Executive Summary, Scorecard, Deal Overview). When the SAME figure appears in multiple places with the same metric, scope, period, value, and unit — emit ONE claim with the primary location in source_page/verbatim_snippet and additional locations in source_locations[].
+
+Example: "£192m Total Group Revenue FY Mar-26" appears in Overview (p2), Scorecard (p5), and Exec Summary (p8). Emit ONE claim:
+- source_page: "Overview (p2)"  [first occurrence]
+- verbatim_snippet: "Total Group Revenue of £192m..."
+- source_locations: [{"source_page": "Scorecard (p5)", "verbatim_snippet": "Revenue: £192m"}, {"source_page": "Exec Summary (p8)", "verbatim_snippet": "...generating £192m revenue..."}]
+
+This saves output tokens and avoids duplicate reconciliation. When in doubt about whether two mentions are the same claim, check: same metric + same scope + same period + same value + same unit → merge.
 
 ## Output Format
 
@@ -439,6 +527,7 @@ Return a JSON array of claim objects. Each claim:
   "source_doc": "<filename>",
   "source_page": "<page/section reference or null>",
   "verbatim_snippet": "<exact text from the memo>",
+  "source_locations": [{"source_page": "...", "verbatim_snippet": "..."}] or null,
   "claim_category": "operating_metric" | "deal_mechanics" | "valuation_structuring" | "returns_projection" | "cross_reference"
 }
 
@@ -760,8 +849,17 @@ export async function runClaimsExtraction(
 
   // --- MERGE: Combine retained (prior invocations) + new (this invocation) ---
   // CRITICAL: Retained claims are NEVER deleted or reset.
-  const allClaims = [...retainedClaims, ...newClaims];
+  const rawAllClaims = [...retainedClaims, ...newClaims];
   const allTerminals = [...retainedTerminals, ...newTerminals];
+
+  // --- B3: Code-level dedup on (metric, scope_qualifier, basis, period, value, unit) ---
+  // Merges source_locations when the same figure is extracted multiple times.
+  // This is a BACKSTOP for the prompt-level dedup (B2). Both are needed:
+  //   - Prompt-level saves output tokens by not emitting duplicates
+  //   - Code-level catches residual duplicates the model still emits
+  // DO NOT conflate with the claim_id dedup at line ~865 (buildCanonicalLedger),
+  // which keys on exact_text + page and is an idempotency guard.
+  const allClaims = deduplicateClaimsByCoordinate(rawAllClaims);
 
   const docsProcessed = allTerminals.filter(r => r.status !== "pending").length;
   const pendingCount = allTerminals.filter(r => r.status === "pending").length;

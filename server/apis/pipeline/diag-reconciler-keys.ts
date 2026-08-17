@@ -78,6 +78,17 @@ export default api({
     total_claims: z.number(),
     operating_metric_claims: z.number(),
     figures_loaded: z.number(),
+    // Terminal results per memo (output_truncated, output_tokens)
+    terminal_results: z.array(z.object({
+      file_name: z.string(),
+      status: z.string(),
+      claims_count: z.number(),
+      output_truncated: z.boolean().nullable(),
+      output_tokens: z.number().nullable(),
+    })),
+    // Claims with non-null scenario or basis
+    scenario_claim_count: z.number(),
+    basis_claim_count: z.number(),
     // Pass criteria
     passes_collision_gate: z.boolean(), // < 10 multi-claim keys
     passes_scenario_gate: z.boolean(),  // at least 1 scenario exclusion (once ledger has scenarios)
@@ -107,6 +118,9 @@ export default api({
         total_claims: 0,
         operating_metric_claims: 0,
         figures_loaded: 0,
+        terminal_results: [],
+        scenario_claim_count: 0,
+        basis_claim_count: 0,
         passes_collision_gate: true,
         passes_scenario_gate: false,
         error: "No claims found in diag_claims_ledger for this deal",
@@ -274,6 +288,24 @@ export default api({
 
     const operatingMetricClaims = claims.filter(c => c.claim_category === "operating_metric").length;
 
+    // 6. Extract terminal results from the ledger
+    const terminalResults: Array<{ file_name: string; status: string; claims_count: number; output_truncated: boolean | null; output_tokens: number | null }> = [];
+    if (Array.isArray(rawLedger.terminal_results)) {
+      for (const tr of rawLedger.terminal_results) {
+        terminalResults.push({
+          file_name: tr.file_name ?? "unknown",
+          status: tr.status ?? "unknown",
+          claims_count: tr.claims_count ?? 0,
+          output_truncated: tr.output_truncated ?? null,
+          output_tokens: tr.output_tokens ?? null,
+        });
+      }
+    }
+
+    // 7. Count claims with non-null scenario or basis
+    const scenarioClaimCount = claims.filter(c => c.scenario !== null && c.scenario !== undefined).length;
+    const basisClaimCount = claims.filter(c => c.basis !== null && c.basis !== undefined).length;
+
     return {
       multi_claim_keys: multiClaimKeys,
       reconciled_count,
@@ -285,6 +317,9 @@ export default api({
       total_claims: claims.length,
       operating_metric_claims: operatingMetricClaims,
       figures_loaded: figures.length,
+      terminal_results: terminalResults,
+      scenario_claim_count: scenarioClaimCount,
+      basis_claim_count: basisClaimCount,
       passes_collision_gate: multiClaimKeys.length < 10,
       passes_scenario_gate: scenarioExcluded > 0,
       error: reconciliationError,

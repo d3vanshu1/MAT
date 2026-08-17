@@ -579,6 +579,8 @@ export function fromLegacyClaim(params: {
     period: string;
     value: number;
     unit: string;
+    basis: string | null;
+    scenario: string | null;
     basis_note: string;
     source_doc: string;
     source_page: string | null;
@@ -627,7 +629,7 @@ export function fromLegacyClaim(params: {
     currency,
     scale: deriveScale(legacyClaim.unit),
     actual_forecast_status: actualForecast,
-    accounting_basis: deriveAccountingBasis(legacyClaim.scope_qualifier),
+    accounting_basis: legacyClaim.basis ?? deriveAccountingBasis(legacyClaim.scope_qualifier),
     stated_value: legacyClaim.value,
     source_validation: validation,
   });
