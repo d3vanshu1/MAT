@@ -149,6 +149,8 @@ export interface ChunkResult {
   elapsed_ms: number;
   /** True when 0 claims extracted despite >500 output tokens — indicates silent parse loss */
   parse_recovered_empty?: boolean;
+  /** True when this chunk was truncated and qualifies for subdivision but subdivision was deferred */
+  needs_subdivide?: boolean;
 }
 
 export interface ClaimsLedger {
@@ -604,12 +606,32 @@ export interface ClaimsExtractionOptions {
    */
   chunkCursor?: Record<string, number[]>;
   /**
-   * Called after each chunk completes extraction. The harness uses this to
-   * persist incremental progress so timeouts lose at most one chunk.
-   * Receives the memoId, completed chunk index, claims from that chunk,
-   * and the running ChunkResult.
+   * Called after each chunk completes extraction (post-subdivide). The harness
+   * uses this to persist the FINAL per-chunk claims so reconstruction works.
+   * Fires only after adaptive subdivide has replaced truncated results.
    */
   onChunkComplete?: (event: ChunkCompleteEvent) => Promise<void>;
+  /**
+   * Called immediately when a chunk's LLM call returns (pre-subdivide).
+   * Used for cursor-only progress persistence. Does NOT include claims —
+   * those are in onChunkComplete which fires post-subdivide.
+   */
+  onChunkProgress?: (memoId: string, chunkIndex: number) => Promise<void>;
+  /**
+   * When true, truncated chunks are NOT subdivided inline. Instead, they are
+   * emitted via onChunkComplete with output_truncated=true and
+   * needs_subdivide=true on the ChunkResult. The caller persists them and
+   * handles subdivision on the next invocation (deferred pattern).
+   *
+   * When false (default), the inline subdivide loop runs immediately.
+   */
+  deferSubdivide?: boolean;
+  /**
+   * Map of chunk indices that need deferred subdivision (from a prior invocation).
+   * memoId → array of {parentIdx, charStart, charEnd}. When present, these are
+   * processed as pre-split sub-chunks (2 halves each) instead of full chunks.
+   */
+  subdivideQueue?: Record<string, Array<{ parentIdx: number; charStart: number; charEnd: number }>>;
 }
 
 export interface ChunkCompleteEvent {
@@ -753,8 +775,93 @@ export async function runClaimsExtraction(
     let totalOutputTokens = 0;
     let anyTruncated = false;
 
-    // Build chunk jobs for the worker pool
-    const chunkJobs: WorkerPoolJob<{ claims: Claim[]; result: ChunkResult }>[] = pendingChunks.map((chunk) => ({
+    // --- Deferred subdivide queue: process previously-truncated chunks as pre-split sub-chunks ---
+    const subdivideQueue = options?.subdivideQueue?.[memo.id] ?? [];
+    const subdivideParentIndices = new Set(subdivideQueue.map(q => q.parentIdx));
+
+    // Filter out subdivide-queued chunks from normal pending (they'll be processed as sub-chunks)
+    const normalPendingChunks = pendingChunks.filter(c => !subdivideParentIndices.has(c.chunkIndex));
+
+    if (subdivideQueue.length > 0) {
+      console.log(
+        `[ClaimsExtraction] "${memo.file_name}": ${subdivideQueue.length} chunk(s) queued for deferred subdivide ` +
+        `(indices: [${[...subdivideParentIndices].join(",")}])`
+      );
+    }
+
+    // Build sub-chunk jobs for queued subdivide entries
+    const subdivideJobs: WorkerPoolJob<{ claims: Claim[]; result: ChunkResult }>[] = subdivideQueue.flatMap(({ parentIdx, charStart, charEnd }) => {
+      const halfWidth = Math.floor((charEnd - charStart) / 2);
+      const midpoint = charStart + halfWidth;
+      const subChunks = [
+        { start: charStart, end: midpoint, subPart: 1 },
+        { start: midpoint, end: charEnd, subPart: 2 },
+      ];
+
+      return subChunks.map(({ start, end, subPart }) => ({
+        id: `${memo.id}:${parentIdx}:sub${subPart}`,
+        label: `${memo.file_name} chunk ${parentIdx + 1} sub ${subPart}/2`,
+        execute: async (): Promise<{ claims: Claim[]; result: ChunkResult }> => {
+          const subStart = Date.now();
+          const subText = text.slice(start, end);
+
+          const subBody = {
+            model: SONNET_MODEL,
+            max_tokens: 16_384,
+            temperature: 0,
+            system: CLAIMS_EXTRACTION_PROMPT,
+            messages: [
+              {
+                role: "user",
+                content: `## Document: ${memo.file_name} (chunk ${parentIdx + 1}/${chunks.length}, sub-part ${subPart}/2)\n\nExtract all quantitative financial claims from this section:\n\n${subText}`,
+              },
+            ],
+          };
+
+          let subResp: LLMResponse;
+          if (options?.bypassHeadroom) {
+            subResp = await ctx.integrations.ai.apiRequest(
+              { method: "POST", path: "/v1/messages", body: subBody },
+              { response: MessageResponseSchema },
+              { label: `ClaimsExtraction: deferred subdivide ${memo.file_name} chunk ${parentIdx + 1} sub ${subPart}/2` },
+            );
+          } else {
+            subResp = await callLLMWithHeadroom(
+              ctx, subBody,
+              `ClaimsExtraction: deferred subdivide ${memo.file_name} chunk ${parentIdx + 1} sub ${subPart}/2`,
+              { pipelineStartTime, maxPerCallTimeout: 180_000, retries: 1 },
+            );
+          }
+
+          const subRespText = subResp.content[0]?.text ?? "";
+          const subParse = parseClaimsResponse(subRespText, memo.file_name);
+          const subTrunc = subResp.stop_reason === "max_tokens";
+          const subTokens = subResp.usage.output_tokens;
+          const subElapsed = Date.now() - subStart;
+
+          // Notify cursor progress
+          if (options?.onChunkProgress) {
+            await options.onChunkProgress(memo.id, parentIdx);
+          }
+
+          return {
+            claims: subParse.claims,
+            result: {
+              index: parentIdx,
+              charStart: start,
+              charEnd: end,
+              claims: subParse.claims.length,
+              output_tokens: subTokens,
+              output_truncated: subTrunc,
+              elapsed_ms: subElapsed,
+            },
+          };
+        },
+      }));
+    });
+
+    // Build chunk jobs for the worker pool (normal pending + subdivide queue)
+    const chunkJobs: WorkerPoolJob<{ claims: Claim[]; result: ChunkResult }>[] = normalPendingChunks.map((chunk) => ({
       id: `${memo.id}:${chunk.chunkIndex}`,
       label: `${memo.file_name} chunk ${chunk.chunkIndex + 1}/${chunks.length}`,
       execute: async () => {
@@ -829,32 +936,38 @@ export async function runClaimsExtraction(
           parse_recovered_empty: parseRecoveredEmpty || undefined,
         };
 
-        // Persist immediately on chunk completion (before pool collects)
-        if (options?.onChunkComplete) {
-          await options.onChunkComplete({
-            memoId: memo.id,
-            memoFileName: memo.file_name,
-            chunkIndex: chunk.chunkIndex,
-            chunkClaims: parseResult.claims,
-            chunkResult: cr,
-            accumulatedClaims: [], // Filled post-pool for ordering
-            accumulatedChunkResults: [], // Filled post-pool for ordering
-            rawResponseText: parseRecoveredEmpty ? responseText : undefined,
-          });
+        // Notify cursor progress (pre-subdivide — cursor only, no claims persist)
+        if (options?.onChunkProgress) {
+          await options.onChunkProgress(memo.id, chunk.chunkIndex);
         }
 
         return { claims: parseResult.claims, result: cr };
       },
     }));
 
-    // Run chunk pool with bounded concurrency
-    const poolResult = await runWorkerPool(chunkJobs, { concurrency: CHUNK_CONCURRENCY });
+    // Run chunk pool with bounded concurrency (normal chunks + deferred subdivide sub-chunks)
+    const allJobs = [...chunkJobs, ...subdivideJobs];
+    const poolResult = await runWorkerPool(allJobs, { concurrency: CHUNK_CONCURRENCY });
 
     // Collect results in chunk-index order for determinism
+    // For deferred subdivide: multiple sub-chunk results share the same parent index — merge them
     const settledByIndex: Map<number, { claims: Claim[]; result: ChunkResult }> = new Map();
     for (const r of poolResult.results) {
       if (r.status === "fulfilled" && r.value) {
-        settledByIndex.set(r.value.result.index, r.value);
+        const { result, claims } = r.value;
+        const existing = settledByIndex.get(result.index);
+        if (existing && subdivideParentIndices.has(result.index)) {
+          // Merge sub-chunk results into the parent entry
+          existing.claims.push(...claims);
+          existing.result.claims += result.claims;
+          existing.result.output_tokens += result.output_tokens;
+          existing.result.elapsed_ms += result.elapsed_ms;
+          existing.result.charEnd = Math.max(existing.result.charEnd, result.charEnd);
+          existing.result.charStart = Math.min(existing.result.charStart, result.charStart);
+          if (result.output_truncated) existing.result.output_truncated = true;
+        } else {
+          settledByIndex.set(result.index, { claims: [...claims], result: { ...result } });
+        }
       } else if (r.status === "rejected") {
         const chunkIdx = parseInt(r.job.id.split(":")[1], 10);
         console.error(`[ClaimsExtraction] Chunk ${chunkIdx} failed: ${r.reason}`);
@@ -868,6 +981,32 @@ export async function runClaimsExtraction(
     const MAX_SUBDIVIDE_DEPTH = 1;
     let subdividePass = 0;
 
+    // DEFERRED SUBDIVIDE: if enabled, mark truncated chunks and skip inline subdivide.
+    // The caller persists these results and processes them as pre-split sub-chunks
+    // on the next invocation (fresh time budget).
+    if (options?.deferSubdivide) {
+      const truncatedIndices = [...settledByIndex.entries()]
+        .filter(([_, v]) => v.result.output_truncated)
+        .map(([idx, v]) => ({ idx, charStart: v.result.charStart, charEnd: v.result.charEnd }));
+
+      for (const { idx, charStart, charEnd } of truncatedIndices) {
+        const chunkWidth = charEnd - charStart;
+        const halfWidth = Math.floor(chunkWidth / 2);
+        const qualifies = halfWidth >= MIN_SUBDIVIDE_CHARS;
+        const entry = settledByIndex.get(idx)!;
+        entry.result.needs_subdivide = qualifies;
+        if (qualifies) {
+          console.log(
+            `[ClaimsExtraction] DEFERRED SUBDIVIDE: chunk ${idx} (${chunkWidth} chars) → marked for subdivision on next invocation`
+          );
+        } else {
+          console.warn(
+            `[ClaimsExtraction] CANNOT SUBDIVIDE: chunk ${idx} (${chunkWidth} chars) — half (${halfWidth}) below floor ${MIN_SUBDIVIDE_CHARS}. Accepting truncation.`
+          );
+        }
+      }
+    } else {
+      // INLINE SUBDIVIDE (original behavior for callers without cursor-based resume)
     while (subdividePass < MAX_SUBDIVIDE_DEPTH) {
       const truncatedIndices = [...settledByIndex.entries()]
         .filter(([_, v]) => v.result.output_truncated)
@@ -992,6 +1131,7 @@ export async function runClaimsExtraction(
         }
       }
     }
+    } // end else (inline subdivide)
 
     // Process in index order — accumulate and fire onChunkComplete
     const sortedIndices = [...settledByIndex.keys()].sort((a, b) => a - b);
@@ -1497,8 +1637,15 @@ export function parseClaimsResponse(responseText: string, sourceFile: string): P
   const validClaims: Claim[] = [];
   for (const raw of rawArray) {
     try {
+      // Pre-validation coercion: period null → "UNDATED"
+      // The LLM sometimes returns null for claims with no temporal reference
+      // (TAM figures, market share, etc.). The schema requires a string.
+      const coerced = { ...raw as object };
+      if ((coerced as any).period === null || (coerced as any).period === undefined) {
+        (coerced as any).period = "UNDATED";
+      }
       // Ensure source_doc is set correctly (LLM may omit or misname)
-      const withSource = { ...raw as object, source_doc: sourceFile };
+      const withSource = { ...coerced, source_doc: sourceFile };
       const claim = ClaimSchema.parse(withSource);
       validClaims.push(claim);
     } catch {

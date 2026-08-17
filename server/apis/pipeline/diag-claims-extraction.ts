@@ -66,6 +66,10 @@ export default api({
     // to this many characters and runs a direct LLM call (bypasses runClaimsExtraction).
     // Does NOT persist to ledger. Requires exactly 1 documentIds entry.
     maxInputChars: z.number().nullable(),
+    // Chunk filter: when set, extracts ONLY these chunk indices and merges
+    // results into the existing ledger. Used for targeted re-extraction of
+    // specific chunks (e.g. after a fix). Requires exactly 1 documentIds entry.
+    chunkIndices: z.array(z.number()).nullable(),
   }),
 
   output: z.object({
@@ -99,7 +103,7 @@ export default api({
     obstacles: z.array(z.string()),
   }),
 
-  async run(ctx, { dealId, documentIds, maxWorkUnits, reset, skipQualitative, maxInputChars }) {
+  async run(ctx, { dealId, documentIds, maxWorkUnits, reset, skipQualitative, maxInputChars, chunkIndices }) {
     const startTime = Date.now();
     const obstacles: string[] = [];
 
@@ -622,17 +626,6 @@ export default api({
       }
       chunkCursor[event.memoId].push(event.chunkIndex);
 
-      // Persist cursor to DB (lightweight upsert — just the cursor, not the full ledger)
-      await ctx.integrations.db.query(
-        `INSERT INTO diag_claims_ledger (deal_id, chunk_cursor, updated_at)
-         VALUES ($1, $2::jsonb, NOW())
-         ON CONFLICT (deal_id)
-         DO UPDATE SET chunk_cursor = $2::jsonb, updated_at = NOW()`,
-        z.any(),
-        [dealId, JSON.stringify(chunkCursor)],
-        { label: `DiagCE: persist chunk cursor (${event.memoFileName} chunk ${event.chunkIndex})` },
-      );
-
       // Persist chunk claims + result to events table (for reconstruction on timeout)
       await ctx.integrations.db.query(
         `INSERT INTO diag_claims_events (deal_id, event_type, memo_file, elapsed_ms, output_tokens, detail)
@@ -648,10 +641,22 @@ export default api({
             claims_count: event.chunkClaims.length,
             output_truncated: event.chunkResult.output_truncated,
             parse_recovered_empty: event.chunkResult.parse_recovered_empty ?? false,
+            needs_subdivide: event.chunkResult.needs_subdivide ?? false,
             claims: event.chunkClaims,
           }),
         ],
         { label: `DiagCE: persist chunk claims (${event.memoFileName} chunk ${event.chunkIndex})` },
+      );
+
+      // Also persist cursor alongside claims (so reconstruction + resume both work)
+      await ctx.integrations.db.query(
+        `INSERT INTO diag_claims_ledger (deal_id, chunk_cursor, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (deal_id)
+         DO UPDATE SET chunk_cursor = $2::jsonb, updated_at = NOW()`,
+        z.any(),
+        [dealId, JSON.stringify(chunkCursor)],
+        { label: `DiagCE: persist chunk cursor (${event.memoFileName} chunk ${event.chunkIndex})` },
       );
 
       console.log(
@@ -678,6 +683,260 @@ export default api({
       }
     };
 
+    // onChunkProgress: cursor-only persist (fires in-pool, pre-subdivide)
+    const onChunkProgress = async (memoId: string, chunkIndex: number): Promise<void> => {
+      if (!chunkCursor[memoId]) {
+        chunkCursor[memoId] = [];
+      }
+      if (!chunkCursor[memoId].includes(chunkIndex)) {
+        chunkCursor[memoId].push(chunkIndex);
+      }
+      await ctx.integrations.db.query(
+        `INSERT INTO diag_claims_ledger (deal_id, chunk_cursor, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (deal_id)
+         DO UPDATE SET chunk_cursor = $2::jsonb, updated_at = NOW()`,
+        z.any(),
+        [dealId, JSON.stringify(chunkCursor)],
+        { label: `DiagCE: cursor progress (chunk ${chunkIndex})` },
+      );
+    };
+
+    // --- chunkIndices filter: STAGING pattern ---
+    // Extract specified chunks into staging events FIRST. Only delete the old
+    // events and update the cursor once the new data has been successfully written.
+    // This prevents data loss on orchestrator timeout — the old events remain
+    // intact until replacements are confirmed.
+    if (chunkIndices && chunkIndices.length > 0) {
+      if (!documentIds || documentIds.length !== 1) {
+        throw new Error("chunkIndices requires exactly 1 documentIds entry");
+      }
+      const targetMemoId = documentIds[0];
+
+      // Build a TEMPORARY cursor that omits the target indices (forces re-extraction
+      // of those chunks) but DO NOT persist this yet. The real cursor keeps old data safe.
+      const tempCursor: Record<string, number[]> = { ...chunkCursor };
+      if (tempCursor[targetMemoId]) {
+        const indicesToClear = new Set(chunkIndices);
+        tempCursor[targetMemoId] = tempCursor[targetMemoId].filter(i => !indicesToClear.has(i));
+      }
+
+      // Clear the terminal_result for this memo so extraction sees it as pending
+      if (priorLedger) {
+        priorLedger.terminal_results = priorLedger.terminal_results.filter(
+          t => t.memo_id !== targetMemoId
+        );
+        priorLedger.complete = false;
+      }
+
+      console.log(`[DiagCE] chunkIndices staging: will re-extract chunks [${chunkIndices.join(",")}] of memo ${targetMemoId} (old events preserved until success)`);
+
+      // Run extraction with the temporary cursor — only target indices are pending
+      const stagingLedger: ClaimsLedger = await runClaimsExtraction(
+        pipelineCtx,
+        dealId,
+        startTime,
+        200_000,
+        {
+          bypassHeadroom: true,
+          priorLedger,
+          maxWorkUnits: 1,
+          skipQualitative: skipQualitative ?? false,
+          chunkConcurrency: 8,
+          chunkCursor: tempCursor,
+          onChunkComplete: async (event: ChunkCompleteEvent): Promise<void> => {
+            // Write new results as staging events (separate event_type so old ones stay)
+            await ctx.integrations.db.query(
+              `INSERT INTO diag_claims_events (deal_id, event_type, memo_file, elapsed_ms, output_tokens, detail)
+               VALUES ($1, 'chunk_claims_staged', $2, $3, $4, $5::jsonb)`,
+              z.any(),
+              [
+                dealId, event.memoFileName, event.chunkResult.elapsed_ms, event.chunkResult.output_tokens,
+                JSON.stringify({
+                  memo_id: event.memoId,
+                  chunk_index: event.chunkIndex,
+                  char_start: event.chunkResult.charStart,
+                  char_end: event.chunkResult.charEnd,
+                  claims_count: event.chunkClaims.length,
+                  output_truncated: event.chunkResult.output_truncated,
+                  parse_recovered_empty: event.chunkResult.parse_recovered_empty ?? false,
+                  claims: event.chunkClaims,
+                }),
+              ],
+              { label: `DiagCE: STAGED chunk claims (chunk ${event.chunkIndex})` },
+            );
+            console.log(`[DiagCE] Staged: chunk ${event.chunkIndex} (${event.chunkClaims.length} claims, ${event.chunkResult.output_tokens} tokens)`);
+          },
+          onChunkProgress,
+          deferSubdivide: true,
+        },
+      );
+
+      // --- COMMIT PHASE: swap old → new ONLY for chunks that actually staged ---
+      // Query which chunk indices have staged events (handles partial completion on timeout)
+      const stagedRows = await ctx.integrations.db.query(
+        `SELECT DISTINCT (detail->>'chunk_index')::int AS idx
+         FROM diag_claims_events
+         WHERE deal_id = $1 AND event_type = 'chunk_claims_staged'
+         AND detail->>'memo_id' = $2`,
+        z.object({ idx: z.number() }),
+        [dealId, targetMemoId],
+        { label: `DiagCE: check which chunks staged successfully` },
+      );
+      const stagedIndices = stagedRows.map(r => r.idx);
+
+      if (stagedIndices.length === 0) {
+        // Nothing staged — originals preserved. Clean up any partial staging artifacts.
+        console.warn(`[DiagCE] chunkIndices staging: 0 of ${chunkIndices.length} chunks completed — originals preserved intact.`);
+        await ctx.integrations.db.query(
+          `DELETE FROM diag_claims_events WHERE deal_id = $1 AND event_type = 'chunk_claims_staged' AND detail->>'memo_id' = $2`,
+          z.any(),
+          [dealId, targetMemoId],
+          { label: `DiagCE: clean up empty staging` },
+        );
+
+        // Return with obstacle report — no data lost
+        const meta = stagingLedger.extraction_metadata;
+        return {
+          complete: false,
+          total_claims: meta.total_claims,
+          memos_completed: persistedMemosCompleted,
+          memos_pending: stagingLedger.terminal_results.filter(t => t.status === "pending").map(t => t.file_name),
+          this_invocation: { memos_processed: 0, wall_clock_ms: Date.now() - startTime, per_memo: [] },
+          category_counts: {
+            operating_metric: meta.operating_metric_claims,
+            deal_mechanics: meta.deal_mechanics_claims,
+            valuation_structuring: meta.valuation_structuring_claims,
+            returns_projection: meta.returns_projection_claims,
+            cross_reference: meta.cross_reference_claims,
+            total: meta.total_claims,
+            docs_processed: meta.docs_processed,
+          },
+          obstacles: [`STAGING_TIMEOUT: 0 of ${chunkIndices.length} target chunks completed — originals preserved`],
+        };
+      }
+
+      console.log(`[DiagCE] chunkIndices staging: ${stagedIndices.length}/${chunkIndices.length} chunks staged. Committing.`);
+
+      // 1. Delete old chunk_claims events ONLY for successfully staged indices
+      await ctx.integrations.db.query(
+        `DELETE FROM diag_claims_events
+         WHERE deal_id = $1 AND event_type = 'chunk_claims'
+         AND detail->>'memo_id' = $2
+         AND (detail->>'chunk_index')::int = ANY($3::int[])`,
+        z.any(),
+        [dealId, targetMemoId, stagedIndices],
+        { label: `DiagCE: delete old events for staged chunks [${stagedIndices.join(",")}]` },
+      );
+
+      // 2. Promote staged events to regular chunk_claims
+      await ctx.integrations.db.query(
+        `UPDATE diag_claims_events
+         SET event_type = 'chunk_claims'
+         WHERE deal_id = $1 AND event_type = 'chunk_claims_staged'
+         AND detail->>'memo_id' = $2
+         AND (detail->>'chunk_index')::int = ANY($3::int[])`,
+        z.any(),
+        [dealId, targetMemoId, stagedIndices],
+        { label: `DiagCE: promote staged → chunk_claims [${stagedIndices.join(",")}]` },
+      );
+
+      // 3. Update the real cursor — only staged indices, preserve the rest
+      if (!chunkCursor[targetMemoId]) chunkCursor[targetMemoId] = [];
+      for (const idx of stagedIndices) {
+        if (!chunkCursor[targetMemoId].includes(idx)) {
+          chunkCursor[targetMemoId].push(idx);
+        }
+      }
+      await ctx.integrations.db.query(
+        `INSERT INTO diag_claims_ledger (deal_id, chunk_cursor, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (deal_id)
+         DO UPDATE SET chunk_cursor = $2::jsonb, updated_at = NOW()`,
+        z.any(),
+        [dealId, JSON.stringify(chunkCursor)],
+        { label: "DiagCE: persist cursor after staging success" },
+      );
+
+      console.log(`[DiagCE] chunkIndices staging COMPLETE: chunks [${stagedIndices.join(",")}] swapped (${stagedIndices.length}/${chunkIndices.length} requested)`);
+
+      // 4. Persist the final merged ledger and return
+      const meta = stagingLedger.extraction_metadata;
+      const newTerminals = stagingLedger.terminal_results.filter(t => t.status !== "pending" && (t.status as string) !== "filtered_out");
+      const priorCompleted = new Set(priorRows.length > 0 ? priorRows[0].memos_completed : [] as string[]);
+      for (const t of newTerminals) priorCompleted.add(t.file_name);
+      const reallyCompleted = [...priorCompleted];
+
+      await ctx.integrations.db.query(
+        `INSERT INTO diag_claims_ledger (deal_id, ledger, memos_completed, total_claims, complete, chunk_cursor, updated_at)
+         VALUES ($1, $2::jsonb, $3::text[], $4, $5, $6::jsonb, NOW())
+         ON CONFLICT (deal_id)
+         DO UPDATE SET ledger = $2::jsonb, memos_completed = $3::text[], total_claims = $4, complete = $5, chunk_cursor = $6::jsonb, updated_at = NOW()`,
+        z.any(),
+        [dealId, JSON.stringify(stagingLedger), reallyCompleted, meta.total_claims, stagingLedger.complete, JSON.stringify(chunkCursor)],
+        { label: "DiagCE: persist ledger after chunkIndices staging" },
+      );
+
+      return {
+        complete: stagingLedger.complete,
+        total_claims: meta.total_claims,
+        memos_completed: reallyCompleted,
+        memos_pending: stagingLedger.terminal_results
+          .filter(t => t.status === "pending")
+          .map(t => t.file_name),
+        this_invocation: {
+          memos_processed: newTerminals.length,
+          wall_clock_ms: Date.now() - startTime,
+          per_memo: newTerminals.map(t => ({
+            file_name: t.file_name,
+            status: t.status,
+            claims_count: t.claims_count,
+            error: t.error ?? null,
+          })),
+        },
+        category_counts: {
+          operating_metric: meta.operating_metric_claims,
+          deal_mechanics: meta.deal_mechanics_claims,
+          valuation_structuring: meta.valuation_structuring_claims,
+          returns_projection: meta.returns_projection_claims,
+          cross_reference: meta.cross_reference_claims,
+          total: meta.total_claims,
+          docs_processed: meta.docs_processed,
+        },
+        obstacles: [],
+      };
+    }
+
+    // --- Build deferred subdivide queue from persisted events ---
+    // Load events with needs_subdivide=true for all target memos
+    const subdivideQueue: Record<string, Array<{ parentIdx: number; charStart: number; charEnd: number }>> = {};
+    if (documentIds && documentIds.length > 0) {
+      for (const memoId of documentIds) {
+        const subdRows = await ctx.integrations.db.query(
+          `SELECT detail FROM diag_claims_events
+           WHERE deal_id = $1 AND event_type = 'chunk_claims'
+           AND detail->>'memo_id' = $2
+           AND (detail->>'needs_subdivide')::boolean = true`,
+          z.object({ detail: z.any() }),
+          [dealId, memoId],
+          { label: `DiagCE: load subdivide queue for ${memoId}` },
+        );
+        if (subdRows.length > 0) {
+          subdivideQueue[memoId] = subdRows.map(r => ({
+            parentIdx: r.detail.chunk_index,
+            charStart: r.detail.char_start,
+            charEnd: r.detail.char_end,
+          }));
+          // Remove these indices from cursor so they're treated as pending for subdivide
+          if (chunkCursor[memoId]) {
+            const subdIndices = new Set(subdivideQueue[memoId].map(q => q.parentIdx));
+            chunkCursor[memoId] = chunkCursor[memoId].filter(i => !subdIndices.has(i));
+          }
+          console.log(`[DiagCE] Subdivide queue for ${memoId}: ${subdRows.length} chunk(s) [${subdivideQueue[memoId].map(q => q.parentIdx).join(",")}]`);
+        }
+      }
+    }
+
     const ledger: ClaimsLedger = await runClaimsExtraction(
       pipelineCtx,
       dealId,
@@ -691,6 +950,9 @@ export default api({
         chunkConcurrency: 8,
         chunkCursor,
         onChunkComplete,
+        onChunkProgress,
+        deferSubdivide: true,
+        subdivideQueue: Object.keys(subdivideQueue).length > 0 ? subdivideQueue : undefined,
       },
     );
 
