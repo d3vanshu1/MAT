@@ -116,6 +116,15 @@ export default api({
 
     // ─── RESET ────────────────────────────────────────────────────────────
     if (reset) {
+      // Revert probe-reclassified topics back to absent
+      await db.query(
+        `UPDATE oa_topics SET subject_coverage = 'absent', coverage_basis = '0 subject facts on this topic'
+         WHERE run_id = $1::uuid AND subject_coverage = 'partial'
+           AND coverage_basis LIKE 'Probe found%'`,
+        z.any(), [runId],
+        { label: "Reset: revert probe-partial topics to absent" }
+      );
+      // Delete checkpoints
       await db.query(
         `DELETE FROM oa_stage_checkpoints WHERE run_id = $1::uuid AND stage = 'absence_probe'`,
         z.any(), [runId],
@@ -289,7 +298,21 @@ export default api({
 
         const verdict = hits.length > 0 ? "found_in_text" : "verified_absent";
 
-        if (hits.length > 0) {
+        // ─── STRICTER THRESHOLD ─────────────────────────────────────────
+        // A single generic keyword hit (1-word query) is insufficient.
+        // Require EITHER: a multi-word phrase match, OR hits from ≥2 distinct queries.
+        let passesThreshold = false;
+        if (hits.length >= 2) {
+          // Hits from 2+ distinct queries → strong signal
+          const distinctQueryHits = new Set(hits.map(h => h.query));
+          passesThreshold = distinctQueryHits.size >= 2;
+        }
+        if (!passesThreshold && hits.length > 0) {
+          // Check if any hit was from a multi-word phrase (≥2 words)
+          passesThreshold = hits.some(h => h.query.trim().split(/\s+/).length >= 2);
+        }
+
+        if (passesThreshold) {
           topicsWithHits++;
           reclassifyTopicIds.push(topic.topic_id);
           reclassifyBases.push(`Probe found ${hits.length} text hit(s) but no extracted facts`);

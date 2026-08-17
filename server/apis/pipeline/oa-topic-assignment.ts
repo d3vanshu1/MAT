@@ -329,6 +329,7 @@ export default api({
     maxBatches: z.number().optional(), // for testing: limit number of batches to process
     testDocumentId: z.string().optional(), // for testing: only load facts from this document
     startOffset: z.number().optional(), // for testing: skip N facts before batching (probe mid-document)
+    repairUnitKeys: z.array(z.string()).optional(), // repair mode: delete only these failed checkpoints then re-process them
   }),
   output: z.object({
     status: z.enum(["complete", "in_progress"]),
@@ -337,7 +338,7 @@ export default api({
     report: z.record(z.string(), z.any()).optional(),
   }),
 
-  async run(ctx, { dealId, runId, reset, maxBatches, testDocumentId, startOffset }) {
+  async run(ctx, { dealId, runId, reset, maxBatches, testDocumentId, startOffset, repairUnitKeys }) {
     const { db } = ctx.integrations;
     const aiFn: AiFn = ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai) as any;
 
@@ -374,6 +375,18 @@ export default api({
         checkpoints: delCp[0]?.cnt ?? 0,
       };
       console.log(`[P4] Reset complete for run ${runId}: topic_facts=${resetCounts.topic_facts}, topics=${resetCounts.topics}, checkpoints=${resetCounts.checkpoints}`);
+    }
+
+    // ─── REPAIR MODE: delete only specific failed checkpoints ────────────
+    if (repairUnitKeys && repairUnitKeys.length > 0) {
+      for (const uk of repairUnitKeys) {
+        await db.query(
+          `DELETE FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'topic_assignment' AND unit_key = $2`,
+          z.any(), [runId, uk],
+          { label: `Repair: delete checkpoint ${uk}` }
+        );
+      }
+      console.log(`[P4] Repair: deleted ${repairUnitKeys.length} failed checkpoints: ${repairUnitKeys.join(', ')}`);
     }
 
     // ─── A1: Seed oa_topics (batched) ─────────────────────────────────────

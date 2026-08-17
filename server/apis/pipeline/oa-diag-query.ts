@@ -181,6 +181,10 @@ const QueryInput = z.discriminatedUnion("query", [
     dealId: z.string(),
   }),
   z.object({
+    query: z.literal("finding_diagnostics"),
+    runId: z.string(),
+  }),
+  z.object({
     query: z.literal("gap_gate_slim"),
     runId: z.string(),
   }),
@@ -188,6 +192,57 @@ const QueryInput = z.discriminatedUnion("query", [
     query: z.literal("topic_dist_by_document"),
     runId: z.string(),
     documentId: z.string(),
+  }),
+  z.object({
+    query: z.literal("failed_checkpoints_detail"),
+    runId: z.string(),
+    stage: z.string(),
+  }),
+  z.object({
+    query: z.literal("checkpoint_status_summary"),
+    runId: z.string(),
+    stage: z.string(),
+  }),
+  z.object({
+    query: z.literal("narrative_audit"),
+    runId: z.string(),
+    findingIds: z.array(z.string()).min(1).max(20),
+  }),
+  z.object({
+    query: z.literal("fact_source_window"),
+    dealId: z.string(),
+    factId: z.string(),
+  }),
+  z.object({
+    query: z.literal("completed_checkpoint_keys"),
+    runId: z.string(),
+    stage: z.string(),
+  }),
+  z.object({
+    query: z.literal("report_chunk"),
+    runId: z.string(),
+    charStart: z.number().int().min(0).default(0),
+    charEnd: z.number().int().min(1).default(12000),
+  }),
+  z.object({
+    query: z.literal("legal_dd_rated_facts"),
+    dealId: z.string(),
+    offset: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(100).default(61),
+  }),
+  z.object({
+    query: z.literal("rated_facts_evidence_check"),
+    runId: z.string(),
+    dealId: z.string(),
+    factIds: z.array(z.string()).min(1).max(20),
+  }),
+  z.object({
+    query: z.literal("multi_assignment_check"),
+    runId: z.string(),
+  }),
+  z.object({
+    query: z.literal("emergent_topic_check"),
+    runId: z.string(),
   }),
 ]);
 
@@ -357,13 +412,13 @@ export default api({
             f.chunk_index AS source_chunk_index,
             tf.topic_id
           FROM oa_facts f
-          LEFT JOIN oa_topic_facts tf ON tf.fact_id = f.fact_id AND tf.run_id = $3
+          LEFT JOIN oa_topic_facts tf ON tf.fact_id = f.fact_id AND tf.run_id = $3::uuid
           WHERE f.deal_id = $1
             AND f.predicate ILIKE $2
           ORDER BY f.predicate
           LIMIT $4 OFFSET $5`,
           FactByPredicateSchema,
-          [input.dealId, input.predicateLike, input.runId ?? "", input.limit, input.offset],
+          [input.dealId, input.predicateLike, input.runId ?? null, input.limit, input.offset],
           { label: `facts_by_predicate (pattern=${input.predicateLike}, offset=${input.offset})` }
         );
         return { rows, rowCount: rows.length };
@@ -1155,6 +1210,47 @@ export default api({
       }
 
       // -----------------------------------------------------------------------
+      // finding_diagnostics: compact summary for analysis — topic, gap_kind, tier, evidence counts
+      // -----------------------------------------------------------------------
+      case "finding_diagnostics": {
+        const DiagRow = z.object({
+          topic_id: z.string(),
+          gap_kind: z.string(),
+          materiality_tier: z.coerce.string(),
+          materiality_basis: z.string().nullable(),
+          absence_basis: z.string().nullable(),
+          source_fact_id: z.string().nullable(),
+          quantified_impact: z.any(),
+          subject_count: z.number(),
+          reference_count: z.number(),
+          true_subject_count: z.number(),
+          true_reference_count: z.number(),
+          truncated: z.boolean(),
+        });
+        const diagRows = await ctx.integrations.db.query(
+          `SELECT f.topic_id, f.gap_kind, f.materiality_tier, f.materiality_basis, f.absence_basis,
+                  f.source_fact_id, f.quantified_impact,
+                  COALESCE(jsonb_array_length(f.subject_evidence), 0) AS subject_count,
+                  COALESCE(jsonb_array_length(f.reference_evidence), 0) AS reference_count,
+                  COALESCE(ts.cnt, 0)::int AS true_subject_count,
+                  COALESCE(tr.cnt, 0)::int AS true_reference_count,
+                  (COALESCE(jsonb_array_length(f.subject_evidence), 0) < COALESCE(ts.cnt, 0)
+                   OR COALESCE(jsonb_array_length(f.reference_evidence), 0) < COALESCE(tr.cnt, 0)) AS truncated
+           FROM oa_findings f
+           LEFT JOIN (SELECT run_id, topic_id, COUNT(*)::int AS cnt FROM oa_topic_facts WHERE fact_role = 'subject' AND run_id = $1::uuid GROUP BY run_id, topic_id) ts
+             ON ts.run_id = f.run_id AND ts.topic_id = f.topic_id
+           LEFT JOIN (SELECT run_id, topic_id, COUNT(*)::int AS cnt FROM oa_topic_facts WHERE fact_role = 'reference' AND run_id = $1::uuid GROUP BY run_id, topic_id) tr
+             ON tr.run_id = f.run_id AND tr.topic_id = f.topic_id
+           WHERE f.run_id = $1::uuid
+           ORDER BY f.materiality_tier ASC, f.topic_id ASC`,
+          DiagRow,
+          [input.runId],
+          { label: "Finding diagnostics compact" }
+        );
+        return { rows: diagRows, rowCount: diagRows.length };
+      }
+
+      // -----------------------------------------------------------------------
       // gap_gate_slim: G4/G5/G6 without the large G3 array
       // -----------------------------------------------------------------------
       case "gap_gate_slim": {
@@ -1257,6 +1353,293 @@ export default api({
           { label: `T9: topic distribution for document ${input.documentId.slice(0, 8)}` }
         );
         return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // checkpoint_status_summary: count by status for a stage
+      // -----------------------------------------------------------------------
+      case "checkpoint_status_summary": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT status, count(*)::int AS cnt
+           FROM oa_stage_checkpoints
+           WHERE run_id = $1::uuid AND stage = $2
+           GROUP BY status
+           ORDER BY cnt DESC`,
+          z.object({ status: z.string(), cnt: z.coerce.number() }),
+          [input.runId, input.stage],
+          { label: `Checkpoint status summary for stage=${input.stage}` }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // failed_checkpoints_detail: full rows for failed checkpoints of a stage
+      // -----------------------------------------------------------------------
+      case "failed_checkpoints_detail": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT unit_key, status, reason, payload_json, updated_at
+           FROM oa_stage_checkpoints
+           WHERE run_id = $1::uuid AND stage = $2 AND status = 'failed'
+           ORDER BY unit_key`,
+          z.object({
+            unit_key: z.string(),
+            status: z.string(),
+            reason: z.string().nullable(),
+            payload_json: z.any(),
+            updated_at: z.string().nullable(),
+          }),
+          [input.runId, input.stage],
+          { label: `Failed checkpoints for stage=${input.stage}` }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // fact_source_window: fetch char offsets from oa_facts, then extract window from documents.parsed_text
+      // -----------------------------------------------------------------------
+      case "fact_source_window": {
+        const factMeta = await ctx.integrations.db.query(
+          `SELECT f.fact_id, f.char_start, f.char_end, f.document_id, f.predicate, f.value,
+                  d.file_name
+           FROM oa_facts f
+           LEFT JOIN documents d ON d.id = f.document_id
+           WHERE f.fact_id = $1 AND f.deal_id = $2`,
+          z.object({
+            fact_id: z.string(),
+            char_start: z.coerce.number().nullable(),
+            char_end: z.coerce.number().nullable(),
+            document_id: z.string(),
+            predicate: z.string().nullable(),
+            value: z.string().nullable(),
+            file_name: z.string().nullable(),
+          }),
+          [input.factId, input.dealId],
+          { label: `Fact source window lookup: ${input.factId}` }
+        );
+        if (factMeta.length === 0) return { rows: [{ error: "Fact not found" }], rowCount: 1 };
+        const meta = factMeta[0];
+        if (meta.char_start == null || meta.char_end == null) {
+          return { rows: [{ ...meta, source_window: null, error: "NULL char_start/char_end" }], rowCount: 1 };
+        }
+        const windowRows = await ctx.integrations.db.query(
+          `SELECT substring(parsed_text FROM $2 + 1 FOR $3 - $2) AS source_window
+           FROM documents WHERE id = $1 AND parsed_text IS NOT NULL`,
+          z.object({ source_window: z.string().nullable() }),
+          [meta.document_id, meta.char_start, meta.char_end],
+          { label: `Extract source window: ${meta.document_id}` }
+        );
+        const sourceWindow = windowRows[0]?.source_window ?? null;
+        const predicateInWindow = sourceWindow && meta.predicate
+          ? sourceWindow.toLowerCase().includes(meta.predicate.toLowerCase())
+          : null;
+        return {
+          rows: [{
+            fact_id: meta.fact_id,
+            predicate: meta.predicate,
+            value: meta.value,
+            document_id: meta.document_id,
+            file_name: meta.file_name,
+            char_start: meta.char_start,
+            char_end: meta.char_end,
+            window_length: sourceWindow?.length ?? 0,
+            source_window_first_500: sourceWindow?.slice(0, 500) ?? null,
+            source_window_last_500: sourceWindow?.slice(-500) ?? null,
+            predicate_in_window: predicateInWindow,
+          }],
+          rowCount: 1,
+        };
+      }
+
+      // -----------------------------------------------------------------------
+      // narrative_audit: fetch narratives + topic + tier for specific finding_ids
+      // -----------------------------------------------------------------------
+      case "narrative_audit": {
+        const placeholders = input.findingIds.map((_, i) => `$${i + 2}`).join(",");
+        const rows = await ctx.integrations.db.query(
+          `SELECT finding_id, topic_id, gap_kind, materiality_tier::text AS materiality_tier,
+                  narrative, subject_evidence, reference_evidence
+           FROM oa_findings
+           WHERE run_id = $1::uuid AND finding_id IN (${placeholders})
+           ORDER BY topic_id`,
+          z.object({
+            finding_id: z.string(),
+            topic_id: z.string(),
+            gap_kind: z.string().nullable(),
+            materiality_tier: z.string().nullable(),
+            narrative: z.string().nullable(),
+            subject_evidence: z.any(),
+            reference_evidence: z.any(),
+          }),
+          [input.runId, ...input.findingIds],
+          { label: `Narrative audit for ${input.findingIds.length} findings` }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // completed_checkpoint_keys: list unit_keys + payload_json for completed checkpoints
+      // -----------------------------------------------------------------------
+      case "completed_checkpoint_keys": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT unit_key, payload_json
+           FROM oa_stage_checkpoints
+           WHERE run_id = $1::uuid AND stage = $2 AND status = 'complete'
+           ORDER BY updated_at DESC`,
+          z.object({
+            unit_key: z.string(),
+            payload_json: z.any(),
+          }),
+          [input.runId, input.stage],
+          { label: `Completed checkpoint keys for stage=${input.stage}` }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      // -----------------------------------------------------------------------
+      // report_chunk: read persisted report from render checkpoint, return substring
+      // -----------------------------------------------------------------------
+      case "report_chunk": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT payload_json->>'report_markdown' AS report_text
+           FROM oa_stage_checkpoints
+           WHERE run_id = $1::uuid AND stage = 'render' AND unit_key = 'report_markdown'
+           LIMIT 1`,
+          z.object({ report_text: z.string().nullable() }),
+          [input.runId],
+          { label: "Read persisted report chunk" }
+        );
+        const fullText = rows[0]?.report_text ?? "";
+        const chunk = fullText.slice(input.charStart, input.charEnd);
+        return { rows: [{ chunk, totalLength: fullText.length, charStart: input.charStart, charEnd: Math.min(input.charEnd, fullText.length) }], rowCount: 1 };
+      }
+
+      case "rated_facts_evidence_check": {
+        // For each factId, check: (1) its topic assignments, (2) whether it appears in any finding's reference_evidence
+        const factPlaceholders = input.factIds.map((_, i) => `$${i + 3}`).join(",");
+        const rows = await ctx.integrations.db.query(
+          `WITH target_facts AS (
+            SELECT unnest(ARRAY[${factPlaceholders}]::uuid[]) AS fact_id
+          ),
+          topic_assignments AS (
+            SELECT tf.fact_id, tf.topic_id, tf.fact_role
+            FROM oa_topic_facts tf
+            WHERE tf.run_id = $1 AND tf.fact_id IN (SELECT fact_id FROM target_facts)
+          ),
+          evidence_hits AS (
+            SELECT f.topic_id AS finding_topic,
+                   elem::text AS fact_id_text,
+                   f.materiality_tier::text AS finding_tier,
+                   f.adviser_severity_max
+            FROM oa_findings f,
+                 jsonb_array_elements_text(f.reference_evidence) AS elem
+            WHERE f.run_id = $1::uuid
+              AND elem::uuid IN (SELECT fact_id FROM target_facts)
+          )
+          SELECT
+            ta.fact_id::text,
+            ta.topic_id,
+            ta.fact_role,
+            of.adviser_severity,
+            of.adviser_disposition,
+            COALESCE(eh.finding_topic, '') AS in_finding_topic,
+            COALESCE(eh.finding_tier, '') AS finding_tier,
+            COALESCE(eh.adviser_severity_max, '') AS finding_adviser_sev_max
+          FROM topic_assignments ta
+          JOIN oa_facts of ON of.fact_id = ta.fact_id AND of.deal_id = $2
+          LEFT JOIN evidence_hits eh ON eh.fact_id_text = ta.fact_id::text AND eh.finding_topic = ta.topic_id
+          ORDER BY of.adviser_severity, ta.topic_id`,
+          z.object({
+            fact_id: z.string(),
+            topic_id: z.string(),
+            fact_role: z.string(),
+            adviser_severity: z.string().nullable(),
+            adviser_disposition: z.string().nullable(),
+            in_finding_topic: z.string(),
+            finding_tier: z.string(),
+            finding_adviser_sev_max: z.string(),
+          }),
+          [input.runId, input.dealId, ...input.factIds],
+          { label: "Rated facts evidence check" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      case "multi_assignment_check": {
+        const rows = await ctx.integrations.db.query(
+          `WITH multi AS (
+            SELECT fact_id, COUNT(DISTINCT topic_id) AS topic_count
+            FROM oa_topic_facts WHERE run_id = $1
+            GROUP BY fact_id HAVING COUNT(DISTINCT topic_id) > 1
+          )
+          SELECT
+            (SELECT COUNT(*)::int FROM multi) AS total_multi_assigned,
+            (SELECT json_agg(row_to_json(t)) FROM (
+              SELECT m.fact_id::text, m.topic_count::int,
+                     array_agg(DISTINCT tf.topic_id ORDER BY tf.topic_id) AS topics
+              FROM multi m
+              JOIN oa_topic_facts tf ON tf.fact_id = m.fact_id AND tf.run_id = $1
+              GROUP BY m.fact_id, m.topic_count
+              ORDER BY m.topic_count DESC
+              LIMIT 20
+            ) t) AS top_20`,
+          z.object({ total_multi_assigned: z.coerce.number(), top_20: z.any() }),
+          [input.runId],
+          { label: "Multi-assignment check" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      case "emergent_topic_check": {
+        const rows = await ctx.integrations.db.query(
+          `SELECT
+            COUNT(*)::int AS total_emergent,
+            COUNT(*) FILTER (WHERE EXISTS (
+              SELECT 1 FROM oa_topic_facts tf WHERE tf.run_id = t.run_id AND tf.topic_id = t.topic_id
+            ))::int AS emergent_with_facts
+          FROM oa_topics t
+          WHERE t.run_id = $1 AND t.obligation_basis = 'model_proposed_unclassified'`,
+          z.object({ total_emergent: z.coerce.number(), emergent_with_facts: z.coerce.number() }),
+          [input.runId],
+          { label: "Emergent topic check" }
+        );
+        return { rows, rowCount: rows.length };
+      }
+
+      case "legal_dd_rated_facts": {
+        const LEGAL_DD_DOC = "e27d46c9-c384-42ed-bc8c-6f04ba8bc474";
+        // First get counts by severity
+        const counts = await ctx.integrations.db.query(
+          `SELECT adviser_severity, COUNT(*)::int AS cnt,
+                  COUNT(adviser_disposition)::int AS with_disposition
+           FROM oa_facts
+           WHERE deal_id = $1
+             AND document_id = $2
+             AND adviser_severity IS NOT NULL
+           GROUP BY adviser_severity
+           ORDER BY adviser_severity`,
+          z.object({ adviser_severity: z.string(), cnt: z.coerce.number(), with_disposition: z.coerce.number() }),
+          [input.dealId, LEGAL_DD_DOC],
+          { label: "Legal DD severity counts" }
+        );
+        // Then get sample rows
+        const rows = await ctx.integrations.db.query(
+          `SELECT f.fact_id, f.adviser_severity, f.adviser_disposition, f.predicate, f.chunk_index
+           FROM oa_facts f
+           WHERE f.deal_id = $1
+             AND f.document_id = $2
+             AND f.adviser_severity IS NOT NULL
+           ORDER BY f.adviser_severity, f.chunk_index
+           LIMIT $3 OFFSET $4`,
+          z.object({
+            fact_id: z.string(),
+            adviser_severity: z.string(),
+            adviser_disposition: z.string().nullable(),
+            predicate: z.string(),
+            chunk_index: z.coerce.number().nullable(),
+          }),
+          [input.dealId, LEGAL_DD_DOC, input.limit, input.offset],
+          { label: "Legal DD rated facts" }
+        );
+        return { rows: [{ counts, sample: rows }], rowCount: rows.length };
       }
 
       default: {

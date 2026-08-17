@@ -332,45 +332,50 @@ export function normalizeFigures(figures: Figure[]): NormalizedFigure[] {
 function normalizePeriod(period: string): string {
   const p = period.trim().toLowerCase();
 
-  // Handle "FY Mar-XX" format (most common in this deal)
-  const fyMarMatch = p.match(/fy\s*mar[-\s]?(\d{2,4})(f|b|le|a)?/i);
-  if (fyMarMatch) {
-    let yr = parseInt(fyMarMatch[1], 10);
+  // --- Helper: normalize a single year + optional suffix ---
+  function normalizeYr(raw: string, rawSuffix: string | undefined): string {
+    let yr = parseInt(raw, 10);
     if (yr >= 100) yr = yr - 2000; // 2026 → 26
-    const rawSuffix = fyMarMatch[2]?.toLowerCase() ?? "";
-    // "LE" (Latest Estimate) for the current deal year is functionally equivalent to "actual"
-    // "A" (Actual) is just explicit — same as no suffix. Drop both.
-    const suffix = (rawSuffix === "le" || rawSuffix === "a") ? "" : rawSuffix;
-    return `fy-mar-${yr}${suffix}`;
+    // "LE" (Latest Estimate) and "A" (Actual) are equivalent to no suffix
+    const s = rawSuffix?.toLowerCase() ?? "";
+    const suffix = (s === "le" || s === "a") ? "" : s;
+    return `${yr}${suffix}`;
   }
 
-  // Handle "FY XX" or "FYXX" format
-  const fyMatch = p.match(/fy\s*(\d{2,4})(f|b|le|a)?/i);
-  if (fyMatch) {
-    let yr = parseInt(fyMatch[1], 10);
-    if (yr >= 100) yr = yr - 2000;
-    const rawSuffix = fyMatch[2]?.toLowerCase() ?? "";
-    const suffix = (rawSuffix === "le" || rawSuffix === "a") ? "" : rawSuffix;
-    return `fy-mar-${yr}${suffix}`;
+  // --- Range detection: "FY Mar-26-FY31", "FY26-FY31", "FY23-25", "FY Mar-26-31" ---
+  // Match: FY [Mar-]?XX[-–to ]FY? [Mar-]?YY with optional suffixes
+  const rangeRe = /^fy\s*(?:mar[-\s]?)?(\d{2,4})(f|b|le|a)?\s*[-–to]+\s*(?:fy\s*)?(?:mar[-\s]?)?(\d{2,4})(f|b|le|a)?$/i;
+  const rangeMatch = p.match(rangeRe);
+  if (rangeMatch) {
+    const start = normalizeYr(rangeMatch[1], rangeMatch[2]);
+    const end = normalizeYr(rangeMatch[3], rangeMatch[4]);
+    return `fy-mar-${start}_${end}`;
   }
 
-  // Handle "Mar-XX" format
-  const marMatch = p.match(/mar[-\s]?(\d{2,4})(f|b|le|a)?/i);
-  if (marMatch) {
-    let yr = parseInt(marMatch[1], 10);
-    if (yr >= 100) yr = yr - 2000;
-    const rawSuffix = marMatch[2]?.toLowerCase() ?? "";
-    const suffix = (rawSuffix === "le" || rawSuffix === "a") ? "" : rawSuffix;
-    return `fy-mar-${yr}${suffix}`;
+  // --- Anchored single-period patterns ---
+  // FY Mar-XX (anchored — nothing else in string)
+  const fyMarAnchored = p.match(/^fy\s*mar[-\s]?(\d{2,4})(f|b|le|a)?$/i);
+  if (fyMarAnchored) {
+    return `fy-mar-${normalizeYr(fyMarAnchored[1], fyMarAnchored[2])}`;
   }
 
-  // Handle plain year: "2026", "2025", "26", "25"
-  // Also "2026 actual", "2025 forecast", "2027 budget" (with trailing descriptor)
-  const yearWithSuffix = p.match(/^(\d{4})\s*(actual|forecast|budget|estimate)?$/i) || p.match(/^(\d{2})\s*(actual|forecast|budget|estimate)?$/i);
+  // FY XX or FYXX (anchored)
+  const fyAnchored = p.match(/^fy\s*(\d{2,4})(f|b|le|a)?$/i);
+  if (fyAnchored) {
+    return `fy-mar-${normalizeYr(fyAnchored[1], fyAnchored[2])}`;
+  }
+
+  // Mar-XX (anchored)
+  const marAnchored = p.match(/^mar[-\s]?(\d{2,4})(f|b|le|a)?$/i);
+  if (marAnchored) {
+    return `fy-mar-${normalizeYr(marAnchored[1], marAnchored[2])}`;
+  }
+
+  // Plain year: "2026", "25", optionally followed by "actual", "forecast", "budget", "estimate"
+  const yearWithSuffix = p.match(/^(\d{2,4})\s*(actual|forecast|budget|estimate)?$/i);
   if (yearWithSuffix) {
     let yr = parseInt(yearWithSuffix[1], 10);
     if (yr >= 100) yr = yr - 2000;
-    // "actual" → no suffix, "forecast" → "f", "budget" → "b", "estimate" → ""
     let suffix = "";
     const desc = yearWithSuffix[2]?.toLowerCase();
     if (desc === "forecast") suffix = "f";
@@ -378,16 +383,37 @@ function normalizePeriod(period: string): string {
     return `fy-mar-${yr}${suffix}`;
   }
 
-  // Fallback: return lowercased trimmed (for periods like "LTM", "L3Y", etc.)
-  return p.replace(/\s+/g, "-");
+  // --- Unanchored FY pattern with residue: try to extract FY portion, slug-ify rest ---
+  // This catches "FY Mar-26 OCF basis" or "FY31F (14.2% CAGR)" that SHOULD have been
+  // split by extraction, but if not, we at least don't silently discard the residue.
+  const fyUnanchored = p.match(/fy\s*(?:mar[-\s]?)?(\d{2,4})(f|b|le|a)?/i);
+  if (fyUnanchored) {
+    // There's residue beyond the FY portion — slug-ify the WHOLE string to avoid silent collisions
+    return p.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  }
+
+  // Fallback: slug-ify (for "LTM", "L3Y", "CY", etc.)
+  return p.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
 /**
- * Build a coordinate lookup key from metric + scope + period.
+ * Build a coordinate lookup key from metric + scope + basis + period.
+ * Returns null for claims with non-null scenario (scenario claims are
+ * excluded from contradiction matching — they represent conditional cases).
  * All parts are lowercased and trimmed.
  */
-export function coordKey(metric: string, scope: string, period: string): string {
-  return `${metric.toLowerCase().trim()}|${scope.toLowerCase().trim()}|${normalizePeriod(period)}`;
+export function coordKey(
+  metric: string,
+  scope: string,
+  period: string,
+  basis: string | null = null,
+  scenario: string | null = null,
+): string | null {
+  // Scenario claims are not matchable — they represent sensitivity cells
+  if (scenario) return null;
+
+  const basisPart = basis ? basis.toLowerCase().trim() : "";
+  return `${metric.toLowerCase().trim()}|${scope.toLowerCase().trim()}|${basisPart}|${normalizePeriod(period)}`;
 }
 
 /**
@@ -702,10 +728,10 @@ export function validateSupersessionProof(
   // Corrective E3: Collect ONLY exact-match candidates; ignore non-matching entirely.
   const exactMatchIds = new Set<string>();
   for (const candidate of candidates) {
-    const candidateCoord = coordKey(candidate.claim_metric, candidate.claim_scope, candidate.claim_period);
+    const candidateCoord = coordKey(candidate.claim_metric ?? "", candidate.claim_scope ?? "", candidate.claim_period ?? "");
     const sourceMatch = claim.source_doc === candidate.claim_source_doc;
 
-    if (claimCoord === candidateCoord && sourceMatch) {
+    if (claimCoord !== null && claimCoord === candidateCoord && sourceMatch) {
       exactMatchIds.add(candidate.canonical_id);
     }
     // Non-matching candidates are silently ignored — they are irrelevant, not ambiguous.
@@ -841,10 +867,11 @@ export async function runReconciliation(
     const normalizedFigures = normalizeFigures(figures);
     console.log(`[Reconciliation] Normalized ${normalizedFigures.length} figure coordinates from ${figures.length} raw figures`);
 
-    // Build lookup index: key = "metric|scope|period" → NormalizedFigure[]
+    // Build lookup index: key = "metric|scope|basis|period" → NormalizedFigure[]
     const figureIndex = new Map<string, NormalizedFigure[]>();
     for (const nf of normalizedFigures) {
       const key = coordKey(nf.metric, nf.scope_qualifier, nf.period);
+      if (key === null) continue; // should never happen for model figures
       if (!figureIndex.has(key)) figureIndex.set(key, []);
       figureIndex.get(key)!.push(nf);
     }
@@ -852,6 +879,7 @@ export async function runReconciliation(
     // ----- Step 4: Coordinate-match each claim and compute delta -----
     for (const claim of reconcilableClaims) {
       const key = coordKey(claim.metric, claim.scope_qualifier, claim.period);
+      if (key === null) continue; // scenario claims excluded
       const matches = figureIndex.get(key);
 
       if (!matches || matches.length === 0) {

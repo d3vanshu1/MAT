@@ -250,8 +250,8 @@ export default api({
     // --- Coordinate-space debug info ---
     const normalizedFigs = normalizeFigures(figures);
     const opClaims = ledger.claims.filter(c => c.claim_category === "operating_metric");
-    const sampleFigKeys = [...new Set(normalizedFigs.slice(0, 20).map(nf => coordKey(nf.metric, nf.scope_qualifier, nf.period)))];
-    const sampleClaimKeys = [...new Set(opClaims.slice(0, 20).map(c => coordKey(c.metric, c.scope_qualifier, c.period)))];
+    const sampleFigKeys = [...new Set(normalizedFigs.slice(0, 20).map(nf => coordKey(nf.metric, nf.scope_qualifier, nf.period)).filter((k): k is string => k !== null))];
+    const sampleClaimKeys = [...new Set(opClaims.slice(0, 20).map(c => coordKey(c.metric, c.scope_qualifier, c.period)).filter((k): k is string => k !== null))];
     const sampleRawLabels = [...new Set(figures.slice(0, 30).map(f => `${f.name} | ${f.period}`))];
     // Provenance: which doc(s) produced figures and what periods exist
     const figureDocIds = [...new Set(figures.map(f => f.source_doc))];

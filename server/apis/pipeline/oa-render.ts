@@ -61,7 +61,7 @@ const FindingRow = z.object({
 });
 
 const DealRow = z.object({
-  deal_name: z.string(),
+  name: z.string(),
 });
 
 const DocumentCoverageRow = z.object({
@@ -78,10 +78,121 @@ const FailedChunkRow = z.object({
 // Rendering functions
 // ---------------------------------------------------------------------------
 
-function renderEvidenceBlock(evidence: any[]): string {
+const MAX_EVIDENCE_LINES = 10;
+
+/**
+ * Score a fact's relevance to the narrative by checking whether key strings
+ * from the fact (document name, value, predicate keywords) appear in the text.
+ * Higher score = more relevant to what the narrative actually argues from.
+ */
+function scoreFactRelevance(fact: any, narrative: string | null): number {
+  if (!narrative) return 0;
+  let score = 0;
+  const lower = narrative.toLowerCase();
+
+  // Document name match — strong signal
+  if (fact?.document_name) {
+    const docName = fact.document_name.toLowerCase();
+    // Try first 30 chars of doc name (captures "SCG - Project Saint - Vendor F...")
+    if (lower.includes(docName.slice(0, 30))) score += 5;
+    // Try key word fragments from the document name
+    const fragments = docName.split(/[\s\-_]+/).filter((w: string) => w.length > 4);
+    for (const frag of fragments.slice(0, 5)) {
+      if (lower.includes(frag)) { score += 1; break; }
+    }
+  }
+
+  // Value match — strong signal (figures cited in narrative)
+  if (fact?.value) {
+    const val = fact.value.toLowerCase();
+    if (lower.includes(val)) score += 4;
+    // Try numeric part only (e.g. "22.9" from "£22.9m")
+    const numMatch = val.match(/[\d,.]+/);
+    if (numMatch && numMatch[0].length >= 3 && lower.includes(numMatch[0])) score += 3;
+  }
+
+  // Predicate keyword match — moderate signal
+  if (fact?.predicate) {
+    const predWords = fact.predicate.toLowerCase().split(/\s+/).filter((w: string) => w.length > 5);
+    let predMatches = 0;
+    for (const w of predWords.slice(0, 8)) {
+      if (lower.includes(w)) predMatches++;
+    }
+    if (predMatches >= 3) score += 3;
+    else if (predMatches >= 2) score += 2;
+    else if (predMatches >= 1) score += 1;
+  }
+
+  return score;
+}
+
+/**
+ * Deduplicate near-identical evidence facts so 10 display slots carry 10
+ * truly distinct data points. Two facts are "near-identical" when they share
+ * the same document AND the same predicate_family (first significant words of
+ * the predicate minus numeric qualifiers / bracket annotations). The highest-
+ * scored member of each family survives; others are suppressed.
+ */
+function deduplicateEvidence(facts: any[]): any[] {
+  if (facts.length <= MAX_EVIDENCE_LINES) return facts; // no dedup needed if already under cap
+
+  const familyMap = new Map<string, number>();
+  const docSlots = new Map<string, number>();
+  const result: any[] = [];
+
+  // Two passes:
+  // Pass 1: dedup near-identical predicates (max 1 per family)
+  // Pass 2: enforce per-document cap (max 5 from any single document) to force diversity
+
+  for (const fact of facts) {
+    const docKey = (fact?.document_name ?? "").toLowerCase().slice(0, 40);
+    // Normalize predicate to family: strip parenthetical qualifiers, numbers, punctuation
+    // Use first 2 significant words — broad grouping
+    const rawPred = (fact?.predicate ?? "").toLowerCase();
+    const sigWords = rawPred
+      .replace(/\(.*?\)/g, "")          // remove parenthetical qualifiers
+      .replace(/[\d,.£$%€]+/g, "")      // remove numeric values
+      .replace(/[^\w\s]/g, " ")         // remove punctuation
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .filter((w: string) => w.length > 3);
+
+    // Family key: first 2 significant words from predicate + document
+    const predFamily = sigWords.slice(0, 2).join("|");
+    if (!predFamily) { result.push(fact); continue; }
+
+    const key = `${docKey}::${predFamily}`;
+    const familyCount = familyMap.get(key) ?? 0;
+    const docCount = docSlots.get(docKey) ?? 0;
+
+    // Hard cap: 1 per predicate family (strict dedup)
+    if (familyCount >= 1) continue;
+    // Soft cap: max 5 facts from same document (force source diversity)
+    if (docCount >= 5) continue;
+
+    familyMap.set(key, familyCount + 1);
+    docSlots.set(docKey, docCount + 1);
+    result.push(fact);
+  }
+
+  return result;
+}
+
+function renderEvidenceBlock(evidence: any[], narrative: string | null): string {
   if (!evidence || evidence.length === 0) return "  *(no evidence cited)*\n";
 
-  return evidence.map((e: any) => {
+  // Rank evidence by relevance to the narrative text
+  const scored = evidence.map((e: any) => ({ fact: e, score: scoreFactRelevance(e, narrative) }));
+  scored.sort((a, b) => b.score - a.score);
+
+  const sorted = scored.map((s) => s.fact);
+  const totalCount = sorted.length;
+
+  // Deduplicate near-identical predicates so 10 slots carry 10 distinct facts
+  const deduplicated = deduplicateEvidence(sorted);
+
+  const lines = deduplicated.slice(0, MAX_EVIDENCE_LINES).map((e: any) => {
     const parts: string[] = [];
     if (e?.predicate) parts.push(e.predicate);
     if (e?.value) parts.push(`= ${e.value}`);
@@ -90,7 +201,12 @@ function renderEvidenceBlock(evidence: any[]): string {
     }
     const docName = e?.document_name ?? "Unknown document";
     return `  - ${docName}: ${parts.join(" ") || "(fact reference)"}`;
-  }).join("\n") + "\n";
+  });
+
+  if (totalCount > MAX_EVIDENCE_LINES) {
+    lines.push(`  *${MAX_EVIDENCE_LINES} of ${totalCount} supporting facts shown. Full evidence set available in the run record.*`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 function renderAdviserRating(referenceEvidence: any[]): string {
@@ -99,16 +215,47 @@ function renderAdviserRating(referenceEvidence: any[]): string {
   const withSeverity = referenceEvidence.filter((e: any) => e?.adviser_severity);
   if (withSeverity.length === 0) return "";
 
-  const ratings = withSeverity.map((e: any) => {
-    const parts: string[] = [];
-    if (e.adviser_severity) parts.push(`severity: ${e.adviser_severity}`);
-    if (e.adviser_disposition) parts.push(`disposition: ${e.adviser_disposition}`);
-    return parts.join(", ");
-  });
+  // Count by severity level (deduplicate identical severity+disposition pairs first)
+  const seen = new Set<string>();
+  const severityCounts: Record<string, number> = {};
+  const SEVERITY_ORDER: Record<string, number> = { high: 3, medium: 2, low: 1 };
+  let highestSeverityRank = 0;
+  let highestDisposition: string | null = null;
 
-  // Deduplicate
-  const unique = [...new Set(ratings)];
-  return `**Adviser rating:** ${unique.join("; ")}\n`;
+  for (const e of withSeverity) {
+    const key = `${e.adviser_severity}|${e.adviser_disposition ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const sev = e.adviser_severity.toLowerCase();
+    severityCounts[sev] = (severityCounts[sev] ?? 0) + 1;
+
+    const rank = SEVERITY_ORDER[sev] ?? 0;
+    if (rank > highestSeverityRank) {
+      highestSeverityRank = rank;
+      highestDisposition = e.adviser_disposition ?? null;
+    } else if (rank === highestSeverityRank && !highestDisposition && e.adviser_disposition) {
+      highestDisposition = e.adviser_disposition;
+    }
+  }
+
+  // Build summary line: "High — 2 items, Medium — 1, Low — 11"
+  const summaryParts: string[] = [];
+  for (const level of ["high", "medium", "low"]) {
+    if (severityCounts[level]) {
+      const label = level.charAt(0).toUpperCase() + level.slice(1);
+      summaryParts.push(`${label} — ${severityCounts[level]}`);
+    }
+  }
+
+  const lines: string[] = [];
+  lines.push(`**Adviser rating (Osborne Clarke):** ${summaryParts.join(", ")}`);
+
+  if (highestDisposition) {
+    lines.push(`  Highest-rated: "${highestDisposition}"`);
+  }
+
+  return lines.join("\n") + "\n";
 }
 
 function renderFinding(finding: z.infer<typeof FindingRow>, compact: boolean): string {
@@ -138,7 +285,7 @@ function renderFinding(finding: z.infer<typeof FindingRow>, compact: boolean): s
   lines.push(renderEvidenceBlock([
     ...(finding.subject_evidence ?? []),
     ...(finding.reference_evidence ?? []),
-  ]));
+  ], finding.narrative));
 
   const adviserRating = renderAdviserRating(finding.reference_evidence);
   if (adviserRating) lines.push(adviserRating);
@@ -160,6 +307,7 @@ interface LimitationsData {
   failedChunks: Array<{ document_name: string; failed_count: number }>;
   unprobedTopics: string[];
   withheldNarratives: string[];
+  truncatedFindings: Array<{ topic: string; role: string; capped: number; true_count: number }>;
   checklistVersion: string;
 }
 
@@ -204,6 +352,14 @@ function renderLimitations(data: LimitationsData): string {
     lines.push(`**Findings with withheld narratives:** None.\n`);
   }
 
+  // Truncated evidence (FACT_CAP)
+  if (data.truncatedFindings.length > 0) {
+    lines.push(`**Findings with capped evidence (FACT_CAP = 150):**\n`);
+    lines.push(`The following findings had more facts assigned to them than could fit in the analysis window. Rated facts were prioritised; lower-priority facts may have been excluded.\n`);
+    data.truncatedFindings.forEach((t) => lines.push(`- ${t.topic} (${t.role}): ${t.capped} of ${t.true_count} facts included`));
+    lines.push("");
+  }
+
   lines.push(`**Obligation checklist version:** ${data.checklistVersion}\n`);
 
   return lines.join("\n");
@@ -230,10 +386,11 @@ function assembleReport(input: RenderInput): string {
 
   // Count topics evaluated vs silent
   const topicsWithFindings = new Set(findings.map((f) => f.topic_id));
-  const topicsEvaluated = SEEDED_TOPICS.filter((t) =>
+  const evaluableTopics = SEEDED_TOPICS.filter((t) =>
     t.obligation_class !== "not_memo_relevant"
-  ).length;
-  const topicsSilent = topicsEvaluated - topicsWithFindings.size;
+  );
+  const topicsEvaluated = evaluableTopics.length;
+  const topicsSilent = evaluableTopics.filter((t) => !topicsWithFindings.has(t.topic_id)).length;
 
   const sections: string[] = [];
 
@@ -255,7 +412,7 @@ function assembleReport(input: RenderInput): string {
   sections.push(`| Tier 3 — Noted | ${tier3.length} |`);
   sections.push(`| **Total findings** | **${findings.length}** |`);
   sections.push("");
-  sections.push(`Topics evaluated: ${topicsEvaluated} | Topics with findings: ${topicsWithFindings.size} | Topics silent: ${topicsSilent}\n`);
+  sections.push(`Topics in obligation checklist: ${topicsEvaluated} | Topics with findings: ${topicsWithFindings.size} | Topics silent (no gaps identified): ${topicsSilent}\n`);
 
   // Tier 1
   sections.push(`## Tier 1 — Potentially Deal-Relevant\n`);
@@ -301,6 +458,7 @@ export default api({
     dealId: z.string(),
     runId: z.string(),
     sample: z.boolean().optional().default(false),
+    section: z.enum(["full", "header", "tier1", "tier2", "tier3", "limitations"]).optional().default("full"),
   }),
   output: z.object({
     report_markdown: z.string(),
@@ -316,7 +474,7 @@ export default api({
     }),
   }),
 
-  async run(ctx, { dealId, runId, sample }) {
+  async run(ctx, { dealId, runId, sample, section }) {
     const { db } = ctx.integrations;
 
     // ─── Sample mode: hand-constructed findings for B4 verification ──────
@@ -327,12 +485,12 @@ export default api({
 
     // ─── Load deal name ──────────────────────────────────────────────────
     const dealRows = await db.query(
-      `SELECT deal_name FROM deals WHERE id = $1`,
+      `SELECT name FROM deals WHERE id = $1`,
       DealRow,
       [dealId],
       { label: "Load deal name" }
     );
-    const dealName = dealRows[0]?.deal_name ?? "Unknown Deal";
+    const dealName = dealRows[0]?.name ?? "Unknown Deal";
 
     // ─── Load findings ───────────────────────────────────────────────────
     const findings = await db.query(
@@ -345,6 +503,66 @@ export default api({
       [runId, dealId],
       { label: "Load findings for render" }
     );
+
+    // ─── Enrich evidence with fact details ───────────────────────────────
+    // Collect all fact IDs referenced across all findings
+    const allFactIds = new Set<string>();
+    for (const f of findings) {
+      const subj = Array.isArray(f.subject_evidence) ? f.subject_evidence : [];
+      const ref = Array.isArray(f.reference_evidence) ? f.reference_evidence : [];
+      for (const id of subj) { if (typeof id === "string") allFactIds.add(id); }
+      for (const id of ref) { if (typeof id === "string") allFactIds.add(id); }
+    }
+
+    // Load fact details in a single query
+    let factMap: Map<string, { predicate: string; value: string | null; scope_qualifier: string | null; document_name: string | null; adviser_severity: string | null; adviser_disposition: string | null }> = new Map();
+    if (allFactIds.size > 0) {
+      const factIdArr = [...allFactIds];
+      const placeholders = factIdArr.map((_, i) => `$${i + 1}`).join(",");
+      const factRows = await db.query(
+        `SELECT f.fact_id, f.predicate, f.value, f.scope_qualifier,
+                d.file_name AS document_name,
+                f.adviser_severity, f.adviser_disposition
+         FROM oa_facts f
+         LEFT JOIN documents d ON d.id = f.document_id
+         WHERE f.fact_id IN (${placeholders})`,
+        z.object({
+          fact_id: z.string(),
+          predicate: z.string(),
+          value: z.string().nullable(),
+          scope_qualifier: z.string().nullable(),
+          document_name: z.string().nullable(),
+          adviser_severity: z.string().nullable(),
+          adviser_disposition: z.string().nullable(),
+        }),
+        factIdArr,
+        { label: `Load ${factIdArr.length} fact details for evidence rendering` }
+      );
+      for (const row of factRows) {
+        factMap.set(row.fact_id, row);
+      }
+    }
+
+    // Replace fact ID arrays with enriched fact objects
+    const enrichedFindings = findings.map((f) => {
+      const enrichEvidence = (ids: any) => {
+        if (!Array.isArray(ids)) return [];
+        return ids.map((id: any) => {
+          if (typeof id === "string") {
+            const detail = factMap.get(id);
+            if (detail) return detail;
+            return { predicate: null, value: null, scope_qualifier: null, document_name: null, adviser_severity: null, adviser_disposition: null };
+          }
+          // Already an object (shouldn't happen but handle gracefully)
+          return id;
+        });
+      };
+      return {
+        ...f,
+        subject_evidence: enrichEvidence(f.subject_evidence),
+        reference_evidence: enrichEvidence(f.reference_evidence),
+      };
+    });
 
     // ─── Load limitations data ───────────────────────────────────────────
 
@@ -395,9 +613,35 @@ export default api({
     );
 
     // Findings with withheld narratives
-    const withheldNarratives = findings
+    const withheldNarratives = enrichedFindings
       .filter((f) => f.narrative === null && f.materiality_basis?.includes("quote_validation_failed"))
       .map((f) => f.topic_id);
+
+    // Truncated findings (evidence was capped)
+    const TruncRow = z.object({ topic_id: z.string(), role: z.string(), capped: z.coerce.number(), true_count: z.coerce.number() });
+    const truncatedFindings = await db.query(
+      `SELECT f.topic_id,
+              CASE WHEN COALESCE(jsonb_array_length(f.subject_evidence), 0) < COALESCE(ts.cnt, 0) THEN 'subject'
+                   ELSE 'reference' END AS role,
+              CASE WHEN COALESCE(jsonb_array_length(f.subject_evidence), 0) < COALESCE(ts.cnt, 0)
+                   THEN COALESCE(jsonb_array_length(f.subject_evidence), 0)
+                   ELSE COALESCE(jsonb_array_length(f.reference_evidence), 0) END AS capped,
+              CASE WHEN COALESCE(jsonb_array_length(f.subject_evidence), 0) < COALESCE(ts.cnt, 0)
+                   THEN COALESCE(ts.cnt, 0)
+                   ELSE COALESCE(tr.cnt, 0) END AS true_count
+       FROM oa_findings f
+       LEFT JOIN (SELECT run_id, topic_id, COUNT(*)::int AS cnt FROM oa_topic_facts WHERE fact_role = 'subject' AND run_id = $1::uuid GROUP BY run_id, topic_id) ts
+         ON ts.run_id = f.run_id AND ts.topic_id = f.topic_id
+       LEFT JOIN (SELECT run_id, topic_id, COUNT(*)::int AS cnt FROM oa_topic_facts WHERE fact_role = 'reference' AND run_id = $1::uuid GROUP BY run_id, topic_id) tr
+         ON tr.run_id = f.run_id AND tr.topic_id = f.topic_id
+       WHERE f.run_id = $1::uuid
+         AND (COALESCE(jsonb_array_length(f.subject_evidence), 0) < COALESCE(ts.cnt, 0)
+              OR COALESCE(jsonb_array_length(f.reference_evidence), 0) < COALESCE(tr.cnt, 0))
+       ORDER BY f.topic_id`,
+      TruncRow,
+      [runId],
+      { label: "Truncated evidence findings" }
+    );
 
     // ─── Assemble report ─────────────────────────────────────────────────
     const generatedAt = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
@@ -406,12 +650,13 @@ export default api({
       dealName,
       runId,
       generatedAt,
-      findings,
+      findings: enrichedFindings,
       limitations: {
         zeroFactDocuments,
         failedChunks: failedChunks as any,
         unprobedTopics: unprobedTopics.map((t) => t.topic_id),
         withheldNarratives,
+        truncatedFindings: truncatedFindings.map((t) => ({ topic: getTopicLabel(t.topic_id), role: t.role, capped: t.capped, true_count: t.true_count })),
         checklistVersion: OBLIGATION_CHECKLIST_VERSION,
       },
     });
@@ -430,16 +675,49 @@ export default api({
     // This file has NO import of anthropic and makes no AI calls.
     // The meta.llm_calls field is always 0.
 
+    // ─── Persist rendered report to checkpoint for retrieval ──────────────
+    await db.query(
+      `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, payload_json, updated_at)
+       VALUES ($1::uuid, 'render', 'report_markdown', 'complete', $2::jsonb, NOW())
+       ON CONFLICT (run_id, stage, unit_key) DO UPDATE
+       SET payload_json = $2::jsonb, status = 'complete', updated_at = NOW()`,
+      z.any(),
+      [runId, JSON.stringify({ report_markdown: reportMarkdown })],
+      { label: "Persist rendered report" }
+    );
+
+    // ─── Section filtering ────────────────────────────────────────────────
+    let outputMarkdown = reportMarkdown;
+    if (section !== "full") {
+      const sectionMarkers: Record<string, { start: string; end?: string }> = {
+        header: { start: "# Omission Audit", end: "## Tier 1" },
+        tier1: { start: "## Tier 1", end: "## Tier 2" },
+        tier2: { start: "## Tier 2", end: "## Tier 3" },
+        tier3: { start: "## Tier 3", end: "## Coverage Notes" },
+        limitations: { start: "## Coverage Notes" },
+      };
+      const marker = sectionMarkers[section];
+      if (marker) {
+        const startIdx = reportMarkdown.indexOf(marker.start);
+        const endIdx = marker.end ? reportMarkdown.indexOf(marker.end) : -1;
+        if (startIdx >= 0) {
+          outputMarkdown = endIdx > startIdx
+            ? reportMarkdown.slice(startIdx, endIdx)
+            : reportMarkdown.slice(startIdx);
+        }
+      }
+    }
+
     return {
-      report_markdown: reportMarkdown,
+      report_markdown: outputMarkdown,
       meta: {
         llm_calls: 0,
         b2_fields_in_output: b2Leaked,
-        findings_rendered: findings.length,
+        findings_rendered: enrichedFindings.length,
         tier_counts: {
-          tier1: findings.filter((f) => f.materiality_tier === 1).length,
-          tier2: findings.filter((f) => f.materiality_tier === 2).length,
-          tier3: findings.filter((f) => f.materiality_tier === 3).length,
+          tier1: enrichedFindings.filter((f) => f.materiality_tier === 1).length,
+          tier2: enrichedFindings.filter((f) => f.materiality_tier === 2).length,
+          tier3: enrichedFindings.filter((f) => f.materiality_tier === 3).length,
         },
       },
     };
@@ -518,6 +796,7 @@ function renderSampleReport() {
     failedChunks: [{ document_name: "2026-06-15 SCG - 3rd IC Memo vS.pdf", failed_count: 3 }],
     unprobedTopics: [],
     withheldNarratives: ["capex.requirements"],
+    truncatedFindings: [{ topic: "Competitive Landscape", role: "reference", capped: 150, true_count: 212 }],
     checklistVersion: OBLIGATION_CHECKLIST_VERSION,
   };
 

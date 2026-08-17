@@ -162,7 +162,7 @@ function emitFromFlags(items: any[]): RawFact[] {
     period: null,
     scope_qualifier: "NONE_STATED",
     verbatim_snippet: null,
-    adviser_severity: normalizeAdviserSeverity(f.adviser_severity || f.severity),
+    adviser_severity: normalizeAdviserSeverity(f.adviser_severity ?? null),
     adviser_disposition: f.adviser_disposition || null,
     stated_or_derived: "stated",
     source_metadata: {

@@ -52,11 +52,23 @@ export const ClaimSchema = z.object({
   scope_qualifier: z.string().describe(
     "The EXACT basis/scope — e.g. 'Organic Cash EBITDA', 'PF Revenue', " +
     "'acquired-via-M&A (deal-sizing)', 'PEP Cash EBITDA (Organic)', 'Group Revenue (excl-future-M&A)'. " +
-    "This field PREVENTS fabrication by distinguishing metrics that share a name but have different scopes."
+    "This field PREVENTS fabrication by distinguishing metrics that share a name but have different scopes. " +
+    "MUST NEVER be a metric enum value (e.g. never 'other_financial', 'net_debt'). Use 'NONE_STATED' if no qualifier is stated."
   ),
-  period: z.string().describe("e.g. 'FY Mar-26', 'LTM Sep-26', 'FY23-26 CAGR', 'Jun-26 run-rate'"),
+  period: z.string().describe(
+    "Temporal reference ONLY — e.g. 'FY Mar-26', 'LTM Sep-26', 'FY23-26', 'FY31F'. " +
+    "NO parentheticals, scenarios, or basis descriptors. Those go in 'scenario' or 'basis'."
+  ),
   value: z.number(),
   unit: z.enum(["£m", "%", "x", "£k", "£", "p", "years", "bps", "other"]),
+  basis: z.string().nullable().describe(
+    "The measurement basis when explicitly stated — e.g. 'OCF basis', 'Cash EBITDA basis', " +
+    "'ARR', 'contracted GP', 'opening ARR'. Null when the document states no explicit basis qualifier."
+  ),
+  scenario: z.string().nullable().describe(
+    "The sensitivity or scenario parameter — e.g. '14.2% CAGR', 'no M&A', '£8m M&A p.a.', " +
+    "'Management Plan', 'PEP Base Case', 'Ares package'. Null for unconditional/base-case claims."
+  ),
   basis_note: z.string().describe(
     "Free-text: what the number refers to. E.g. 'avg EBITDA acquired per M&A deal', " +
     "'pro-forma revenue including completed acquisitions', 'entry EV / Adj EBITDA'"
@@ -89,6 +101,10 @@ export interface TerminalResult {
   file_name: string;
   status: TerminalStatus;
   claims_count: number;
+  /** True when the LLM response hit max_tokens — claims are partial (back of memo lost) */
+  output_truncated?: boolean;
+  /** Actual output tokens consumed for this memo's quantitative extraction */
+  output_tokens?: number;
   error?: string;
 }
 
@@ -101,6 +117,10 @@ export interface ExtractionResult {
   /** Qualitative canonical claims extracted from the same memo */
   qualitativeClaims: CanonicalIcClaim[];
   truncated: boolean;
+  /** True when the LLM response hit max_tokens (stop_reason = "max_tokens"). Output is silently incomplete. */
+  output_truncated: boolean;
+  /** Actual output tokens returned by the model (from usage.output_tokens) */
+  output_tokens: number;
   parseFailed: boolean;
   parseError?: string;
 }
@@ -232,7 +252,7 @@ export async function runWorkerPool<T>(
 // Extraction Prompt
 // ---------------------------------------------------------------------------
 
-const CLAIMS_EXTRACTION_PROMPT = `You are a senior private equity analyst performing STRUCTURED CLAIM EXTRACTION from IC memos.
+export const CLAIMS_EXTRACTION_PROMPT = `You are a senior private equity analyst performing STRUCTURED CLAIM EXTRACTION from IC memos.
 
 Your job: Extract every quantitative financial claim into a typed ledger with PRECISE scope classification.
 
@@ -352,6 +372,44 @@ Before writing each claim, ask yourself:
 5. Is this from a segment breakdown? If yes → carry the segment name
 6. Only use "Total Group Revenue" if the number genuinely represents ALL reported revenue across the entire group
 
+## Period vs Basis vs Scenario: Three Distinct Axes
+
+Every claim has up to three temporal/conditional dimensions. They are NEVER merged into a single field.
+
+| Verbatim text | period | basis | scenario |
+|---|---|---|---|
+| FY Mar-26 OCF basis | FY Mar-26 | OCF basis | null |
+| FY31F (14.2% CAGR) | FY31F | null | 14.2% CAGR |
+| FY31F (PEP Base Case: 8.7% organic CAGR) | FY31F | null | PEP Base Case: 8.7% organic CAGR |
+| FY26-FY31 (base case) | FY26-FY31 | null | base case |
+| FY Mar-26 contracted GP | FY Mar-26 | contracted GP | null |
+| FY31F (no M&A) | FY31F | null | no M&A |
+| FY26 ARR | FY26 | ARR | null |
+| FY26 (Ares package) | FY26 | null | Ares package |
+
+Rules:
+- **period** = temporal reference ONLY (fiscal year, quarter, LTM window, range). Never contains parentheticals.
+- **basis** = measurement methodology or accounting basis explicitly stated (OCF basis, ARR, contracted GP, opening ARR). Null if not stated.
+- **scenario** = sensitivity case, assumption variant, or model parameter (CAGR rates, M&A pacing labels, package names, base/bull/bear). Null for unconditional/base-case figures.
+
+⚠️ If a period string contains parenthetical content like "FY31F (14.2% CAGR)", SPLIT IT:
+- period = "FY31F"
+- scenario = "14.2% CAGR"
+NEVER put the parenthetical into the period field.
+
+## Sensitivity Grid Cells — DO NOT EXTRACT
+
+Sensitivity tables show computed outputs (IRR, MoM, EBITDA multiples) for many scenario cells.
+Do NOT extract these computed grid cells — they are derived outputs, not stated claims.
+
+Only extract from sensitivity tables:
+- The INPUT ASSUMPTIONS (e.g. "organic CAGR range 8–14%", "exit multiple 12–16x")
+- The LABELLED BASE CASE output row (the single row the memo highlights as the central case)
+
+Do NOT extract:
+- Each individual cell of a sensitivity matrix (e.g. "IRR = 23.4% at 12x exit / 10% CAGR")
+- Interpolated values between labelled cases
+
 ## Extraction Rules
 
 1. Extract the VERBATIM snippet — the exact text from the memo. This is required.
@@ -361,18 +419,22 @@ Before writing each claim, ask yourself:
 5. For PF (pro-forma): any revenue/EBITDA explicitly labelled "pro-forma" or "PF" = PF scope.
 6. Multiple claims from the same sentence are fine — extract each distinct metric separately.
 7. If a claim references another document's finding (e.g. "FDD shows £X"), tag as cross_reference.
-8. Preserve the period exactly as stated — don't normalise "FY Mar-26" to "2026".
+8. Preserve the period as a TEMPORAL REFERENCE ONLY — no parentheticals, scenarios, or basis qualifiers.
 9. For growth rates (CAGRs), use the scope of what's growing: "Organic Cash EBITDA" CAGR → scope = "Organic Cash EBITDA", NOT "Total Group Revenue".
+10. scope_qualifier must NEVER be a metric enum value (e.g. never "other_financial", "net_debt", "cash_flow"). If no qualifier is stated, emit "NONE_STATED".
+11. Split compound period strings: temporal part → period, methodology → basis, assumption → scenario.
 
 ## Output Format
 
 Return a JSON array of claim objects. Each claim:
 {
   "metric": "revenue" | "EBITDA" | "gross_margin" | "net_income" | "net_debt" | "multiple" | "growth_rate" | "cost" | "capex" | "cash_flow" | "returns" | "other_financial",
-  "scope_qualifier": "<exact scope — MUST reflect actual basis, never a lazy default>",
-  "period": "<period string>",
+  "scope_qualifier": "<exact scope — MUST reflect actual basis, never a lazy default. Use NONE_STATED if none. NEVER a metric enum value.>",
+  "period": "<temporal reference ONLY — e.g. 'FY Mar-26', 'FY26-FY31', 'LTM Sep-26'. NO parentheticals.>",
   "value": <numeric value>,
   "unit": "£m" | "%" | "x" | "£k" | "£" | "p" | "years" | "bps" | "other",
+  "basis": "<measurement basis if stated — e.g. 'OCF basis', 'ARR', 'contracted GP'. null if not stated>",
+  "scenario": "<sensitivity/scenario parameter — e.g. '14.2% CAGR', 'no M&A', 'base case'. null if unconditional>",
   "basis_note": "<what this number refers to>",
   "source_doc": "<filename>",
   "source_page": "<page/section reference or null>",
@@ -420,6 +482,11 @@ export interface ClaimsExtractionOptions {
    * Defaults to all pending memos.
    */
   maxWorkUnits?: number;
+  /**
+   * When true, skips the qualitative extraction pass (extractQualitativeFromMemo).
+   * Halves LLM time per memo. Quantitative extraction is unaffected.
+   */
+  skipQualitative?: boolean;
 }
 
 export async function runClaimsExtraction(
@@ -556,24 +623,45 @@ export async function runClaimsExtraction(
     const responseText = response.content[0]?.text ?? "";
     const parseResult = parseClaimsResponse(responseText, memo.file_name);
 
+    // --- Edit 1: Output truncation detection ---
+    // Check stop_reason to detect when the model hit max_tokens mid-output.
+    // The repair heuristic still runs and claims are still returned — this only
+    // adds a loud label so downstream consumers know the count is incomplete.
+    const outputTruncated = response.stop_reason === "max_tokens";
+    const outputTokens = response.usage.output_tokens;
+    if (outputTruncated) {
+      console.warn(
+        `[ClaimsExtraction] OUTPUT TRUNCATED: "${memo.file_name}" hit max_tokens ` +
+        `(${outputTokens} output tokens). ${parseResult.claims.length} claims recovered via repair. ` +
+        `Back-of-memo claims are systematically lost.`
+      );
+    }
+
     console.log(
       `[ClaimsExtraction] "${memo.file_name}": ${parseResult.claims.length} claims ` +
       `(${parseResult.claims.filter(c => c.claim_category === "operating_metric").length} operating, ` +
       `${parseResult.claims.filter(c => c.claim_category === "deal_mechanics").length} deal-mechanics, ` +
       `${parseResult.claims.filter(c => c.claim_category === "valuation_structuring").length} valuation, ` +
       `${parseResult.claims.filter(c => c.claim_category === "returns_projection").length} returns)` +
-      `${parseResult.failed ? " [PARSE FAILED]" : ""}${truncated ? " [TRUNCATED]" : ""}`
+      `${parseResult.failed ? " [PARSE FAILED]" : ""}${truncated ? " [INPUT TRUNCATED]" : ""}` +
+      `${outputTruncated ? " [OUTPUT TRUNCATED]" : ""}`
     );
 
-    // --- MAT-F01B: Qualitative extraction on the same memo ---
-    const qualitativeClaims = await extractQualitativeFromMemo(
-      ctx, memo, text, pipelineStartTime, options,
-    );
-    if (qualitativeClaims.length > 0) {
-      console.log(`[ClaimsExtraction][Qualitative] "${memo.file_name}": ${qualitativeClaims.length} qualitative claims`);
+    // --- Edit 2: skipQualitative gate ---
+    let qualitativeClaims: CanonicalIcClaim[] = [];
+    if (!options?.skipQualitative) {
+      // MAT-F01B: Qualitative extraction on the same memo
+      qualitativeClaims = await extractQualitativeFromMemo(
+        ctx, memo, text, pipelineStartTime, options,
+      );
+      if (qualitativeClaims.length > 0) {
+        console.log(`[ClaimsExtraction][Qualitative] "${memo.file_name}": ${qualitativeClaims.length} qualitative claims`);
+      }
+    } else {
+      console.log(`[ClaimsExtraction][Qualitative] Skipped for "${memo.file_name}" (skipQualitative=true)`);
     }
 
-    return { claims: parseResult.claims, qualitativeClaims, truncated, parseFailed: parseResult.failed, parseError: parseResult.error };
+    return { claims: parseResult.claims, qualitativeClaims, truncated, output_truncated: outputTruncated, output_tokens: outputTokens, parseFailed: parseResult.failed, parseError: parseResult.error };
   };
 
   // Build job list for PENDING memos only (incremental — already-processed memos are retained)
@@ -583,7 +671,7 @@ export async function runClaimsExtraction(
     label: memo.file_name,
     execute: async (): Promise<ExtractionResult> => {
       if (!memo.parsed_text || memo.parsed_text.trim().length === 0) {
-        return { claims: [], qualitativeClaims: [], truncated: false, parseFailed: true, parseError: `Empty or whitespace-only parsed_text for ${memo.file_name}` };
+        return { claims: [], qualitativeClaims: [], truncated: false, output_truncated: false, output_tokens: 0, parseFailed: true, parseError: `Empty or whitespace-only parsed_text for ${memo.file_name}` };
       }
       return extractMemo(memo);
     },
@@ -627,6 +715,8 @@ export async function runClaimsExtraction(
         file_name: r.job.label,
         status: terminalStatus,
         claims_count: extraction.claims.length,
+        output_truncated: extraction.output_truncated,
+        output_tokens: extraction.output_tokens,
         error: extraction.parseError,
       });
     } else {

@@ -116,7 +116,15 @@ Rules:
 - If subject_coverage handles the topic adequately → gap_detected = false, gap_kind = null.
 - Conservative: only flag a gap if material information is truly missing, not just additional detail.
 - Never invent facts not shown above.
-- Return ONLY valid JSON. No markdown fences, no commentary.`;
+- Return ONLY valid JSON. No markdown fences, no commentary.
+
+CRITICAL SCOPE CONSTRAINT:
+You see only the facts assigned to THIS topic. You do not see the rest of the memo.
+Never assert that the memos are silent on a subject, that no acknowledgement exists,
+or that a matter is absent from the memos entirely. Those are corpus-wide claims you
+cannot verify from one topic's facts.
+
+Write "the facts on this topic do not include X" — never "the memo does not address X".`;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,13 +259,27 @@ export default api({
           continue;
         }
 
-        // Emit not_disclosed finding
+        // Emit not_disclosed finding — load reference fact_ids to populate reference_evidence
+        const refFactIds = await db.query(
+          `SELECT tf.fact_id FROM oa_topic_facts tf
+           JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $3
+           WHERE tf.run_id = $1 AND tf.topic_id = $2 AND tf.fact_role = 'reference'
+           ORDER BY CASE f.adviser_severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, f.predicate
+           LIMIT 150`,
+          z.object({ fact_id: z.string() }),
+          [runId, topic.topic_id, dealId],
+          { label: `Load ref fact_ids for not_disclosed ${topic.topic_id}` }
+        );
+
+        const refEvidenceJson = JSON.stringify(refFactIds.map(f => f.fact_id));
+
         await db.query(
           `INSERT INTO oa_findings (finding_id, run_id, deal_id, topic_id, gap_kind, materiality_tier, materiality_basis, absence_basis, subject_evidence, reference_evidence, narrative)
-           VALUES (gen_random_uuid(), $1, $2, $3, 'not_disclosed', 3, 'awaiting_materiality_assessment', $4, '[]'::jsonb, '[]'::jsonb, $5)`,
+           VALUES (gen_random_uuid(), $1, $2, $3, 'not_disclosed', 3, 'awaiting_materiality_assessment', $4, '[]'::jsonb, $6::jsonb, $5)`,
           z.any(),
           [runId, dealId, topic.topic_id, absenceBasis,
-           `Topic "${topic.topic_label}" is not addressed in the IC memo. ${absenceBasis === 'probe_not_run' ? 'Retrieval probe was not run.' : 'Retrieval probe confirmed no text mentions.'}`],
+           `Topic "${topic.topic_label}" is not addressed in the IC memo. ${absenceBasis === 'probe_not_run' ? 'Retrieval probe was not run.' : 'Retrieval probe confirmed no text mentions.'}`,
+           refEvidenceJson],
           { label: `Insert not_disclosed: ${topic.topic_id}` }
         );
         gapsEmitted++;
@@ -292,7 +314,7 @@ export default api({
          FROM oa_topic_facts tf
          JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $2
          WHERE tf.run_id = $1 AND tf.topic_id = $3 AND tf.fact_role = 'subject'
-         ORDER BY f.predicate
+         ORDER BY CASE f.adviser_severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, f.predicate
          LIMIT ${FACT_CAP}`,
         TopicFactDetail,
         [runId, dealId, topic.topic_id],
@@ -304,7 +326,7 @@ export default api({
          FROM oa_topic_facts tf
          JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $2
          WHERE tf.run_id = $1 AND tf.topic_id = $3 AND tf.fact_role = 'reference'
-         ORDER BY f.predicate
+         ORDER BY CASE f.adviser_severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, f.predicate
          LIMIT ${FACT_CAP}`,
         TopicFactDetail,
         [runId, dealId, topic.topic_id],

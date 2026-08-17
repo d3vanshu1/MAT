@@ -21,10 +21,10 @@ import { SEEDED_TOPICS } from "./oa-taxonomy.js";
 const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
-// Budget guard constants
-const HARD_KILL_MS = 200_000;
-const SAFETY_MARGIN_MS = 45_000;
-const DEFAULT_UNIT_DURATION_MS = 20_000;
+// Budget guard constants — orchestrator hard-kills at ~300s, must yield before that
+const HARD_KILL_MS = 250_000;
+const SAFETY_MARGIN_MS = 40_000;
+const DEFAULT_UNIT_DURATION_MS = 55_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -144,12 +144,30 @@ REFERENCE EVIDENCE (from adviser reports):
 ${refLines || "  (none)"}
 
 INSTRUCTIONS:
-- Write 2-4 paragraphs summarising what the adviser reports say, what the IC memo says (or omits), and why this gap matters.
+- Write 2-4 paragraphs.
+- FIRST: State what the memos DO disclose on this topic before stating what is missing. A finding that ignores existing coverage is a false finding.
+- THEN: Describe the gap — what the reference documents reveal that is absent or inadequately addressed in the IC memo.
 - Use factual, measured language. Do not speculate.
-- Any direct quotation MUST be copied EXACTLY from the SOURCE WINDOW text provided above. Do not paraphrase inside quotation marks. Do not construct a quote from field values. If you cannot quote exactly from the source windows, do not quote — describe instead.
 - Do not use internal field names or identifiers in the narrative.
 - Reference documents by name (e.g. "the Vendor FDD states...") not by fact_id.
 - Focus on the gap: what is disclosed in the reference but missing/inadequate in the subject.
+
+QUOTATION RULES:
+- The fact fields provided to you — predicate, value, scope_qualifier — are SUMMARIES generated during extraction. They are NOT source text. Never place them in quotation marks.
+- Direct quotation is permitted ONLY from the SOURCE WINDOWS provided, copied exactly, character for character.
+- QUOTE where the finding rests on someone's specific wording — an adviser's stated disposition ("For information only"), a recommendation, a qualification, a caveat. In those cases the wording carries meaning that paraphrase loses.
+- DO NOT quote where the finding rests on figures. State the numbers directly as prose. A finding built on data is verified by its numbers, not by quotation marks.
+- If no suitable verbatim quote exists in the source windows, do not construct one. Write the finding without quotation.
+
+FIGURE CITATION RULES:
+- Every figure you cite must appear with its period and its scope qualifier as recorded on the fact, and you must name the source document. A reader must be able to locate that figure in the source without guessing which population or period it refers to.
+- Example: "£49.0 million of adjusted EBITDA for the year ended March 2025 (PwC Vendor FDD)" — not "£49.0 million".
+
+ADVISER SEVERITY:
+- Adviser severity ratings are provided as structured fields. State a rating ONLY when it appears on a fact you are citing. Never infer a severity from the seriousness of the subject matter.
+
+SCOPE CONSTRAINTS:
+- You see only the facts assigned to THIS topic. You do not see the rest of the memo. Never assert that the memos are silent on a subject, that no acknowledgement exists, or that a matter is absent from the memos entirely. Those are corpus-wide claims you cannot verify from one topic's facts. Write "the facts on this topic do not include X" — never "the memo does not address X".
 
 OUTPUT: Return ONLY the narrative text. No markdown headings, no metadata, no JSON wrapping.`;
 }
@@ -220,7 +238,7 @@ function validateQuotes(
 }
 
 // ---------------------------------------------------------------------------
-// A4 — Provenance resolution gate
+// A4 — Provenance resolution gate (BATCHED for performance)
 // ---------------------------------------------------------------------------
 
 interface ProvenanceResult {
@@ -237,40 +255,99 @@ async function resolveProvenance(
 ): Promise<ProvenanceResult[]> {
   if (factIds.length === 0) return [];
 
-  const results: ProvenanceResult[] = [];
-  for (const factId of factIds) {
-    const rows = await db.query(
-      `SELECT fact_id, char_start, char_end, document_id
-       FROM oa_facts
-       WHERE fact_id = $1 AND deal_id = $2`,
-      z.object({
-        fact_id: z.string(),
-        char_start: z.coerce.number().nullable(),
-        char_end: z.coerce.number().nullable(),
-        document_id: z.string(),
-      }),
-      [factId, dealId],
-      { label: `Resolve provenance: ${factId}` }
-    );
+  // Batch 1: Load all fact metadata in one query
+  const placeholders = factIds.map((_, i) => `$${i + 2}`).join(", ");
+  const factRows = await db.query(
+    `SELECT fact_id, char_start, char_end, document_id
+     FROM oa_facts
+     WHERE fact_id IN (${placeholders}) AND deal_id = $1`,
+    z.object({
+      fact_id: z.string(),
+      char_start: z.coerce.number().nullable(),
+      char_end: z.coerce.number().nullable(),
+      document_id: z.string(),
+    }),
+    [dealId, ...factIds],
+    { label: `Batch provenance lookup (${factIds.length} facts)` }
+  );
 
-    if (rows.length === 0) {
+  const factMap = new Map<string, { fact_id: string; char_start: number | null; char_end: number | null; document_id: string }>(
+    factRows.map((r: any) => [r.fact_id, r])
+  );
+  const results: ProvenanceResult[] = [];
+  
+  // Group facts by document_id for batch source window retrieval
+  const docGroups = new Map<string, Array<{ factId: string; charStart: number; charEnd: number }>>();
+
+  for (const factId of factIds) {
+    const row = factMap.get(factId);
+    if (!row) {
       results.push({ resolved: false, factId, error: `fact_id ${factId} not found in oa_facts`, sourceWindow: null });
       continue;
     }
-
-    const row = rows[0];
     if (row.char_start == null || row.char_end == null) {
       results.push({ resolved: false, factId, error: `fact_id ${factId} has NULL char_start or char_end`, sourceWindow: null });
       continue;
     }
-
-    const { text, error } = await deriveSourceWindow(db, factId, row.char_start, row.char_end, row.document_id);
-    if (error || !text) {
-      results.push({ resolved: false, factId, error: error ?? "empty source window", sourceWindow: null });
+    if (row.char_end <= row.char_start) {
+      results.push({ resolved: false, factId, error: `fact_id ${factId}: char_end <= char_start`, sourceWindow: null });
       continue;
     }
+    
+    const group = docGroups.get(row.document_id) ?? [];
+    group.push({ factId, charStart: row.char_start, charEnd: row.char_end });
+    docGroups.set(row.document_id, group);
+  }
 
-    results.push({ resolved: true, factId, error: null, sourceWindow: text });
+  // Batch 2: For each document, load ALL source windows in ONE query
+  for (const [docId, facts] of docGroups.entries()) {
+    // Build a single query that returns all substrings for this document
+    // Using a VALUES list with lateral join
+    const valuesClause = facts.map((f, i) => `($${i * 2 + 2}::int, $${i * 2 + 3}::int)`).join(", ");
+    const WINDOW_PAD = 200; // Extra chars each side for quote validation context
+    const params: any[] = [docId];
+    for (const f of facts) {
+      params.push(Math.max(0, f.charStart - WINDOW_PAD), f.charEnd + WINDOW_PAD);
+    }
+
+    try {
+      const rows = await db.query(
+        `SELECT v.idx, substring(d.parsed_text FROM GREATEST(v.cs + 1, 1) FOR LEAST(v.ce, length(d.parsed_text)) - GREATEST(v.cs, 0)) AS snippet
+         FROM documents d,
+              (VALUES ${facts.map((_, i) => `(${i}, $${i * 2 + 2}::int, $${i * 2 + 3}::int)`).join(", ")}) AS v(idx, cs, ce)
+         WHERE d.id = $1 AND d.parsed_text IS NOT NULL
+         ORDER BY v.idx`,
+        z.object({ idx: z.coerce.number(), snippet: z.string().nullable() }),
+        params,
+        { label: `Batch source windows: ${docId.slice(0, 8)} (${facts.length} facts)` }
+      );
+
+      const snippetMap = new Map<number, string | null>(rows.map((r: any) => [r.idx, r.snippet]));
+      for (let i = 0; i < facts.length; i++) {
+        const snippet = snippetMap.get(i);
+        if (!snippet) {
+          results.push({ resolved: false, factId: facts[i].factId, error: `empty source window for ${facts[i].factId}`, sourceWindow: null });
+        } else {
+          results.push({ resolved: true, factId: facts[i].factId, error: null, sourceWindow: snippet });
+        }
+      }
+    } catch (e: any) {
+      // Fallback: if the batch query fails (too many params), do individual
+      for (const fact of facts) {
+        const rows = await db.query(
+          `SELECT substring(parsed_text FROM GREATEST($2 + 1, 1) FOR LEAST($3, length(parsed_text)) - GREATEST($2, 0)) AS parsed_text
+           FROM documents WHERE id = $1 AND parsed_text IS NOT NULL`,
+          ParsedTextRow,
+          [docId, Math.max(0, fact.charStart - WINDOW_PAD), fact.charEnd + WINDOW_PAD],
+          { label: `Source window fallback: ${fact.factId.slice(0, 8)}` }
+        );
+        if (rows.length === 0 || !rows[0].parsed_text) {
+          results.push({ resolved: false, factId: fact.factId, error: `empty source window for ${fact.factId}`, sourceWindow: null });
+        } else {
+          results.push({ resolved: true, factId: fact.factId, error: null, sourceWindow: rows[0].parsed_text });
+        }
+      }
+    }
   }
 
   return results;
@@ -291,7 +368,9 @@ export default api({
     dealId: z.string(),
     runId: z.string(),
     reset: z.boolean().optional().default(false),
+    retryFailed: z.boolean().optional().default(false),
     dryRun: z.boolean().optional().default(false),
+    findingIds: z.array(z.string()).optional(),
     testMode: z.object({
       narrative: z.string(),
       sourceWindows: z.array(z.string()),
@@ -304,7 +383,7 @@ export default api({
     report: z.record(z.string(), z.any()).optional(),
   }),
 
-  async run(ctx, { dealId, runId, reset, dryRun, testMode }) {
+  async run(ctx, { dealId, runId, reset, retryFailed, dryRun, findingIds, testMode }) {
     // ─── TEST MODE: pure validator unit test, no DB/LLM ─────────────────
     if (testMode) {
       const quotesExtracted = extractQuotedSpans(testMode.narrative);
@@ -335,6 +414,13 @@ export default api({
         { label: "Reset: delete finding_assembly checkpoints" }
       );
       console.log("[P8] Reset complete for run", runId);
+    } else if (retryFailed) {
+      const deleted = await db.query(
+        `DELETE FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'finding_assembly' AND status = 'failed' RETURNING unit_key`,
+        z.object({ unit_key: z.string() }), [runId],
+        { label: "RetryFailed: delete failed finding_assembly checkpoints" }
+      );
+      console.log(`[P8] RetryFailed: cleared ${deleted.length} failed checkpoints for retry`);
     }
 
     // ─── Load findings that have a materiality_tier (completed P7) ────────
@@ -363,9 +449,13 @@ export default api({
     const processed = new Set(checkpoints.map((c) => c.unit_key));
 
     const pending = findings.filter((f) => !processed.has(f.finding_id));
-    console.log(`[P8] ${pending.length} pending (${findings.length - pending.length} already processed)`);
+    // ─── Optional: restrict to specific finding IDs ─────────────────────
+    const workset = findingIds && findingIds.length > 0
+      ? pending.filter((f) => findingIds.includes(f.finding_id))
+      : pending;
+    console.log(`[P8] ${pending.length} pending (${findings.length - pending.length} already processed)${findingIds ? `, workset=${workset.length} (filtered)` : ''}`);
 
-    if (pending.length === 0) {
+    if (workset.length === 0) {
       // ─── Complete: build report ─────────────────────────────────────────
       const completedCps = checkpoints.filter((c) => c.status === "complete").length;
       const failedCps = checkpoints.filter((c) => c.status === "failed").length;
@@ -391,7 +481,7 @@ export default api({
     let quoteFailures: Array<{ finding_id: string; quotes: string[]; attempt: number }> = [];
     let emptyCharRangeFacts: string[] = [];
 
-    for (const finding of pending) {
+    for (const finding of workset) {
       // Budget check
       if (timeRemaining() < SAFETY_MARGIN_MS + unitDurationMs) {
         console.log(`[P8] YIELDING FOR BUDGET: ${timeRemaining()}ms remaining`);
@@ -401,12 +491,16 @@ export default api({
       const unitStart = Date.now();
 
       // ─── A4: Provenance resolution gate ──────────────────────────────────
-      const subjectFactIds = (finding.subject_evidence ?? [])
-        .map((e: any) => e?.fact_id)
-        .filter((id: any): id is string => typeof id === "string");
-      const referenceFactIds = (finding.reference_evidence ?? [])
-        .map((e: any) => e?.fact_id)
-        .filter((id: any): id is string => typeof id === "string");
+      // Evidence arrays may be plain UUID strings (from P6) or objects with fact_id
+      const extractFactIds = (evidence: any[]): string[] =>
+        (evidence ?? []).map((e: any) => {
+          if (typeof e === "string") return e;           // Plain UUID
+          if (typeof e === "object" && e?.fact_id) return e.fact_id; // Object form
+          return null;
+        }).filter((id: any): id is string => typeof id === "string");
+
+      const subjectFactIds = extractFactIds(finding.subject_evidence);
+      const referenceFactIds = extractFactIds(finding.reference_evidence);
       const allFactIds = [...subjectFactIds, ...referenceFactIds];
 
       const provenanceResults = await resolveProvenance(db, allFactIds, dealId);
@@ -479,6 +573,7 @@ export default api({
 
       let narrative: string | null = null;
       let validationPassed = false;
+      const rejectedNarratives: string[] = [];
 
       for (let attempt = 1; attempt <= 2; attempt++) {
         const prompt = buildNarrativePrompt(
@@ -520,6 +615,7 @@ export default api({
             quotes: validation.failedQuotes,
             attempt,
           });
+          rejectedNarratives.push(rawNarrative);
           console.log(`[P8] Quote validation FAILED (attempt ${attempt}) for ${finding.finding_id}: ${validation.failedQuotes.length} bad quotes`);
         }
       }
@@ -534,12 +630,22 @@ export default api({
         );
         narrativesWritten++;
 
+        // Persist quote metrics on success for observability
+        const quotesExtracted = extractQuotedSpans(narrative);
+        const quoteMetrics = {
+          quotes_extracted: quotesExtracted.length,
+          quotes_validated: quotesExtracted.length,
+          quote_texts: quotesExtracted,
+          narrative_length: narrative.length,
+        };
+
         await db.query(
-          `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status)
-           VALUES ($1, 'finding_assembly', $2, 'complete')
-           ON CONFLICT (run_id, stage, unit_key) DO NOTHING`,
+          `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, payload_json)
+           VALUES ($1, 'finding_assembly', $2, 'complete', $3::jsonb)
+           ON CONFLICT (run_id, stage, unit_key) DO UPDATE SET
+             status = 'complete', payload_json = $3::jsonb, updated_at = now()`,
           z.any(),
-          [runId, finding.finding_id],
+          [runId, finding.finding_id, JSON.stringify(quoteMetrics)],
           { label: `Checkpoint (success): ${finding.finding_id}` }
         );
       } else {
@@ -557,10 +663,17 @@ export default api({
         await db.query(
           `INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, reason, payload_json)
            VALUES ($1, 'finding_assembly', $2, 'failed', 'quote_validation_failed', $3::jsonb)
-           ON CONFLICT (run_id, stage, unit_key) DO NOTHING`,
+           ON CONFLICT (run_id, stage, unit_key) DO UPDATE SET
+             status = 'failed', reason = 'quote_validation_failed', payload_json = $3::jsonb, updated_at = now()`,
           z.any(),
           [runId, finding.finding_id, JSON.stringify({
             failed_quotes: quoteFailures.filter((q) => q.finding_id === finding.finding_id).flatMap((q) => q.quotes),
+            rejected_narrative_attempt_1: rejectedNarratives[0] ?? null,
+            rejected_narrative_attempt_2: rejectedNarratives[1] ?? null,
+            offending_quotes_by_attempt: quoteFailures
+              .filter((q) => q.finding_id === finding.finding_id)
+              .map((q) => ({ attempt: q.attempt, quotes: q.quotes })),
+            source_window_lengths: allSourceWindows.map((w) => w.length),
           })],
           { label: `Checkpoint (quote fail): ${finding.finding_id}` }
         );
@@ -572,7 +685,7 @@ export default api({
     }
 
     // ─── Return ────────────────────────────────────────────────────────────
-    const totalRemaining = pending.length - findingsProcessed;
+    const totalRemaining = workset.length - findingsProcessed;
 
     if (totalRemaining === 0) {
       return {
