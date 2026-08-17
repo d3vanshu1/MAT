@@ -873,6 +873,7 @@ export function validateSupersessionProof(
  * @param discrepancies Cross-version discrepancies from numeric-verify-inline
  * @param pipelineStartTime For headroom calculations
  * @param timeBudgetMs Max time for this phase
+ * @param dealId Optional deal ID for findings table provenance
  */
 export async function runReconciliation(
   ctx: PipelineContext,
@@ -881,6 +882,7 @@ export async function runReconciliation(
   discrepancies: Discrepancy[],
   pipelineStartTime: number,
   timeBudgetMs: number,
+  dealId?: string,
 ): Promise<ReconciliationResult> {
   const phaseStart = Date.now();
   console.log(`[Reconciliation] Starting — ${ledger.claims.length} claims, ${figures.length} figures, budget ${Math.round(timeBudgetMs / 1000)}s`);
@@ -1299,7 +1301,7 @@ export async function runReconciliation(
     await ctx.integrations.db.execute(
       `INSERT INTO reconciliation_findings (report_id, deal_id, findings, findings_count)
        VALUES ($1, $2, $3::jsonb, $4)`,
-      [findings_report_id, null, JSON.stringify(findings), findings.length],
+      [findings_report_id, dealId ?? null, JSON.stringify(findings), findings.length],
       { label: "Persist reconciliation findings" }
     );
   } catch (err) {

@@ -3202,6 +3202,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               numericReport.discrepancies ?? [],
               startTime,
               reconTimeBudget,
+              input.dealId,
             );
             console.log(
               `[ClaimsReconciliation] ${claimsReconciliation.findings.length} findings ` +
