@@ -40,6 +40,8 @@ export default api({
     mode: z.enum(["summary", "findings"]).nullable(),
     /** 0-based page for findings mode (10/page). Ignored in summary mode. */
     page: z.number().nullable(),
+    /** Optional filter: only return findings of this kind */
+    finding_kind: z.string().nullable(),
   }),
 
   output: z.object({
@@ -85,6 +87,7 @@ export default api({
       page_size: z.number(),
       total_findings: z.number(),
       total_pages: z.number(),
+      finding_kind_filter: z.string().optional(),
     }).nullable(),
     findings: z.array(z.object({
       finding_kind: z.string(),
@@ -106,7 +109,7 @@ export default api({
     })).nullable(),
   }),
 
-  async run(ctx, { dealId, numericReportId, mode, page }) {
+  async run(ctx, { dealId, numericReportId, mode, page, finding_kind }) {
     const startTime = Date.now();
     const resolvedMode = mode ?? "summary";
     const pageNum = page ?? 0;
@@ -209,8 +212,12 @@ export default api({
       return response;
     }
 
-    // --- Findings mode: paginate at 10/page ---
-    const pagedFindings = result.findings.slice(
+    // --- Findings mode: filter + paginate at 10/page ---
+    const filteredFindings = finding_kind
+      ? result.findings.filter((f: ReconciliationFinding) => f.finding_kind === finding_kind)
+      : result.findings;
+    const filteredPages = Math.ceil(filteredFindings.length / FINDINGS_PAGE_SIZE);
+    const pagedFindings = filteredFindings.slice(
       pageNum * FINDINGS_PAGE_SIZE,
       (pageNum + 1) * FINDINGS_PAGE_SIZE,
     );
@@ -239,8 +246,9 @@ export default api({
       pagination: {
         page: pageNum,
         page_size: FINDINGS_PAGE_SIZE,
-        total_findings: result.findings.length,
-        total_pages: totalPages,
+        total_findings: filteredFindings.length,
+        total_pages: filteredPages,
+        ...(finding_kind ? { finding_kind_filter: finding_kind } : {}),
       },
       findings: formatted,
     };

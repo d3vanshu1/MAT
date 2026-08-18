@@ -906,7 +906,30 @@ export async function runReconciliation(
   const reconcilableClaims = ledger.claims.filter(c => c.claim_category === "operating_metric");
   const nonReconcilable = ledger.claims.filter(c => c.claim_category !== "operating_metric");
 
-  console.log(`[Reconciliation] ${reconcilableClaims.length} operating_metric claims to reconcile, ${nonReconcilable.length} non-reconcilable (tagged)`);
+  // ----- Step 1b: Deduplicate reconcilable claims by coordinate key -----
+  // Multiple memo passages may cite the same figure (e.g. revenue FY26 mentioned 3 times).
+  // We match once per unique coordinate, keeping the first occurrence for traceability.
+  // Scenario claims (coordKey → null) are separated — they are excluded from matching entirely.
+  const scenarioClaims: typeof reconcilableClaims = [];
+  const dedupedClaims: typeof reconcilableClaims = [];
+  const seenCoordKeys = new Set<string>();
+  for (const c of reconcilableClaims) {
+    const key = coordKey(c.metric, c.scope_qualifier, c.period, c.basis ?? null, c.scenario ?? null);
+    if (key === null) {
+      scenarioClaims.push(c);
+    } else if (!seenCoordKeys.has(key)) {
+      seenCoordKeys.add(key);
+      dedupedClaims.push(c);
+    }
+    // Duplicates (same coordKey, already seen) are silently dropped
+  }
+  scenario_excluded = scenarioClaims.length;
+
+  console.log(
+    `[Reconciliation] ${reconcilableClaims.length} operating_metric claims → ` +
+    `${dedupedClaims.length} unique coordinates, ${scenarioClaims.length} scenario-excluded, ` +
+    `${reconcilableClaims.length - dedupedClaims.length - scenarioClaims.length} duplicates removed`
+  );
 
   // ----- Step 2: Emit unreconcilable findings for notable non-operating claims -----
   // Only valuation_structuring claims that reference specific £ amounts get INFO findings
@@ -953,7 +976,7 @@ export async function runReconciliation(
   // ----- Step 3: Deterministic coordinate matching -----
   // Normalize model figures into the same coordinate space as claims, then direct-lookup.
   // No LLM needed — matching is by {metric, scope_qualifier, period} coordinates.
-  if (reconcilableClaims.length > 0 && figures.length > 0) {
+  if (dedupedClaims.length > 0 && figures.length > 0) {
     const normalizedFigures = normalizeFigures(figures);
     console.log(`[Reconciliation] Normalized ${normalizedFigures.length} figure coordinates from ${figures.length} raw figures`);
 
@@ -966,8 +989,8 @@ export async function runReconciliation(
       figureIndex.get(key)!.push(nf);
     }
 
-    // ----- Step 4: Coordinate-match each claim and compute delta -----
-    for (const claim of reconcilableClaims) {
+    // ----- Step 4: Coordinate-match each deduplicated claim and compute delta -----
+    for (const claim of dedupedClaims) {
       // --- U3/F2: Exclude UNDATED period; route NONE_STATED scope to near-miss ---
       const normalizedClaimPeriod = normalizePeriod(claim.period);
       const isUndatedPeriod = claim.period === "UNDATED" || normalizedClaimPeriod === "undated";
@@ -1045,7 +1068,8 @@ export async function runReconciliation(
       }
 
       const key = coordKey(claim.metric, claim.scope_qualifier, claim.period, claim.basis ?? null, claim.scenario ?? null);
-      if (key === null) { scenario_excluded++; continue; } // scenario claims excluded
+      // Note: key should never be null here — scenario claims are pre-filtered in Step 1b
+      if (key === null) continue;
       let matches = figureIndex.get(key) ?? null;
       let basisUnconfirmed = false;
 
@@ -1311,14 +1335,10 @@ export async function runReconciliation(
   }
 
   // ----- U6: Coverage denominator math -----
-  // Adjudicable = reconcilableClaims − scenario-excluded − UNDATED period
-  // NONE_STATED scope claims ARE adjudicable (routed to near-miss), NOT deducted.
-  const distinctClaims = new Set(
-    reconcilableClaims.map(c =>
-      coordKey(c.metric, c.scope_qualifier, c.period, c.basis ?? null, c.scenario ?? null)
-    )
-  ).size;
-  const adjudicable = reconcilableClaims.length - scenario_excluded - no_coordinate_no_period;
+  // Adjudicable = dedupedClaims (unique coordinates) − UNDATED period
+  // Scenario claims already excluded in Step 1b. NONE_STATED scope IS adjudicable.
+  const distinctClaims = dedupedClaims.length;
+  const adjudicable = dedupedClaims.length - no_coordinate_no_period;
   const matched = reconciled_count + within_tolerance_count;
   const coverage_pct = adjudicable > 0 ? matched / adjudicable : 0;
   const coverage_with_near_miss_pct = adjudicable > 0 ? (matched + near_miss_count) / adjudicable : 0;
