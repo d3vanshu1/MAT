@@ -4,12 +4,12 @@
  * Loads a pre-existing claims ledger and numeric figures from the database,
  * then runs runReconciliation directly. Zero LLM calls. Expected runtime: seconds.
  *
- * Inputs:
- *   - dealId: deal to load ledger for (from diag_claims_ledger)
- *   - numericReportId: UUID of the numeric_reports row to load figures from
+ * Modes:
+ *   - "summary" (default): returns coverage, all counts, findings_report_id,
+ *     total_findings, total_pages. No findings array.
+ *   - "findings": returns paginated findings (10/page).
  *
- * Use case: verify F1/F2/F3 logic on a real dataset without burning 180s on
- * claims extraction.
+ * Hard-rejects responses above 20K characters rather than silently truncating.
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { runReconciliation, type ReconciliationFinding } from "./claims-reconciliation.js";
@@ -19,6 +19,9 @@ import type { PipelineContext } from "./pipeline-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
+
+const FINDINGS_PAGE_SIZE = 10;
+const MAX_RESPONSE_CHARS = 20_000;
 
 export default api({
   name: "DiagReconcileOnly",
@@ -33,21 +36,26 @@ export default api({
   input: z.object({
     dealId: z.string(),
     numericReportId: z.string(),
-    /** 0-based page for findings (50/page). Null = page 0. */
+    /** "summary" (default) or "findings" */
+    mode: z.enum(["summary", "findings"]).nullable(),
+    /** 0-based page for findings mode (10/page). Ignored in summary mode. */
     page: z.number().nullable(),
   }),
 
   output: z.object({
-    // Load diagnostics
+    // --- Always present ---
     ledger_found: z.boolean(),
     ledger_claims_count: z.number(),
     figures_found: z.boolean(),
     figures_count: z.number(),
     discrepancies_count: z.number(),
-    // Reconciliation result
+    elapsed_ms: z.number(),
+    matching_error: z.string().nullable(),
+
+    // --- Summary fields (always present when reconciliation ran) ---
     findings_report_id: z.string().nullable(),
-    findings_truncated: z.boolean(),
     total_findings: z.number(),
+    total_pages: z.number(),
     reconciled_count: z.number(),
     unreconcilable_count: z.number(),
     scope_mismatch_count: z.number(),
@@ -55,8 +63,6 @@ export default api({
     cross_version_findings: z.number(),
     near_miss_count: z.number(),
     ambiguous_reference_count: z.number(),
-    matching_error: z.string().nullable(),
-    // Coverage table
     coverage: z.object({
       raw_claims: z.number(),
       distinct_claims: z.number(),
@@ -72,13 +78,14 @@ export default api({
       coverage_pct: z.number(),
       coverage_with_near_miss_pct: z.number(),
     }).nullable(),
-    // Paginated findings
+
+    // --- Findings mode only ---
     pagination: z.object({
       page: z.number(),
       page_size: z.number(),
       total_findings: z.number(),
       total_pages: z.number(),
-    }),
+    }).nullable(),
     findings: z.array(z.object({
       finding_kind: z.string(),
       severity: z.string(),
@@ -96,13 +103,12 @@ export default api({
       delta_abs_m: z.string().nullable(),
       delta_pct: z.string().nullable(),
       source_docs: z.array(z.string()),
-    })),
-    elapsed_ms: z.number(),
+    })).nullable(),
   }),
 
-  async run(ctx, { dealId, numericReportId, page }) {
+  async run(ctx, { dealId, numericReportId, mode, page }) {
     const startTime = Date.now();
-    const PAGE_SIZE = 50;
+    const resolvedMode = mode ?? "summary";
     const pageNum = page ?? 0;
 
     // --- Step 1: Load ledger from diag_claims_ledger ---
@@ -115,7 +121,7 @@ export default api({
     );
 
     if (ledgerRows.length === 0) {
-      return emptyResult(pageNum, PAGE_SIZE, Date.now() - startTime, false, true);
+      return emptyResult(Date.now() - startTime, false, true);
     }
 
     const rawLedger = ledgerRows[0].ledger;
@@ -131,7 +137,7 @@ export default api({
     );
 
     if (reportRows.length === 0) {
-      return emptyResult(pageNum, PAGE_SIZE, Date.now() - startTime, true, false, ledger.claims.length);
+      return emptyResult(Date.now() - startTime, true, false, ledger.claims.length);
     }
 
     const rawFigures = typeof reportRows[0].figures === "string"
@@ -162,13 +168,52 @@ export default api({
       figures,
       discrepancies,
       startTime,
-      60_000, // 60s budget (reconciliation is <1s in practice)
+      60_000, // 60s budget
       dealId,
     );
 
-    // --- Step 4: Paginate findings ---
-    const totalPages = Math.ceil(result.findings.length / PAGE_SIZE);
-    const pagedFindings = result.findings.slice(pageNum * PAGE_SIZE, (pageNum + 1) * PAGE_SIZE);
+    const elapsed = Date.now() - startTime;
+    const totalPages = Math.ceil(result.findings.length / FINDINGS_PAGE_SIZE);
+
+    // --- Summary fields (common to both modes) ---
+    const summary = {
+      ledger_found: true,
+      ledger_claims_count: ledger.claims.length,
+      figures_found: true,
+      figures_count: figures.length,
+      discrepancies_count: discrepancies.length,
+      elapsed_ms: elapsed,
+      matching_error: result.matching_error ?? null,
+      findings_report_id: result.findings_report_id,
+      total_findings: result.findings.length,
+      total_pages: totalPages,
+      reconciled_count: result.reconciled_count,
+      unreconcilable_count: result.unreconcilable_count,
+      scope_mismatch_count: result.scope_mismatch_count,
+      within_tolerance_count: result.within_tolerance_count,
+      cross_version_findings: result.cross_version_findings,
+      near_miss_count: result.near_miss_count,
+      ambiguous_reference_count: result.ambiguous_reference_count,
+      coverage: result.coverage,
+    };
+
+    // --- Summary mode: no findings array ---
+    if (resolvedMode === "summary") {
+      const response = {
+        ...summary,
+        pagination: null,
+        findings: null,
+      };
+      enforceResponseSize(response, "summary");
+      console.log(`[DiagReconcileOnly] Summary complete in ${elapsed}ms`);
+      return response;
+    }
+
+    // --- Findings mode: paginate at 10/page ---
+    const pagedFindings = result.findings.slice(
+      pageNum * FINDINGS_PAGE_SIZE,
+      (pageNum + 1) * FINDINGS_PAGE_SIZE,
+    );
 
     const formatted = pagedFindings.map((rf: ReconciliationFinding) => ({
       finding_kind: rf.finding_kind,
@@ -189,43 +234,36 @@ export default api({
       source_docs: rf.source_docs,
     }));
 
-    const elapsed = Date.now() - startTime;
-    console.log(`[DiagReconcileOnly] Complete in ${elapsed}ms`);
-
-    return {
-      ledger_found: true,
-      ledger_claims_count: ledger.claims.length,
-      figures_found: true,
-      figures_count: figures.length,
-      discrepancies_count: discrepancies.length,
-      findings_report_id: result.findings_report_id,
-      findings_truncated: result.findings_truncated ?? false,
-      total_findings: result.findings.length,
-      reconciled_count: result.reconciled_count,
-      unreconcilable_count: result.unreconcilable_count,
-      scope_mismatch_count: result.scope_mismatch_count,
-      within_tolerance_count: result.within_tolerance_count,
-      cross_version_findings: result.cross_version_findings,
-      near_miss_count: result.near_miss_count,
-      ambiguous_reference_count: result.ambiguous_reference_count,
-      matching_error: result.matching_error ?? null,
-      coverage: result.coverage,
+    const response = {
+      ...summary,
       pagination: {
         page: pageNum,
-        page_size: PAGE_SIZE,
+        page_size: FINDINGS_PAGE_SIZE,
         total_findings: result.findings.length,
         total_pages: totalPages,
       },
       findings: formatted,
-      elapsed_ms: elapsed,
     };
+
+    enforceResponseSize(response, `findings page ${pageNum}`);
+    console.log(`[DiagReconcileOnly] Findings page ${pageNum} complete in ${elapsed}ms`);
+    return response;
   },
 });
 
+// --- Hard-reject if serialized response exceeds 20K characters ---
+function enforceResponseSize(response: unknown, context: string): void {
+  const serialized = JSON.stringify(response);
+  if (serialized.length > MAX_RESPONSE_CHARS) {
+    throw new Error(
+      `Response exceeds ${MAX_RESPONSE_CHARS} characters (actual: ${serialized.length}) ` +
+      `in ${context} mode. Reduce page size or switch to summary mode.`
+    );
+  }
+}
+
 // --- Helper: empty result for early returns ---
 function emptyResult(
-  page: number,
-  pageSize: number,
   elapsed: number,
   ledgerFound: boolean,
   figuresFound: boolean,
@@ -237,9 +275,11 @@ function emptyResult(
     figures_found: figuresFound,
     figures_count: 0,
     discrepancies_count: 0,
+    elapsed_ms: elapsed,
+    matching_error: ledgerFound ? null : "No ledger found for deal",
     findings_report_id: null,
-    findings_truncated: false,
     total_findings: 0,
+    total_pages: 0,
     reconciled_count: 0,
     unreconcilable_count: 0,
     scope_mismatch_count: 0,
@@ -247,10 +287,8 @@ function emptyResult(
     cross_version_findings: 0,
     near_miss_count: 0,
     ambiguous_reference_count: 0,
-    matching_error: ledgerFound ? null : "No ledger found for deal",
     coverage: null,
-    pagination: { page, page_size: pageSize, total_findings: 0, total_pages: 0 },
-    findings: [],
-    elapsed_ms: elapsed,
+    pagination: null,
+    findings: null,
   };
 }
