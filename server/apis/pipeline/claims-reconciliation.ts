@@ -115,11 +115,22 @@ export interface ReconciliationResult {
   coverage: CoverageDenominator;
 }
 
-/** U6: Coverage denominator breakdown */
+/** U6: Coverage denominator breakdown — full funnel from raw_claims to adjudicable */
 export interface CoverageDenominator {
   raw_claims: number;
-  distinct_claims: number;
+  /** Claims excluded because claim_category !== "operating_metric" */
+  category_excluded: number;
+  /** Breakdown of excluded categories by claim_category value */
+  category_breakdown: Record<string, number>;
+  /** raw_claims - category_excluded */
+  in_category: number;
   scenario_excluded: number;
+  /** in_category - scenario_excluded (before dedup) */
+  pre_dedup: number;
+  /** Number of duplicate coordinates collapsed */
+  duplicates_collapsed: number;
+  /** Unique coordinates after dedup */
+  distinct_claims: number;
   /** Informational: claims with NONE_STATED scope (routed to near-miss, NOT deducted from adjudicable) */
   no_scope_count: number;
   /** Claims with NONE_STATED scope that found a near-miss candidate */
@@ -1367,8 +1378,17 @@ export async function runReconciliation(
     matching_error,
     coverage: {
       raw_claims: ledger.claims.length,
-      distinct_claims: distinctClaims,
+      category_excluded: nonReconcilable.length,
+      category_breakdown: nonReconcilable.reduce((acc, c) => {
+        const cat = c.claim_category ?? "unknown";
+        acc[cat] = (acc[cat] ?? 0) + 1;
+        return acc;
+      }, {} as Record<string, number>),
+      in_category: reconcilableClaims.length,
       scenario_excluded,
+      pre_dedup: reconcilableClaims.length - scenarioClaims.length,
+      duplicates_collapsed: reconcilableClaims.length - scenarioClaims.length - dedupedClaims.length,
+      distinct_claims: distinctClaims,
       no_scope_count: no_coordinate_no_scope,
       no_scope_near_miss_eligible,
       no_period_count: no_coordinate_no_period,
