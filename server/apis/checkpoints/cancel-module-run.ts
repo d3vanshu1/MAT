@@ -5,14 +5,9 @@
  *   1. Primary: dealId + moduleId — cancels ALL running/pending rows for that module
  *   2. Alternate: runId alone — cancels a specific run (backward compat)
  *
- * Sets status = 'failed' + is_cancelled = TRUE + completed_at = now().
- * Returns the list of affected run IDs.
- *
- * Boolean approach: uses `is_cancelled` column (Migration 009) to distinguish
- * user-initiated cancellation from pipeline failure. No enum dependency.
- * If the column doesn't exist yet (pre-migration), falls back to just
- * setting status = 'failed' (legacy behavior preserved, functionally safe
- * because client-side killedModulesRef prevents auto-resume regardless).
+ * Sets status = 'failed' + completed_at = now().
+ * Schema has no `is_cancelled` column — cancellation is status='failed'.
+ * Client-side killedModulesRef prevents auto-resume.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 
@@ -39,13 +34,12 @@ export default api({
   output: z.object({
     cancelled: z.boolean(),
     affectedRunIds: z.array(z.string()),
-    usedBoolean: z.boolean().describe("True if is_cancelled column was set; false if pre-migration fallback"),
   }),
 
   async run(ctx, { dealId, moduleId, runId }) {
     // Validate input: must provide either (dealId + moduleId) or runId
     if (!runId && (!dealId || !moduleId)) {
-      return { cancelled: false, affectedRunIds: [], usedBoolean: false };
+      return { cancelled: false, affectedRunIds: [] };
     }
 
     // Build the WHERE clause based on input mode
@@ -62,37 +56,18 @@ export default api({
       params = [runId!];
     }
 
-    // Attempt with is_cancelled boolean (post-migration-009)
-    try {
-      const affected = await ctx.integrations.db.query(
-        `UPDATE module_runs
-         SET status = 'failed'::module_status, is_cancelled = TRUE, completed_at = now()
-         WHERE ${whereClause}
-         RETURNING id`,
-        AffectedRowSchema,
-        params,
-        { label: `Cancel runs (boolean): ${dealId ? `${moduleId}@${dealId.slice(0, 8)}` : runId?.slice(0, 8)}` }
-      );
+    const affected = await ctx.integrations.db.query(
+      `UPDATE module_runs
+       SET status = 'failed'::module_status, completed_at = now()
+       WHERE ${whereClause}
+       RETURNING id`,
+      AffectedRowSchema,
+      params,
+      { label: `Cancel runs: ${dealId ? `${moduleId}@${dealId.slice(0, 8)}` : runId?.slice(0, 8)}` }
+    );
 
-      const ids = affected.map(r => r.id);
-      console.log(`[CancelModuleRun] Cancelled ${ids.length} run(s) with is_cancelled=TRUE: ${ids.join(", ")}`);
-      return { cancelled: ids.length > 0, affectedRunIds: ids, usedBoolean: true };
-    } catch (colErr: unknown) {
-      // Column doesn't exist yet (pre-migration-009) — fall back to status='failed' only
-      console.warn(`[CancelModuleRun] is_cancelled column not found, using status-only fallback`);
-
-      const affected = await ctx.integrations.db.query(
-        `UPDATE module_runs
-         SET status = 'failed'::module_status, completed_at = now()
-         WHERE ${whereClause}
-         RETURNING id`,
-        AffectedRowSchema,
-        params,
-        { label: `Cancel (pre-migration fallback): ${dealId ? `${moduleId}@${dealId.slice(0, 8)}` : runId?.slice(0, 8)}` }
-      );
-
-      const ids = affected.map(r => r.id);
-      return { cancelled: ids.length > 0, affectedRunIds: ids, usedBoolean: false };
-    }
+    const ids = affected.map(r => r.id);
+    console.log(`[CancelModuleRun] Cancelled ${ids.length} run(s): ${ids.join(", ")}`);
+    return { cancelled: ids.length > 0, affectedRunIds: ids };
   },
 });

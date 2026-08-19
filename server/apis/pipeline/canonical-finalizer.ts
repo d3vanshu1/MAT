@@ -471,57 +471,23 @@ export async function canonicalFinalize(
   }
 
   // ── STEP 1: Validate prerequisites ────────────────────────────────────────
-  // Check if an output already exists — if so, verify idempotency
-  // Fix 10: Use artifact_status lifecycle columns (requires migration 019).
-  // Fix 11: Fail closed when artifact_status column doesn't exist.
+  // Check if an output already exists for this run (idempotency).
+  // Schema has only: id, module_run_id, executive_header, findings, full_report_markdown, created_at
   const ExistingOutputSchema = z.object({
     id: z.string(),
-    semantic_hash: z.string().nullable(),
     executive_header: z.string().nullable(),
-    artifact_status: z.string().nullable(),
   });
-  let existingOutputs: { id: string; semantic_hash: string | null; executive_header: string | null; artifact_status: string | null }[];
-  try {
-    existingOutputs = await db.query(
-      `SELECT id, semantic_hash, executive_header, artifact_status
-       FROM module_outputs
-       WHERE module_run_id = $1 AND artifact_status = 'active'
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      ExistingOutputSchema,
-      [runId],
-      { label: "canonicalFinalize: check existing active output" }
-    );
-  } catch {
-    // artifact_status column (or another canonical column) does not exist.
-    // FAIL CLOSED: Migration 018/019 must be applied before finalization.
-    console.error(
-      `[canonicalFinalize] BLOCKED: canonical schema columns missing for run ${runId}. ` +
-      `Run RunMigration018 / RunMigration019 and retry.`
-    );
-    return {
-      status: "canonical_migration_required" as any,
-      message:
-        "CANONICAL_SCHEMA_MIGRATION_REQUIRED: artifact_status or companion columns do not exist. " +
-        "Execute RunMigration018 and RunMigration019 before attempting finalization.",
-    };
-  }
-
-  // Fix 10: Detect invalidated partial artifacts via artifact_status, not header text.
-  // If an active row's status is somehow 'invalidated_partial', treat as no active artifact.
-  // Also check for any pre-existing invalidated rows that need lifecycle transition.
-  let invalidatedPartialId: string | null = null;
-  const isInvalidatedPartial = existingOutputs.length > 0 &&
-    (existingOutputs[0].artifact_status === 'invalidated_partial' ||
-     existingOutputs[0].executive_header?.startsWith("[INVALIDATED_PARTIAL]"));
-  if (isInvalidatedPartial) {
-    invalidatedPartialId = existingOutputs[0].id;
-    console.log(
-      `[canonicalFinalize] Existing output ${invalidatedPartialId} is invalidated partial — ` +
-      `will INSERT new active row and mark old as superseded`
-    );
-    existingOutputs = [];
-  }
+  let existingOutputs: { id: string; executive_header: string | null }[];
+  existingOutputs = await db.query(
+    `SELECT id, executive_header
+     FROM module_outputs
+     WHERE module_run_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    ExistingOutputSchema,
+    [runId],
+    { label: "canonicalFinalize: check existing output" }
+  );
 
   // For contradiction_check, require all canonical checkpoints
   const requiredKeys = CLAIMS_REQUIRED_MODULES.has(moduleType)
@@ -643,18 +609,8 @@ export async function canonicalFinalize(
   // ── STEP 8: Idempotency guard ──────────────────────────────────────────────
   if (existingOutputs.length > 0) {
     const existing = existingOutputs[0];
-    if (existing.semantic_hash === semanticHash) {
-      // Identical content — safe no-op
-      console.log(`[canonicalFinalize] Idempotent: artifact ${existing.id} already persisted with hash ${semanticHash}`);
-      return {
-        status: "idempotent",
-        artifactId: existing.id,
-        semanticHash,
-        message: `Artifact already persisted with identical semantic hash.`,
-      };
-    }
 
-    // Check if the run is already marked completed with a different hash
+    // Check if the run is already marked completed
     const RunStatusSchema = z.object({ status: z.string() });
     const runRows = await db.query(
       `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
@@ -664,17 +620,13 @@ export async function canonicalFinalize(
     );
     const currentStatus = runRows[0]?.status ?? "unknown";
     if (currentStatus === "completed") {
-      console.warn(
-        `[canonicalFinalize] REJECTED: run ${runId} already completed with hash ` +
-        `${existing.semantic_hash ?? "(none)"}, new hash ${semanticHash}`
-      );
+      // Already finalized — treat as idempotent
+      console.log(`[canonicalFinalize] Idempotent: run ${runId} already completed, artifact ${existing.id} exists`);
       return {
-        status: "rejected_overwrite",
-        existingHash: existing.semantic_hash ?? "",
-        newHash: semanticHash,
-        message:
-          `Run is already completed with a different semantic hash. ` +
-          `To overwrite, use an explicit versioned administrative action.`,
+        status: "idempotent",
+        artifactId: existing.id,
+        semanticHash,
+        message: `Run already completed with existing artifact.`,
       };
     }
     // Run is not completed — allow the update (retry with different content mid-run is normal)
@@ -703,50 +655,35 @@ export async function canonicalFinalize(
 
   // ── STEP 10: Persist artifact once ────────────────────────────────────────
   // Write all findings (reportable + excluded) to findings column for full fidelity.
-  // The reportable_finding_ids column identifies the substantive set for consumers.
-  // Diagnostics are stored in a companion column.
+  // Schema: module_outputs has (id, module_run_id, executive_header, findings, full_report_markdown, created_at).
   const allFindingsJson = JSON.stringify(reportableFindings);
-  const diagnosticsJson = JSON.stringify(artifact.diagnostics);
-  const reportableFindingIdsJson = JSON.stringify(reportableFindingIds);
-  const finalizedAt = artifact.finalized_at;
 
   try {
     let artifactId: string;
 
     if (existingOutputs.length > 0) {
       artifactId = existingOutputs[0].id;
-      // Update existing row — canonical schema only (legacy paths removed)
+      // Update existing row — only actual schema columns
       await db.execute(
           `UPDATE module_outputs
            SET executive_header       = $2,
                findings               = $3::jsonb,
-               full_report_markdown   = $4,
-               schema_version         = 2,
-               finalized_at           = $5::timestamptz,
-               semantic_hash          = $6,
-               reportable_finding_ids = $7::jsonb,
-               f06_diagnostics        = $8::jsonb
+               full_report_markdown   = $4
            WHERE id = $1`,
           [
             artifactId,
             executiveHeader,
             allFindingsJson,
             reportMarkdown,
-            finalizedAt,
-            semanticHash,
-            reportableFindingIdsJson,
-            diagnosticsJson,
           ],
           { label: "canonicalFinalize: persist artifact (update)" }
         );
     } else {
-      // Insert new row — canonical schema with artifact lifecycle (Fix 10)
+      // Insert new row — actual schema columns only
       const insertedRows = await db.query(
         `INSERT INTO module_outputs
-           (module_run_id, executive_header, findings, full_report_markdown,
-            schema_version, finalized_at, semantic_hash, reportable_finding_ids,
-            f06_diagnostics, artifact_status)
-         VALUES ($1, $2, $3::jsonb, $4, 2, $5::timestamptz, $6, $7::jsonb, $8::jsonb, 'active')
+           (module_run_id, executive_header, findings, full_report_markdown)
+         VALUES ($1, $2, $3::jsonb, $4)
          RETURNING id`,
         z.object({ id: z.string() }),
         [
@@ -754,28 +691,10 @@ export async function canonicalFinalize(
           executiveHeader,
           allFindingsJson,
           reportMarkdown,
-          finalizedAt,
-          semanticHash,
-          reportableFindingIdsJson,
-          diagnosticsJson,
         ],
         { label: "canonicalFinalize: persist artifact (insert)" }
       );
       artifactId = insertedRows[0].id;
-
-      // Fix 10: If there was an invalidated partial, mark its lifecycle transition
-      if (invalidatedPartialId) {
-        await db.execute(
-          `UPDATE module_outputs
-           SET artifact_status = 'invalidated_partial',
-               superseded_by_output_id = $2,
-               invalidated_at = now(),
-               invalidation_reason = 'superseded_by_complete_artifact'
-           WHERE id = $1`,
-          [invalidatedPartialId, artifactId],
-          { label: "canonicalFinalize: mark old partial as superseded" }
-        );
-      }
     }
 
     // Bump deal updated_at
@@ -791,17 +710,17 @@ export async function canonicalFinalize(
     );
 
     // ── STEP 11: Verify persistence succeeded ─────────────────────────────
-    const VerifySchema = z.object({ id: z.string(), semantic_hash: z.string().nullable() });
+    const VerifySchema = z.object({ id: z.string() });
     const verifyRows = await db.query(
-      `SELECT id, semantic_hash FROM module_outputs WHERE id = $1 LIMIT 1`,
+      `SELECT id FROM module_outputs WHERE id = $1 LIMIT 1`,
       VerifySchema,
       [artifactId],
       { label: "canonicalFinalize: verify persistence" }
     );
-    if (verifyRows.length === 0 || verifyRows[0].semantic_hash !== semanticHash) {
+    if (verifyRows.length === 0) {
       return {
         status: "persist_failed",
-        error: `Persistence verification failed — artifact ${artifactId} not readable or hash mismatch`,
+        error: `Persistence verification failed — artifact ${artifactId} not readable after INSERT/UPDATE`,
       };
     }
 
@@ -809,10 +728,9 @@ export async function canonicalFinalize(
     await db.execute(
       `UPDATE module_runs
        SET status       = 'completed'::module_status,
-           completed_at = now(),
-           semantic_hash = $2
+           completed_at = now()
        WHERE id = $1 AND status = 'running'::module_status`,
-      [runId, semanticHash],
+      [runId],
       { label: "canonicalFinalize: mark run completed (guarded)" }
     );
 

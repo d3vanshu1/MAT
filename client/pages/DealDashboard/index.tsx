@@ -149,7 +149,6 @@ export default function DealDashboardPage() {
                 deal_id: dealId!,
                 module_id: m.moduleId,
                 status: m.latestRun.status as ModuleRun["status"],
-                isCancelled: m.latestRun.isCancelled ?? false,
                 triggered_at: m.latestRun.triggeredAt,
                 completed_at: m.latestRun.completedAt,
                 documents_included: [],
@@ -178,13 +177,6 @@ export default function DealDashboardPage() {
       setStatuses((prev) => {
         const merged = { ...prev };
         for (const [id, status] of Object.entries(loaded)) {
-          // CRITICAL: DB 'is_cancelled' flag ALWAYS overrides client state.
-          // Cancellation is server-authoritative and must survive reload, other tabs,
-          // and the anti-flicker guard. cancelledRunsRef is UX-only.
-          if (status.latestRun?.isCancelled) {
-            merged[id] = status;
-            continue;
-          }
           if (runningModules.has(id) && pipelinePollingActive.current.has(id)) {
             // This module is actively being polled by the pipeline loop — skip DB overwrite.
             // Exception: if DB also says "running", allow the update (keeps run ID in sync).
@@ -1958,7 +1950,6 @@ export default function DealDashboardPage() {
       }
 
       // Clean up local state — update statuses so isRunning flips immediately
-      // DB is_cancelled flag ALWAYS overrides client state (survives reload).
       // cancelledRunsRef is UX-only for instant button feedback.
       setStatuses((prev) => {
         const current = prev[moduleId];
@@ -1967,7 +1958,7 @@ export default function DealDashboardPage() {
           ...prev,
           [moduleId]: {
             ...current,
-            latestRun: { ...current.latestRun, status: "failed" as const, isCancelled: true },
+            latestRun: { ...current.latestRun, status: "failed" as const },
           },
         };
       });
@@ -2560,7 +2551,6 @@ export default function DealDashboardPage() {
     id: string;
     module_id: string;
     status: string;
-    isCancelled?: boolean;
     triggered_at: string;
     completed_at: string | null;
     finding_count: number;
@@ -2576,7 +2566,6 @@ export default function DealDashboardPage() {
               .filter((r: { module_id: string }) => r.module_id === historyModule)
               .map((r: Record<string, unknown>) => ({
                 ...r,
-                isCancelled: (r as { is_cancelled?: boolean }).is_cancelled ?? false,
               })) as typeof historyRuns
           );
         }

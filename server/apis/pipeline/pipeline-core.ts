@@ -21,9 +21,9 @@
  *
  * 3. NUMERIC MODULES REQUIRE A PERSISTED REPORT BEFORE BACKGROUND RESUME:
  *    `contradiction_check` and `model_assumptions_stress` expect a numeric report
- *    passed as input. The background runner (ResumeStalePipelines) must verify
- *    `numeric_report_json IS NOT NULL` before claiming; if absent, skip without
- *    refreshing `triggered_at` (see item 3 fix — pre-claim check).
+ *    passed as input. The background runner (ResumeStalePipelines) verifies numeric
+ *    data availability before claiming; if absent, skip without refreshing
+ *    `triggered_at` (see item 3 fix — pre-claim check).
  *
  * 4. PER-CALL TIMEOUT ON LLM REQUESTS: `callAnthropic` uses a 120s per-call
  *    timeout via Promise.race. Without this, a single hanging Anthropic call
@@ -1906,35 +1906,19 @@ function escapeMarkdownBreakers(text: string): string {
 // Cancellation Gate
 // ---------------------------------------------------------------------------
 
-/** Lightweight single-row check — returns true if the run has been cancelled. */
+/** Lightweight single-row check — returns true if the run has been cancelled (status='failed'). */
 async function checkCancelled(ctx: PipelineContext, runId: string, gate: string): Promise<boolean> {
-  // Check is_cancelled boolean (post-migration-009) with fallback to status check
-  try {
-    const rows = await ctx.integrations.db.query(
-      `SELECT COALESCE(is_cancelled, FALSE) AS is_cancelled FROM module_runs WHERE id = $1 LIMIT 1`,
-      z.object({ is_cancelled: z.boolean() }),
-      [runId],
-      { label: `Cancel gate: ${gate}` }
-    );
-    if (rows[0]?.is_cancelled) {
-      console.log(`[pipeline:cancel-gate] Run ${runId} cancelled at gate: ${gate}`);
-      return true;
-    }
-  } catch (err: unknown) {
-    // Discriminate: 42703 = undefined_column (pre-migration) → silent legacy fallback.
-    // The Superblocks platform may wrap Postgres errors into a generic
-    // 'Integration "..." failed during "query"' message, so we also treat
-    // that wrapped form as a likely missing-column scenario (non-fatal).
-    const errMsg = err instanceof Error ? err.message : String(err);
-    const isLikelyMissingColumn =
-      errMsg.includes("42703") ||
-      errMsg.includes("does not exist") ||
-      errMsg.includes('failed during "query"');
-    if (!isLikelyMissingColumn) {
-      console.error(`[pipeline:cancel-gate] UNEXPECTED ERROR at gate "${gate}" for run ${runId}: ${errMsg}`);
-    }
-    // Pre-migration: column doesn't exist → cancellation indistinguishable server-side.
-    // Client-side killedModulesRef is the real guard.
+  // Schema has no `is_cancelled` column. Cancellation is represented by status='failed'.
+  // The client-side killedModulesRef is the primary guard; this is a server-side fallback.
+  const rows = await ctx.integrations.db.query(
+    `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
+    z.object({ status: z.string() }),
+    [runId],
+    { label: `Cancel gate: ${gate}` }
+  );
+  if (rows.length > 0 && rows[0].status === "failed") {
+    console.log(`[pipeline:cancel-gate] Run ${runId} is failed at gate: ${gate}`);
+    return true;
   }
   return false;
 }
@@ -2098,39 +2082,20 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     // Uses a CTE with an existence check so the INSERT only fires when no
     // running row exists. This is the app-level equivalent of a partial
     // unique index (deal_id, module_id) WHERE status = 'running'.
-    let newRunRows: Array<{ run_id: string }>;
-    try {
-      newRunRows = await ctx.integrations.db.query(
-        `WITH guard AS (
-           SELECT 1 FROM module_runs
-           WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
-           LIMIT 1
-         )
-         INSERT INTO module_runs (deal_id, module_id, status, numeric_report_json)
-         SELECT $1, $2, 'running'::module_status, $3::jsonb
-         WHERE NOT EXISTS (SELECT 1 FROM guard)
-         RETURNING id AS run_id`,
-        RunIdSchema,
-        [dealId, moduleId, numericReport ? JSON.stringify(numericReport) : null],
-        { label: "Create pipeline run (guarded, with numeric report)" }
-      );
-    } catch {
-      // Column doesn't exist yet — insert without numeric_report_json
-      newRunRows = await ctx.integrations.db.query(
-        `WITH guard AS (
-           SELECT 1 FROM module_runs
-           WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
-           LIMIT 1
-         )
-         INSERT INTO module_runs (deal_id, module_id, status)
-         SELECT $1, $2, 'running'::module_status
-         WHERE NOT EXISTS (SELECT 1 FROM guard)
-         RETURNING id AS run_id`,
-        RunIdSchema,
-        [dealId, moduleId],
-        { label: "Create pipeline run (guarded, legacy)" }
-      );
-    }
+    const newRunRows = await ctx.integrations.db.query(
+      `WITH guard AS (
+         SELECT 1 FROM module_runs
+         WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
+         LIMIT 1
+       )
+       INSERT INTO module_runs (deal_id, module_id, status)
+       SELECT $1, $2, 'running'::module_status
+       WHERE NOT EXISTS (SELECT 1 FROM guard)
+       RETURNING id AS run_id`,
+      RunIdSchema,
+      [dealId, moduleId],
+      { label: "Create pipeline run (guarded)" }
+    );
 
     if (newRunRows.length === 0) {
       // A running row already exists — return the existing run's ID so the
@@ -2176,58 +2141,19 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     // Only resume runs that are still in 'running' status.
     // Completed or failed runs must NOT be resurrected — that causes the
     // "zombie run" bug where terminated runs get re-opened.
-    let status: string;
-    let isCancelled: boolean;
+    const currentStatus = await ctx.integrations.db.query(
+      `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
+      z.object({ status: z.string() }),
+      [runId],
+      { label: "Check run status before resume" }
+    );
 
-    try {
-      const currentStatus = await ctx.integrations.db.query(
-        `SELECT status, COALESCE(is_cancelled, FALSE)::text AS is_cancelled FROM module_runs WHERE id = $1 LIMIT 1`,
-        z.object({ status: z.string(), is_cancelled: z.string() }),
-        [runId],
-        { label: "Check run status before resume" }
-      );
-
-      if (currentStatus.length === 0) {
-        throw new Error(`Run ${runId} not found`);
-      }
-
-      status = currentStatus[0].status;
-      isCancelled = currentStatus[0].is_cancelled === "true" || currentStatus[0].is_cancelled === "t";
-    } catch (err: unknown) {
-      // Dump full error structure — SDK errors strip Postgres detail; we need to
-      // learn where the platform actually hides it for future hardening.
-      const errDetail = (() => {
-        try {
-          return JSON.stringify(err, Object.getOwnPropertyNames(err as object));
-        } catch {
-          return String(err);
-        }
-      })();
-      console.error(`[pipeline:resume-status-check] ERROR for run ${runId}. Full structure: ${errDetail}`);
-
-      // Fallback-probe: status-only query references no missing column.
-      // Succeeds → failure was column-related (pre-migration or SDK stripping detail); proceed.
-      // Fails → integration genuinely down; rethrow original.
-      try {
-        const fallbackRows = await ctx.integrations.db.query(
-          `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
-          z.object({ status: z.string() }),
-          [runId],
-          { label: "Check run status before resume (fallback-probe)" }
-        );
-
-        if (fallbackRows.length === 0) {
-          throw new Error(`Run ${runId} not found`);
-        }
-
-        status = fallbackRows[0].status;
-        isCancelled = false;
-      } catch (fallbackErr: unknown) {
-        // Fallback also failed — integration is genuinely unreachable; rethrow original
-        console.error(`[pipeline:resume-status-check] Fallback-probe ALSO FAILED for run ${runId}. Rethrowing original.`);
-        throw err;
-      }
+    if (currentStatus.length === 0) {
+      throw new Error(`Run ${runId} not found`);
     }
+
+    const status = currentStatus[0].status;
+
     if (status === "completed") {
       // Already done — return immediately with a synthetic completed result
       // so the caller knows not to keep polling.
@@ -2244,10 +2170,10 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       };
     }
 
-    if (status === "failed" || isCancelled) {
+    if (status === "failed") {
       // Terminated — don't resurrect. Return the terminal state.
       return {
-        status: isCancelled ? "cancelled" : "failed",
+        status: "failed",
         runId,
         phase: "terminated",
         progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
@@ -2260,21 +2186,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     }
 
     // Status is 'running' — refresh triggered_at to claim ownership
-    // Also persist numeric report if provided (so background job can use it)
-    try {
-      await ctx.integrations.db.execute(
-        `UPDATE module_runs SET triggered_at = now(), numeric_report_json = COALESCE($2::jsonb, numeric_report_json) WHERE id = $1`,
-        [runId, numericReport ? JSON.stringify(numericReport) : null],
-        { label: "Resume run — refresh triggered_at + persist numeric report" }
-      );
-    } catch {
-      // numeric_report_json column may not exist yet — fallback to plain heartbeat
-      await ctx.integrations.db.execute(
-        `UPDATE module_runs SET triggered_at = now() WHERE id = $1`,
-        [runId],
-        { label: "Resume run — refresh triggered_at (legacy)" }
-      );
-    }
+    await ctx.integrations.db.execute(
+      `UPDATE module_runs SET triggered_at = now() WHERE id = $1`,
+      [runId],
+      { label: "Resume run — refresh triggered_at" }
+    );
   }
 
   // --- Step 0.3.5: Load filename→tag map for deterministic independent flag ---
@@ -5334,89 +5250,12 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     console.warn("[pipeline] Failed to query permanently_failed extractions:", pfErr);
   }
 
-  // ─── Evidence Admission synthesis for contradiction_check (old path) ────────
-  // The canonical-finalizer requires a merge_checkpoints row at tree_level=96
-  // with a valid evidence_admission_ledgers payload. This is normally written by
-  // the P2.1 ReplayClaimLinkage API for the reconstructed path. For the old
-  // natural-merge-tree path, we synthesize it inline from the final findings
-  // and claims ledger — satisfying the validator prerequisite.
-  //
-  // Idempotent: ON CONFLICT upserts. Skipped if row already exists and is valid.
-  // Gated on contradiction_check only (matches CLAIMS_REQUIRED_MODULES).
-  if (moduleId === "contradiction_check" && runId) {
-    const eaStart = Date.now();
-    try {
-      // Check if evidence_admission already exists (idempotent skip)
-      const ExistingSchema = z.object({ merged_json: z.any() });
-      const existing = await ctx.integrations.db.query(
-        `SELECT merged_json FROM merge_checkpoints
-         WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
-         LIMIT 1`,
-        ExistingSchema,
-        [runId],
-        { label: "evidence_admission: check existing" }
-      );
-
-      let needsWrite = true;
-      if (existing.length > 0) {
-        const payload = typeof existing[0].merged_json === "string"
-          ? JSON.parse(existing[0].merged_json)
-          : existing[0].merged_json;
-        const ledgers = payload?.evidence_admission_ledgers;
-        if (Array.isArray(ledgers) && ledgers.some(
-          (l: any) => l?.schema_version === "evidence-admission-v1" && Array.isArray(l.admitted) && l.admitted.length > 0
-        )) {
-          needsWrite = false;
-          console.log(`[pipeline] evidence_admission already valid at tree_level=96 — skipping synthesis`);
-        }
-      }
-
-      if (needsWrite) {
-        // Synthesize admitted evidence entries from finalFindings
-        // Each finding constitutes evidence that was "admitted" into the analysis
-        const admittedEntries = finalFindings.slice(0, 50).map((f: MergedFinding, idx: number) => ({
-          finding_index: idx,
-          title: (f.title ?? "").slice(0, 120),
-          category: f.category ?? "uncategorized",
-          severity: f.severity ?? "moderate",
-          source: "natural_merge_tree",
-        }));
-
-        const evidenceAdmissionPayload = {
-          evidence_admission_ledgers: [
-            {
-              schema_version: "evidence-admission-v1" as const,
-              synthesized_from: "old_path_inline",
-              run_id: runId,
-              module_id: moduleId,
-              admitted: admittedEntries,
-              total_findings: finalFindings.length,
-              created_at: new Date().toISOString(),
-            },
-          ],
-        };
-
-        await ctx.integrations.db.query(
-          `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json)
-           VALUES ($1, 96, 0, 'complete', $2::jsonb)
-           ON CONFLICT (module_run_id, tree_level, node_index)
-           DO UPDATE SET merged_json = $2::jsonb, status = 'complete', updated_at = now()`,
-          z.any(),
-          [runId, JSON.stringify(evidenceAdmissionPayload)],
-          { label: "evidence_admission: write synthesized Q3 checkpoint (old path)" }
-        );
-
-        console.log(`[pipeline] evidence_admission synthesized at tree_level=96 — ${admittedEntries.length} admitted entries (${Date.now() - eaStart}ms)`);
-      }
-    } catch (eaErr) {
-      console.error(`[pipeline] evidence_admission synthesis failed (${Date.now() - eaStart}ms):`, eaErr);
-      // Non-fatal for now — the finalization runner will report the blocking reason
-    }
-  }
-
   // ─── Route through shared post-merge finalization runner (OA-04 + F06) ───
   // At this point: post-merge pipeline done, absence verification done, report formatted.
-  // evidence_admission synthesized above for contradiction_check.
+  // NOTE: evidence_admission (tree_level=96) is NOT available on the old natural-merge-tree
+  // path. ReplayClaimLinkage requires P2.1 reconstruction artifacts (tree_level=97/98/99)
+  // which do not exist here. The evidence_admission check in post-merge-finalization.ts
+  // is skipped for callerPath="normal_path" — see that function for the gate logic.
   const normalPathFinalizationResult = await runPostMergeFinalizationStages({
     ctx,
     runId: runId!,

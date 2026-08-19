@@ -34,8 +34,6 @@ import { STALENESS_THRESHOLD_MINUTES, RESUME_JOB_TIME_BUDGET_MS } from "./pipeli
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
-const NUMERIC_MODULES_SET = new Set(["contradiction_check", "model_assumptions_stress"]);
-
 const StaleRunSchema = z.object({
   id: z.string(),
   deal_id: z.string(),
@@ -98,32 +96,6 @@ export default api({
         break;
       }
 
-      // For numeric-dependent modules, check availability BEFORE claiming
-      // so we don't refresh triggered_at on a run we can't process.
-      if (NUMERIC_MODULES_SET.has(target.module_id)) {
-        let numericAvailable = false;
-        try {
-          const hasNumeric = await ctx.integrations.db.query(
-            `SELECT numeric_report_json IS NOT NULL AS has_report FROM module_runs WHERE id = $1`,
-            z.object({ has_report: z.boolean() }),
-            [target.id],
-            { label: "Pre-claim: check if run has persisted numeric report" }
-          );
-          numericAvailable = hasNumeric.length > 0 && hasNumeric[0].has_report;
-        } catch {
-          // Column doesn't exist yet — treat as unavailable
-        }
-
-        if (!numericAvailable) {
-          processed.push({
-            runId: target.id,
-            moduleId: target.module_id,
-            outcome: "skipped: numeric-dependent module without persisted numeric report (not claimed)",
-          });
-          continue;
-        }
-      }
-
       // Atomically claim this run (CAS on triggered_at to prevent double-pickup)
       const claimed = await ctx.integrations.db.query(
         `UPDATE module_runs
@@ -141,23 +113,8 @@ export default api({
         continue;
       }
 
-      // Load persisted numeric report if available (already confirmed exists for numeric modules)
-      let numericReport: any = null;
-      try {
-        const numericRow = await ctx.integrations.db.query(
-          `SELECT numeric_report_json FROM module_runs WHERE id = $1 AND numeric_report_json IS NOT NULL`,
-          z.object({ numeric_report_json: z.any() }),
-          [target.id],
-          { label: "Load persisted numeric report" }
-        );
-        if (numericRow.length > 0) {
-          numericReport = typeof numericRow[0].numeric_report_json === "string"
-            ? JSON.parse(numericRow[0].numeric_report_json)
-            : numericRow[0].numeric_report_json;
-        }
-      } catch {
-        // Column may not exist yet — proceed without numeric grounding
-      }
+      // Numeric report is loaded from checkpoints inside runPipelineCore —
+      // no need to query it from module_runs (column doesn't exist in schema).
 
       try {
         const result = await runPipelineCore(ctx, {
@@ -165,7 +122,7 @@ export default api({
           moduleId: target.module_id,
           runId: target.id,
           useOpus: false,
-          numericReport,
+          numericReport: null,
         });
 
         // Fix 18 closure: runPipelineCore() is the sole final-output writer.

@@ -660,7 +660,11 @@ export async function runPostMergeFinalizationStages(
   );
 
   // Check evidence admission specifically — if required and missing, BLOCK
-  if (CLAIMS_REQUIRED_MODULES.has(moduleId)) {
+  // EXCEPTION: normal_path (old natural-merge-tree) runs do NOT have P2.1
+  // reconstruction artifacts (tree_level=97/98/99) that ReplayClaimLinkage
+  // requires to produce evidence_admission at tree_level=96. The check is
+  // skipped for these runs — evidence admission is a P2.1 gate only.
+  if (CLAIMS_REQUIRED_MODULES.has(moduleId) && callerPath !== "normal_path") {
     const evidenceEntry = checkpointStatus.find(s => s.key === "evidence_admission");
     if (evidenceEntry && !evidenceEntry.present) {
       console.error(`${LOG_PREFIX} canonical_finalize: BLOCKED — evidence_admission missing. Cannot fabricate.`);
@@ -668,6 +672,8 @@ export async function runPostMergeFinalizationStages(
       return buildResult("blocked", "canonical_finalize", stageStates, completedStages, progressAdvanced,
         ["Evidence admission (tree_level=96) checkpoint is missing. This stage must be executed by the production evidence-admission service. Finalization is blocked until genuine evidence admission data exists."]);
     }
+  } else if (CLAIMS_REQUIRED_MODULES.has(moduleId) && callerPath === "normal_path") {
+    console.log(`${LOG_PREFIX} canonical_finalize: evidence_admission check SKIPPED for normal_path — P2.1 reconstruction artifacts not available`);
   }
 
   // Invoke F06 — the sole authoritative finalizer

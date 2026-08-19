@@ -29,36 +29,22 @@ export default api({
   }),
 
   async run(ctx, { runId, override }) {
-    // 0. Check current run status + is_cancelled for diagnostics and guard
-    let currentStatus: string | null = null;
-    let isCancelled = false;
-    try {
-      const runRows = await ctx.integrations.db.query(
-        `SELECT status::text AS status, COALESCE(is_cancelled, FALSE) AS is_cancelled FROM module_runs WHERE id = $1 LIMIT 1`,
-        z.object({ status: z.string(), is_cancelled: z.boolean() }),
-        [runId],
-        { label: "Check run status + is_cancelled" }
-      );
-      currentStatus = runRows.length > 0 ? runRows[0].status : null;
-      isCancelled = runRows[0]?.is_cancelled ?? false;
-    } catch {
-      // Pre-migration: column doesn't exist
-      const runRows = await ctx.integrations.db.query(
-        `SELECT status::text AS status FROM module_runs WHERE id = $1 LIMIT 1`,
-        z.object({ status: z.string() }),
-        [runId],
-        { label: "Check run status (pre-migration)" }
-      );
-      currentStatus = runRows.length > 0 ? runRows[0].status : null;
-    }
+    // 0. Check current run status for guard
+    const runRows = await ctx.integrations.db.query(
+      `SELECT status::text AS status FROM module_runs WHERE id = $1 LIMIT 1`,
+      z.object({ status: z.string() }),
+      [runId],
+      { label: "Check run status" }
+    );
+    const currentStatus = runRows.length > 0 ? runRows[0].status : null;
 
-    // GUARD: refuse cancelled runs unless explicit override
-    if (isCancelled && !override) {
+    // GUARD: refuse failed runs unless explicit override (failed = possibly cancelled)
+    if (currentStatus === "failed" && !override) {
       return {
         mergeCheckpointsDeleted: 0,
         outputsDeleted: 0,
         runReset: false,
-        currentStatus: `${currentStatus} (cancelled — use ResurrectModuleRun to revive a cancelled run, or pass override:true to force)`,
+        currentStatus: `${currentStatus} (use ResurrectModuleRun to revive, or pass override:true to force)`,
         analysisRowsFound: 0,
       };
     }

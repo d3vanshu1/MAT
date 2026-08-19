@@ -28,23 +28,19 @@ export default api({
 
   async run(ctx, { runId, dealId, moduleId, status, documentsIncluded, override }) {
     if (runId) {
-      // GUARD: refuse update on cancelled runs unless override:true
-      let isCancelled = false;
-      try {
+      // GUARD: refuse update on failed runs unless override:true
+      // (Without is_cancelled column, failed status is the cancellation marker)
+      if (!override) {
         const check = await ctx.integrations.db.query(
-          `SELECT COALESCE(is_cancelled, FALSE) AS is_cancelled FROM module_runs WHERE id = $1 LIMIT 1`,
-          z.object({ is_cancelled: z.boolean() }),
+          `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
+          z.object({ status: z.string() }),
           [runId],
-          { label: `Check is_cancelled before status update` }
+          { label: `Check status before update` }
         );
-        isCancelled = check[0]?.is_cancelled ?? false;
-      } catch {
-        // Pre-migration: column doesn't exist, can't guard
-      }
-
-      if (isCancelled && !override) {
-        console.warn(`[UpdateRunStatus] Refused: run ${runId} is cancelled. Pass override:true to force.`);
-        return { runId };
+        if (check[0]?.status === "failed") {
+          console.warn(`[UpdateRunStatus] Refused: run ${runId} is failed. Pass override:true to force.`);
+          return { runId };
+        }
       }
 
       // Update existing run

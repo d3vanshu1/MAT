@@ -8,7 +8,6 @@ const ModuleStatusRowSchema = z.object({
   module_id: z.string(),
   run_id: z.string(),
   status: z.string(),
-  is_cancelled: z.boolean(),
   triggered_at: z.string(),
   completed_at: z.string().nullable(),
   executive_header: z.string().nullable(),
@@ -21,7 +20,6 @@ const BASE_QUERY = `SELECT DISTINCT ON (mr.module_id)
   mr.module_id,
   mr.id AS run_id,
   mr.status,
-  {{IS_CANCELLED_EXPR}}
   mr.triggered_at,
   mr.completed_at,
   mo.executive_header,
@@ -61,7 +59,6 @@ export default api({
         latestRun: z.object({
           id: z.string(),
           status: z.string(),
-          isCancelled: z.boolean(),
           triggeredAt: z.string(),
           completedAt: z.string().nullable(),
         }),
@@ -78,26 +75,12 @@ export default api({
   }),
 
   async run(ctx, { dealId }) {
-    // Try with is_cancelled column (post-migration-009)
-    let rows: Array<z.infer<typeof ModuleStatusRowSchema>>;
-
-    try {
-      rows = await ctx.integrations.db.query(
-        BASE_QUERY.replace("{{IS_CANCELLED_EXPR}}", "COALESCE(mr.is_cancelled, FALSE) AS is_cancelled,"),
-        ModuleStatusRowSchema,
-        [dealId],
-        { label: "Load latest module results (with is_cancelled)" }
-      );
-    } catch {
-      // Pre-migration fallback: column doesn't exist
-      const legacyRows = await ctx.integrations.db.query(
-        BASE_QUERY.replace("{{IS_CANCELLED_EXPR}}", "FALSE AS is_cancelled,"),
-        ModuleStatusRowSchema,
-        [dealId],
-        { label: "Load latest module results (pre-migration)" }
-      );
-      rows = legacyRows;
-    }
+    const rows = await ctx.integrations.db.query(
+      BASE_QUERY,
+      ModuleStatusRowSchema,
+      [dealId],
+      { label: "Load latest module results" }
+    );
 
     const modules = rows.map((row) => {
       // RC1 + Fix 3: strict reload — fail closed on any corruption
@@ -127,7 +110,7 @@ export default api({
         latestRun: {
           id: row.run_id,
           status: row.status,
-          isCancelled: row.is_cancelled,
+
           triggeredAt: row.triggered_at,
           completedAt: row.completed_at,
         },
