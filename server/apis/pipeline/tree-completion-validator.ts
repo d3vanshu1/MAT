@@ -93,7 +93,7 @@ export interface AnalysisRecord {
 // ---------------------------------------------------------------------------
 
 export const VALIDATOR_VERSION = "1.0.0-publication-gate";
-const MERGE_GROUP_SIZE = 4;
+const MERGE_GROUP_SIZE = 2;
 
 // ---------------------------------------------------------------------------
 // Core Validation Logic
