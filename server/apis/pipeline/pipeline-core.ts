@@ -2449,7 +2449,16 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             // All fast-path cases route through the shared post-merge finalization runner.
             // The runner handles claims, reconciliation, post-merge, absence verification,
             // and canonical finalization as a single resumable state machine.
-            console.log(`[pipeline:fast-path] Routing to shared post-merge finalization runner (prereqAbort=${fastPathPrereqAbort}, hkAbort=${fastPathHousekeepingAbort})`);
+            //
+            // callerPath determination: if evidence_admission is missing because P2.1
+            // reconstruction artifacts (tree_level=97/98/99) were never produced, this is
+            // a natural-merge-tree run resuming from a complete root. Use "normal_path"
+            // so post-merge-finalization skips the evidence_admission gate.
+            const effectiveCallerPath: "fast_path" | "normal_path" =
+              fpMissingPrereqs.includes("evidence_admission")
+                ? "normal_path"
+                : "fast_path";
+            console.log(`[pipeline:fast-path] Routing to shared post-merge finalization runner (prereqAbort=${fastPathPrereqAbort}, hkAbort=${fastPathHousekeepingAbort}, effectiveCallerPath=${effectiveCallerPath})`);
               const finalizationResult = await runPostMergeFinalizationStages({
                 ctx,
                 runId,
@@ -2461,7 +2470,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                 executiveHeader: topCheckpoint.executive_header,
                 startTime,
                 timeRemaining,
-                callerPath: "fast_path",
+                callerPath: effectiveCallerPath,
                 housekeepingFindings: fastPathHousekeeping,
                 housekeepingValidated: !fastPathHousekeepingAbort,
                 fileTagMap,

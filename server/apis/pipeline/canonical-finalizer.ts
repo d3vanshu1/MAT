@@ -86,6 +86,12 @@ export interface FinalizerPrerequisites {
    * This flag is audited in logs.
    */
   bypassPublicationGate?: boolean;
+  /**
+   * If true, evidence_admission is not required as a prerequisite.
+   * Set for natural-merge-tree runs that never produce P2.1 reconstruction
+   * artifacts (tree_level=97/98/99) and therefore cannot have evidence_admission.
+   */
+  skipEvidenceAdmission?: boolean;
 }
 
 export type FinalizerOutcome =
@@ -497,7 +503,12 @@ export async function canonicalFinalize(
   const missingKeys: string[] = [];
   const statusMap = new Map(checkpointStatus.map(s => [s.key, s]));
 
-  for (const key of requiredKeys) {
+  // Filter out evidence_admission when skipEvidenceAdmission is set (natural-merge-tree runs)
+  const effectiveRequiredKeys = prereqs.skipEvidenceAdmission
+    ? requiredKeys.filter(k => k !== "evidence_admission")
+    : requiredKeys;
+
+  for (const key of effectiveRequiredKeys) {
     const entry = statusMap.get(key);
     if (!entry || !entry.present) {
       missingKeys.push(key);

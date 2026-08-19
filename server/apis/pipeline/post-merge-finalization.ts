@@ -696,6 +696,9 @@ export async function runPostMergeFinalizationStages(
       degradedConditions: verificationErrored
         ? [`Absence verification phase errored (${postMergeHousekeeping.length} housekeeping findings present)`]
         : undefined,
+      // Natural-merge-tree runs never produce P2.1 reconstruction artifacts
+      // (tree_level=97/98/99), so evidence_admission cannot exist. Skip it.
+      skipEvidenceAdmission: callerPath === "normal_path",
     },
   );
 
