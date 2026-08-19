@@ -30,7 +30,9 @@ const BASE_QUERY = `SELECT DISTINCT ON (mr.module_id)
   mo.created_at AS output_created_at
 FROM module_runs mr
 LEFT JOIN module_outputs mo ON mo.module_run_id = mr.id
+LEFT JOIN module_run_flags mrf ON mrf.module_run_id = mr.id
 WHERE mr.deal_id = $1
+  AND COALESCE(mrf.diagnostic_only, FALSE) = FALSE
 ORDER BY mr.module_id,
   CASE WHEN mr.status = 'running' THEN 0
        WHEN mo.id IS NOT NULL THEN 1

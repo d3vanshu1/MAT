@@ -251,10 +251,7 @@ export default api({
         claim.basis ?? null,
         claim.scenario ?? null,
       );
-      if (key === null) {
-        scenarioExcluded++;
-        continue;
-      }
+      if (key === null) { scenarioExcluded++; continue; }
       if (!keyMap.has(key)) keyMap.set(key, []);
       keyMap.get(key)!.push(claim);
     }

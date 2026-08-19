@@ -60,7 +60,9 @@ export default api({
           )) AS critical
         FROM module_runs mr
         JOIN module_outputs mo ON mo.module_run_id = mr.id
+        LEFT JOIN module_run_flags mrf ON mrf.module_run_id = mr.id
         WHERE mr.status = 'completed'
+          AND COALESCE(mrf.diagnostic_only, FALSE) = FALSE
         GROUP BY mr.deal_id
       ) finding_counts ON finding_counts.deal_id = d.id
       WHERE d.id = $1

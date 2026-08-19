@@ -277,6 +277,7 @@ export default function DealDashboardPage() {
   const { run: backfillDocTablesApi } = useApi("BackfillDocTablesFromText");
   const { run: getDocTablesSummaryApi } = useApi("GetDocTablesSummary");
   const { run: runModulePipelineApi } = useApi("RunModulePipeline");
+  const { run: getRunnableRunsApi } = useApi("GetRunnableRuns");
 
   // Cancellation tracking — stores run IDs that have been cancelled
   const cancelledRunsRef = useRef<Set<string>>(new Set());
@@ -2067,16 +2068,24 @@ export default function DealDashboardPage() {
     if (!dealId) return;
 
     const attemptResume = async () => {
-      // Find modules that DB says are running but the pipeline loop is NOT driving
-      const dbRunningIds = Object.entries(statuses)
-        .filter(([, s]) => s.latestRun?.status === "running")
-        .map(([id]) => id);
+      // Query the DB for ALL running runs (including diagnostic) via dedicated unfiltered API
+      let dbRunningIds: Array<{ moduleId: string; runId: string }> = [];
+      try {
+        const result = await getRunnableRunsApi({ dealId });
+        dbRunningIds = (result?.runs ?? []).map((r: { module_id: string; run_id: string }) => ({
+          moduleId: r.module_id,
+          runId: r.run_id,
+        }));
+      } catch (err) {
+        console.error("[auto-resume] GetRunnableRuns failed:", err);
+        return;
+      }
 
       const orphanedModules = dbRunningIds.filter(
-        (id) =>
-          !pipelinePollingActive.current.has(id) &&
-          !resumingModulesRef.current.has(id) &&
-          !killedModulesRef.current.has(id)
+        ({ moduleId }) =>
+          !pipelinePollingActive.current.has(moduleId) &&
+          !resumingModulesRef.current.has(moduleId) &&
+          !killedModulesRef.current.has(moduleId)
       );
 
       if (orphanedModules.length === 0) return;
@@ -2092,10 +2101,8 @@ export default function DealDashboardPage() {
       // Small delay to let browser connections stabilize after wake
       await new Promise((r) => setTimeout(r, 1_000));
 
-      for (const moduleId of orphanedModules) {
+      for (const { moduleId, runId } of orphanedModules) {
         if (moduleId === "executive_summary") continue;
-        const runId = statuses[moduleId]?.latestRun?.id;
-        if (!runId) continue;
         // Re-check guards after the delay (another resume may have started)
         if (pipelinePollingActive.current.has(moduleId)) continue;
         if (resumingModulesRef.current.has(moduleId)) continue;
@@ -2130,7 +2137,7 @@ export default function DealDashboardPage() {
       document.removeEventListener("visibilitychange", handleVisibility);
       clearInterval(heartbeatInterval);
     };
-  }, [dealId, statuses, handleRunModule]);
+  }, [dealId, handleRunModule, getRunnableRunsApi]);
 
   // ---------------------------------------------------------------------------
   // Progress polling for DB-running modules

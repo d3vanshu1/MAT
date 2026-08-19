@@ -69,21 +69,21 @@ export default api({
     // Find all stale runs: status='running' and triggered_at older than threshold
     // Excludes runs with active recovery claims (unexpired claimed_by on any checkpoint)
     const staleRuns = await ctx.integrations.db.query(
-      `SELECT id, deal_id, module_id
-       FROM module_runs
-       WHERE status = 'running'::module_status
-         AND triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'
+      `SELECT mr.id, mr.deal_id, mr.module_id
+       FROM module_runs mr
+       WHERE mr.status = 'running'::module_status
+         AND mr.triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'
          AND NOT EXISTS (
            SELECT 1 FROM merge_checkpoints mc
-           WHERE mc.module_run_id = module_runs.id
+           WHERE mc.module_run_id = mr.id
              AND mc.claimed_by IS NOT NULL
              AND mc.claimed_at > now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'
          )
-       ORDER BY triggered_at ASC
+       ORDER BY mr.triggered_at ASC
        LIMIT 10`,
       StaleRunSchema,
       [],
-      { label: "Find stale running pipelines (excludes active recovery claims)" }
+      { label: "Find stale running pipelines (includes diagnostic runs)" }
     );
 
     if (staleRuns.length === 0) {

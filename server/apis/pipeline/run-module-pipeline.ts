@@ -41,6 +41,8 @@ export default api({
     }).nullable().optional(),
     // True when NumericVerify hit its time budget and only processed a subset of tables
     numericPartial: z.boolean().nullable().optional(),
+    // When true, the resulting module_run is hidden from dashboards and resume logic
+    diagnosticOnly: z.boolean().nullable().optional(),
   }),
 
   output: z.object({
@@ -85,6 +87,7 @@ export default api({
       subjectDocumentIds: input.subjectDocumentIds,
       numericReport: input.numericReport,
       numericPartial: input.numericPartial,
+      diagnosticOnly: input.diagnosticOnly,
     });
   },
 });

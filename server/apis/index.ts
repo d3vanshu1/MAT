@@ -20,6 +20,7 @@ import FormatReport from './modules/format-report.js';
 import WebResearch from './modules/web-research.js';
 import SaveModuleResult from './modules/save-module-result.js';
 import LoadModuleResults from './modules/load-module-results.js';
+import GetRunnableRuns from './modules/get-runnable-runs.js';
 import GetRunHistory from './modules/get-run-history.js';
 import GetRunOutput from './modules/get-run-output.js';
 
@@ -146,6 +147,10 @@ import RunMigration023 from './pipeline/run-migration-023.js';
 import RunMigration024 from './pipeline/run-migration-024.js';
 import RunMigration025 from './pipeline/run-migration-025.js';
 import RunMigration026 from './pipeline/run-migration-026.js';
+import RunMigration027 from './pipeline/run-migration-027.js';
+import RunMigration028 from './pipeline/run-migration-028.js';
+import RunMigration029 from './pipeline/run-migration-029.js';
+import Stage5ExtractReferenceFigures from './pipeline/stage5-extract-reference-figures.js';
 import ResetStageCheckpoints from './pipeline/reset-stage-checkpoints.js';
 import OaFactNormalization from './pipeline/oa-fact-normalization.js';
 import OaNormalizationReport from './pipeline/oa-normalization-report.js';
@@ -159,6 +164,7 @@ import OaFindingAssembly from './pipeline/oa-finding-assembly.js';
 import OaRender from './pipeline/oa-render.js';
 import OaAcceptanceTests from './pipeline/oa-acceptance-tests.js';
 import PublishOaToModuleOutputs from './pipeline/publish-oa-to-module-outputs.js';
+import TestVerificationGate from './pipeline/test-verification-gate.js';
 // import PurgeDealPipelineState from './pipeline/purge-deal-pipeline-state.js';
 
 // Database setup
@@ -234,7 +240,7 @@ import FramingPatternAudit from './audit/framing-pattern-audit.js';
 const apis = {
   // AI pipeline
   AnalyzeChunk, UniversalExtract, MergeFindings, FormatReport, WebResearch,
-  SaveModuleResult, LoadModuleResults, GetRunHistory, GetRunOutput,
+  SaveModuleResult, LoadModuleResults, GetRunnableRuns, GetRunHistory, GetRunOutput,
   // Server-side pipeline
   RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagMergeMetrics, DiagConsolidationFailure, DiagConsolidationDryrun, DiagOaIdentityFit, DiagModelGrouper, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,     ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact,
   ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings, ReplayPopulateClaimsLedger, DiagSaintReconciliation, GetSaintReconciliationPage, DiagReconciliationFindings,
@@ -242,7 +248,7 @@ const apis = {
   DiagCheckpointInspect, DiagPartialNodeLedger, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
-  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs,
+  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

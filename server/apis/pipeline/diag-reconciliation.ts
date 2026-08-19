@@ -186,6 +186,7 @@ export default api({
           cross_version_findings: 0,
           near_miss_count: 0,
           ambiguous_reference_count: 0,
+          near_miss_unit_rejected: 0,
           coverage: {
             raw_claims: ledger.claims.length,
             category_excluded: 0,
@@ -221,6 +222,7 @@ export default api({
         cross_version_findings: 0,
         near_miss_count: 0,
         ambiguous_reference_count: 0,
+        near_miss_unit_rejected: 0,
         coverage: {
           raw_claims: ledger.claims.length,
           category_excluded: 0,

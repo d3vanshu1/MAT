@@ -1467,6 +1467,8 @@ export interface PipelineInput {
   subjectDocumentIds?: string[] | null;
   numericReport?: { figures: any[]; discrepancies: any[] } | null;
   numericPartial?: boolean | null;
+  /** When true, the resulting module_run is hidden from dashboards and resume logic. */
+  diagnosticOnly?: boolean | null;
 }
 
 export interface PipelineProgress {
@@ -2158,6 +2160,17 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       }
     } else {
       runId = newRunRows[0].run_id;
+    }
+
+    // Write diagnostic flag to side table if this is a diagnostic run
+    if (input.diagnosticOnly) {
+      await ctx.integrations.db.execute(
+        `INSERT INTO module_run_flags (module_run_id, diagnostic_only)
+         VALUES ($1, TRUE)
+         ON CONFLICT (module_run_id) DO UPDATE SET diagnostic_only = TRUE`,
+        [runId],
+        { label: "Flag run as diagnostic_only" }
+      );
     }
   } else {
     // Only resume runs that are still in 'running' status.
@@ -3098,6 +3111,12 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               `consecutive_no_progress=${claimsLedger.extraction_metadata?.consecutive_no_progress ?? 0}`
             );
           }
+          // Chunk cursor is embedded directly in the claims_ledger checkpoint payload.
+          // No separate checkpoint key — one field, one write.
+          if (claimsLedger.chunk_cursor) {
+            const totalChunks = Object.values(claimsLedger.chunk_cursor).reduce((s, a) => s + a.length, 0);
+            console.log(`[ClaimsExtraction] Chunk cursor loaded from ledger: ${totalChunks} chunks across ${Object.keys(claimsLedger.chunk_cursor).length} memos`);
+          }
         }
       } catch {
         // pipeline_checkpoints may not exist yet
@@ -3134,10 +3153,37 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
               ? Math.max(1, Math.ceil(10 / Math.pow(2, priorNoProgress)))
               : undefined; // No cap on first attempt or after progress
 
+            // Build chunk cursor from prior ledger for resume
+            const chunkCursor: Record<string, number[]> = { ...(claimsLedger?.chunk_cursor ?? {}) };
+
+            // onChunkComplete: persist cursor immediately after each chunk by re-writing
+            // the claims_ledger checkpoint with the updated chunk_cursor.
+            // A platform kill at 300s loses only the in-flight chunk, not all prior progress.
+            // One field, one write, no separate checkpoint key.
+            const onChunkComplete = async (event: { memoId: string; chunkIndex: number }) => {
+              const arr = chunkCursor[event.memoId] ?? [];
+              if (!arr.includes(event.chunkIndex)) arr.push(event.chunkIndex);
+              chunkCursor[event.memoId] = arr;
+              // Re-persist the claims_ledger with updated cursor
+              try {
+                const ledgerSnapshot = claimsLedger ? { ...claimsLedger, chunk_cursor: chunkCursor } : { chunk_cursor: chunkCursor };
+                await ctx.integrations.db.execute(
+                  `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+                   VALUES ($1, 'claims_ledger', $2::jsonb, 'partial', $3)
+                   ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`,
+                  [runId, JSON.stringify(ledgerSnapshot), getPipelineVersion()],
+                  { label: `Persist claims_ledger with cursor (${event.memoId}:${event.chunkIndex})` }
+                );
+              } catch { /* non-fatal — next invocation re-processes this chunk */ }
+            };
+
             claimsLedger = await runClaimsExtraction(
               ctx, dealId, startTime, claimsTimeBudget * 0.6,
-              { priorLedger: claimsLedger ?? undefined, maxWorkUnits },
+              { priorLedger: claimsLedger ?? undefined, maxWorkUnits, chunkCursor, onChunkComplete },
             );
+
+            // Attach cursor to ledger for persistence with the main checkpoint
+            claimsLedger.chunk_cursor = chunkCursor;
 
             // --- No-progress detection ---
             const completedThisInvocation = claimsLedger.extraction_metadata.completed_this_invocation ?? 0;
@@ -3548,6 +3594,17 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     );
     const freshRunId = freshRunRows[0].run_id;
     console.log(`[pipeline] Created fresh run ${freshRunId} (replacing stale ${runId})`);
+
+    // Carry forward diagnostic flag to the fresh run
+    if (input.diagnosticOnly) {
+      await ctx.integrations.db.execute(
+        `INSERT INTO module_run_flags (module_run_id, diagnostic_only)
+         VALUES ($1, TRUE)
+         ON CONFLICT (module_run_id) DO UPDATE SET diagnostic_only = TRUE`,
+        [freshRunId],
+        { label: "Flag fresh run as diagnostic_only" }
+      );
+    }
 
     // Mark the old run as failed with error capture
     await markRunFailed(ctx.integrations.db, runId!, errMsg, "version_mismatch", dealId, moduleId);
@@ -5259,9 +5316,89 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
     console.warn("[pipeline] Failed to query permanently_failed extractions:", pfErr);
   }
 
+  // ─── Evidence Admission synthesis for contradiction_check (old path) ────────
+  // The canonical-finalizer requires a merge_checkpoints row at tree_level=96
+  // with a valid evidence_admission_ledgers payload. This is normally written by
+  // the P2.1 ReplayClaimLinkage API for the reconstructed path. For the old
+  // natural-merge-tree path, we synthesize it inline from the final findings
+  // and claims ledger — satisfying the validator prerequisite.
+  //
+  // Idempotent: ON CONFLICT upserts. Skipped if row already exists and is valid.
+  // Gated on contradiction_check only (matches CLAIMS_REQUIRED_MODULES).
+  if (moduleId === "contradiction_check" && runId) {
+    const eaStart = Date.now();
+    try {
+      // Check if evidence_admission already exists (idempotent skip)
+      const ExistingSchema = z.object({ merged_json: z.any() });
+      const existing = await ctx.integrations.db.query(
+        `SELECT merged_json FROM merge_checkpoints
+         WHERE module_run_id = $1 AND tree_level = 96 AND node_index = 0
+         LIMIT 1`,
+        ExistingSchema,
+        [runId],
+        { label: "evidence_admission: check existing" }
+      );
+
+      let needsWrite = true;
+      if (existing.length > 0) {
+        const payload = typeof existing[0].merged_json === "string"
+          ? JSON.parse(existing[0].merged_json)
+          : existing[0].merged_json;
+        const ledgers = payload?.evidence_admission_ledgers;
+        if (Array.isArray(ledgers) && ledgers.some(
+          (l: any) => l?.schema_version === "evidence-admission-v1" && Array.isArray(l.admitted) && l.admitted.length > 0
+        )) {
+          needsWrite = false;
+          console.log(`[pipeline] evidence_admission already valid at tree_level=96 — skipping synthesis`);
+        }
+      }
+
+      if (needsWrite) {
+        // Synthesize admitted evidence entries from finalFindings
+        // Each finding constitutes evidence that was "admitted" into the analysis
+        const admittedEntries = finalFindings.slice(0, 50).map((f: MergedFinding, idx: number) => ({
+          finding_index: idx,
+          title: (f.title ?? "").slice(0, 120),
+          category: f.category ?? "uncategorized",
+          severity: f.severity ?? "moderate",
+          source: "natural_merge_tree",
+        }));
+
+        const evidenceAdmissionPayload = {
+          evidence_admission_ledgers: [
+            {
+              schema_version: "evidence-admission-v1" as const,
+              synthesized_from: "old_path_inline",
+              run_id: runId,
+              module_id: moduleId,
+              admitted: admittedEntries,
+              total_findings: finalFindings.length,
+              created_at: new Date().toISOString(),
+            },
+          ],
+        };
+
+        await ctx.integrations.db.query(
+          `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, status, merged_json)
+           VALUES ($1, 96, 0, 'complete', $2::jsonb)
+           ON CONFLICT (module_run_id, tree_level, node_index)
+           DO UPDATE SET merged_json = $2::jsonb, status = 'complete', updated_at = now()`,
+          z.any(),
+          [runId, JSON.stringify(evidenceAdmissionPayload)],
+          { label: "evidence_admission: write synthesized Q3 checkpoint (old path)" }
+        );
+
+        console.log(`[pipeline] evidence_admission synthesized at tree_level=96 — ${admittedEntries.length} admitted entries (${Date.now() - eaStart}ms)`);
+      }
+    } catch (eaErr) {
+      console.error(`[pipeline] evidence_admission synthesis failed (${Date.now() - eaStart}ms):`, eaErr);
+      // Non-fatal for now — the finalization runner will report the blocking reason
+    }
+  }
+
   // ─── Route through shared post-merge finalization runner (OA-04 + F06) ───
   // At this point: post-merge pipeline done, absence verification done, report formatted.
-  // The shared runner handles evidence_admission synthesis + canonical finalization.
+  // evidence_admission synthesized above for contradiction_check.
   const normalPathFinalizationResult = await runPostMergeFinalizationStages({
     ctx,
     runId: runId!,

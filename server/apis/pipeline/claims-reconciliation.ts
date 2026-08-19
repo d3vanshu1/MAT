@@ -102,6 +102,8 @@ export interface ReconciliationResult {
   near_miss_count: number;
   /** F1: Claims that hit an ambiguous multi-figure key (fail-closed, no assertion) */
   ambiguous_reference_count: number;
+  /** 1.1: Near-miss candidates rejected by unit compatibility (% vs £) */
+  near_miss_unit_rejected: number;
   /** Internal error from LLM matching step (null if LLM succeeded or wasn't attempted) */
   matching_error?: string | null;
   /** Fix 20: Total supersession diagnostics emitted during this reconciliation.
@@ -164,9 +166,9 @@ interface MatchProposal {
 // ---------------------------------------------------------------------------
 
 /** Coarse unit families for compatibility checking */
-type UnitFamily = "absolute_gbp" | "rate_pct" | "multiplier" | "count" | "unknown";
+export type UnitFamily = "absolute_gbp" | "rate_pct" | "multiplier" | "count" | "unknown";
 
-function classifyClaimUnit(unit: string): UnitFamily {
+export function classifyClaimUnit(unit: string): UnitFamily {
   const u = unit.trim().toLowerCase();
   if (u === "£m" || u === "£k" || u === "£" || u === "£bn") return "absolute_gbp";
   if (u === "%" || u === "bps" || u === "pp") return "rate_pct";
@@ -180,7 +182,7 @@ function classifyClaimUnit(unit: string): UnitFamily {
  * Model figures store raw £ values (absolute) unless the label/context
  * clearly indicates a percentage or multiple.
  */
-function classifyModelFigureUnit(fig: Figure): UnitFamily {
+export function classifyModelFigureUnit(fig: Figure): UnitFamily {
   const label = fig.name.toLowerCase();
   // Rate indicators in the figure label
   if (label.includes("margin") || label.includes("growth") || label.includes("%") ||
@@ -206,7 +208,7 @@ function classifyModelFigureUnit(fig: Figure): UnitFamily {
  * Returns true if claim unit and model figure unit families are compatible.
  * Incompatible pairs should NEVER be reconciled — they'd produce false divergences.
  */
-function unitsAreCompatible(claimFamily: UnitFamily, modelFamily: UnitFamily): boolean {
+export function unitsAreCompatible(claimFamily: UnitFamily, modelFamily: UnitFamily): boolean {
   // If either is unknown, we can't assert incompatibility — allow match (be conservative)
   if (claimFamily === "unknown" || modelFamily === "unknown") return true;
   // Same family is always compatible
@@ -337,7 +339,10 @@ const LABEL_MAPPINGS: LabelMapping[] = [
   // EBITDA family — order matters
   { pattern: /adj(usted)?\.?\s+cash\s+ebitda/i, metric: "ebitda", scope_qualifier: "Adjusted EBITDA" },
   { pattern: /adj(usted)?\.?\s+ebitda/i, metric: "ebitda", scope_qualifier: "Adjusted EBITDA" },
-  { pattern: /reported\s+ebitda|ebitda.*reported|non.?pro.?forma.*ebitda|ebitda.*non.?pro.?forma/i, metric: "ebitda", scope_qualifier: "Cash EBITDA (Reported / Non Pro Forma)" },
+  // REMOVED: Reported EBITDA → Cash EBITDA mapping. These are materially different measures
+  // (delta £6-8m per year). Reported EBITDA ≠ Cash EBITDA (Non Pro Forma). Claims at that
+  // scope correctly become unmatched until an actual Cash EBITDA row is found in the model.
+  // { pattern: /reported\s+ebitda|ebitda.*reported|non.?pro.?forma.*ebitda|ebitda.*non.?pro.?forma/i, metric: "ebitda", scope_qualifier: "Cash EBITDA (Reported / Non Pro Forma)" },
   { pattern: /cash\s+ebitda/i, metric: "ebitda", scope_qualifier: "Cash EBITDA" },
   { pattern: /run.?rate\s+ebitda/i, metric: "ebitda", scope_qualifier: "Run-rate EBITDA" },
   { pattern: /organic.*ebitda|ebitda.*organic/i, metric: "ebitda", scope_qualifier: "Organic Cash EBITDA" },
@@ -358,6 +363,22 @@ export function normalizeFigures(figures: Figure[]): NormalizedFigure[] {
   const results: NormalizedFigure[] = [];
   for (const fig of figures) {
     const label = fig.name.trim();
+
+    // --- Pre-normalized passthrough for reference_figures bridge ---
+    // Format: "[prenorm:<metric>:<basis_or_empty>]<scope_qualifier>"
+    // This bypasses LABEL_MAPPINGS for figures already in claims vocabulary.
+    const prenormMatch = label.match(/^\[prenorm:([^:]+):([^\]]*)\](.+)$/);
+    if (prenormMatch) {
+      results.push({
+        raw: fig,
+        metric: prenormMatch[1],
+        scope_qualifier: prenormMatch[3],
+        period: normalizePeriod(fig.period),
+        basis: prenormMatch[2] || null,
+      });
+      continue;
+    }
+
     let mapped = false;
     for (const mapping of LABEL_MAPPINGS) {
       if (mapping.pattern.test(label)) {
@@ -389,7 +410,7 @@ export function normalizeFigures(figures: Figure[]): NormalizedFigure[] {
  *   "fy-mar-25" (for FY Mar-25, FY25, FY2025, 2025, Mar-25)
  *   "fy-mar-27f" (for forecasts: FY Mar-27F, FY27F, 2027F)
  */
-function normalizePeriod(period: string): string {
+export function normalizePeriod(period: string): string {
   const p = period.trim().toLowerCase();
 
   // --- Helper: normalize a single year + optional suffix ---
@@ -469,9 +490,11 @@ export function coordKey(
   basis: string | null = null,
   scenario: string | null = null,
 ): string | null {
-  // Scenario claims are not matchable — they represent sensitivity cells
+  // U7 guard: scenario-tagged claims (conditional parameters like CAGR variants,
+  // M&A assumptions) are excluded from reconciliation. Without this guard,
+  // e.g. twelve "Organic Cash EBITDA" claims at FY31F under different CAGR
+  // assumptions all collapse to one coordinate with £70m–£131m spread.
   if (scenario) return null;
-
   const basisPart = basis ? basis.toLowerCase().trim() : "";
   return `${metric.toLowerCase().trim()}|${scope.toLowerCase().trim()}|${basisPart}|${normalizePeriod(period)}`;
 }
@@ -533,7 +556,7 @@ function processMatch(
   nf: NormalizedFigure,
   figures: Figure[],
   findings: ReconciliationFinding[],
-  options?: { basisUnconfirmed?: boolean },
+  options?: { basisUnconfirmed?: boolean; periodBasisUnconfirmed?: boolean },
 ): MatchResult {
   const modelFig = nf.raw;
 
@@ -658,6 +681,29 @@ function processMatch(
       full_analysis: `[SCOPE_MISMATCH] Basis-relaxed match. Claim: "${claim.verbatim_snippet}" ` +
         `(basis="${claim.basis}"). Model: "${nf.raw.name}" (no basis mapping). ` +
         `Cannot confirm these measure the same thing.`,
+      severity_anchor: null,
+      source_docs: [claim.source_doc],
+      claim,
+      model_figure: nf.raw,
+      delta_abs: deltaAbs,
+      delta_pct: deltaPct,
+    });
+    return { kind: "scope_mismatch", finding: findings[findings.length - 1] };
+  }
+
+  // Period-basis-unconfirmed: forecast suffix relaxation matched. A relaxed match
+  // never asserts a contradiction — downgrade to scope_mismatch with explanatory note.
+  if (options?.periodBasisUnconfirmed) {
+    findings.push({
+      finding_kind: "scope_mismatch",
+      severity: "info",
+      title: `${claim.scope_qualifier} (${claim.period}): period_basis_unconfirmed — matched against forecast figure`,
+      detail: `Claim period "${claim.period}" has no exact match in actuals. ` +
+        `Matched against forecast figure "${nf.raw.name}" at ${nf.raw.period}. ` +
+        `Delta: ${deltaAbs >= 1_000_000 ? `£${(deltaAbs / 1_000_000).toFixed(1)}m` : `£${(deltaAbs / 1_000).toFixed(0)}k`} (${(deltaPct * 100).toFixed(1)}%). Not asserted as contradiction.`,
+      full_analysis: `[PERIOD_BASIS_UNCONFIRMED] Forecast-relaxed match. Claim: "${claim.verbatim_snippet}" ` +
+        `(period="${claim.period}"). Model: "${nf.raw.name}" at period="${nf.raw.period}" (forecast suffix). ` +
+        `Matched by stripping actual/forecast distinction. Delta not asserted as definitive divergence.`,
       severity_anchor: null,
       source_docs: [claim.source_doc],
       claim,
@@ -905,6 +951,7 @@ export async function runReconciliation(
   let within_tolerance_count = 0;
   let near_miss_count = 0;
   let ambiguous_reference_count = 0;
+  let near_miss_unit_rejected_total = 0;
   let matching_error: string | null = null;
 
   // --- U6: Coverage denominator tracking ---
@@ -920,15 +967,18 @@ export async function runReconciliation(
   // ----- Step 1b: Deduplicate reconcilable claims by coordinate key -----
   // Multiple memo passages may cite the same figure (e.g. revenue FY26 mentioned 3 times).
   // We match once per unique coordinate, keeping the first occurrence for traceability.
-  // Scenario claims (coordKey → null) are separated — they are excluded from matching entirely.
-  const scenarioClaims: typeof reconcilableClaims = [];
+  // Scenario-tagged claims (non-null scenario) are excluded from adjudicable entirely —
+  // they are sensitivity/conditional variants that cannot be sourced to a single figure.
   const dedupedClaims: typeof reconcilableClaims = [];
+  const scenarioClaims: typeof reconcilableClaims = [];
   const seenCoordKeys = new Set<string>();
   for (const c of reconcilableClaims) {
     const key = coordKey(c.metric, c.scope_qualifier, c.period, c.basis ?? null, c.scenario ?? null);
     if (key === null) {
       scenarioClaims.push(c);
-    } else if (!seenCoordKeys.has(key)) {
+      continue;
+    }
+    if (!seenCoordKeys.has(key)) {
       seenCoordKeys.add(key);
       dedupedClaims.push(c);
     }
@@ -938,7 +988,7 @@ export async function runReconciliation(
 
   console.log(
     `[Reconciliation] ${reconcilableClaims.length} operating_metric claims → ` +
-    `${dedupedClaims.length} unique coordinates, ${scenarioClaims.length} scenario-excluded, ` +
+    `${scenarioClaims.length} scenario-excluded, ${dedupedClaims.length} unique coordinates, ` +
     `${reconcilableClaims.length - dedupedClaims.length - scenarioClaims.length} duplicates removed`
   );
 
@@ -992,12 +1042,25 @@ export async function runReconciliation(
     console.log(`[Reconciliation] Normalized ${normalizedFigures.length} figure coordinates from ${figures.length} raw figures`);
 
     // Build lookup index: key = "metric|scope|basis|period" → NormalizedFigure[]
+    // Figures never carry a scenario field, so coordKey always returns a string here.
     const figureIndex = new Map<string, NormalizedFigure[]>();
     for (const nf of normalizedFigures) {
       const key = coordKey(nf.metric, nf.scope_qualifier, nf.period, nf.basis);
-      if (key === null) continue; // should never happen for model figures
+      if (key === null) continue; // defensive — figures should never have scenario
       if (!figureIndex.has(key)) figureIndex.set(key, []);
       figureIndex.get(key)!.push(nf);
+    }
+
+    // Compute lastActualYear: highest 2-digit year WITHOUT forecast 'f' suffix
+    // Used by forecast suffix relaxation (Pass 2c)
+    let lastActualYear = 0;
+    for (const key of figureIndex.keys()) {
+      const period = key.split("|")[3]; // key format: metric|scope|basis|period
+      const m = period.match(/^fy-mar-(\d{2})$/);
+      if (m) {
+        const yr = parseInt(m[1], 10);
+        if (yr > lastActualYear) lastActualYear = yr;
+      }
     }
 
     // ----- Step 4: Coordinate-match each deduplicated claim and compute delta -----
@@ -1079,8 +1142,7 @@ export async function runReconciliation(
       }
 
       const key = coordKey(claim.metric, claim.scope_qualifier, claim.period, claim.basis ?? null, claim.scenario ?? null);
-      // Note: key should never be null here — scenario claims are pre-filtered in Step 1b
-      if (key === null) continue;
+      if (key === null) continue; // scenario claims already excluded in dedup; defensive
       let matches = figureIndex.get(key) ?? null;
       let basisUnconfirmed = false;
 
@@ -1090,9 +1152,9 @@ export async function runReconciliation(
         const relaxedKey = coordKey(claim.metric, claim.scope_qualifier, claim.period, null, claim.scenario ?? null);
         if (relaxedKey !== null) {
           matches = figureIndex.get(relaxedKey) ?? null;
-          if (matches && matches.length > 0) {
-            basisUnconfirmed = true;
-          }
+        }
+        if (matches && matches.length > 0) {
+          basisUnconfirmed = true;
         }
       }
 
@@ -1113,6 +1175,36 @@ export async function runReconciliation(
         }
       }
 
+      // Pass 2c — Forecast suffix relaxation (1.2):
+      // If the claim's period resolves to fy-mar-XX (no 'f') and no match exists,
+      // and the year >= lastActualYear, retry with fy-mar-XXf. Forecast claims in
+      // the memo target forecast columns in the model.
+      let periodBasisUnconfirmed = false;
+      if ((!matches || matches.length === 0) && !basisUnconfirmed) {
+        const fyMatch = normalizedClaimPeriod.match(/^fy-mar-(\d{2})$/);
+        if (fyMatch) {
+          const yr = parseInt(fyMatch[1], 10);
+          if (yr >= lastActualYear) {
+            const forecastPeriod = `fy-mar-${fyMatch[1]}f`;
+            const forecastKey = coordKey(claim.metric, claim.scope_qualifier, forecastPeriod, claim.basis ?? null, claim.scenario ?? null);
+            const forecastMatches = forecastKey ? (figureIndex.get(forecastKey) ?? null) : null;
+            if (forecastMatches && forecastMatches.length > 0) {
+              matches = forecastMatches;
+              periodBasisUnconfirmed = true;
+            } else if (claim.basis) {
+              // Also try basis-relaxed forecast key
+              const relaxedForecastKey = coordKey(claim.metric, claim.scope_qualifier, forecastPeriod, null, claim.scenario ?? null);
+              const relaxedForecastMatches = relaxedForecastKey ? (figureIndex.get(relaxedForecastKey) ?? null) : null;
+              if (relaxedForecastMatches && relaxedForecastMatches.length > 0) {
+                matches = relaxedForecastMatches;
+                periodBasisUnconfirmed = true;
+                basisUnconfirmed = true;
+              }
+            }
+          }
+        }
+      }
+
       if (!matches || matches.length === 0) {
         // Try fuzzy period matching (e.g., "FY Mar-26" vs "2026" or "Mar-26")
         const fuzzyMatches = fuzzyPeriodLookup(figureIndex, claim.metric, claim.scope_qualifier, claim.period);
@@ -1120,16 +1212,25 @@ export async function runReconciliation(
         if (fuzzyMatches.length === 0) {
           // --- U7: Near-miss pass — same metric + same period, any scope ---
           const nearMissCandidates: Array<{ nf: NormalizedFigure; scopeDelta: string }> = [];
+          const claimUnitFamily = classifyClaimUnit(claim.unit);
+          let nearMissUnitRejected = 0;
           for (const [fkey, nfs] of figureIndex.entries()) {
             const [fm, _fs, _fb, fp] = fkey.split("|");
             if (fm === claim.metric.toLowerCase().trim() && fp === normalizedClaimPeriod) {
               for (const nf of nfs) {
                 if (nf.scope_qualifier.toLowerCase() !== claim.scope_qualifier.toLowerCase()) {
+                  // Unit compatibility gate: percentage claims never match £ figures
+                  const modelUnitFamily = classifyModelFigureUnit(nf.raw);
+                  if (!unitsAreCompatible(claimUnitFamily, modelUnitFamily)) {
+                    nearMissUnitRejected++;
+                    continue;
+                  }
                   nearMissCandidates.push({ nf, scopeDelta: nf.scope_qualifier });
                 }
               }
             }
           }
+          near_miss_unit_rejected_total += nearMissUnitRejected;
 
           if (nearMissCandidates.length > 0) {
             // Order by absolute delta ascending, cap at 3
@@ -1234,7 +1335,7 @@ export async function runReconciliation(
 
       // Direct coordinate match found — use first (all agree within de minimis)
       const nf = matches[0];
-      const matchResult = processMatch(claim, nf, figures, findings, { basisUnconfirmed });
+      const matchResult = processMatch(claim, nf, figures, findings, { basisUnconfirmed, periodBasisUnconfirmed });
       if (matchResult.kind === "reconciled") reconciled_count++;
       else if (matchResult.kind === "within_tolerance") within_tolerance_count++;
       else if (matchResult.kind === "scope_mismatch") scope_mismatch_count++;
@@ -1246,6 +1347,8 @@ export async function runReconciliation(
   }
 
   // ----- Step 5: Cross-version findings from numeric-verify discrepancies -----
+  // A3 fix: When one source is "(hardcoded)" it's a frozen forecast snapshot;
+  // the other is realised actual. Reframe as "forecast vs realised actual".
   let cross_version_findings = 0;
   for (const disc of discrepancies) {
     const materialMetrics = (disc.metrics ?? []).filter(m => m.tier === "material");
@@ -1256,11 +1359,27 @@ export async function runReconciliation(
     const maxDelta = Math.max(...materialMetrics.map(m => m.absDiff));
     const severity: "critical" | "warning" | "info" = maxDelta >= 1_000_000 ? "warning" : "info";
 
+    // A3: Detect forecast-vs-actual pattern and relabel
+    const sources = disc.sources ?? [];
+    const hasHardcoded = sources.some((s: string) => /hardcoded/i.test(s));
+    let findingTitle: string;
+    let findingDetail: string;
+    if (hasHardcoded) {
+      // FS Summary (hardcoded) = frozen forecast; FS Summary = realised actual
+      findingTitle = `Forecast vs realised actual: ${disc.period} — ${materialMetrics.length} material movement${materialMetrics.length === 1 ? "" : "s"}`;
+      findingDetail = `${disc.period}: the frozen forecast (${sources.find((s: string) => /hardcoded/i.test(s)) ?? "hardcoded sheet"}) ` +
+        `diverges from the realised actual (${sources.find((s: string) => !/hardcoded/i.test(s)) ?? "live sheet"}). ` +
+        (disc.headline ?? disc.description ?? "");
+    } else {
+      findingTitle = `Cross-version revision: ${disc.period} — ${materialMetrics.length} material movement${materialMetrics.length === 1 ? "" : "s"}`;
+      findingDetail = disc.headline ?? disc.description;
+    }
+
     findings.push({
       finding_kind: "cross_version",
       severity,
-      title: `Cross-version revision: ${disc.period} — ${materialMetrics.length} material movement${materialMetrics.length === 1 ? "" : "s"}`,
-      detail: disc.headline ?? disc.description,
+      title: findingTitle,
+      detail: findingDetail,
       full_analysis: `[CROSS_VERSION] ${disc.description}\n\nMaterial movements:\n` +
         materialMetrics.map(m => {
           const sign = m.sourceA > m.sourceB ? "+" : "−";
@@ -1374,6 +1493,7 @@ export async function runReconciliation(
     within_tolerance_count,
     cross_version_findings,
     near_miss_count,
+    near_miss_unit_rejected: near_miss_unit_rejected_total,
     ambiguous_reference_count,
     matching_error,
     coverage: {
@@ -1387,7 +1507,7 @@ export async function runReconciliation(
       in_category: reconcilableClaims.length,
       scenario_excluded,
       pre_dedup: reconcilableClaims.length - scenarioClaims.length,
-      duplicates_collapsed: reconcilableClaims.length - scenarioClaims.length - dedupedClaims.length,
+      duplicates_collapsed: (reconcilableClaims.length - scenarioClaims.length) - dedupedClaims.length,
       distinct_claims: distinctClaims,
       no_scope_count: no_coordinate_no_scope,
       no_scope_near_miss_eligible,
@@ -1449,7 +1569,7 @@ function isHistoricalActualPeriod(period: string): boolean {
   return year < CURRENT_DEAL_YEAR;
 }
 
-function normalizeClaimValue(claim: Claim): number {
+export function normalizeClaimValue(claim: Claim): number {
   // Convert claim value to the same units as model figures (raw £)
   switch (claim.unit) {
     case "£m": return claim.value * 1_000_000;

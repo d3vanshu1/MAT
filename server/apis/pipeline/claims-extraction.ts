@@ -183,6 +183,8 @@ export interface ClaimsLedger {
    * backward compatibility. Only populated after conversion step completes.
    */
   canonical_claims?: CanonicalIcClaim[];
+  /** Chunk cursor — tracks completed chunk indices per memo for resume across invocations */
+  chunk_cursor?: Record<string, number[]>;
 }
 
 // ---------------------------------------------------------------------------

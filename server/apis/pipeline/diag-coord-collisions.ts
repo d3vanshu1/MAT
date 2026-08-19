@@ -82,15 +82,12 @@ export default api({
 
     const claims: StoredClaim[] = rows[0].ledger.claims ?? [];
 
-    // Apply coordKey to each claim (null key = scenario claim, excluded)
+    // Apply coordKey to each claim (scenario claims excluded — coordKey returns null)
     const keyMap = new Map<string, { claims: StoredClaim[]; key: string }>();
     let scenarioExcluded = 0;
     for (const c of claims) {
       const key = coordKey(c.metric, c.scope_qualifier, c.period, c.basis ?? null, c.scenario ?? null);
-      if (key === null) {
-        scenarioExcluded++;
-        continue;
-      }
+      if (key === null) { scenarioExcluded++; continue; }
       if (!keyMap.has(key)) {
         keyMap.set(key, { key, claims: [] });
       }
