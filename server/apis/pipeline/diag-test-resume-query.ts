@@ -20,14 +20,18 @@ export default api({
   }),
 
   async run(ctx, { runId }) {
-    // Test 1: Simple status query (should always work)
-    const statusOnly = await ctx.integrations.db.query(
-      `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
-      z.object({ status: z.string() }),
-      [runId],
-      { label: "Simple status check" }
+    // Schema audit: get actual columns on the three core tables
+    const cols = await ctx.integrations.db.query(
+      `SELECT table_name, column_name, data_type, is_nullable
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name IN ('module_runs', 'module_outputs', 'pipeline_checkpoints')
+       ORDER BY table_name, ordinal_position`,
+      z.object({ table_name: z.string(), column_name: z.string(), data_type: z.string(), is_nullable: z.string() }),
+      [],
+      { label: "Schema audit" }
     );
 
-    return { status: statusOnly[0]?.status ?? "not_found", is_cancelled: "false" };
+    return { status: JSON.stringify(cols), is_cancelled: "schema_audit" };
   },
 });
