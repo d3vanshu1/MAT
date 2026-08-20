@@ -115,6 +115,8 @@ export interface ReductionResult {
   primaryFindings: any[];
   secondaryObservations: any[];
   suppressedLedger: FindingDisposition[];
+  /** Findings reclassified from divergence→confirmation (asserted agreement) */
+  confirmations: KindConsistencyResult[];
   /** Deduplication families: representative → member IDs */
   families: Record<string, string[]>;
   /** Gate statistics */
@@ -529,6 +531,56 @@ const GROUND_TRUTH_SIGNALS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Kind-consistency guard — detects findings that assert agreement but carry
+// a contradiction/discrepancy/divergence kind label. Reclassifies them as
+// "confirmation" before gates run. This is not a gate; it corrects a
+// mislabelling the model applies when it checks for divergence, finds none,
+// and reports the check.
+// ---------------------------------------------------------------------------
+const DIVERGENCE_KINDS = /contradiction|discrepancy|divergence/i;
+const AGREEMENT_SIGNALS = [
+  /\breconciles?\b/i,
+  /\bconsistent(ly)?\b/i,
+  /\bverified\b/i,
+  /\balign(s|ed|ment)?\b/i,
+  /\bwell[- ]supported\b/i,
+  /\bdocumented and internally consistent\b/i,
+  /\bconfirm(s|ed)?\b.*\b(no|zero|immaterial)\b/i,
+  /\bno\s+(material\s+)?variance\b/i,
+  /\bno\s+contradiction\b/i,
+  /\bsupports?\s+the\s+thesis\b/i,
+  /\bnarrative\s+anchor\s+verified\b/i,
+  /\bnot\s+contradicted\b/i,
+];
+
+export interface KindConsistencyResult {
+  finding: any;
+  originalKind: string;
+  matchedSignal: string;
+}
+
+/**
+ * Returns true if the finding's text asserts agreement/confirmation while its
+ * kind label claims divergence. Examines detail and full_analysis.
+ */
+function isAgreementMislabelled(f: any): { mislabelled: boolean; signal: string } {
+  const kind = (f.finding_kind ?? "").toLowerCase();
+  if (!DIVERGENCE_KINDS.test(kind)) return { mislabelled: false, signal: "" };
+
+  const text = `${f.detail ?? ""} ${f.full_analysis ?? ""}`;
+  for (const pattern of AGREEMENT_SIGNALS) {
+    if (pattern.test(text)) {
+      // Secondary check: the finding must NOT also contain conflict indicators
+      const hasConflict = /\bdiscrepan(cy|cies)\b|\bcontradicts?\b|\bdiverg(es?|ence)\b|\bunderstat(es?|ement)\b|\boverstat(es?|ement)\b|\bmismatch\b|\b(gap|delta|variance)\s+of\b/i.test(text);
+      if (!hasConflict) {
+        return { mislabelled: true, signal: pattern.source };
+      }
+    }
+  }
+  return { mislabelled: false, signal: "" };
+}
+
+// ---------------------------------------------------------------------------
 // Main reduction function
 // ---------------------------------------------------------------------------
 export function applyReductionGates(findings: any[]): ReductionResult {
@@ -538,13 +590,35 @@ export function applyReductionGates(findings: any[]): ReductionResult {
   const gateStats: Record<string, { passed: number; failed: number }> = {};
   const groundTruthSignals: string[] = [];
 
+  // ── Pre-pass: Kind-consistency guard ─────────────────────────────────────
+  const confirmations: KindConsistencyResult[] = [];
+  const gatedFindings: any[] = [];
+  for (const f of findings) {
+    const { mislabelled, signal } = isAgreementMislabelled(f);
+    if (mislabelled) {
+      confirmations.push({
+        finding: { ...f, finding_kind: "confirmation", severity: "info" },
+        originalKind: f.finding_kind,
+        matchedSignal: signal,
+      });
+    } else {
+      gatedFindings.push(f);
+    }
+  }
+  if (confirmations.length > 0) {
+    console.log(
+      `[ReductionGate] Kind-consistency guard: ${confirmations.length} findings reclassified ` +
+      `from divergence→confirmation (${findings.length} total → ${gatedFindings.length} entering gates)`
+    );
+  }
+
   // Initialize gate stats
   for (const gate of GATES) {
     const name = gate.name.replace("gate", "").replace(/([A-Z])/g, "_$1").toLowerCase().replace(/^_/, "");
     gateStats[name] = { passed: 0, failed: 0 };
   }
 
-  for (const f of findings) {
+  for (const f of gatedFindings) {
     const findingId = f.finding_id ?? f.id ?? "unknown";
 
     // Check known false-positive patterns first
@@ -614,6 +688,7 @@ export function applyReductionGates(findings: any[]): ReductionResult {
     primaryFindings,
     secondaryObservations,
     suppressedLedger,
+    confirmations,
     families,
     gateStats,
     groundTruthSignals,

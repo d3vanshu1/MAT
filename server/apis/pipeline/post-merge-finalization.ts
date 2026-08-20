@@ -569,7 +569,8 @@ export async function runPostMergeFinalizationStages(
 
     console.log(
       `${LOG_PREFIX} finding_reduction_gate: ${beforeCount} → ${afterCount} primary ` +
-      `(${reductionResult.secondaryObservations.length} secondary, ` +
+      `(${reductionResult.confirmations.length} confirmations, ` +
+      `${reductionResult.secondaryObservations.length} secondary, ` +
       `${reductionResult.suppressedLedger.length} suppressed, ` +
       `ground_truth=[${reductionResult.groundTruthSignals.join(",")}])`
     );
@@ -585,9 +586,16 @@ export async function runPostMergeFinalizationStages(
           runId,
           JSON.stringify({
             primaryCount: afterCount,
+            confirmationCount: reductionResult.confirmations.length,
             secondaryCount: reductionResult.secondaryObservations.length,
             suppressedCount: reductionResult.suppressedLedger.length,
             suppressedLedger: reductionResult.suppressedLedger,
+            confirmations: reductionResult.confirmations.map(c => ({
+              findingId: c.finding.finding_id ?? c.finding.id ?? "unknown",
+              title: c.finding.title,
+              originalKind: c.originalKind,
+              signal: c.matchedSignal,
+            })),
             gateStats: reductionResult.gateStats,
             groundTruthSignals: reductionResult.groundTruthSignals,
           }),
