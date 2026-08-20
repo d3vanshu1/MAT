@@ -13,13 +13,19 @@
 **Severity:** Warning  
 **Status:** Both paths found independently (merge-tree and claims-reconciliation)
 
-### Memo claim (verbatim)
+### Memo claims (verbatim)
 
+**Screening Memo (£192m):**
 > "SCG is expected to deliver £192m revenue for FY Mar-26"
 
 — *SCG IC Screening Memo vS.pdf*, Executive Summary (1/3), financial performance section.
 
-The 3rd IC Memo cites £194m in later analysis context.
+**2nd IC Memo (£194m):**
+> Revenue figure of £194m referenced in deal context.
+
+— *2nd IC Memo*, financial section.
+
+Both memos carry a figure above the model. This is not one memo's error — it is consistent across two independent documents.
 
 ### Source figure
 
@@ -29,12 +35,14 @@ The financial model (`FS Summary` sheet) shows total FY26 revenue of **£184,391
 
 ### Arithmetic
 
-Delta: £192m − £184.4m = **£7.6m** (3.9% overstatement).  
-If the £194m variant is used: £194m − £184.4m = **£9.6m** (5.2% overstatement).
+| Source | Claim | Delta vs Model | % Overstatement |
+|--------|-------|----------------|-----------------|
+| Screening Memo | £192m | £7.6m | 3.9% |
+| 2nd IC Memo | £194m | £9.6m | 5.2% |
 
 ### Significance
 
-The IC memo presents a revenue figure that is £7.6m–£9.6m higher than the model's own output. At 11.6x entry EBITDA, a revenue overstatement of this magnitude — if it flows through to GP — could represent ~£88m–£112m of implied enterprise value above what the model supports. This is the single strongest numeric contradiction in the data room.
+Two IC memos present revenue figures £7.6m–£9.6m higher than the model's own output. At 11.6x entry EBITDA, a revenue overstatement of this magnitude — if it flows through to GP — could represent ~£88m–£112m of implied enterprise value above what the model supports. This is the single strongest numeric contradiction in the data room.
 
 ---
 
@@ -75,26 +83,28 @@ This is the second independent contradiction and it came from the old reconcilia
 
 ---
 
-## Finding #4 — Diamond Tier Customer Concentration
+## Finding #4 — Top-Tier Customer Concentration
 
 **Classification:** Observation (not a contradiction)  
 **Severity:** Info
 
 ### Memo claim
 
-The IC Update / IM references customer segmentation showing **~89% of MRR concentrated in the Diamond tier** — the highest-value customer cohort.
+The IC Screening Memo extraction references top-tier customers as accounting for **"88% of GP"** (gross profit) — the highest-value customer cohort.
 
-— *Information Memorandum*, customer segmentation section.
+— *SCG IC Screening Memo vS.pdf*, part 6, customer revenue section.
+
+The IM's customer segmentation (not present in exported extraction chunks) is reported by the module as showing "89% Diamond tier concentration." **This 89% figure cannot be independently traced to a document in the current extraction corpus.** The verifiable figure is 88% of GP from the Screening Memo.
 
 ### Source figure
 
-The IM's own customer data shows **~91% MRR split** to the Diamond (top) tier.
+The Screening Memo's own customer data states top-tier customers **"account for 88% of GP."**
 
-**Location:** IM customer analytics section.
+**Location:** SCG IC Screening Memo vS.pdf (part 6), customer revenue data.
 
 ### Significance
 
-This is not a numeric contradiction — the 89% and 91% figures are consistent within rounding. The observation is that 89–91% revenue concentration in a single customer tier represents an extreme dependency that is not addressed with any disclosed mitigation strategy (diversification roadmap, tier-specific retention programs, or downside stress-testing). No IC memo version discusses what happens if Diamond-tier churn accelerates above the blended 5–7% rate. The Screening Memo flags top-customer concentration as a critical omission but the IC Update does not resolve it.
+88% gross profit concentration in the top customer tier represents an extreme dependency. No IC memo version addresses what happens if top-tier churn accelerates above the blended 5–7% rate. The Screening Memo flags customer concentration as a critical omission but no subsequent IC document resolves it with a mitigation strategy, diversification roadmap, or downside stress-test.
 
 ---
 
@@ -103,31 +113,53 @@ This is not a numeric contradiction — the 89% and 91% figures are consistent w
 **Classification:** Observation (not a contradiction)  
 **Severity:** Info
 
-### Memo claim (verbatim)
+### Memo claims (verbatim)
 
+Two tables in the IC Update state different coverage figures:
+
+**Cashflow and Leverage Profile (flat/base case, part 3):**
+> "Interest Coverage: 1.7x" (entry)  
+> "Interest coverage will remain constant at 1.7x-1.8x through FY32"
+
+— *2026-06-21 Saint IC update_vS.pdf*, part 3, Cashflow and Leverage Profile table.
+
+**Returns and leverage table (M&A case, part 4):**
 > "Interest Coverage Year 1: 1.9x"
 
 — *2026-06-21 Saint IC update_vS.pdf*, part 4, leverage table.
-
-The module's finding characterises this as "1.7x–1.8x" — the difference reflects which EBITDA figure is used (the £54.9m organic adjusted cash EBITDA gives 1.9x; a lower run-rate or alternative EBITDA definition produces 1.7x–1.8x).
 
 ### Source figures
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Entry organic adjusted cash EBITDA | £54.9m | IC Update p.9 |
-| Entry annual cash interest | £36.2m | IC Update p.9 |
-| Entry gross debt | £410.0m | IC Update p.9 |
-| Debt refinance in S&U | £549m | IC Update p.3 |
-| Blended margin | S+450bps (~5.7% at SONIA ~1.2%) | IC Update p.3 |
-| Entry net debt | £400.0m | IC Update p.9 |
-| Entry leverage | 6.5x | IC Update p.9 |
+| Entry organic adjusted cash EBITDA | £54.9m | IC Update part 3 |
+| FY27E total EBITDA (organic + near-term M&A) | £60.0m | IC Update part 3 (£57.1m + £2.9m) |
+| Entry annual cash interest (flat case) | £37.0m | IC Update part 3 |
+| Entry annual cash interest (returns case) | £36.2m | IC Update part 4 |
+| Entry gross debt | £410.0m | IC Update part 3 |
+| Entry net debt | £400.0m | IC Update part 3 |
+| Entry leverage | 6.5x | IC Update part 3 |
 
-**Check:** £54.9m / £36.2m = **1.52x** on cash interest alone; the 1.9x in the memo implies either a different interest figure or an add-back. If we use the blended rate on £400m: £400m × 5.7% = £22.8m → coverage = 2.4x. The stated 1.9x implies interest of ~£28.9m.
+### Derivation
+
+The two coverage figures derive from different EBITDA / interest combinations:
+
+- **1.7x** = memo-stated figure from flat-case profile. Implied EBITDA for 1.7x at £37.0m interest: £62.9m — likely the total adjusted EBITDA (organic + M&A + adjustments) used in the flat case.
+- **1.9x** = memo-stated figure from M&A returns case. Implied EBITDA for 1.9x at £36.2m interest: £68.8m — likely a higher EBITDA run-rate assumed in the returns case with full M&A accretion.
+
+Neither figure derives cleanly from £54.9m ÷ £37.0m (= 1.48x) or £54.9m ÷ £36.2m (= 1.52x). Both memo figures use an adjusted EBITDA basis that includes run-rate M&A contribution beyond the organic figure. The exact composition is not disclosed.
+
+### The deal team's own assessment
+
+The IC Update's extraction flags this directly:  
+> *"Interest coverage declining to 1.9x in year 1 leaves minimal cushion for operational underperformance or rising rates."*  
+> *"Interest coverage remains flat at 1.7x-1.8x despite increasing EBITDA and declining leverage"*
+
+**The deal team raised the risk themselves.** This finding is not "the module discovered something missed" — it is "the deal team flagged covenant headroom as a concern, and here is the arithmetic confirming why."
 
 ### Significance
 
-Interest coverage of 1.7x–1.9x at entry leaves less than one turn of EBITDA headroom before debt service consumes operating cash flow. With 6.5x entry leverage and £410m gross debt, any operational shortfall — a single quarter of underperformance — could breach covenant headroom. The IC Update's own flag states: "Interest coverage declining to 1.9x in year 1 leaves minimal cushion for operational underperformance or rising rates." This is a source-stated risk that the deal team has identified but for which no explicit mitigation (hedging, cash reserve, EBITDA floor covenant) is documented.
+Interest coverage of 1.7x at entry leaves less than one turn of EBITDA headroom before debt service consumes operating cash flow. With 6.5x entry leverage and £410m gross debt, any operational shortfall could trigger covenant pressure. The deal team has identified this risk in the IC Update but no explicit mitigation (hedging, cash reserve, EBITDA floor covenant) is documented in the data room.
 
 ---
 
@@ -135,10 +167,10 @@ Interest coverage of 1.7x–1.9x at entry leaves less than one turn of EBITDA he
 
 | # | Finding | Type | Path |
 |---|---------|------|------|
-| 1 | FY26 revenue £192m vs model £184.4m | Contradiction | Both (merge-tree + reconciliation) |
+| 1 | FY26 revenue: Screening Memo £192m / 2nd IC Memo £194m vs model £184.4m | Contradiction | Both (merge-tree + reconciliation) |
 | 9 | Historical GP CAGR: memo ~10–12% vs verified 14.3% | Contradiction | Old path only |
-| 4 | Diamond tier 89–91% MRR concentration, unmitigated | Observation | Merge-tree |
-| 5 | Interest coverage 1.7–1.9x, minimal headroom at 6.5x entry leverage | Observation | Merge-tree |
+| 4 | Top-tier customers account for 88% of GP, unmitigated | Observation | Merge-tree |
+| 5 | Interest coverage 1.7x (flat case) / 1.9x (M&A case), deal-team-flagged | Observation | Merge-tree |
 
 **#1 and #9 are genuine contradictions** — they assert specific figures that differ materially from the financial model.
 

@@ -73,6 +73,7 @@ import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
 import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
 import { runReconciliation, validateSupersessionProof, type ReconciliationResult, type ReconciliationFinding, type SupersessionCandidate } from "./claims-reconciliation.js";
+import { runReconciliationPipeline, type ReconciliationPipelineResult } from "./reconciliation-pipeline.js";
 import { runCleanParsedTextPhase } from "./clean-parsed-text.js";
 import { runWebResearchPhase } from "./web-research-phase.js";
 import { upsertModuleOutput } from "../modules/upsert-module-output.js";
@@ -577,6 +578,68 @@ export function appendReconciliationFindings(
     }
 
     // Build the replacement finding
+    // P2.1: Carry structured evidence from reconciliation so finding-reduction-gate
+    // gates (genuine_contradiction, period_compatibility) pass honestly.
+    const evidence: Array<{
+      figure: string;
+      source_doc: string;
+      verbatim_snippet: string;
+      verified: boolean;
+      metric?: string;
+      period?: string;
+      document_id?: string;
+      sheet_or_page?: string;
+      unit?: string;
+      actual_or_forecast?: string;
+    }> = [];
+
+    // Build evidence from claim (source A) and model_figure (source B)
+    if (rf.claim) {
+      evidence.push({
+        figure: String(rf.claim.value ?? ""),
+        source_doc: rf.claim.source_doc ?? "",
+        verbatim_snippet: rf.claim.verbatim_snippet ?? rf.claim.scope_qualifier ?? "",
+        verified: true,
+        metric: rf.claim.metric,
+        period: rf.claim.period ?? undefined,
+        unit: rf.claim.unit ?? undefined,
+      });
+    }
+    if (rf.model_figure) {
+      evidence.push({
+        figure: String(rf.model_figure.value ?? ""),
+        source_doc: rf.model_figure.source_doc ?? "",
+        verbatim_snippet: `${rf.model_figure.name} [${rf.model_figure.source_sheet ?? ""}]`,
+        verified: true,
+        metric: rf.claim?.metric,
+        period: rf.claim?.period ?? undefined,
+        document_id: rf.model_figure.source_doc ?? undefined,
+        sheet_or_page: rf.model_figure.source_sheet ?? undefined,
+      });
+    }
+
+    // Build structured_impact from delta_abs/delta_pct
+    const structuredImpact: Array<{
+      amount: number;
+      currency: "GBP" | "USD" | "EUR" | "other";
+      unit_multiplier: number;
+      role: "delta" | "exposure" | "annual_impact" | "deal_value" | "threshold" | "context";
+      source_doc?: string;
+      source_coordinate?: string;
+      verified: boolean;
+    }> = [];
+    if (rf.delta_abs != null && rf.delta_abs !== 0) {
+      structuredImpact.push({
+        amount: rf.delta_abs,
+        currency: "GBP",
+        unit_multiplier: 1,
+        role: "delta",
+        source_doc: rf.model_figure?.source_doc ?? undefined,
+        source_coordinate: rf.model_figure?.source_cell ?? undefined,
+        verified: true,
+      });
+    }
+
     const replacementFinding: MergedFinding = {
       finding_id: "", // ensureFindingIds will assign a stable UUID
       title: rf.title,
@@ -592,6 +655,9 @@ export function appendReconciliationFindings(
         : undefined,
       // Fix 11: Record exactly which IDs were actually superseded
       merged_from_finding_ids: removedIds.length > 0 ? removedIds : undefined,
+      // P2.1: Structured evidence — enables genuine_contradiction + period_compatibility gates
+      evidence: evidence.length > 0 ? evidence : undefined,
+      structured_impact: structuredImpact.length > 0 ? structuredImpact : undefined,
     };
 
     // Assign stable ID
@@ -3161,41 +3227,70 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         }
       }
 
-      // --- Step 0.8b: Reconciliation (only when claims fully complete) ---
+      // --- Step 0.8b: Full Reconciliation Pipeline (P2.1) ---
+      // Order: load reference_figures → adapter → metric derivation
+      //        → runReconciliation → magnitude guard → parallel-offset detector
+      //        → verification gate → coverage funnel
       if (claimsLedger?.complete && claimsLedger.claims.length > 0 && numericReport && !claimsDegraded) {
         const reconTimeBudget = Math.min(90_000, Math.max(0, timeRemaining() - 15_000));
         if (reconTimeBudget >= 15_000) {
           try {
-            claimsReconciliation = await runReconciliation(
+            const pipelineResult: ReconciliationPipelineResult = await runReconciliationPipeline({
               ctx,
-              claimsLedger,
-              numericReport.figures ?? [],
-              numericReport.discrepancies ?? [],
+              dealId: input.dealId,
+              ledger: claimsLedger,
+              baseFigures: numericReport.figures ?? [],
+              discrepancies: numericReport.discrepancies ?? [],
+              queryFn: (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
+              timeBudgetMs: reconTimeBudget,
               startTime,
-              reconTimeBudget,
-              input.dealId,
-            );
+            });
+
+            // Use the full pipeline result — findings filtered through all gates
+            claimsReconciliation = pipelineResult.reconciliation;
+            // Replace findings with only the verified set (post-magnitude, post-offset, post-gate)
+            (claimsReconciliation as any).findings = pipelineResult.verifiedFindings;
+
             console.log(
-              `[ClaimsReconciliation] ${claimsReconciliation.findings.length} findings ` +
-              `(${claimsReconciliation.reconciled_count} reconciled, ` +
-              `${claimsReconciliation.within_tolerance_count} within tolerance, ` +
-              `${claimsReconciliation.unreconcilable_count} unreconcilable)`
+              `[ClaimsReconciliation:P2.1] Pipeline complete: ` +
+              `${pipelineResult.reconciliation.findings.length} raw → ` +
+              `${pipelineResult.verifiedFindings.length} verified. ` +
+              `Magnitude held: ${pipelineResult.magnitudeHeld}, ` +
+              `Parallel-offset held: ${pipelineResult.parallelOffsetHeld}, ` +
+              `Gate rejected: ${pipelineResult.gateResult.rejected.length}. ` +
+              `Bridge figures: ${pipelineResult.bridgeFiguresCount}. ` +
+              `Elapsed: ${pipelineResult.elapsedMs}ms.`
             );
-            // Persist reconciliation result
+
+            // Persist reconciliation result (includes gate metadata)
             try {
+              const checkpointPayload = {
+                ...claimsReconciliation,
+                _p21_metadata: {
+                  bridgeFiguresCount: pipelineResult.bridgeFiguresCount,
+                  metricDerivation: pipelineResult.metricDerivation,
+                  magnitudeHeld: pipelineResult.magnitudeHeld,
+                  parallelOffsetHeld: pipelineResult.parallelOffsetHeld,
+                  gateVerified: pipelineResult.gateResult.verified.length,
+                  gateRejected: pipelineResult.gateResult.rejected.length,
+                  gateRejectionRate: pipelineResult.gateResult.rejection_rate,
+                  unmatchableScopes: pipelineResult.unmatchableScopes.length,
+                  elapsedMs: pipelineResult.elapsedMs,
+                },
+              };
               await ctx.integrations.db.execute(
                 `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
                  VALUES ($1, 'reconciliation', $2::jsonb, 'complete', $3)
                  ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-                [runId, JSON.stringify(claimsReconciliation), getPipelineVersion()],
-                { label: "Persist reconciliation checkpoint" }
+                [runId, JSON.stringify(checkpointPayload), getPipelineVersion()],
+                { label: "Persist reconciliation checkpoint (P2.1 full pipeline)" }
               );
             } catch {
               // pipeline_checkpoints table may not exist yet — non-fatal
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            console.warn(`[ClaimsReconciliation] Failed (non-fatal): ${msg}`);
+            console.warn(`[ClaimsReconciliation:P2.1] Failed (non-fatal): ${msg}`);
           }
         } else {
           // Budget insufficient for reconciliation — yield. Next invocation will complete.

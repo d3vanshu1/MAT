@@ -541,7 +541,7 @@ const DIVERGENCE_KINDS = /contradiction|discrepancy|divergence/i;
 const AGREEMENT_SIGNALS = [
   /\breconciles?\b/i,
   /\bconsistent(ly)?\b/i,
-  /\bverified\b/i,
+  /\bverified\b(?!.*\b(delta|discrepan|gap|differ|exceed))/i,  // "verified" only when NOT followed by conflict language
   /\balign(s|ed|ment)?\b/i,
   /\bwell[- ]supported\b/i,
   /\bdocumented and internally consistent\b/i,
@@ -571,7 +571,7 @@ function isAgreementMislabelled(f: any): { mislabelled: boolean; signal: string 
   for (const pattern of AGREEMENT_SIGNALS) {
     if (pattern.test(text)) {
       // Secondary check: the finding must NOT also contain conflict indicators
-      const hasConflict = /\bdiscrepan(cy|cies)\b|\bcontradicts?\b|\bdiverg(es?|ence)\b|\bunderstat(es?|ement)\b|\boverstat(es?|ement)\b|\bmismatch\b|\b(gap|delta|variance)\s+of\b/i.test(text);
+      const hasConflict = /\bdiscrepan(cy|cies)\b|\bcontradicts?\b|\bdiverg(es?|ence)\b|\bunderstat(es?|ement)\b|\boverstat(es?|ement)\b|\bmismatch\b|\bexceeds?\b|\b(gap|delta|variance)\s*(of|:|\s+£|\s+\d)/i.test(text);
       if (!hasConflict) {
         return { mislabelled: true, signal: pattern.source };
       }

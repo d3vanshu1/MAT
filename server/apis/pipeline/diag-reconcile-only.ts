@@ -14,6 +14,7 @@
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { runReconciliation, coordKey, normalizePeriod, normalizeClaimValue, type ReconciliationFinding } from "./claims-reconciliation.js";
 import { runVerificationGate, type GateCheck, type GateResult, type RefFigCoord } from "./verification-gate.js";
+import { loadReferenceFigures, applyMetricDerivation, applyMagnitudeGuard, applyParallelOffsetDetector, type ParallelAuditEntry } from "./reconciliation-pipeline.js";
 import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { ClaimsLedger } from "./claims-extraction.js";
 import type { PipelineContext } from "./pipeline-config.js";
@@ -262,84 +263,19 @@ export default api({
     const baseFigures: Figure[] = Array.isArray(rawFigures) ? rawFigures : [];
     const discrepancies: Discrepancy[] = Array.isArray(rawDisc) ? rawDisc : [];
 
-    // --- Step 2b: Load reference_figures as supplementary bridge figures ---
-    // reference_figures stores 2,242 segment-level figures already in claims vocabulary.
-    // We convert them to Figure[] with prenorm-encoded names so normalizeFigures passes
-    // them through directly (metric + scope_qualifier + period already resolved).
-    //
-    // Item 8: Provenance ranking — ORDER BY places primary document first.
-    // When multiple figures share a coordKey, the first inserted (primary doc)
-    // wins in the figureIndex (first-write-wins in normalizeFigures / coordKey build).
+    // --- Step 2b: Load reference_figures (shared function from reconciliation-pipeline.ts) ---
     const PRIMARY_DOC = "3ea34aa1-6617-4d95-ae3c-5225d3da0387";
-    const RefFigRow = z.object({
-      document_id: z.string(),
-      sheet_name: z.string(),
-      metric: z.string(),
-      scope_qualifier: z.string(),
-      period: z.string(),
-      value: z.coerce.number(),
-      basis: z.string().nullable(),
-    });
-    const refFigRows = await ctx.integrations.db.query(
-      `SELECT document_id, sheet_name, metric, scope_qualifier, period, value, basis
-       FROM reference_figures WHERE deal_id = $1
-       AND sheet_name NOT IN ('Recent_acquisition_overlay')
-       ORDER BY CASE WHEN document_id = $2 THEN 0 ELSE 1 END, sheet_name, period`,
-      RefFigRow,
-      [dealId, PRIMARY_DOC],
-      { label: "Load reference_figures for reconciler bridge (provenance-ranked, excl. scale-incompatible)" }
+    const { bridgeFigures, refFigCoords, rawRows: refFigRows } = await loadReferenceFigures(
+      (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
+      dealId,
+      PRIMARY_DOC,
     );
-
-    // Convert to Figure[] with prenorm-encoded name:
-    // "[prenorm:<metric>:<basis_or_empty>]<scope_qualifier>"
-    const bridgeFigures: Figure[] = refFigRows.map(r => ({
-      name: `[prenorm:${r.metric}:${r.basis ?? ""}]${r.scope_qualifier}`,
-      period: r.period,
-      value: r.value,
-      source_doc: r.document_id,
-      source_cell: "ref_fig",
-      source_sheet: r.sheet_name,
-    }));
 
     // Combine: numeric_reports figures (group-level) + reference_figures (segment-level)
     const figures: Figure[] = [...baseFigures, ...bridgeFigures];
 
-    // --- Step 2c: Derive metric from scope for segment-qualified entries ---
-    // Claims extraction mis-tags segment revenue as "other_financial" when the scope
-    // already encodes the metric family. Rule (narrow, deterministic):
-    //   metric==="other_financial" AND scope matches Revenue (segment: → revenue
-    //   metric==="other_financial" AND scope matches Gross Profit (segment: → gross_margin
-    // Applied symmetrically to claims and figures.
-    let claimsRewritten = 0;
-    let figuresRewritten = 0;
-
-    for (const c of ledger.claims) {
-      if (c.metric === "other_financial" && c.scope_qualifier) {
-        if (/^Revenue \(segment: /i.test(c.scope_qualifier)) {
-          c.metric = "revenue";
-          claimsRewritten++;
-        } else if (/^Gross Profit \(segment: /i.test(c.scope_qualifier)) {
-          c.metric = "gross_margin";
-          claimsRewritten++;
-        }
-      }
-    }
-
-    // Symmetric: apply to bridge figures' prenorm metric field
-    // (shouldn't fire — stage5 already assigns correct metric — but ensures parity)
-    for (const f of bridgeFigures) {
-      const prenormMatch = f.name.match(/^\[prenorm:([^:]+):([^\]]*)\](.+)$/);
-      if (prenormMatch && prenormMatch[1] === "other_financial") {
-        const scope = prenormMatch[3];
-        if (/^Revenue \(segment: /i.test(scope)) {
-          f.name = `[prenorm:revenue:${prenormMatch[2]}]${scope}`;
-          figuresRewritten++;
-        } else if (/^Gross Profit \(segment: /i.test(scope)) {
-          f.name = `[prenorm:gross_margin:${prenormMatch[2]}]${scope}`;
-          figuresRewritten++;
-        }
-      }
-    }
+    // --- Step 2c: Metric derivation (shared function from reconciliation-pipeline.ts) ---
+    const { claimsRewritten, figuresRewritten } = applyMetricDerivation(ledger, bridgeFigures);
 
     console.log(
       `[DiagReconcileOnly] Loaded: ${ledger.claims.length} claims, ${baseFigures.length} base + ${bridgeFigures.length} bridge = ${figures.length} figures, ${discrepancies.length} discrepancies`
@@ -368,47 +304,11 @@ export default api({
 
     const elapsed = Date.now() - startTime;
 
-    // --- Item 4: Near-miss magnitude guard ---
-    // Suppress any scope_mismatch (near-miss) finding where the figure value
-    // differs from the claim value by more than 100x in either direction.
-    // These are noise — a £352 figure against a £10.3m claim is not a candidate.
-    let magnitudeRejected = 0;
-    const findingsFiltered: ReconciliationFinding[] = [];
-    // Item 7: Capture suppressed findings for reporting
-    const magnitudeSuppressed: Array<{
-      claim_scope: string;
-      claim_value_m: number;
-      figure_scope: string;
-      figure_value_m: number;
-      ratio: number;
-    }> = [];
-    for (const f of result.findings as ReconciliationFinding[]) {
-      if (f.finding_kind === "scope_mismatch" && f.claim && f.model_figure) {
-        const claimVal = Math.abs(f.claim.value * (f.claim.unit === "£m" ? 1_000_000 : f.claim.unit === "£k" ? 1_000 : 1));
-        const modelVal = Math.abs(f.model_figure.value);
-        if (claimVal > 0 && modelVal > 0) {
-          const ratio = claimVal > modelVal ? claimVal / modelVal : modelVal / claimVal;
-          if (ratio > 100) {
-            magnitudeRejected++;
-            magnitudeSuppressed.push({
-              claim_scope: f.claim.scope_qualifier ?? "NONE_STATED",
-              claim_value_m: claimVal / 1_000_000,
-              figure_scope: f.model_figure.name.replace(/^\[prenorm:[^\]]*\]/, ""),
-              figure_value_m: modelVal / 1_000_000,
-              ratio: Math.round(ratio),
-            });
-            continue; // suppress this finding
-          }
-        }
-      }
-      findingsFiltered.push(f);
-    }
-
-    // Replace result.findings with filtered set for downstream processing
-    const effectiveFindings = findingsFiltered;
-    // Sort suppressions by ratio desc, keep top 10
-    magnitudeSuppressed.sort((a, b) => b.ratio - a.ratio);
-    const topMagnitudeSuppressed = magnitudeSuppressed.slice(0, 10);
+    // --- Item 4: Near-miss magnitude guard (shared from reconciliation-pipeline.ts) ---
+    const magnitudeResult = applyMagnitudeGuard(result.findings as ReconciliationFinding[]);
+    const magnitudeRejected = magnitudeResult.rejected;
+    const topMagnitudeSuppressed = magnitudeResult.suppressions;
+    const effectiveFindings = magnitudeResult.passed;
     console.log(
       `[DiagReconcileOnly] Magnitude guard: ${magnitudeRejected} near-misses rejected (>100x delta)`
     );
@@ -433,78 +333,12 @@ export default api({
       .sort((a, b) => b.count - a.count)
       .slice(0, 30); // Top 30 pairs
 
-    // --- Part 2: Parallel offset detector ---
-    // Groups data_divergence findings by scope. If a scope has 3+ period observations
-    // where all deltas share the same sign with CV < 20%, the mapping is suspect:
-    // two parallel series that aren't measuring the same thing.
-    interface ParallelAuditEntry {
-      scope: string;
-      periods: Array<{ period: string; claim_value_m: number; model_value_m: number; delta_m: number }>;
-      mean_delta_m: number;
-      cv: number;
-      suspect: boolean;
-    }
-    const parallelScopeMap = new Map<string, Array<{ period: string; claim_val: number; model_val: number }>>();
-    for (const f of effectiveFindings) {
-      if ((f.finding_kind === "data_divergence" || (f.finding_kind === "scope_mismatch" && f.delta_abs !== null && f.delta_abs > 0))
-          && f.claim && f.model_figure && f.delta_abs !== null) {
-        // Only consider findings where claim matched by coordKey (not near-miss)
-        // data_divergence findings are direct coordinate matches
-        if (f.finding_kind !== "data_divergence") continue;
-        const scope = f.claim.scope_qualifier ?? "NONE_STATED";
-        if (!parallelScopeMap.has(scope)) parallelScopeMap.set(scope, []);
-        parallelScopeMap.get(scope)!.push({
-          period: f.claim.period ?? "",
-          claim_val: normalizeClaimValue(f.claim),
-          model_val: f.model_figure.value,
-        });
-      }
-    }
-
-    const parallelAudit: ParallelAuditEntry[] = [];
-    const suspectScopes = new Set<string>();
-
-    for (const [scope, observations] of parallelScopeMap.entries()) {
-      if (observations.length < 3) continue;
-      // Compute signed deltas (claim - model)
-      const deltas = observations.map(o => o.claim_val - o.model_val);
-      const allPositive = deltas.every(d => d > 0);
-      const allNegative = deltas.every(d => d < 0);
-      if (!allPositive && !allNegative) continue; // mixed signs → not parallel
-
-      const absDelta = deltas.map(d => Math.abs(d));
-      const mean = absDelta.reduce((s, v) => s + v, 0) / absDelta.length;
-      if (mean === 0) continue;
-      const stdDev = Math.sqrt(absDelta.reduce((s, v) => s + (v - mean) ** 2, 0) / absDelta.length);
-      const cv = stdDev / mean;
-
-      const suspect = cv < 0.20;
-      const entry: ParallelAuditEntry = {
-        scope,
-        periods: observations.map(o => ({
-          period: o.period,
-          claim_value_m: parseFloat((o.claim_val / 1_000_000).toFixed(2)),
-          model_value_m: parseFloat((o.model_val / 1_000_000).toFixed(2)),
-          delta_m: parseFloat(((o.claim_val - o.model_val) / 1_000_000).toFixed(2)),
-        })),
-        mean_delta_m: parseFloat((mean / 1_000_000).toFixed(2)),
-        cv: parseFloat(cv.toFixed(3)),
-        suspect,
-      };
-      parallelAudit.push(entry);
-      if (suspect) suspectScopes.add(scope);
-    }
-
-    // Suppress findings from suspect scopes
-    const preSuppressCount = effectiveFindings.length;
-    const suspectSuppressed: typeof effectiveFindings = [];
-    const cleanedFindings = effectiveFindings.filter(f => {
-      if (f.finding_kind === "data_divergence" && f.claim && suspectScopes.has(f.claim.scope_qualifier ?? "")) {
-        suspectSuppressed.push(f);
-        return false;
-      }
-      return true;
-    });
+    // --- Part 2: Parallel offset detector (shared from reconciliation-pipeline.ts) ---
+    const parallelResult = applyParallelOffsetDetector(effectiveFindings);
+    const parallelAudit = parallelResult.audit;
+    const suspectScopes = parallelResult.suspectScopes;
+    const suspectSuppressed = parallelResult.held;
+    const cleanedFindings = parallelResult.passed;
     console.log(`[DiagReconcileOnly] Parallel offset: ${parallelAudit.length} scopes audited, ${suspectScopes.size} suspect, ${suspectSuppressed.length} findings held`);
 
     // --- Part 3: Verification Gate ---
@@ -541,13 +375,7 @@ export default api({
       }
     }
 
-    // Build ref fig coords for figure existence check
-    const refFigCoords: RefFigCoord[] = refFigRows.map(r => ({
-      metric: r.metric,
-      scope_qualifier: r.scope_qualifier,
-      period: r.period,
-      basis: r.basis,
-    }));
+    // refFigCoords already loaded from loadReferenceFigures (Step 2b)
 
     // Run the gate
     const gateResult = runVerificationGate({
