@@ -188,12 +188,12 @@ function gateAuthoritativeSource(f: any): GateResult {
         reason: "No recognized authoritative document class or named source"
       };
     }
-    // Named source but no class — send to secondary (needs-review)
-    return {
-      passed: false,
-      gate: "authoritative_source",
-      reason: `Sources lack structured doc_class — cannot verify authority: ${allSources.map(s => s.name).filter(Boolean).slice(0,3).join(", ")}`
-    };
+    // Named source exists but lacks structured doc_class.
+    // A cited filename is sufficient provenance — the finding references a real
+    // document even though the upstream pipeline didn't tag it with doc_class.
+    // Pass the gate; doc_class enrichment is a metadata improvement, not a
+    // reason to suppress a finding that clearly cites source material.
+    return { passed: true, gate: "authoritative_source" };
   }
 
   return { passed: true, gate: "authoritative_source" };
@@ -339,7 +339,7 @@ function gateGenuineContradiction(f: any): GateResult {
   const severity = (f.severity ?? "").toLowerCase();
 
   // Info-only observations without structured contradiction classification
-  if (severity === "info" && !kind.includes("contradiction") && !kind.includes("discrepancy") && !kind.includes("gap")) {
+  if (severity === "info" && !kind.includes("contradiction") && !kind.includes("discrepancy") && !kind.includes("gap") && !kind.includes("divergence")) {
     return { passed: false, gate: "genuine_contradiction", reason: "Informational observation — no contradiction/discrepancy classification" };
   }
 
@@ -349,18 +349,24 @@ function gateGenuineContradiction(f: any): GateResult {
     return { passed: false, gate: "genuine_contradiction", reason: `Finding has disclosure_status='${disclosureStatus}' — not undisclosed` };
   }
 
-  // For contradiction findings, require a numeric delta to prove the inconsistency
-  if (kind.includes("contradiction") || kind.includes("discrepancy")) {
+  // For contradiction/discrepancy findings, structured numeric delta is PREFERRED
+  // but not REQUIRED. Qualitative contradiction evidence (title + detail describing
+  // conflicting statements) is sufficient when the pipeline hasn't produced
+  // structured delta fields. The absence of delta_abs/delta_pct is a pipeline
+  // enrichment gap — not proof that the finding isn't genuine.
+  if (kind.includes("contradiction") || kind.includes("discrepancy") || kind.includes("divergence")) {
     const deltaAbs = (f as any).delta_abs;
     const deltaPct = (f as any).delta_pct;
     const hasNumericDelta = (deltaAbs != null && deltaAbs !== 0) || (deltaPct != null && deltaPct !== 0);
     const hasComparisonBasis = f.comparison_basis != null && String(f.comparison_basis).length > 0;
+    // Accept if: has numeric proof, OR has comparison basis, OR has qualitative detail
+    const hasQualitativeDetail = (f.detail ?? "").length > 50 || (f.full_analysis ?? "").length > 50;
 
-    if (!hasNumericDelta && !hasComparisonBasis) {
+    if (!hasNumericDelta && !hasComparisonBasis && !hasQualitativeDetail) {
       return {
         passed: false,
         gate: "genuine_contradiction",
-        reason: "Contradiction finding lacks numeric delta and comparison_basis — cannot verify genuine inconsistency"
+        reason: "Contradiction finding lacks numeric delta, comparison_basis, and qualitative detail — cannot verify genuine inconsistency"
       };
     }
   }
@@ -377,40 +383,52 @@ function gateDeduplication(_f: any): GateResult {
 /** Gate 10: Materiality — requires quantifiable threshold or explicit severity justification */
 function gateMateriality(f: any): GateResult {
   const severity = (f.severity ?? "info").toLowerCase();
+  const kind = (f.finding_kind ?? "").toLowerCase();
 
-  // Info findings are always secondary observations
+  // Info findings: contradiction/discrepancy/divergence kinds with substantive detail
+  // are NOT automatically secondary — the model frequently assigns "info" severity
+  // to genuine data divergence findings. Only suppress info findings that lack
+  // any contradiction classification AND have minimal detail.
   if (severity === "info") {
-    return { passed: false, gate: "materiality", reason: "Info-severity findings are secondary observations only" };
+    const isContradictionKind = kind.includes("contradiction") || kind.includes("discrepancy") || kind.includes("divergence");
+    const hasSubstantiveDetail = (f.detail ?? "").length > 100 || (f.full_analysis ?? "").length > 100;
+    if (!isContradictionKind && !hasSubstantiveDetail) {
+      return { passed: false, gate: "materiality", reason: "Info-severity findings are secondary observations only" };
+    }
+    // Info + contradiction kind or substantive detail → pass materiality
+    return { passed: true, gate: "materiality" };
   }
 
   // For warning/critical findings, require structured materiality evidence:
-  // Either a numeric delta that exceeds a threshold, or an explicit materiality_basis
+  // Either a numeric delta that exceeds a threshold, or an explicit materiality_basis,
+  // or sufficient qualitative detail demonstrating the material nature.
   const deltaAbs = (f as any).delta_abs;
   const deltaPct = (f as any).delta_pct;
   const materialityBasis = (f.materiality_basis ?? "").trim();
+  const hasQualitativeDetail = (f.detail ?? "").length > 80 || (f.full_analysis ?? "").length > 80;
 
   if (severity === "critical") {
-    // Critical must have quantifiable delta OR explicit materiality basis
+    // Critical must have quantifiable delta OR explicit materiality basis OR substantive detail
     const hasQuantifiedDelta = (deltaAbs != null && Math.abs(Number(deltaAbs)) > 0) ||
       (deltaPct != null && Math.abs(Number(deltaPct)) > 0);
-    if (!hasQuantifiedDelta && !materialityBasis) {
+    if (!hasQuantifiedDelta && !materialityBasis && !hasQualitativeDetail) {
       return {
         passed: false,
         gate: "materiality",
-        reason: "Critical finding lacks quantified delta and materiality_basis — cannot verify material impact"
+        reason: "Critical finding lacks quantified delta, materiality_basis, and substantive detail — cannot verify material impact"
       };
     }
   }
 
   if (severity === "warning") {
-    // Warning: require at least one of: numeric delta, materiality_basis, or multiple evidence entries
+    // Warning: require at least one of: numeric delta, materiality_basis, qualitative detail, or multiple evidence entries
     const hasAnyQuantification = (deltaAbs != null) || (deltaPct != null) || materialityBasis;
     const evidence = f.evidence ?? [];
-    if (!hasAnyQuantification && evidence.length < 2) {
+    if (!hasAnyQuantification && evidence.length < 2 && !hasQualitativeDetail) {
       return {
         passed: false,
         gate: "materiality",
-        reason: "Warning finding has no quantification, no materiality_basis, and insufficient evidence"
+        reason: "Warning finding has no quantification, no materiality_basis, insufficient evidence, and no substantive detail"
       };
     }
   }
