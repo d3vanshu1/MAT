@@ -655,8 +655,12 @@ export async function runPostMergeFinalizationStages(
   // Validate evidence admission prerequisite
   // Evidence admission (tree_level=96) must genuinely exist — never fabricated.
   // loadCheckpointStatus checks the actual Q3 merge checkpoint payload.
+  // NOTE: hasParsedFindings=true unconditionally because by this point all
+  // quality stages (claims, reconciliation, post_merge, reduction gate) have
+  // completed. An empty findings array is a legitimate terminal state (all
+  // findings gated out), not a missing prerequisite.
   const checkpointStatus = await loadCheckpointStatus(
-    ctx.integrations.db, runId, moduleId, postMergeFindings.length > 0,
+    ctx.integrations.db, runId, moduleId, true,
   );
 
   // Check evidence admission specifically — if required and missing, BLOCK
