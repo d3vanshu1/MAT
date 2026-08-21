@@ -35,6 +35,7 @@ import {
   type FinalizerOutcome,
 } from "./canonical-finalizer.js";
 import type { CanonicalFinalArtifact } from "./canonical-final-artifact.js";
+import { CANONICAL_FINAL_ARTIFACT_VERSION, SEMANTIC_HASH_VERSION } from "./canonical-final-artifact.js";
 import type { MergedFinding } from "../modules/build-merged-text.js";
 import { computeContentHash } from "./source-snapshot.js";
 import { applyReductionGates } from "./finding-reduction-gate.js";
@@ -235,6 +236,193 @@ function hashReconciliation(result: ReconciliationResult): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Durable Stage Checkpoints (stages 3–5)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Stages 1 (claims_ledger) and 2 (reconciliation) were already durable. Stages 3
+// (post_merge), the finding reduction gate, and 5 (canonical_finalize) were not:
+// they re-executed on EVERY invocation of this runner. The reduction-gate ledger
+// was written to pipeline_checkpoints but never read back. The result was that
+// each resume spent its whole budget redoing identical work, ran out, and yielded
+// in_progress again — a restart loop that could never reach finalization.
+//
+// Every stage checkpoint carries a lineage envelope. A checkpoint is only reused
+// when BOTH the pipeline version AND the natural-root finding hash match, so a
+// changed pipeline or a changed merge root forces the stage to re-run.
+
+/** Checkpoint keys for the newly-durable stages */
+const POST_MERGE_DONE_KEY = "post_merge_done";
+const REDUCTION_GATE_DONE_KEY = "reduction_gate_done";
+const CANONICAL_FINALIZE_DONE_KEY = "canonical_finalize_done";
+
+interface StageCheckpointEnvelope<T> {
+  pipelineVersion: string;
+  naturalRootFindingHash: string;
+  sourceManifestHash: string | null;
+  payload: T;
+}
+
+/**
+ * Load a stage checkpoint and validate its lineage.
+ * Returns the payload only when the checkpoint exists, is complete, and its
+ * lineage matches the current invocation. Never throws.
+ */
+async function loadStageCheckpoint<T>(
+  ctx: PipelineContext,
+  runId: string,
+  key: string,
+  pipelineVersion: string,
+  naturalRootFindingHash: string,
+  logPrefix: string,
+): Promise<T | null> {
+  try {
+    const rows = await ctx.integrations.db.query(
+      `SELECT payload, status, version_hash FROM pipeline_checkpoints
+       WHERE module_run_id = $1 AND checkpoint_key = $2
+       LIMIT 1`,
+      z.object({ payload: z.any(), status: z.string().nullable(), version_hash: z.string().nullable() }),
+      [runId, key],
+      { label: `${logPrefix} Load ${key}` },
+    );
+    if (rows.length === 0 || !rows[0].payload) return null;
+    if (rows[0].status !== "complete") {
+      console.log(`${logPrefix} ${key}: present but status=${rows[0].status} — ignoring`);
+      return null;
+    }
+    if (rows[0].version_hash !== pipelineVersion) {
+      console.warn(`${logPrefix} ${key}: STALE — version ${rows[0].version_hash} != current ${pipelineVersion}`);
+      return null;
+    }
+    const envelope = rows[0].payload as StageCheckpointEnvelope<T>;
+    if (envelope?.naturalRootFindingHash !== naturalRootFindingHash) {
+      console.warn(
+        `${logPrefix} ${key}: STALE — root hash ${String(envelope?.naturalRootFindingHash).slice(0, 8)} != ` +
+        `current ${naturalRootFindingHash.slice(0, 8)}`
+      );
+      return null;
+    }
+    if (envelope.payload === undefined || envelope.payload === null) {
+      console.warn(`${logPrefix} ${key}: envelope has no payload — ignoring`);
+      return null;
+    }
+    return envelope.payload;
+  } catch (e: any) {
+    // pipeline_checkpoints unreadable — treat as missing and re-run the stage.
+    // Failing toward re-execution is safe; failing toward "done" would skip work.
+    console.warn(`${logPrefix} ${key}: load failed (${e?.message}) — treating as missing`);
+    return null;
+  }
+}
+
+/**
+ * Persist a stage checkpoint with its lineage envelope.
+ * Returns true when the write succeeded (durable progress was made).
+ */
+async function persistStageCheckpoint<T>(
+  ctx: PipelineContext,
+  runId: string,
+  key: string,
+  payload: T,
+  lineage: { pipelineVersion: string; naturalRootFindingHash: string; sourceManifestHash: string | null },
+  logPrefix: string,
+): Promise<boolean> {
+  const envelope: StageCheckpointEnvelope<T> = {
+    pipelineVersion: lineage.pipelineVersion,
+    naturalRootFindingHash: lineage.naturalRootFindingHash,
+    sourceManifestHash: lineage.sourceManifestHash,
+    payload,
+  };
+  try {
+    await ctx.integrations.db.execute(
+      `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
+       VALUES ($1, $2, $3::jsonb, 'complete', $4)
+       ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE
+         SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = EXCLUDED.version_hash`,
+      [runId, key, JSON.stringify(envelope), lineage.pipelineVersion],
+      { label: `${logPrefix} Persist ${key}` },
+    );
+    console.log(`${logPrefix} ${key}: checkpoint persisted`);
+    return true;
+  } catch (e: any) {
+    console.warn(`${logPrefix} ${key}: persist failed (non-fatal): ${e?.message}`);
+    return false;
+  }
+}
+
+/**
+ * Rebuild a CanonicalFinalArtifact from the already-published module_outputs row.
+ *
+ * Used when finalization is known to have completed (canonical_finalize_done
+ * checkpoint, or an F06 `idempotent` outcome) but the in-memory artifact object
+ * is not available. Without this, the runner returned `complete` with a null
+ * artifact, and BOTH callers in pipeline-core translate "complete with no
+ * artifact" into `in_progress` — another way the run could never close.
+ */
+async function hydratePersistedArtifact(
+  ctx: PipelineContext,
+  runId: string,
+  moduleId: string,
+  fallbackExecutiveHeader: string,
+  semanticHash: string,
+  checkpointStatus: any[],
+  logPrefix: string,
+): Promise<CanonicalFinalArtifact | null> {
+  try {
+    const rows = await ctx.integrations.db.query(
+      `SELECT executive_header, full_report_markdown, findings
+       FROM module_outputs
+       WHERE module_run_id = $1
+         AND executive_header NOT LIKE '[INVALIDATED_PARTIAL]%'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      z.object({
+        executive_header: z.string().nullable(),
+        full_report_markdown: z.string().nullable(),
+        findings: z.any().nullable(),
+      }),
+      [runId],
+      { label: `${logPrefix} Hydrate persisted artifact` },
+    );
+    if (rows.length === 0) {
+      console.warn(`${logPrefix} Hydration failed: no non-invalidated module_outputs row for run ${runId}`);
+      return null;
+    }
+    const row = rows[0];
+    const persistedFindings: unknown[] = Array.isArray(row.findings) ? row.findings : [];
+    const markdown = row.full_report_markdown ?? "";
+    return {
+      schema_version: CANONICAL_FINAL_ARTIFACT_VERSION,
+      run_id: runId,
+      module_type: moduleId,
+      canonical_findings: persistedFindings,
+      reportable_finding_ids: persistedFindings
+        .map((f: any) => f?.finding_id ?? f?.id)
+        .filter((id: unknown): id is string => typeof id === "string"),
+      diagnostics: {
+        narrative_validation: [],
+        excluded_findings: [],
+        degraded_conditions: ["Artifact rehydrated from persisted module_outputs — diagnostics not re-derived"],
+        checkpoint_status: checkpointStatus,
+      },
+      report: {
+        markdown,
+        finding_count: persistedFindings.length,
+        executive_header: row.executive_header ?? fallbackExecutiveHeader,
+      },
+      identity: {
+        semantic_hash: semanticHash,
+        hash_version: SEMANTIC_HASH_VERSION,
+      },
+      finalized_at: new Date().toISOString(),
+    };
+  } catch (e: any) {
+    console.warn(`${logPrefix} Hydration failed (${e?.message})`);
+    return null;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main Entry Point
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -295,6 +483,82 @@ export async function runPostMergeFinalizationStages(
     pipelineVersion,
     sourceManifestHash,
   };
+
+  /** Payload shape for canonical_finalize_done (3c) */
+  interface CanonicalFinalizeDonePayload {
+    artifactId: string;
+    semanticHash: string;
+    findingCount: number;
+    pipelineVersion: string;
+    naturalRootFindingHash: string;
+    finalizedAt: string;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 3c (read on entry): canonical_finalize_done
+  //
+  // If F06 already produced and published an artifact for THIS pipeline version
+  // and THIS natural-root finding hash, the run is finished. Re-invoking F06
+  // cannot improve the outcome — at best it returns `idempotent`, at worst it
+  // burns the entire budget and yields in_progress, which is exactly the restart
+  // loop. Short-circuit: rehydrate the published artifact and return complete.
+  //
+  // This checkpoint is also what makes the corrected fast path in pipeline-core
+  // safe: "valid manifest + valid artifact" may only be treated as completed
+  // when canonical_finalize_done exists at the current pipeline version.
+  // ─────────────────────────────────────────────────────────────────────────
+  const finalizeDoneCp = await loadStageCheckpoint<CanonicalFinalizeDonePayload>(
+    ctx, runId, CANONICAL_FINALIZE_DONE_KEY, pipelineVersion, naturalRootFindingHash, LOG_PREFIX,
+  );
+
+  if (finalizeDoneCp) {
+    console.log(
+      `${LOG_PREFIX} canonical_finalize: ALREADY DONE — artifact=${finalizeDoneCp.artifactId}, ` +
+      `hash=${finalizeDoneCp.semanticHash}, findings=${finalizeDoneCp.findingCount}, ` +
+      `finalizedAt=${finalizeDoneCp.finalizedAt}. Skipping all stages; rehydrating published artifact.`
+    );
+
+    for (const stage of STAGE_SEQUENCE) {
+      stageStates.push({
+        stage,
+        status: "completed_valid",
+        detail: stage === "canonical_finalize"
+          ? `restored from canonical_finalize_done (artifact=${finalizeDoneCp.artifactId})`
+          : "already completed in a prior invocation",
+        lineageValid: true,
+      });
+      completedStages.push(stage);
+    }
+
+    const hydrated = await hydratePersistedArtifact(
+      ctx, runId, moduleId, executiveHeader, finalizeDoneCp.semanticHash,
+      stageStates.map(s => ({ key: s.stage, present: true })),
+      LOG_PREFIX,
+    );
+
+    if (!hydrated) {
+      // Checkpoint says finalization succeeded but the published row is gone
+      // (invalidated or purged). Do NOT fabricate an artifact — clear the stale
+      // checkpoint's authority by falling through to a genuine re-finalization.
+      console.warn(
+        `${LOG_PREFIX} canonical_finalize_done present but module_outputs row unavailable — ` +
+        `ignoring checkpoint and re-running the finalization chain.`
+      );
+      stageStates.length = 0;
+      completedStages.length = 0;
+    } else {
+      return {
+        status: "complete",
+        currentStage: "canonical_finalize",
+        stageStates,
+        completedStages,
+        progressAdvanced: false,
+        blockingReasons: [],
+        artifact: hydrated,
+        finalizerOutcome: null,
+      };
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // STAGE 1: claims_ledger
@@ -568,36 +832,114 @@ export async function runPostMergeFinalizationStages(
   let postMergeFindings = canonicalRootFindings;
   let postMergeHousekeeping = housekeepingFindings;
 
-  try {
-    const postMergeResult = await runPostMergePipeline({
-      findings: canonicalRootFindings,
-      housekeepingFindings,
-      numericReport: null, // Loaded internally by post-merge if needed
-      claimsReconciliation: reconciliationResult,
-      fileTagMap,
-      moduleId,
-      queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
-      dealId,
-      aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
-    });
-    postMergeFindings = postMergeResult.findings;
-    postMergeHousekeeping = postMergeResult.housekeepingFindings;
-    lineage.postMergeResultHash = hashFindings(postMergeFindings);
-    stageStates.push({ stage: "post_merge", status: "completed_valid", detail: `${postMergeFindings.length} findings after processing` });
+  const stageLineage = { pipelineVersion, naturalRootFindingHash, sourceManifestHash };
+
+  /** Payload shape for post_merge_done */
+  interface PostMergeDonePayload {
+    findings: MergedFinding[];
+    housekeepingFindings: MergedFinding[];
+    postMergeResultHash: string;
+  }
+  /** Payload shape for reduction_gate_done */
+  interface ReductionGateDonePayload {
+    primaryFindings: MergedFinding[];
+    housekeepingFindings: MergedFinding[];
+    postMergeResultHash: string;
+    gateStats?: unknown;
+    groundTruthSignals?: string[];
+  }
+
+  // ── 3b (read first): reduction_gate_done supersedes post_merge_done ────────
+  // If the gate already ran for this root at this pipeline version, its output IS
+  // the input to absence_verify and F06 — both post_merge and the gate are skipped.
+  const gateCp = await loadStageCheckpoint<ReductionGateDonePayload>(
+    ctx, runId, REDUCTION_GATE_DONE_KEY, pipelineVersion, naturalRootFindingHash, LOG_PREFIX,
+  );
+
+  let gateAlreadyApplied = false;
+  if (gateCp && Array.isArray(gateCp.primaryFindings)) {
+    postMergeFindings = gateCp.primaryFindings;
+    postMergeHousekeeping = Array.isArray(gateCp.housekeepingFindings)
+      ? gateCp.housekeepingFindings
+      : housekeepingFindings;
+    lineage.postMergeResultHash = gateCp.postMergeResultHash;
+    gateAlreadyApplied = true;
+    stageStates.push({ stage: "post_merge", status: "completed_valid", detail: "restored from reduction_gate_done checkpoint", lineageValid: true });
     completedStages.push("post_merge");
-    console.log(`${LOG_PREFIX} post_merge: ${canonicalRootFindings.length} → ${postMergeFindings.length} findings`);
-  } catch (err: any) {
-    console.error(`${LOG_PREFIX} post_merge: FAILED: ${err?.message}`);
-    stageStates.push({ stage: "post_merge", status: "failed", detail: err?.message });
-    return buildResult("failed", "post_merge", stageStates, completedStages, progressAdvanced, [`Post-merge processing failed: ${err?.message}`]);
+    console.log(
+      `${LOG_PREFIX} post_merge + finding_reduction_gate: RESTORED from checkpoint — ` +
+      `${postMergeFindings.length} primary findings, housekeeping=${postMergeHousekeeping.length}. ` +
+      `Both stages skipped this invocation.`
+    );
+  }
+
+  // ── 3a: post_merge (skipped when the gate checkpoint already covered it) ───
+  if (!gateAlreadyApplied) {
+    const postMergeCp = await loadStageCheckpoint<PostMergeDonePayload>(
+      ctx, runId, POST_MERGE_DONE_KEY, pipelineVersion, naturalRootFindingHash, LOG_PREFIX,
+    );
+
+    if (postMergeCp && Array.isArray(postMergeCp.findings)) {
+      postMergeFindings = postMergeCp.findings;
+      postMergeHousekeeping = Array.isArray(postMergeCp.housekeepingFindings)
+        ? postMergeCp.housekeepingFindings
+        : housekeepingFindings;
+      lineage.postMergeResultHash = postMergeCp.postMergeResultHash;
+      stageStates.push({ stage: "post_merge", status: "completed_valid", detail: `restored from post_merge_done checkpoint (${postMergeFindings.length} findings)`, lineageValid: true });
+      completedStages.push("post_merge");
+      console.log(`${LOG_PREFIX} post_merge: RESTORED from checkpoint — ${postMergeFindings.length} findings, runPostMergePipeline skipped`);
+    } else {
+      try {
+        const postMergeResult = await runPostMergePipeline({
+          findings: canonicalRootFindings,
+          housekeepingFindings,
+          numericReport: null, // Loaded internally by post-merge if needed
+          claimsReconciliation: reconciliationResult,
+          fileTagMap,
+          moduleId,
+          queryFn: ctx.integrations.db.query.bind(ctx.integrations.db),
+          dealId,
+          aiFn: ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai),
+        });
+        postMergeFindings = postMergeResult.findings;
+        postMergeHousekeeping = postMergeResult.housekeepingFindings;
+        lineage.postMergeResultHash = hashFindings(postMergeFindings);
+        stageStates.push({ stage: "post_merge", status: "completed_valid", detail: `${postMergeFindings.length} findings after processing` });
+        completedStages.push("post_merge");
+        console.log(`${LOG_PREFIX} post_merge: ${canonicalRootFindings.length} → ${postMergeFindings.length} findings`);
+
+        // 3a: durable checkpoint so the next invocation does not redo this work
+        const wrote = await persistStageCheckpoint<PostMergeDonePayload>(
+          ctx, runId, POST_MERGE_DONE_KEY,
+          {
+            findings: postMergeFindings,
+            housekeepingFindings: postMergeHousekeeping,
+            postMergeResultHash: lineage.postMergeResultHash!,
+          },
+          stageLineage, LOG_PREFIX,
+        );
+        if (wrote) progressAdvanced = true;
+      } catch (err: any) {
+        console.error(`${LOG_PREFIX} post_merge: FAILED: ${err?.message}`);
+        stageStates.push({ stage: "post_merge", status: "failed", detail: err?.message });
+        return buildResult("failed", "post_merge", stageStates, completedStages, progressAdvanced, [`Post-merge processing failed: ${err?.message}`]);
+      }
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
   // FINDING REDUCTION GATE — applied after post_merge, before absence_verify
   // Replaces postMergeFindings with primary findings; secondary/suppressed
   // findings are recorded in diagnostics but do NOT enter the IC-facing report.
+  //
+  // 3b: skipped entirely when reduction_gate_done was restored above. Re-running
+  // the gate on already-gated findings is not free and not guaranteed idempotent
+  // (confirmation matching reads the pre-gate population), so the checkpoint is
+  // authoritative once written.
   // ─────────────────────────────────────────────────────────────────────────
-  {
+  if (gateAlreadyApplied) {
+    console.log(`${LOG_PREFIX} finding_reduction_gate: SKIPPED — restored from reduction_gate_done checkpoint (${postMergeFindings.length} primary findings)`);
+  } else {
     const reductionResult = applyReductionGates(postMergeFindings as any[]);
     const beforeCount = postMergeFindings.length;
     const afterCount = reductionResult.primaryFindings.length;
@@ -645,6 +987,26 @@ export async function runPostMergeFinalizationStages(
 
     // Replace findings: only primary findings proceed into absence_verify and F06
     postMergeFindings = reductionResult.primaryFindings as any;
+
+    // 3b: durable checkpoint. This is the linchpin of the loop fix — the gate
+    // output is what F06 consumes, so restoring it lets a resumed invocation
+    // jump straight to absence_verify/finalization instead of rebuilding the
+    // entire post_merge + gate chain and exhausting its budget again.
+    const gateWrote = await persistStageCheckpoint<ReductionGateDonePayload>(
+      ctx, runId, REDUCTION_GATE_DONE_KEY,
+      {
+        primaryFindings: postMergeFindings,
+        housekeepingFindings: postMergeHousekeeping,
+        postMergeResultHash: lineage.postMergeResultHash ?? hashFindings(postMergeFindings),
+        gateStats: reductionResult.gateStats,
+        groundTruthSignals: reductionResult.groundTruthSignals,
+      },
+      stageLineage, LOG_PREFIX,
+    );
+    if (gateWrote) {
+      progressAdvanced = true;
+      gateAlreadyApplied = true;
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -756,6 +1118,22 @@ export async function runPostMergeFinalizationStages(
     completedStages.push("canonical_finalize");
     progressAdvanced = true;
     console.log(`${LOG_PREFIX} COMPLETE — artifact=${f06Outcome.artifactId}, hash=${f06Outcome.semanticHash}, findings=${f06Outcome.findingCount}`);
+
+    // 3c (write): record that finalization succeeded for this lineage. Any later
+    // invocation of this runner short-circuits on entry instead of re-invoking F06.
+    await persistStageCheckpoint<CanonicalFinalizeDonePayload>(
+      ctx, runId, CANONICAL_FINALIZE_DONE_KEY,
+      {
+        artifactId: f06Outcome.artifactId ?? "",
+        semanticHash: f06Outcome.semanticHash ?? "",
+        findingCount: f06Outcome.findingCount ?? postMergeFindings.length,
+        pipelineVersion,
+        naturalRootFindingHash,
+        finalizedAt: new Date().toISOString(),
+      },
+      stageLineage, LOG_PREFIX,
+    );
+
     return {
       status: "complete",
       currentStage: null,
@@ -769,10 +1147,36 @@ export async function runPostMergeFinalizationStages(
   }
 
   if (f06Outcome.status === "idempotent") {
-    // Already finalized with same content — no artifact on idempotent (already persisted)
+    // Already finalized with identical content — the artifact is persisted but F06
+    // does not hand it back. Both callers in pipeline-core treat
+    // "complete with a null artifact" as in_progress, so returning null here is
+    // itself a loop condition. Rehydrate from module_outputs instead.
     stageStates.push({ stage: "canonical_finalize", status: "completed_valid", detail: `idempotent, artifact=${f06Outcome.artifactId}` });
     completedStages.push("canonical_finalize");
     console.log(`${LOG_PREFIX} IDEMPOTENT — artifact=${f06Outcome.artifactId}`);
+
+    // 3c (write): idempotent is a successful finalization outcome — checkpoint it.
+    await persistStageCheckpoint<CanonicalFinalizeDonePayload>(
+      ctx, runId, CANONICAL_FINALIZE_DONE_KEY,
+      {
+        artifactId: f06Outcome.artifactId ?? "",
+        semanticHash: f06Outcome.semanticHash ?? "",
+        findingCount: postMergeFindings.length,
+        pipelineVersion,
+        naturalRootFindingHash,
+        finalizedAt: new Date().toISOString(),
+      },
+      stageLineage, LOG_PREFIX,
+    );
+
+    const idempotentArtifact = await hydratePersistedArtifact(
+      ctx, runId, moduleId, executiveHeader, f06Outcome.semanticHash ?? "",
+      checkpointStatus, LOG_PREFIX,
+    );
+    if (!idempotentArtifact) {
+      console.warn(`${LOG_PREFIX} IDEMPOTENT but persisted artifact could not be rehydrated — returning without artifact`);
+    }
+
     return {
       status: "complete",
       currentStage: null,
@@ -780,7 +1184,7 @@ export async function runPostMergeFinalizationStages(
       completedStages,
       progressAdvanced: false,
       blockingReasons: [],
-      artifact: null, // Idempotent outcome doesn't carry full artifact — already persisted
+      artifact: idempotentArtifact,
       finalizerOutcome: f06Outcome,
     };
   }

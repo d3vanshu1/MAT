@@ -71,6 +71,7 @@ import { tierFindings } from "./materiality-tiering-stage.js";
 import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
+import { validateNumericCheckpoint, isCheckpointComplete } from "./numeric-checkpoint.js";
 import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
 import { runReconciliation, validateSupersessionProof, type ReconciliationResult, type ReconciliationFinding, type SupersessionCandidate } from "./claims-reconciliation.js";
 import { runReconciliationPipeline, type ReconciliationPipelineResult } from "./reconciliation-pipeline.js";
@@ -2433,9 +2434,116 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
             { label: "Fast-path: check module_outputs (excl. invalidated)" }
           );
 
-          if (!outputCheck) {
-            // ✅ Fast-path engaged: final merge node complete, no output yet → format directly
-            console.log(`[pipeline:fast-path] Final merge node found at level ${topCheckpoint.tree_level}, skipping to formatting`);
+          // ── FAST-PATH CONDITION (corrected) ──────────────────────────────
+          // The original guard read `if (!outputCheck)` with NO else branch. When a
+          // valid (non-invalidated) artifact already existed, `outputCheck` was truthy,
+          // the guard was false, and control fell through silently into the full merge
+          // rebuild below — no log, no early return. That is the restart loop: every
+          // resume re-derived the entire merge tree and never reached finalization.
+          //
+          // Correct semantics:
+          //   valid manifest + valid artifact + canonical_finalize_done at current
+          //     version  → finalization genuinely completed: mark the run completed
+          //                 and return. Never rebuild.
+          //   valid manifest + valid artifact, no/stale canonical_finalize_done
+          //              → the artifact predates finalization (e.g. a pre-reduction-gate
+          //                merge-tree output). Enter the finalization runner so the
+          //                remaining stages actually run. Never rebuild.
+          //   valid manifest + no artifact / only invalidated
+          //              → enter the finalization runner (original intent).
+          //   invalid manifest → full rebuild (already handled: isFinalNode stays false).
+          let finalizationRecorded = false;
+          if (outputCheck) {
+            let finalizeCpVersion: string | null = null;
+            try {
+              const [finalizeDoneCp] = await ctx.integrations.db.query(
+                `SELECT version_hash FROM pipeline_checkpoints
+                 WHERE module_run_id = $1
+                   AND checkpoint_key = 'canonical_finalize_done'
+                   AND status = 'complete'
+                 LIMIT 1`,
+                z.object({ version_hash: z.string().nullable() }),
+                [runId],
+                { label: "Fast-path: check canonical_finalize_done checkpoint" }
+              );
+              finalizeCpVersion = finalizeDoneCp?.version_hash ?? null;
+            } catch {
+              // pipeline_checkpoints unreadable — fail toward finalizing, never toward
+              // "already complete". Treating an unknown state as complete would publish
+              // an unfinalized artifact.
+            }
+            finalizationRecorded = finalizeCpVersion !== null && finalizeCpVersion === getPipelineVersion();
+            if (!finalizationRecorded) {
+              console.warn(
+                `[pipeline:fast-path] Artifact exists for run ${runId} but canonical_finalize_done is ` +
+                `${finalizeCpVersion === null ? "absent" : `stale (${finalizeCpVersion} != ${getPipelineVersion()})`} — ` +
+                `artifact predates finalization. Entering finalization runner (NOT rebuilding).`
+              );
+            }
+          }
+
+          if (outputCheck && finalizationRecorded) {
+            // Finalization completed durably in a prior invocation. canonical-finalizer
+            // STEP 12 normally marks the run completed; if a crash landed between
+            // artifact persistence and that status update, close the run here.
+            console.log(
+              `[pipeline:fast-path] canonical_finalize_done present at current pipeline version — ` +
+              `run already finalized. Marking completed and returning without rebuild.`
+            );
+            const [publishedOutput] = await ctx.integrations.db.query(
+              `SELECT executive_header, full_report_markdown, findings
+               FROM module_outputs
+               WHERE module_run_id = $1
+                 AND executive_header NOT LIKE '[INVALIDATED_PARTIAL]%'
+               ORDER BY created_at DESC
+               LIMIT 1`,
+              z.object({
+                executive_header: z.string().nullable(),
+                full_report_markdown: z.string().nullable(),
+                findings: z.any().nullable(),
+              }),
+              [runId],
+              { label: "Fast-path: load published artifact for completed return" }
+            );
+            await ctx.integrations.db.execute(
+              `UPDATE module_runs
+               SET status       = 'completed'::module_status,
+                   completed_at = COALESCE(completed_at, now())
+               WHERE id = $1 AND status <> 'completed'::module_status`,
+              [runId],
+              { label: "Fast-path: mark run completed (finalization already recorded)" }
+            );
+            const publishedFindings: MergedFinding[] = Array.isArray(publishedOutput?.findings)
+              ? (publishedOutput!.findings as MergedFinding[])
+              : [];
+            const publishedReport = publishedOutput?.full_report_markdown ?? "";
+            const MAX_MERGED_TEXT_CHARS = 150_000;
+            const publishedMergedText = publishedReport.length > MAX_MERGED_TEXT_CHARS
+              ? publishedReport.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport]"
+              : publishedReport;
+            return {
+              status: "completed",
+              runId,
+              phase: "done",
+              progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+              result: {
+                executiveHeader: publishedOutput?.executive_header ?? topCheckpoint.executive_header,
+                findings: publishedFindings,
+                mergedText: publishedMergedText,
+                fullReport: publishedReport,
+              },
+              failedChunks: 0,
+              truncatedChunks: 0,
+              truncatedMerges: 0,
+              firstError: null,
+            };
+          }
+
+          // Reached here when: no artifact, only invalidated artifacts, or an artifact
+          // exists but finalization was never durably recorded. All three require the
+          // finalization runner — none require a rebuild.
+          {
+            console.log(`[pipeline:fast-path] Final merge node found at level ${topCheckpoint.tree_level}, routing to finalization (artifactPresent=${!!outputCheck})`);
 
             // Reconstruct findings from checkpoint — RC1: use canonical parser (mode=reload preserves UUIDs)
             const fpRaw = JSON.parse(topCheckpoint.findings_json);
@@ -2583,7 +2691,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                   : null,
               };
             } // end fast-path findings valid
-          }
+          } // end finalization-required block (no artifact / artifact not finalized)
         }
       }
     }
@@ -2903,13 +3011,88 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
         // This is delegated to runNumericVerifyInline which calls validateNumericCheckpoint.
         // Only short-circuit if the checkpoint passes validation inside the engine.
         if (loadedCheckpointStatus === "complete" && saved.figures && saved.discrepancies) {
-          // Pass to engine for validation rather than trusting row status alone.
-          // The engine will validate (schema version, config version, doc universe, prefix tables)
-          // and either return the cached result or invalidate and rebuild.
-          console.log(
-            `[NumericInline:Fix8E] Loaded complete checkpoint (${(saved.figures as any[]).length} figures) — ` +
-            `delegating to engine for structural validation before trusting`
-          );
+          // ── Fix8E preserved, loop-stopper added ──────────────────────────
+          // `numericCheckpointLoaded` was declared but NEVER assigned anywhere in this
+          // file, so the guard below (`if (!numericCheckpointLoaded)`) fired on every
+          // single resume cycle. A complete checkpoint was loaded, logged, and then
+          // ignored — the engine was re-entered every time, and when the remaining
+          // budget fell below the 75s the engine gate requires, the numeric report was
+          // dropped entirely instead of being reloaded from the durable checkpoint.
+          //
+          // Fix8E's invariant still holds: row status alone is NOT trusted. We run the
+          // SAME structural validation the engine runs (validateNumericCheckpoint with
+          // the live document universe plus a re-queried indexed-table prefix). Only a
+          // checkpoint that passes that validation AND reports status=complete is
+          // trusted, and only then is the engine skipped.
+          try {
+            const numDocRows = await ctx.integrations.db.query(
+              `SELECT DISTINCT document_id
+               FROM doc_tables dt
+               JOIN documents d ON d.id = dt.document_id
+               WHERE d.deal_id = $1
+                 AND dt.sheet_or_page != '__generation_manifest__'
+               ORDER BY document_id
+               LIMIT 100`,
+              z.object({ document_id: z.string() }),
+              [dealId],
+              { label: "Numeric checkpoint validation: document universe" }
+            );
+            const numericDocIds = numDocRows.map(r => r.document_id);
+
+            const cpDocCursor = typeof (loadedCheckpointPayload as any)?.documentCursor === "number"
+              ? (loadedCheckpointPayload as any).documentCursor as number
+              : 0;
+            let numericPrefixTableIds: string[] | undefined;
+            if (cpDocCursor > 0) {
+              const prefixDocIds = numericDocIds.slice(0, cpDocCursor);
+              if (prefixDocIds.length > 0) {
+                const prefixRows = await ctx.integrations.db.query(
+                  `SELECT id FROM doc_tables
+                   WHERE document_id = ANY($1::uuid[])
+                     AND sheet_or_page != '__generation_manifest__'
+                   ORDER BY id`,
+                  z.object({ id: z.string() }),
+                  [prefixDocIds],
+                  { label: `Numeric checkpoint validation: prefix tables (${prefixDocIds.length} docs)` }
+                );
+                numericPrefixTableIds = prefixRows.map(r => r.id);
+              }
+            }
+
+            const cpValidation = validateNumericCheckpoint(
+              loadedCheckpointPayload,
+              numericDocIds,
+              numericPrefixTableIds,
+            );
+            if (cpValidation.valid && isCheckpointComplete(cpValidation.checkpoint)) {
+              const validatedCp = cpValidation.checkpoint;
+              numericReport = {
+                figures: validatedCp.figures as any[],
+                discrepancies: validatedCp.discrepancies as any[],
+              };
+              numericPartial = false;
+              numericCheckpointLoaded = true;
+              console.log(
+                `[NumericInline:Fix8E] Complete checkpoint VALIDATED in-place ` +
+                `(${validatedCp.figures.length} figures, ${validatedCp.discrepancies.length} discrepancies, ` +
+                `docs=${validatedCp.documentsProcessed}/${validatedCp.documentsTotal}) — ` +
+                `engine skipped for this invocation`
+              );
+            } else {
+              console.log(
+                `[NumericInline:Fix8E] Complete checkpoint did NOT validate ` +
+                `(${cpValidation.valid ? "status not complete" : cpValidation.reason}) — ` +
+                `delegating to engine for rebuild`
+              );
+            }
+          } catch (cpValErr) {
+            // Validation could not be performed (DB error). Do NOT trust the checkpoint —
+            // fall through to the engine, which performs its own validation.
+            console.warn(
+              `[NumericInline:Fix8E] Checkpoint validation failed to run ` +
+              `(${cpValErr instanceof Error ? cpValErr.message : String(cpValErr)}) — delegating to engine`
+            );
+          }
         } else {
           console.log(
             `[NumericInline] Loaded ${loadedCheckpointStatus} checkpoint — will pass to engine for resume`
