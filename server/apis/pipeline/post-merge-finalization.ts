@@ -28,6 +28,7 @@ import type { PipelineContext } from "./pipeline-config.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
 import { runReconciliation, type ReconciliationResult } from "./claims-reconciliation.js";
+import { runReconciliationPipeline, type ReconciliationPipelineResult } from "./reconciliation-pipeline.js";
 import {
   canonicalFinalize as f06CanonicalFinalize,
   loadCheckpointStatus,
@@ -488,34 +489,68 @@ export async function runPostMergeFinalizationStages(
       }
 
       try {
-        reconciliationResult = await runReconciliation(
+        // P2.1: Use the full reconciliation pipeline (magnitude guard, parallel-offset
+        // detector, verification gate, coverage funnel) instead of bare runReconciliation.
+        const pipelineResult: ReconciliationPipelineResult = await runReconciliationPipeline({
           ctx,
-          claimsLedger!,
-          numericReport?.figures ?? [],
-          numericReport?.discrepancies ?? [],
+          dealId,
+          ledger: claimsLedger!,
+          baseFigures: numericReport?.figures ?? [],
+          discrepancies: numericReport?.discrepancies ?? [],
+          queryFn: (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
+          timeBudgetMs: reconBudget,
           startTime,
-          reconBudget,
+        });
+
+        // Use the full pipeline result — findings filtered through all gates
+        reconciliationResult = pipelineResult.reconciliation;
+        // Replace findings with only the verified set (post-magnitude, post-offset, post-gate)
+        (reconciliationResult as any).findings = pipelineResult.verifiedFindings;
+
+        console.log(
+          `${LOG_PREFIX} reconciliation P2.1 pipeline: ` +
+          `${pipelineResult.reconciliation.findings.length} raw → ` +
+          `${pipelineResult.verifiedFindings.length} verified. ` +
+          `Magnitude held: ${pipelineResult.magnitudeHeld}, ` +
+          `Parallel-offset held: ${pipelineResult.parallelOffsetHeld}, ` +
+          `Gate rejected: ${pipelineResult.gateResult.rejected.length}. ` +
+          `Bridge figures: ${pipelineResult.bridgeFiguresCount}. ` +
+          `Elapsed: ${pipelineResult.elapsedMs}ms.`
         );
 
-        // Persist
+        // Persist with P2.1 metadata
         try {
+          const checkpointPayload = {
+            ...reconciliationResult,
+            _p21_metadata: {
+              bridgeFiguresCount: pipelineResult.bridgeFiguresCount,
+              metricDerivation: pipelineResult.metricDerivation,
+              magnitudeHeld: pipelineResult.magnitudeHeld,
+              parallelOffsetHeld: pipelineResult.parallelOffsetHeld,
+              gateVerified: pipelineResult.gateResult.verified.length,
+              gateRejected: pipelineResult.gateResult.rejected.length,
+              gateRejectionRate: pipelineResult.gateResult.rejection_rate,
+              unmatchableScopes: pipelineResult.unmatchableScopes.length,
+              elapsedMs: pipelineResult.elapsedMs,
+            },
+          };
           await ctx.integrations.db.execute(
             `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
              VALUES ($1, 'reconciliation', $2::jsonb, 'complete', $3)
              ON CONFLICT (module_run_id, checkpoint_key) DO UPDATE
                SET payload = EXCLUDED.payload, updated_at = now(), status = 'complete', version_hash = $3`,
-            [runId, JSON.stringify(reconciliationResult), pipelineVersion],
-            { label: `${LOG_PREFIX} Persist reconciliation` },
+            [runId, JSON.stringify(checkpointPayload), pipelineVersion],
+            { label: `${LOG_PREFIX} Persist reconciliation (P2.1 full pipeline)` },
           );
           progressAdvanced = true;
         } catch (e: any) {
           console.warn(`${LOG_PREFIX} reconciliation: persist failed: ${e?.message}`);
         }
 
-        stageStates.push({ stage: "reconciliation", status: "completed_valid", detail: `${reconciliationResult.findings.length} findings` });
+        stageStates.push({ stage: "reconciliation", status: "completed_valid", detail: `${reconciliationResult.findings.length} findings (P2.1)` });
         completedStages.push("reconciliation");
         lineage.reconciliationHash = hashReconciliation(reconciliationResult);
-        console.log(`${LOG_PREFIX} reconciliation: executed — ${reconciliationResult.findings.length} findings`);
+        console.log(`${LOG_PREFIX} reconciliation: executed P2.1 — ${reconciliationResult.findings.length} verified findings`);
       } catch (err: any) {
         console.error(`${LOG_PREFIX} reconciliation: FAILED: ${err?.message}`);
         stageStates.push({ stage: "reconciliation", status: "failed", detail: err?.message });

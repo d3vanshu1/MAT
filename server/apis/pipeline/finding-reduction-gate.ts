@@ -351,24 +351,27 @@ function gateGenuineContradiction(f: any): GateResult {
     return { passed: false, gate: "genuine_contradiction", reason: `Finding has disclosure_status='${disclosureStatus}' — not undisclosed` };
   }
 
-  // For contradiction/discrepancy findings, structured numeric delta is PREFERRED
-  // but not REQUIRED. Qualitative contradiction evidence (title + detail describing
-  // conflicting statements) is sufficient when the pipeline hasn't produced
-  // structured delta fields. The absence of delta_abs/delta_pct is a pipeline
-  // enrichment gap — not proof that the finding isn't genuine.
+  // STRICT FORM: For contradiction/discrepancy findings, require numeric delta proof.
+  // Structured evidence is the bar — qualitative detail alone is insufficient.
+  // Reconciliation findings carry delta in structured_impact[].role==="delta".
   if (kind.includes("contradiction") || kind.includes("discrepancy") || kind.includes("divergence")) {
     const deltaAbs = (f as any).delta_abs;
     const deltaPct = (f as any).delta_pct;
-    const hasNumericDelta = (deltaAbs != null && deltaAbs !== 0) || (deltaPct != null && deltaPct !== 0);
-    const hasComparisonBasis = f.comparison_basis != null && String(f.comparison_basis).length > 0;
-    // Accept if: has numeric proof, OR has comparison basis, OR has qualitative detail
-    const hasQualitativeDetail = (f.detail ?? "").length > 50 || (f.full_analysis ?? "").length > 50;
+    const hasTopLevelDelta = (deltaAbs != null && deltaAbs !== 0) || (deltaPct != null && deltaPct !== 0);
 
-    if (!hasNumericDelta && !hasComparisonBasis && !hasQualitativeDetail) {
+    // P2.1: Check structured_impact for verified delta entries
+    const structuredImpact: any[] = f.structured_impact ?? [];
+    const hasStructuredDelta = structuredImpact.some(
+      (si: any) => si.role === "delta" && si.verified === true && si.amount != null && si.amount !== 0
+    );
+
+    const hasComparisonBasis = f.comparison_basis != null && String(f.comparison_basis).length > 0;
+
+    if (!hasTopLevelDelta && !hasStructuredDelta && !hasComparisonBasis) {
       return {
         passed: false,
         gate: "genuine_contradiction",
-        reason: "Contradiction finding lacks numeric delta, comparison_basis, and qualitative detail — cannot verify genuine inconsistency"
+        reason: "Contradiction finding lacks numeric delta (top-level or structured_impact) and comparison_basis — cannot verify genuine inconsistency"
       };
     }
   }
@@ -387,50 +390,60 @@ function gateMateriality(f: any): GateResult {
   const severity = (f.severity ?? "info").toLowerCase();
   const kind = (f.finding_kind ?? "").toLowerCase();
 
-  // Info findings: contradiction/discrepancy/divergence kinds with substantive detail
-  // are NOT automatically secondary — the model frequently assigns "info" severity
-  // to genuine data divergence findings. Only suppress info findings that lack
-  // any contradiction classification AND have minimal detail.
+  // Info findings: only contradiction/discrepancy/divergence kinds with structured
+  // evidence pass. All others are secondary observations.
   if (severity === "info") {
     const isContradictionKind = kind.includes("contradiction") || kind.includes("discrepancy") || kind.includes("divergence");
-    const hasSubstantiveDetail = (f.detail ?? "").length > 100 || (f.full_analysis ?? "").length > 100;
-    if (!isContradictionKind && !hasSubstantiveDetail) {
+    if (!isContradictionKind) {
       return { passed: false, gate: "materiality", reason: "Info-severity findings are secondary observations only" };
     }
-    // Info + contradiction kind or substantive detail → pass materiality
+    // Info + contradiction kind → still needs structured evidence to be primary
+    const structuredImpact: any[] = f.structured_impact ?? [];
+    const hasStructuredDelta = structuredImpact.some(
+      (si: any) => si.role === "delta" && si.verified === true && si.amount != null
+    );
+    const hasTopLevelDelta = (f.delta_abs != null && f.delta_abs !== 0) || (f.delta_pct != null && f.delta_pct !== 0);
+    const evidence = f.evidence ?? [];
+    if (!hasStructuredDelta && !hasTopLevelDelta && evidence.length < 2) {
+      return { passed: false, gate: "materiality", reason: "Info-severity contradiction finding lacks structured evidence — secondary" };
+    }
     return { passed: true, gate: "materiality" };
   }
 
-  // For warning/critical findings, require structured materiality evidence:
-  // Either a numeric delta that exceeds a threshold, or an explicit materiality_basis,
-  // or sufficient qualitative detail demonstrating the material nature.
+  // STRICT FORM: For warning/critical findings, require quantified delta or materiality_basis.
+  // structured_impact with role==="delta" counts as quantified delta.
+  // Qualitative detail alone is NOT sufficient.
   const deltaAbs = (f as any).delta_abs;
   const deltaPct = (f as any).delta_pct;
   const materialityBasis = (f.materiality_basis ?? "").trim();
-  const hasQualitativeDetail = (f.detail ?? "").length > 80 || (f.full_analysis ?? "").length > 80;
+
+  // P2.1: Check structured_impact for verified delta
+  const structuredImpact: any[] = f.structured_impact ?? [];
+  const hasStructuredDelta = structuredImpact.some(
+    (si: any) => si.role === "delta" && si.verified === true && si.amount != null && si.amount !== 0
+  );
 
   if (severity === "critical") {
-    // Critical must have quantifiable delta OR explicit materiality basis OR substantive detail
     const hasQuantifiedDelta = (deltaAbs != null && Math.abs(Number(deltaAbs)) > 0) ||
-      (deltaPct != null && Math.abs(Number(deltaPct)) > 0);
-    if (!hasQuantifiedDelta && !materialityBasis && !hasQualitativeDetail) {
+      (deltaPct != null && Math.abs(Number(deltaPct)) > 0) ||
+      hasStructuredDelta;
+    if (!hasQuantifiedDelta && !materialityBasis) {
       return {
         passed: false,
         gate: "materiality",
-        reason: "Critical finding lacks quantified delta, materiality_basis, and substantive detail — cannot verify material impact"
+        reason: "Critical finding lacks quantified delta (top-level or structured_impact) and materiality_basis — cannot verify material impact"
       };
     }
   }
 
   if (severity === "warning") {
-    // Warning: require at least one of: numeric delta, materiality_basis, qualitative detail, or multiple evidence entries
-    const hasAnyQuantification = (deltaAbs != null) || (deltaPct != null) || materialityBasis;
+    const hasAnyQuantification = (deltaAbs != null) || (deltaPct != null) || materialityBasis || hasStructuredDelta;
     const evidence = f.evidence ?? [];
-    if (!hasAnyQuantification && evidence.length < 2 && !hasQualitativeDetail) {
+    if (!hasAnyQuantification && evidence.length < 2) {
       return {
         passed: false,
         gate: "materiality",
-        reason: "Warning finding has no quantification, no materiality_basis, insufficient evidence, and no substantive detail"
+        reason: "Warning finding has no quantification (delta, structured_impact, or materiality_basis) and insufficient evidence entries"
       };
     }
   }
@@ -591,6 +604,12 @@ export function applyReductionGates(findings: any[]): ReductionResult {
   const groundTruthSignals: string[] = [];
 
   // ── Pre-pass: Kind-consistency guard ─────────────────────────────────────
+  // SAFETY PROPERTY: This guard RECLASSIFIES (kind→"confirmation", severity→"info")
+  // rather than SUPPRESSES. A wrong call costs a finding its tier, not its existence.
+  // The finding remains in the output (confirmations array) and is preserved in the
+  // checkpoint. This is intentional — regex heuristics over model-written prose will
+  // always have edges (e.g. "zero discrepancy" contains "discrepancy"), and the cost
+  // of a false positive is demotion, not data loss. Do NOT convert this to a suppression.
   const confirmations: KindConsistencyResult[] = [];
   const gatedFindings: any[] = [];
   for (const f of findings) {

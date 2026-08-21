@@ -14,7 +14,7 @@
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { runReconciliation, coordKey, normalizePeriod, normalizeClaimValue, type ReconciliationFinding } from "./claims-reconciliation.js";
 import { runVerificationGate, type GateCheck, type GateResult, type RefFigCoord } from "./verification-gate.js";
-import { loadReferenceFigures, applyMetricDerivation, applyMagnitudeGuard, applyParallelOffsetDetector, type ParallelAuditEntry } from "./reconciliation-pipeline.js";
+import { loadReferenceFigures, resolvePrimaryReferenceDoc, applyMetricDerivation, applyMagnitudeGuard, applyParallelOffsetDetector, type ParallelAuditEntry } from "./reconciliation-pipeline.js";
 import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { ClaimsLedger } from "./claims-extraction.js";
 import type { PipelineContext } from "./pipeline-config.js";
@@ -55,6 +55,12 @@ export default api({
     discrepancies_count: z.number(),
     elapsed_ms: z.number(),
     matching_error: z.string().nullable(),
+
+    // --- Provenance ranking (P2.1): which model won first-write-wins ---
+    primary_doc_id: z.string().nullable().optional(),
+    primary_doc_file_name: z.string().nullable().optional(),
+    primary_doc_source: z.string().nullable().optional(),
+    primary_doc_matches_baseline: z.boolean().optional(),
 
     // --- Summary fields (always present when reconciliation ran) ---
     findings_report_id: z.string().nullable(),
@@ -264,7 +270,28 @@ export default api({
     const discrepancies: Discrepancy[] = Array.isArray(rawDisc) ? rawDisc : [];
 
     // --- Step 2b: Load reference_figures (shared function from reconciliation-pipeline.ts) ---
-    const PRIMARY_DOC = "3ea34aa1-6617-4d95-ae3c-5225d3da0387";
+    // The primary document is now RESOLVED by the same shared rule production uses
+    // (resolvePrimaryReferenceDoc) rather than hardcoded. The previously-hardcoded id
+    // is retained only as an assertion target so any divergence is visible in the log
+    // and reflected in the output, instead of silently changing the harness baseline.
+    const HARNESS_BASELINE_PRIMARY_DOC = "3ea34aa1-6617-4d95-ae3c-5225d3da0387";
+    const resolvedPrimary = await resolvePrimaryReferenceDoc(
+      (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
+      dealId,
+    );
+    const PRIMARY_DOC = resolvedPrimary?.documentId;
+    const primaryDocMatchesBaseline = PRIMARY_DOC === HARNESS_BASELINE_PRIMARY_DOC;
+    console.log(
+      `[DiagReconcileOnly] Primary reference doc resolved: ${PRIMARY_DOC ?? "none"} ` +
+      `(${resolvedPrimary?.fileName ?? "unknown"}, source=${resolvedPrimary?.source ?? "null"}, ${resolvedPrimary?.figCount ?? 0} figures). ` +
+      `Matches harness baseline ${HARNESS_BASELINE_PRIMARY_DOC}: ${primaryDocMatchesBaseline}`
+    );
+    if (!primaryDocMatchesBaseline) {
+      console.warn(
+        `[DiagReconcileOnly] PRIMARY DOC DIVERGENCE — resolver picked ${PRIMARY_DOC ?? "none"}, ` +
+        `baseline was ${HARNESS_BASELINE_PRIMARY_DOC}. Harness counts are NOT comparable to the published baseline.`
+      );
+    }
     const { bridgeFigures, refFigCoords, rawRows: refFigRows } = await loadReferenceFigures(
       (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
       dealId,
@@ -668,6 +695,10 @@ export default api({
       discrepancies_count: discrepancies.length,
       elapsed_ms: elapsed,
       matching_error: result.matching_error ?? null,
+      primary_doc_id: PRIMARY_DOC ?? null,
+      primary_doc_file_name: resolvedPrimary?.fileName ?? null,
+      primary_doc_source: resolvedPrimary?.source ?? null,
+      primary_doc_matches_baseline: primaryDocMatchesBaseline,
       findings_report_id: result.findings_report_id,
       total_findings: gatedFindings.length,
       total_pages: totalPages,

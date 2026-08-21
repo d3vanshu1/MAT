@@ -92,6 +92,67 @@ const RefFigRow = z.object({
   basis: z.string().nullable(),
 });
 
+const PrimaryDocRow = z.object({
+  document_id: z.string(),
+  file_name: z.string().nullable(),
+  document_source: z.string().nullable(),
+  document_tag: z.string().nullable(),
+  fig_count: z.coerce.number(),
+});
+
+/**
+ * Resolve the deal's PRIMARY reference document — the model whose figures win
+ * first-write-wins in `normalizeFigures`.
+ *
+ * Ranking rule (deterministic, data-driven — no hardcoded document ids):
+ *   1. Only documents that actually contribute rows to `reference_figures`.
+ *   2. `document_source = 'pep'` first — the acquirer's own model is authoritative
+ *      over the vendor's sellside model (same policy as merge-findings.ts, which
+ *      treats `document_source = 'pep'` as an objective source and `'sellside'`
+ *      as an advocacy source).
+ *   3. Then `document_tag = 'financial_model'`.
+ *   4. Then the document contributing the most reference_figures rows.
+ *   5. Then `document_id` ascending, so the result is stable across runs.
+ *
+ * Returns null when the deal has no reference_figures at all — callers then fall
+ * back to the sentinel uuid, which makes the CASE arm a no-op and leaves ordering
+ * to (sheet_name, period) exactly as before.
+ */
+export async function resolvePrimaryReferenceDoc(
+  queryFn: (sql: string, schema: any, params: any[], meta?: { label: string }) => Promise<any[]>,
+  dealId: string,
+): Promise<{ documentId: string; fileName: string | null; source: string | null; figCount: number } | null> {
+  const rows = await queryFn(
+    `SELECT rf.document_id,
+            d.file_name,
+            d.document_source,
+            d.document_tag,
+            count(*) AS fig_count
+     FROM reference_figures rf
+     LEFT JOIN documents d ON d.id = rf.document_id
+     WHERE rf.deal_id = $1
+       AND rf.sheet_name NOT IN ('Recent_acquisition_overlay')
+     GROUP BY rf.document_id, d.file_name, d.document_source, d.document_tag
+     ORDER BY CASE WHEN d.document_source = 'pep' THEN 0 ELSE 1 END,
+              CASE WHEN d.document_tag = 'financial_model' THEN 0 ELSE 1 END,
+              count(*) DESC,
+              rf.document_id ASC
+     LIMIT 1`,
+    PrimaryDocRow,
+    [dealId],
+    { label: "Resolve primary reference document (provenance ranking)" }
+  );
+
+  if (rows.length === 0) return null;
+  const top = rows[0] as z.infer<typeof PrimaryDocRow>;
+  return {
+    documentId: top.document_id,
+    fileName: top.file_name,
+    source: top.document_source,
+    figCount: top.fig_count,
+  };
+}
+
 /**
  * Load reference_figures from DB and convert to Figure[] with prenorm-encoded names.
  * Provenance-ranked: primary document first (first-write-wins in normalizeFigures).
@@ -327,11 +388,27 @@ export async function runReconciliationPipeline(
 ): Promise<ReconciliationPipelineResult> {
   const { ctx, dealId, ledger, baseFigures, discrepancies, queryFn, timeBudgetMs, startTime, primaryDocId } = input;
 
+  // --- Step 0: Resolve primary reference document ---
+  // Production call sites (pipeline-core Step 0.8b, post-merge-finalization) do not
+  // know which model is authoritative, so resolve it here rather than making every
+  // caller thread it through. An explicit `primaryDocId` still wins when supplied.
+  let effectivePrimaryDocId = primaryDocId;
+  if (!effectivePrimaryDocId) {
+    const resolved = await resolvePrimaryReferenceDoc(queryFn, dealId);
+    effectivePrimaryDocId = resolved?.documentId;
+    console.log(
+      `[ReconciliationPipeline] Primary reference doc resolved: ` +
+      `${resolved ? `${resolved.documentId} (${resolved.fileName ?? "unknown"}, source=${resolved.source ?? "null"}, ${resolved.figCount} figures)` : "none — no reference_figures for deal"}`
+    );
+  } else {
+    console.log(`[ReconciliationPipeline] Primary reference doc supplied by caller: ${effectivePrimaryDocId}`);
+  }
+
   // --- Step 1: Load reference_figures ---
   const { bridgeFigures, refFigCoords, rawRows } = await loadReferenceFigures(
     queryFn,
     dealId,
-    primaryDocId,
+    effectivePrimaryDocId,
   );
 
   // --- Step 2: Metric derivation (MUST precede reconciliation) ---
