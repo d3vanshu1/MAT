@@ -107,6 +107,12 @@ export interface SerializedDiscrepancy {
   period: string;
   headline: string;
   materialityFloor: { abs: number; rel: number };
+  /**
+   * Actual/forecast qualifiers of the two compared columns. Optional because
+   * checkpoints written before qualified cross-agreement matching lack them.
+   */
+  qualifierA?: string;
+  qualifierB?: string;
   metrics: Array<{
     label: string;
     sourceA: number;

@@ -191,6 +191,164 @@ export function getReportExclusionReason(finding: any): ExcludedFinding["exclusi
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Executive header synthesis (Item 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rebuild the executive header deterministically from the FINAL reportable
+ * finding set.
+ *
+ * WHY: the LLM-authored `executive_header` is extracted from the merge tree
+ * BEFORE the reduction gate runs. The gate then drops findings, so the stored
+ * header routinely names risks that have no corresponding finding in the same
+ * artifact — which reads as fabrication and is the first thing a reader checks.
+ *
+ * INVARIANT: every risk named in the returned header is derived from an element
+ * of `reportableFindings`, so header↔finding correspondence is structural, not
+ * a validation step that can drift.
+ *
+ * Returns null when there is nothing to synthesize from (caller keeps its
+ * existing human-readable fallback).
+ */
+export function synthesizeExecutiveHeader(reportableFindings: any[]): string | null {
+  if (!Array.isArray(reportableFindings) || reportableFindings.length === 0) {
+    return null;
+  }
+
+  const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+  const rankOf = (f: any) => SEVERITY_RANK[String(f?.severity ?? "info")] ?? 2;
+
+  const ordered = [...reportableFindings].sort((a, b) => {
+    const d = rankOf(a) - rankOf(b);
+    if (d !== 0) return d;
+    return String(a?.title ?? "").localeCompare(String(b?.title ?? ""));
+  });
+
+  const counts = { critical: 0, warning: 0, info: 0 } as Record<string, number>;
+  for (const f of ordered) {
+    const sev = String(f?.severity ?? "info");
+    if (sev in counts) counts[sev] += 1;
+    else counts.info += 1;
+  }
+
+  const total = ordered.length;
+  const mixParts: string[] = [];
+  if (counts.critical > 0) mixParts.push(`${counts.critical} critical`);
+  if (counts.warning > 0) mixParts.push(`${counts.warning} warning`);
+  if (counts.info > 0) mixParts.push(`${counts.info} informational`);
+
+  const lines: string[] = [];
+  lines.push(
+    `This review surfaced ${total} reportable finding${total !== 1 ? "s" : ""}` +
+    (mixParts.length > 0 ? ` (${mixParts.join(", ")}).` : ".")
+  );
+  lines.push("");
+
+  for (const f of ordered) {
+    const title = String(f?.title ?? "").trim() || "Untitled finding";
+    const sev = String(f?.severity ?? "info");
+
+    // Prefer the severity anchor (the £/x figure justifying the rating); fall
+    // back to the first sentence of detail. Never invent language.
+    let anchor = typeof f?.severity_anchor === "string" ? f.severity_anchor.trim() : "";
+    if (!anchor && typeof f?.detail === "string") {
+      const firstSentence = f.detail.trim().split(/(?<=[.!?])\s/)[0] ?? "";
+      anchor = firstSentence.length > 220 ? `${firstSentence.slice(0, 217)}...` : firstSentence;
+    }
+    anchor = anchor.replace(/\s+/g, " ").trim();
+
+    lines.push(`- **${title}** (${sev})${anchor ? ` — ${anchor}` : ""}`);
+  }
+
+  lines.push("");
+  lines.push(
+    "Each item above corresponds to a numbered finding in this report. " +
+    "No risk is named here that is not evidenced below."
+  );
+
+  return lines.join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Source document resolution (Item 3b)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SOURCE_DOC_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/**
+ * Replace raw document UUIDs in `source_docs` with human-readable filenames.
+ *
+ * WHY: findings produced on the numeric-verification path carry
+ * `"<documentId>::<sheetName>"` in `source_docs` (built in numeric-verify-inline
+ * from table provenance), while findings produced on the claims path are
+ * resolved upstream via `resolveProvenance`. The result is inconsistent output
+ * where some findings cite a filename and others leak a UUID.
+ *
+ * Mutates the findings in place. Non-fatal: any unresolved UUID is left exactly
+ * as-is rather than replaced with a guess.
+ */
+export async function resolveSourceDocFilenames(
+  db: { query: (...args: any[]) => Promise<any[]> },
+  dealId: string,
+  findings: any[]
+): Promise<{ resolved: number; unresolved: number }> {
+  const docIds = new Set<string>();
+  for (const f of findings) {
+    const docs = Array.isArray(f?.source_docs) ? f.source_docs : [];
+    for (const sd of docs) {
+      if (typeof sd !== "string") continue;
+      const m = sd.match(SOURCE_DOC_UUID_PATTERN);
+      if (m) docIds.add(m[0].toLowerCase());
+    }
+  }
+
+  if (docIds.size === 0) return { resolved: 0, unresolved: 0 };
+
+  const nameById = new Map<string, string>();
+  try {
+    const rows = await db.query(
+      `SELECT id, file_name
+         FROM documents
+        WHERE deal_id = $1 AND id = ANY($2::uuid[])
+        LIMIT 500`,
+      z.object({ id: z.string(), file_name: z.string().nullable() }),
+      [dealId, Array.from(docIds)],
+      { label: "canonicalFinalize: resolve source doc UUIDs" }
+    );
+    for (const row of rows) {
+      if (row?.id && row?.file_name) nameById.set(String(row.id).toLowerCase(), row.file_name);
+    }
+  } catch (err: any) {
+    console.warn(
+      `[canonicalFinalize] source_docs UUID resolution failed (non-fatal): ${err?.message ?? err}`
+    );
+    return { resolved: 0, unresolved: docIds.size };
+  }
+
+  let resolved = 0;
+  let unresolved = 0;
+
+  for (const f of findings) {
+    if (!Array.isArray(f?.source_docs)) continue;
+    f.source_docs = f.source_docs.map((sd: unknown) => {
+      if (typeof sd !== "string") return sd;
+      const m = sd.match(SOURCE_DOC_UUID_PATTERN);
+      if (!m) return sd;
+      const fileName = nameById.get(m[0].toLowerCase());
+      if (!fileName) {
+        unresolved += 1;
+        return sd; // leave the UUID rather than fabricate a name
+      }
+      resolved += 1;
+      return fileName + sd.slice(m[0].length); // preserves "::Sheet Name" suffix
+    });
+  }
+
+  return { resolved, unresolved };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // §F — Reportable report formatter
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -245,7 +403,19 @@ export function formatCanonicalReport(
   lines.push("# Diligence Report");
   lines.push("");
   lines.push(`> **${total} reportable finding${total !== 1 ? "s" : ""}**`);
-  lines.push(`> Tier 1 (deal-relevant): ${tier1.length}  ·  Tier 2: ${tier2.length}  ·  Tier 3: ${tier3.length}`);
+  // Item 3a: three zeros is self-contradictory when tiering never ran for this
+  // module (materiality tiering applies to omission-audit modules only). Say so
+  // explicitly rather than printing a count line that reads as "nothing matters".
+  const tieredCount = tier1.length + tier2.length + tier3.length;
+  if (tieredCount === 0) {
+    lines.push(
+      `> Materiality tiers not assigned for this module — findings are reported untiered.`
+    );
+  } else {
+    lines.push(
+      `> Tier 1 (deal-relevant): ${tier1.length}  ·  Tier 2: ${tier2.length}  ·  Tier 3: ${tier3.length}`
+    );
+  }
   lines.push("");
 
   if (executiveHeader) {
@@ -365,11 +535,25 @@ export function formatCanonicalReport(
 
   // ── Other Findings (untiered — safety net, never drop) ─────────────────────
   if (other.length > 0) {
-    lines.push(`## Other Findings (${other.length})`);
+    // Item 3a: when tiering never ran for this module, every finding lands here.
+    // Calling them "Other Findings" while they are the module's principal
+    // findings is misleading — label the section for what it actually holds.
+    const isSoleSection =
+      tier1.length === 0 && tier2.length === 0 && tier3.length === 0 && framingChallenges.length === 0;
+    lines.push(isSoleSection ? `## Findings (${other.length})` : `## Other Findings (${other.length})`);
     lines.push("");
     for (const f of other) {
       lines.push(`### ${f.title || "Untitled Finding"}`);
       lines.push("");
+      const meta: string[] = [];
+      if (f.severity) meta.push(`**Severity:** ${f.severity}`);
+      if (Array.isArray(f.source_docs) && f.source_docs.length > 0) {
+        meta.push(`**Sources:** ${f.source_docs.slice(0, 4).join(", ")}`);
+      }
+      if (meta.length > 0) {
+        lines.push(`> ${meta.join("  ·  ")}`);
+        lines.push("");
+      }
       if (f.detail) {
         lines.push(f.detail);
         lines.push("");
@@ -557,6 +741,18 @@ export async function canonicalFinalize(
     `narrative_rejected=${enforcement.counts.narrative_rejected})`
   );
 
+  // ── STEP 3.5: Resolve raw document UUIDs in source_docs to filenames ──────
+  // Findings from the numeric-verification path carry "<documentId>::<sheet>";
+  // findings from the claims path are already resolved upstream. Normalize here
+  // so a single artifact never mixes filenames and UUIDs.
+  const sourceDocResolution = await resolveSourceDocFilenames(db, dealId, enforcedFindings);
+  if (sourceDocResolution.resolved > 0 || sourceDocResolution.unresolved > 0) {
+    console.log(
+      `[canonicalFinalize][source_docs] resolved=${sourceDocResolution.resolved}, ` +
+      `unresolved=${sourceDocResolution.unresolved}`
+    );
+  }
+
   // ── STEP 4: Classify reportable vs. excluded findings (§F) ────────────────
   const reportableFindings: any[] = [];
   const excludedFindings: ExcludedFinding[] = [];
@@ -598,11 +794,26 @@ export async function canonicalFinalize(
     checkpoint_status: checkpointStatus,
   };
 
+  // ── STEP 5.5: Regenerate executive header from the FINAL finding set ──────
+  // The inbound `executiveHeader` was extracted from the merge tree BEFORE the
+  // reduction gate ran, so it can name risks the gate subsequently dropped.
+  // Rebuilding it here from `reportableFindings` makes header↔finding
+  // correspondence structural rather than something that has to be validated.
+  const regeneratedHeader = synthesizeExecutiveHeader(reportableFindings);
+  const effectiveHeader = regeneratedHeader ?? executiveHeader;
+  if (regeneratedHeader && regeneratedHeader !== executiveHeader) {
+    console.log(
+      `[canonicalFinalize][header] regenerated from ${reportableFindings.length} ` +
+      `reportable finding(s) — pre-gate header discarded ` +
+      `(${(executiveHeader ?? "").length} → ${regeneratedHeader.length} chars)`
+    );
+  }
+
   // ── STEP 6: Format report from reportable findings only ──────────────────
   // ALWAYS rebuild report from canonical reportable records (MAT-F06 §1).
   // preFormattedReport is never used as authoritative — it may contain excluded
   // items, F05-rejected text, or unlinked entries that passed through LLM formatting.
-  const reportMarkdown = formatCanonicalReport(executiveHeader, reportableFindings, {
+  const reportMarkdown = formatCanonicalReport(effectiveHeader, reportableFindings, {
     degradedConditions,
     excludedCount: excludedFindings.length,
   });
@@ -655,7 +866,7 @@ export async function canonicalFinalize(
     report: {
       markdown: reportMarkdown,
       finding_count: reportableFindings.length,
-      executive_header: executiveHeader,
+      executive_header: effectiveHeader,
     },
     identity: {
       semantic_hash: semanticHash,
@@ -683,7 +894,7 @@ export async function canonicalFinalize(
            WHERE id = $1`,
           [
             artifactId,
-            executiveHeader,
+            effectiveHeader,
             allFindingsJson,
             reportMarkdown,
           ],
@@ -699,7 +910,7 @@ export async function canonicalFinalize(
         z.object({ id: z.string() }),
         [
           runId,
-          executiveHeader,
+          effectiveHeader,
           allFindingsJson,
           reportMarkdown,
         ],

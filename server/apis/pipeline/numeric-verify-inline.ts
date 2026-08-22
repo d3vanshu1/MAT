@@ -78,6 +78,14 @@ export interface Discrepancy {
   headline: string;
   /** Materiality floor used for tiering (stated in headline for transparency) */
   materialityFloor: { abs: number; rel: number };
+  /**
+   * Actual/forecast qualifier of the source A columns compared for this period
+   * (e.g. "2026 actual"). Undefined for discrepancies produced before qualified
+   * matching existed.
+   */
+  qualifierA?: string;
+  /** Actual/forecast qualifier of the source B columns compared for this period. */
+  qualifierB?: string;
   metrics: Array<{
     label: string;
     sourceA: number;
@@ -347,6 +355,18 @@ function findDuplicateLabels(entries: CrossAgreementEntry[]): Set<string> {
 }
 
 /**
+ * Render a normalized period ("2026 actual", "2026") for prose headlines.
+ * "2026 actual" → "FY2026 (actual basis)"; "2026" → "FY2026".
+ * Non-year periods are passed through unchanged.
+ */
+function formatPeriodForHeadline(period: string): string {
+  const match = period.match(/^(20\d{2})(?:\s+(actual|forecast|budget|plan))?$/);
+  if (!match) return period;
+  const [, year, qualifier] = match;
+  return qualifier ? `FY${year} (${qualifier} basis)` : `FY${year}`;
+}
+
+/**
  * Generate a headline finding for a period's material divergences.
  * Leads with EBITDA/revenue impact.
  */
@@ -375,7 +395,7 @@ function generateHeadline(
   };
 
   const parts: string[] = [];
-  parts.push(`Live model revised vs frozen snapshot in FY${period}`);
+  parts.push(`Live model revised vs frozen snapshot in ${formatPeriodForHeadline(period)}`);
   if (ebitdaLine) parts.push(`${ebitdaLine.label} ${formatDelta(ebitdaLine)}`);
   if (revenueLine) parts.push(`revenue ${formatDelta(revenueLine)}`);
   parts.push(`(${materialMetrics.length} material movement${materialMetrics.length === 1 ? "" : "s"} above \u00a3${(materialityFloor.abs / 1000).toFixed(0)}k/\u200B${(materialityFloor.rel * 100).toFixed(0)}%)`);
@@ -623,12 +643,24 @@ function runCrossAgreement(
   // Detect duplicate labels in source A (lower-confidence matches when label appears >1 time)
   const duplicateLabelsA = findDuplicateLabels(entriesA);
 
-  // Build lookup maps: key = "normalizedLabel::baseYear"
-  // Cross-agreement uses BASE YEAR (no qualifier) so that live-model "actual" columns
-  // match hardcoded-model "forecast" columns for the same fiscal year.
-  // First-occurrence-wins per base-year avoids both:
-  //   (a) downstream rows with same label shadowing structural rows
-  //   (b) forecast columns shadowing actual columns within one sheet (actual comes first)
+  // Build lookup maps: key = "normalizedLabel::qualifiedPeriod"
+  //
+  // Cross-agreement uses the FULLY QUALIFIED period (year plus actual/forecast/budget/plan
+  // qualifier, as produced by normalizePeriod) so a live-model "2026 Actual" column is only
+  // ever compared against a "2026 Actual" column in the hardcoded model — never against
+  // "2026 Forecast".
+  //
+  // Rationale: comparing an actual against a frozen forecast for the same fiscal year is not
+  // a data discrepancy — it is the expected difference between a plan and its realisation.
+  // Matching on base year alone (the prior behaviour) manufactured a family of false findings
+  // whose entire content was "forecast != actual".
+  //
+  // Unqualified period headers (bare "2026") pair only with other unqualified headers. A
+  // qualified/unqualified pair is intentionally skipped rather than guessed at; the count of
+  // such skipped pairs is logged below so the loss of coverage stays visible.
+  //
+  // First-occurrence-wins per key still avoids downstream rows with the same label shadowing
+  // structural rows.
   //
   // CRITICAL: Only use annual entries for cross-agreement. Monthly/sub-annual columns
   // (detected by extractAllNumericEntries) have per-month values that are not comparable
@@ -638,14 +670,14 @@ function runCrossAgreement(
   const mapA = new Map<string, CrossAgreementEntry>();
   for (const e of entriesA) {
     if (!e.isAnnual) continue; // Skip sub-annual entries
-    const key = `${e.label.trim().toLowerCase()}::${periodBaseYear(e.period)}`;
+    const key = `${e.label.trim().toLowerCase()}::${e.period}`;
     if (!mapA.has(key)) mapA.set(key, e);
   }
 
   const mapB = new Map<string, CrossAgreementEntry>();
   for (const e of entriesB) {
     if (!e.isAnnual) continue; // Skip sub-annual entries
-    const key = `${e.label.trim().toLowerCase()}::${periodBaseYear(e.period)}`;
+    const key = `${e.label.trim().toLowerCase()}::${e.period}`;
     if (!mapB.has(key)) mapB.set(key, e);
   }
 
@@ -655,6 +687,41 @@ function runCrossAgreement(
     `[NumericInline:CrossAgreement] Map sizes: A=${mapA.size}, B=${mapB.size}, shared=${sharedKeys.length}. ` +
     `Sample shared keys: ${sharedKeys.slice(0, 5).join("; ")}`
   );
+
+  // Diagnostic: count label/base-year pairs that exist on both sides but did NOT pair because
+  // the actual/forecast qualifiers differ. These are deliberately not compared (see above), but
+  // the count must stay visible so a silent collapse in coverage is detectable.
+  {
+    const baseKeysB = new Map<string, Set<string>>();
+    for (const [key, e] of mapB) {
+      const baseKey = `${e.label.trim().toLowerCase()}::${periodBaseYear(e.period)}`;
+      if (!baseKeysB.has(baseKey)) baseKeysB.set(baseKey, new Set());
+      baseKeysB.get(baseKey)!.add(key);
+    }
+
+    let qualifierMismatchSkipped = 0;
+    const skippedSamples: string[] = [];
+    for (const [key, e] of mapA) {
+      if (mapB.has(key)) continue;
+      const baseKey = `${e.label.trim().toLowerCase()}::${periodBaseYear(e.period)}`;
+      const candidates = baseKeysB.get(baseKey);
+      if (!candidates || candidates.size === 0) continue;
+      qualifierMismatchSkipped++;
+      if (skippedSamples.length < 5) {
+        skippedSamples.push(`${key} vs [${[...candidates].join(" | ")}]`);
+      }
+    }
+
+    if (qualifierMismatchSkipped > 0) {
+      console.log(
+        `[NumericInline:CrossAgreement] Qualifier-mismatch pairs skipped: ${qualifierMismatchSkipped} ` +
+        `(same label + fiscal year on both sides, but differing actual/forecast qualifier — not comparable). ` +
+        `Samples: ${skippedSamples.join("; ")}`
+      );
+    } else {
+      console.log(`[NumericInline:CrossAgreement] Qualifier-mismatch pairs skipped: 0`);
+    }
+  }
 
   // Compare: find keys present in both maps with divergence > threshold
   // Group divergences by period for rolled-up reporting
@@ -666,6 +733,8 @@ function runCrossAgreement(
     relDiffPct: number;
     refA: string;
     refB: string;
+    qualifierA?: string;
+    qualifierB?: string;
   }>>();
 
   let comparedCount = 0;
@@ -718,7 +787,10 @@ function runCrossAgreement(
     // (i.e., flag only when the difference is meaningful in both absolute and relative terms)
     if (absDiff > config.absThreshold && relDiff > config.relThreshold) {
       divergedCount++;
-      const period = periodBaseYear(entryA.period);
+      // Use the fully qualified period (e.g. "2026 actual") as the rollup key so the
+      // reported discrepancy states which basis was compared. Both sides carry the same
+      // qualifier by construction, since the map key now includes it.
+      const period = entryA.period;
       if (!divergencesByPeriod.has(period)) divergencesByPeriod.set(period, []);
       divergencesByPeriod.get(period)!.push({
         label: entryA.label,
@@ -728,6 +800,8 @@ function runCrossAgreement(
         relDiffPct: relDiff * 100,
         refA: entryA.sourceRef,
         refB: entryB.sourceRef,
+        qualifierA: entryA.period,
+        qualifierB: entryB.period,
       });
     } else if (absDiff === 0) {
       identicalCount++;
@@ -758,6 +832,20 @@ function runCrossAgreement(
 
     // Sort by absolute difference descending
     divergences.sort((a, b) => b.absDiff - a.absDiff);
+
+    // Invariant guard: after the qualified-key change, both sides of every pair must carry the
+    // same actual/forecast qualifier. If this ever trips, the key construction has regressed and
+    // forecast-vs-actual noise is being reported as a discrepancy again.
+    const qualifierMismatches = divergences.filter(
+      (d) => d.qualifierA && d.qualifierB && d.qualifierA !== d.qualifierB
+    );
+    if (qualifierMismatches.length > 0) {
+      console.error(
+        `[NumericInline:CrossAgreement] INVARIANT VIOLATION in period "${period}": ` +
+        `${qualifierMismatches.length} pair(s) compared across differing actual/forecast qualifiers. ` +
+        `Samples: ${qualifierMismatches.slice(0, 3).map((d) => `${d.label} (${d.qualifierA} vs ${d.qualifierB})`).join("; ")}`
+      );
+    }
 
     // Classify each metric with tier + flags
     const taggedMetrics = divergences.map((d) => {
@@ -801,6 +889,12 @@ function runCrossAgreement(
       period,
       headline,
       materialityFloor,
+      // Both sides carry the same qualifier by construction (the map key includes it);
+      // the invariant guard above fires if that ever stops being true. Carried on the
+      // discrepancy so downstream labelling can distinguish a like-for-like restatement
+      // from a genuine cross-basis comparison without inferring it from a filename.
+      qualifierA: divergences[0]?.qualifierA,
+      qualifierB: divergences[0]?.qualifierB,
       metrics: taggedMetrics,
     });
   }

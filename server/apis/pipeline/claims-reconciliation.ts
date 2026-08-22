@@ -1359,12 +1359,27 @@ export async function runReconciliation(
     const maxDelta = Math.max(...materialMetrics.map(m => m.absDiff));
     const severity: "critical" | "warning" | "info" = maxDelta >= 1_000_000 ? "warning" : "info";
 
-    // A3: Detect forecast-vs-actual pattern and relabel
+    // A3: Detect forecast-vs-actual pattern and relabel.
+    //
+    // The relabel must key off the actual/forecast qualifiers of the two columns that were
+    // compared — NOT off the sheet filename. The previous condition tested whether any source
+    // string matched /hardcoded/i, which is unconditionally true for the SCG config (source B's
+    // sheet is literally "FS Summary (hardcoded)"), so every cross-version finding was titled
+    // "Forecast vs realised actual" regardless of what was compared.
+    //
+    // Since cross-agreement matching became qualifier-aware, a surviving discrepancy is a
+    // like-for-like comparison (2025 actual vs 2025 actual) — a genuine restatement, which must
+    // NOT be framed as forecast-vs-actual. Only a true cross-basis pair earns that title.
+    //
+    // Missing qualifiers (discrepancies stored before qualified matching existed) are treated as
+    // like-for-like: the neutral "Cross-version revision" title is the safer default.
     const sources = disc.sources ?? [];
-    const hasHardcoded = sources.some((s: string) => /hardcoded/i.test(s));
+    const basesDiffer = Boolean(
+      disc.qualifierA && disc.qualifierB && disc.qualifierA !== disc.qualifierB
+    );
     let findingTitle: string;
     let findingDetail: string;
-    if (hasHardcoded) {
+    if (basesDiffer) {
       // FS Summary (hardcoded) = frozen forecast; FS Summary = realised actual
       findingTitle = `Forecast vs realised actual: ${disc.period} — ${materialMetrics.length} material movement${materialMetrics.length === 1 ? "" : "s"}`;
       findingDetail = `${disc.period}: the frozen forecast (${sources.find((s: string) => /hardcoded/i.test(s)) ?? "hardcoded sheet"}) ` +
