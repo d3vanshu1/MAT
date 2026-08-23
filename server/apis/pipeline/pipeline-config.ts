@@ -92,6 +92,41 @@ export const RESUME_JOB_TIME_BUDGET_MS = EFFECTIVE_CAP_MS - PLATFORM_HEADROOM_MS
 export const STALENESS_THRESHOLD_MINUTES = Math.ceil(EFFECTIVE_CAP_MS / 60_000) + 2; // 7 at 300s cap
 
 // ===========================================================================
+// Merge Tree Topology
+// ===========================================================================
+
+/** Merge tree fan-in: how many child nodes feed one parent node.
+ *
+ *  SINGLE SOURCE OF TRUTH. Every path that walks, builds, validates or resumes
+ *  the merge tree MUST import this constant. Do not re-declare it locally.
+ *
+ *  ── Why 2 (2026-08-23) ────────────────────────────────────────────────────
+ *  The live merge path (pipeline-core) and the publication gate
+ *  (tree-completion-validator) have always used 2 — a binary tree. The round
+ *  manifests written by real runs confirm it: run 13e9c0d6's eight round
+ *  manifests all record group-size-2 math (round 6: groupCount=4 with 1
+ *  singleton carry).
+ *
+ *  The recovery paths (resume-merge-recovery, adaptive-merge-recovery) had
+ *  independently drifted to 4. That drift silently corrupted run 13e9c0d6:
+ *  rebuilding L6:0 with fan-in 4 assigned it children L5:0–L5:3 instead of
+ *  L5:0–L5:1, so it absorbed L6:1's rightful children. The result was a
+ *  double-counted node (129 findings vs the ~50 its true children hold), an
+ *  oversized L7:0, and a truncated L8:0 root that the Fix 25 gate correctly
+ *  refused to publish. Four nodes had to be deleted and rebuilt.
+ *
+ *  A recovery path whose fan-in disagrees with the path that built the tree
+ *  does not repair the tree — it rewrites it into a different, wrong shape.
+ *  Hence: one constant, imported everywhere.
+ *
+ *  NOTE: validate-tree-root.ts is a known remaining exception. It still
+ *  declares 4 locally because it also hardcodes a 4-level topology
+ *  (expectedL1..expectedL4). Pointing it here without generalizing its level
+ *  handling would make it silently ignore levels 5-8 on deeper trees, which is
+ *  worse than its current state. Tracked separately. */
+export const MERGE_GROUP_SIZE = 2;
+
+// ===========================================================================
 // Feature Flags (Stabilization Batch)
 // ===========================================================================
 

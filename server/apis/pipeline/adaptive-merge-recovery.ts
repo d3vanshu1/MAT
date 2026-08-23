@@ -31,7 +31,7 @@ import { parseCanonicalFindings, type CanonicalFinding } from "./canonical-findi
 import { validateMergeContract } from "./merge-contract-validator.js";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
 import { computeContentHash } from "./source-snapshot.js";
-import { EFFECTIVE_CAP_MS } from "./pipeline-config.js";
+import { EFFECTIVE_CAP_MS, MERGE_GROUP_SIZE } from "./pipeline-config.js";
 import {
   requireFrozenManifest,
   getValidMergeTreeLevels,
@@ -48,7 +48,10 @@ const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const MERGE_GROUP_SIZE = 4;
+// MERGE_GROUP_SIZE is imported from pipeline-config.ts (single source of truth).
+// It was locally declared as 4 here until 2026-08-23; that disagreed with the
+// fan-in of 2 used by pipeline-core to BUILD the tree. Re-exported below for
+// tests that derive expected topology from it.
 const MAX_FINDINGS_PER_SUBGROUP = 6;
 const MAX_TOKENS_CONSOLIDATION = 4096;
 const MAX_TOKENS_LEVEL1 = 8000;

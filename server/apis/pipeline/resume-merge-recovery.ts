@@ -30,8 +30,9 @@ import { getPipelineVersion } from "./pipeline-version.js";
 import { parseCanonicalFindings, type CanonicalFinding } from "./canonical-finding.js";
 import { validateMergeContract } from "./merge-contract-validator.js";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
+import { dedupCarryForward } from "./finding-coordinate-dedup.js";
 import type { PipelineContext } from "./pipeline-config.js";
-import { EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS } from "./pipeline-config.js";
+import { EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MERGE_GROUP_SIZE } from "./pipeline-config.js";
 
 // ---------------------------------------------------------------------------
 // Integration IDs
@@ -42,7 +43,10 @@ const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const MERGE_GROUP_SIZE = 4;
+// MERGE_GROUP_SIZE is imported from pipeline-config.ts (single source of truth).
+// It was locally declared as 4 here until 2026-08-23; that disagreed with the
+// fan-in of 2 used by pipeline-core to BUILD the tree, so this recovery path
+// rebuilt nodes with the wrong children and corrupted run 13e9c0d6.
 const MAX_FINDINGS_PER_CALL = 6;
 const MAX_TOKENS_CONSOLIDATION = 4096;
 const MAX_TOKENS_LEVEL1 = 8000;
@@ -878,7 +882,40 @@ async function consolidateFindings(
     if (missing.length > 0) {
       console.warn(`[ResumeMergeRecovery] ${missing.length} input finding_ids not accounted for — carrying forward`);
       const missingFindings = findings.filter(f => missing.includes(f.finding_id));
-      contractResult.acceptedFindings.push(...missingFindings);
+
+      // Fix 25: dedup-before-carry — parity with the Fix 16 block in pipeline-core.ts.
+      // This worker used to append every unaccounted finding verbatim, which is the
+      // same accumulation mechanism that deadlocked R13e9c0d6 at MAX_PARTIAL_RETRIES.
+      // Before appending, check whether this sub-group's output already holds a
+      // finding at the same coordinate (metric|scope|period) that passes the
+      // 14-field compatibility gate; if so, merge the PROVENANCE (claim_ids,
+      // source_docs, evidence[], structured_impact[]) rather than the finding.
+      //
+      // The absorbed id is recorded in the representative's merged_from_finding_ids,
+      // so this file's "no original finding_id disappears" safety invariant still
+      // holds — duplicates become provenance instead of payload.
+      //
+      // Fail-safe toward preservation: an undetermined coordinate or a failing
+      // gate means carry forward verbatim, exactly as before.
+      const dedupResult = dedupCarryForward({
+        findings: contractResult.acceptedFindings as any,
+        carried: missingFindings as any,
+      });
+      contractResult.acceptedFindings = dedupResult.findings as any;
+      contractResult.acceptedFindings.push(...(dedupResult.carryForward as any));
+
+      if (dedupResult.absorbedCount > 0) {
+        console.log(
+          `[ResumeMergeRecovery][Fix25] Absorbed ${dedupResult.absorbedCount}/${missingFindings.length} ` +
+          `carried finding(s) into existing equivalents at L${workUnit.level}:N${workUnit.nodeIndex}`
+        );
+      }
+      if (dedupResult.undeterminedCoordinateCount > 0) {
+        console.log(
+          `[ResumeMergeRecovery][Fix25] ${dedupResult.undeterminedCoordinateCount} carried finding(s) had an ` +
+          `undetermined coordinate — carried forward verbatim`
+        );
+      }
     }
 
     // OA-03: Canonical family dedup after merge contract passes
@@ -945,6 +982,42 @@ async function processSplitNode(
       allResults.push(...subResult);
     }
     groupsProcessed++;
+  }
+
+  // Fix 25: recombination dedup.
+  //
+  // Every sub-group above was consolidated in isolation, so two equivalents that
+  // landed in different groups have never been compared to each other — neither
+  // the per-group coordinate dedup nor the per-group OA-03 family dedup can see
+  // across a group boundary. `allResults` is a plain concatenation, and this is
+  // the only point where the whole node's findings sit in one array.
+  //
+  // Collapse across coordinates here (metric|scope|period, gated by the same
+  // 14-field compatibility check), merging provenance rather than dropping
+  // findings, so this node hands its parent a reduced set instead of the sum of
+  // its parts. Without this pass a split node cannot reduce at all, which is how
+  // the upper tree went 186 → 185 → 156 → 156 with no net reduction.
+  //
+  // Absorbed ids live on in the representative's merged_from_finding_ids, so the
+  // "no original finding_id disappears" invariant in this file's header holds.
+  if (allResults.length > 1) {
+    const recombined = dedupCarryForward({ findings: [], carried: allResults as any });
+    const survivors = [...recombined.findings, ...recombined.carryForward] as CanonicalFinding[];
+
+    if (recombined.absorbedCount > 0) {
+      console.log(
+        `[ResumeMergeRecovery][Fix25] Recombination dedup at L${workUnit.level}:N${workUnit.nodeIndex}: ` +
+        `${allResults.length} → ${survivors.length} findings (${recombined.absorbedCount} absorbed as provenance)`
+      );
+    }
+    if (recombined.undeterminedCoordinateCount > 0) {
+      console.log(
+        `[ResumeMergeRecovery][Fix25] ${recombined.undeterminedCoordinateCount} finding(s) at L${workUnit.level}:N${workUnit.nodeIndex} ` +
+        `had an undetermined coordinate — retained verbatim`
+      );
+    }
+
+    return survivors;
   }
 
   return allResults;

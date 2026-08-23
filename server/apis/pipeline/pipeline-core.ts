@@ -85,7 +85,7 @@ import { runAbsenceVerificationPhase } from "./absence-verification-phase.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
-import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE } from "./pipeline-config.js";
+import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE, MERGE_GROUP_SIZE } from "./pipeline-config.js";
 import { extractFindingsJsonTolerant } from "./extract-findings-tolerant.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
 import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isAnalysisComplete, detectMismatches, isWorkerEnabledForRun, WORKER_BATCH_SIZE } from "./analysis-worker.js";
@@ -115,7 +115,9 @@ const MERGE_MAX_TOKENS = 15000;
 
 const ANALYSIS_CONCURRENCY = 15;
 const MERGE_CONCURRENCY = 5;
-const MERGE_GROUP_SIZE = 2;
+// MERGE_GROUP_SIZE is imported from pipeline-config.ts (single source of truth).
+// This file BUILDS the tree, so its fan-in is authoritative; the shared constant
+// preserves the value of 2 that has always been used here.
 const MAX_MERGE_GROUP_FAILURES = 5; // Skip (use fallback) after this many error checkpoints across invocations
 const MAX_PARTIAL_RETRIES = 2; // Accept truncated merge checkpoints after this many re-merges still truncate
 const MERGE_NODE_TEXT_CAP = 2000; // Max chars per node's text in merge input — prevents token overflow

@@ -42,11 +42,13 @@ function makeCompleteNodes(leafCount: number): MergeNodeRecord[] {
 describe("Test A: Incomplete tree — 205/381 analyses, L3:0 proposed as final", () => {
   const expectedIds = makeIds(381);
   const completedIds = makeIds(205); // only first 205
-  const MERGE_GROUP_SIZE = 4;
 
-  // 381 analyses → L1: ceil(381/4)=96, L2: ceil(96/4)=24, L3: ceil(24/4)=6, L4: ceil(6/4)=2, L5: ceil(2/4)=1
-  // Natural root = L5
-  // Simulate: L1 has some complete, L2 has some, L3 has only node 0 complete
+  // Fan-in 2 → 381 analyses: L1..L9 = 191, 96, 48, 24, 12, 6, 3, 2, 1
+  // Natural root = L9
+  // Simulate a partially-built tree whose deepest complete node is L3:0.
+  // The node counts below are deliberately arbitrary partial progress — the
+  // point of Test A is that a node far below the natural root must never be
+  // accepted as final, whatever the level populations look like.
   const mergeNodes: MergeNodeRecord[] = [];
   // L1: 53 complete nodes (from 205 analyses → ceil(205/4) = 52 groups; but some may be at higher indices)
   for (let i = 0; i < 52; i++) {
@@ -219,8 +221,16 @@ describe("computeExpectedTopology", () => {
     expect(computeExpectedTopology(1)).toEqual([]);
   });
 
-  it("returns correct topology for 4 leaves (MERGE_GROUP_SIZE)", () => {
+  it("returns correct topology for 4 leaves", () => {
     const topo = computeExpectedTopology(4);
+    // Fan-in 2: L1: ceil(4/2) = 2, L2: ceil(2/2) = 1
+    expect(topo.length).toBe(2);
+    expect(topo[0]).toMatchObject({ level: 1, expected_nodes: 2 });
+    expect(topo[1]).toMatchObject({ level: 2, expected_nodes: 1 });
+  });
+
+  it("returns correct topology for 2 leaves (single merge)", () => {
+    const topo = computeExpectedTopology(2);
     expect(topo).toEqual([
       { level: 1, expected_nodes: 1, complete_nodes: 0, partial_nodes: 0, failed_nodes: 0, missing_nodes: 0 },
     ]);
@@ -228,25 +238,28 @@ describe("computeExpectedTopology", () => {
 
   it("returns correct topology for 5 leaves", () => {
     const topo = computeExpectedTopology(5);
-    // L1: ceil(5/4) = 2, L2: ceil(2/4) = 1
-    expect(topo.length).toBe(2);
-    expect(topo[0].expected_nodes).toBe(2);
-    expect(topo[1].expected_nodes).toBe(1);
+    // L1: ceil(5/2) = 3, L2: ceil(3/2) = 2, L3: ceil(2/2) = 1
+    expect(topo.length).toBe(3);
+    expect(topo[0].expected_nodes).toBe(3);
+    expect(topo[1].expected_nodes).toBe(2);
+    expect(topo[2].expected_nodes).toBe(1);
   });
 
-  it("returns correct topology for 381 leaves (SCG case)", () => {
+  it("returns correct topology for 205 leaves (SCG contradiction_check, run 13e9c0d6)", () => {
+    const topo = computeExpectedTopology(205);
+    // Fan-in 2: 205 → 103 → 52 → 26 → 13 → 7 → 4 → 2 → 1
+    // This matches the eight round manifests the real run wrote, including
+    // round 6's groupCount=4 with 1 singleton carry (L5 had 7 nodes: 3 pairs
+    // + 1 carried singleton → L6 had exactly 4 nodes).
+    expect(topo.map(l => l.expected_nodes)).toEqual([103, 52, 26, 13, 7, 4, 2, 1]);
+    expect(topo.length).toBe(8);
+  });
+
+  it("returns correct topology for 381 leaves", () => {
     const topo = computeExpectedTopology(381);
-    // L1: ceil(381/4) = 96
-    // L2: ceil(96/4) = 24
-    // L3: ceil(24/4) = 6
-    // L4: ceil(6/4) = 2
-    // L5: ceil(2/4) = 1
-    expect(topo.length).toBe(5);
-    expect(topo[0]).toMatchObject({ level: 1, expected_nodes: 96 });
-    expect(topo[1]).toMatchObject({ level: 2, expected_nodes: 24 });
-    expect(topo[2]).toMatchObject({ level: 3, expected_nodes: 6 });
-    expect(topo[3]).toMatchObject({ level: 4, expected_nodes: 2 });
-    expect(topo[4]).toMatchObject({ level: 5, expected_nodes: 1 });
+    // Fan-in 2: 381 → 191 → 96 → 48 → 24 → 12 → 6 → 3 → 2 → 1
+    expect(topo.map(l => l.expected_nodes)).toEqual([191, 96, 48, 24, 12, 6, 3, 2, 1]);
+    expect(topo.length).toBe(9);
   });
 });
 
@@ -259,17 +272,24 @@ describe("computeExpectedRootLevel", () => {
     expect(computeExpectedRootLevel(1)).toBe(0);
   });
 
-  it("returns 1 for 2-4 leaves", () => {
+  it("returns 1 for 2 leaves", () => {
     expect(computeExpectedRootLevel(2)).toBe(1);
-    expect(computeExpectedRootLevel(4)).toBe(1);
   });
 
-  it("returns 2 for 5-16 leaves", () => {
-    expect(computeExpectedRootLevel(5)).toBe(2);
-    expect(computeExpectedRootLevel(16)).toBe(2);
+  it("returns 2 for 3-4 leaves", () => {
+    expect(computeExpectedRootLevel(3)).toBe(2);
+    expect(computeExpectedRootLevel(4)).toBe(2);
   });
 
-  it("returns 5 for 381 leaves (SCG case)", () => {
-    expect(computeExpectedRootLevel(381)).toBe(5);
+  it("returns 4 for 16 leaves", () => {
+    expect(computeExpectedRootLevel(16)).toBe(4);
+  });
+
+  it("returns 8 for 205 leaves (SCG contradiction_check, run 13e9c0d6)", () => {
+    expect(computeExpectedRootLevel(205)).toBe(8);
+  });
+
+  it("returns 9 for 381 leaves", () => {
+    expect(computeExpectedRootLevel(381)).toBe(9);
   });
 });

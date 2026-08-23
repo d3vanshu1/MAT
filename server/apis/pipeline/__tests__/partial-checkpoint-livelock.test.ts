@@ -27,7 +27,10 @@ function assertEq<T>(actual: T, expected: T, label: string): void {
 // ─── Constants matching production ───────────────────────────────────────────
 
 const MAX_PARTIAL_RETRIES = 2;
-const MERGE_GROUP_SIZE = 4;
+// NOTE: a local `MERGE_GROUP_SIZE = 4` used to sit here. It was unreferenced by
+// any test in this file and disagreed with production (2), so it was removed
+// on 2026-08-23 rather than corrected — a stale duplicate is worse than none.
+// The single source of truth is MERGE_GROUP_SIZE in pipeline-config.ts.
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

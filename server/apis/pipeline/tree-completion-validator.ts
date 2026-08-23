@@ -37,6 +37,7 @@
  */
 
 import { z } from "@superblocksteam/sdk-api";
+import { MERGE_GROUP_SIZE } from "./pipeline-config.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,7 +138,9 @@ export interface AnalysisRecord {
 // ---------------------------------------------------------------------------
 
 export const VALIDATOR_VERSION = "1.0.0-publication-gate";
-const MERGE_GROUP_SIZE = 2;
+// MERGE_GROUP_SIZE is imported from pipeline-config.ts (single source of truth).
+// This gate must agree with the fan-in pipeline-core uses to build the tree;
+// the shared constant preserves the value of 2 that has always been used here.
 
 // ---------------------------------------------------------------------------
 // Core Validation Logic

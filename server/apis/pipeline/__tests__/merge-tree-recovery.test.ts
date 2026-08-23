@@ -71,8 +71,14 @@ assertNotContains(resumeMergeRecovery, "analyzeChunk", "No analysis in recovery"
 assertContains(resumeMergeRecovery, "childrenReady", "Child completeness check exists");
 assertContains(resumeMergeRecovery, "childMeta?.status === \"complete\"", "Parent waits for complete children");
 
-// A5: Nodes at correct level counts for 205/4 fan-in
-assertContains(resumeMergeRecovery, "MERGE_GROUP_SIZE = 4", "MERGE_GROUP_SIZE=4 for fan-in=4");
+// A5: Fan-in comes from the shared constant, not a local re-declaration.
+// Before 2026-08-23 this file asserted "MERGE_GROUP_SIZE = 4" — a local literal
+// that disagreed with the fan-in of 2 pipeline-core uses to build the tree, and
+// which corrupted run 13e9c0d6 when the recovery path rebuilt nodes with the
+// wrong children. The invariant now under test is that recovery imports the
+// value rather than choosing its own.
+assertContains(resumeMergeRecovery, "MERGE_GROUP_SIZE } from \"./pipeline-config.js\"", "Fan-in imported from pipeline-config, not re-declared");
+assertNotContains(resumeMergeRecovery, "const MERGE_GROUP_SIZE =", "No local fan-in re-declaration");
 assertContains(resumeMergeRecovery, "Math.ceil((childLevelMaxIndex + 1) / MERGE_GROUP_SIZE)", "Expected node count computed from fan-in");
 
 // ---------------------------------------------------------------------------
