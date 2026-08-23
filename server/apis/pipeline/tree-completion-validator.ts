@@ -12,9 +12,28 @@
  *   5. No sibling, child or ancestor node remains partial/pending/failed/absent
  *   6. The root ancestry covers the complete expected source population
  *   7. Source-snapshot validation passes
+ *   8. No node in the tree — least of all the root — was written from a
+ *      TRUNCATED model response (Fix 25)
  *
  * A complete checkpoint below the natural root is RESUMABLE STATE ONLY.
  * It is NOT a final artifact.
+ *
+ * ── Fix 25: truncation blindspot ─────────────────────────────────────────────
+ * `status` alone does not describe a node's fitness. A node whose merge response
+ * hit `max_tokens` is retried; if it still truncates after MAX_PARTIAL_RETRIES it
+ * is ACCEPTED and written with `status='complete'` plus `truncated: true` inside
+ * `merged_json` (livelock prevention — the alternative is a tree that never
+ * converges). The gate previously read only the `status` column, so such a node
+ * counted as fully complete and the root's truncation was invisible: run
+ * 13e9c0d6's L8:0 root was `status='complete', truncated=true,
+ * truncation_count=1`, and the published artifact rested on it silently.
+ *
+ * The validator now reads `truncated` / `truncation_count` out of `merged_json`.
+ * A truncated ROOT blocks publication outright — the final artifact must not be
+ * built from a response the model was cut off mid-emission. Truncated
+ * NON-root nodes are surfaced as a degraded-tree warning rather than a block,
+ * because their content has already been folded into ancestors and re-merging
+ * them means re-running the subtree.
  */
 
 import { z } from "@superblocksteam/sdk-api";
@@ -54,10 +73,24 @@ export interface CompletionDiagnostic {
   total_expected_nodes: number;
   total_complete_nodes: number;
 
+  // Fix 25: truncation visibility. A node counted in `total_complete_nodes` may
+  // still appear here — 'complete' and 'truncated' are independent axes.
+  truncated_node_count: number;
+  truncated_node_ids: string[];
+  /** True when the proposed final node itself was written from a truncated response. */
+  root_truncated: boolean;
+  root_truncation_count: number;
+
   // Verdicts
   tree_complete: boolean;
   source_coverage_complete: boolean;
   publication_eligible: boolean;
+  /**
+   * Fix 25: the tree converged and the root is clean, but at least one non-root
+   * node was accepted truncated. Publication is permitted; fidelity is not
+   * guaranteed for the subtree beneath those nodes.
+   */
+  tree_degraded: boolean;
 
   // Blocking reasons (empty = eligible)
   blocking_reasons: string[];
@@ -74,12 +107,23 @@ export interface TreeLevelSummary {
   partial_nodes: number;
   failed_nodes: number;
   missing_nodes: number;
+  /** Fix 25: nodes at this level that are complete-but-truncated. */
+  truncated_nodes?: number;
 }
 
 export interface MergeNodeRecord {
   tree_level: number;
   node_index: number;
   status: string | null; // 'complete', 'partial', 'error', 'root_manifest', etc.
+  /**
+   * Fix 25: hoisted out of `merged_json`. True when the merge response for this
+   * node hit `max_tokens`. A node can be BOTH `status='complete'` and
+   * `truncated=true` — that is the accepted-after-MAX_PARTIAL_RETRIES state, and
+   * it is exactly the case the gate used to miss.
+   */
+  truncated?: boolean | null;
+  /** Fix 25: how many times this node truncated before being accepted. */
+  truncation_count?: number | null;
 }
 
 export interface AnalysisRecord {
@@ -212,6 +256,11 @@ export function validateTreeCompletion(params: {
     levelSummary.failed_nodes = nodesAtLevel.filter(n =>
       n.status === "error" || n.status === "failed"
     ).length;
+    // Fix 25: complete-but-truncated. Counted separately because these nodes are
+    // ALSO counted in complete_nodes — truncation is orthogonal to status.
+    levelSummary.truncated_nodes = nodesAtLevel.filter(n =>
+      n.truncated === true
+    ).length;
     // Missing = expected but not present in DB
     const presentNodeIndices = new Set(nodesAtLevel.map(n => n.node_index));
     let missingCount = 0;
@@ -228,6 +277,7 @@ export function validateTreeCompletion(params: {
   let missingNodeCount = 0;
   let totalExpectedNodes = 0;
   let totalCompleteNodes = 0;
+  let truncatedNodeCount = 0;
 
   for (const level of expectedTopology) {
     totalExpectedNodes += level.expected_nodes;
@@ -235,8 +285,15 @@ export function validateTreeCompletion(params: {
     partialCount += level.partial_nodes;
     failedCount += level.failed_nodes;
     missingNodeCount += level.missing_nodes;
+    truncatedNodeCount += level.truncated_nodes ?? 0;
   }
   unresolvedCount = partialCount + failedCount + missingNodeCount;
+
+  // Fix 25: enumerate truncated nodes so the caller can name them.
+  const truncatedNodeIds = regularNodes
+    .filter(n => n.truncated === true)
+    .map(n => `${n.tree_level}:${n.node_index}`)
+    .sort();
 
   // --- Root Validation ---
   const actualFinalNodeId = actualFinalNodeLevel != null
@@ -284,8 +341,34 @@ export function validateTreeCompletion(params: {
   // Check source coverage
   const sourceCoverageComplete = analysisComplete && treeComplete && isNaturalRoot;
 
-  // Publication eligibility = all checks pass
-  const publicationEligible = blockingReasons.length === 0;
+  // ── Fix 25: truncated-root gate ───────────────────────────────────────────
+  // The proposed final node can be `status='complete'` and still have been
+  // written from a response the model was cut off mid-emission. That node's
+  // findings are, by definition, an unknown subset of what the merge was asked
+  // to produce. An artifact built on it is not defensible, so this BLOCKS.
+  const proposedRootRecord = actualFinalNodeLevel != null
+    ? regularNodes.find(n =>
+        n.tree_level === actualFinalNodeLevel &&
+        n.node_index === (actualFinalNodeIndex ?? 0)
+      )
+    : undefined;
+  const rootTruncated = proposedRootRecord?.truncated === true;
+  const rootTruncationCount = proposedRootRecord?.truncation_count ?? 0;
+
+  if (rootTruncated) {
+    blockingReasons.push(
+      `Proposed final node ${actualFinalNodeId} is status='${proposedRootRecord?.status ?? "complete"}' but ` +
+      `truncated=true (truncation_count=${rootTruncationCount || 1}). The root merge response hit max_tokens, ` +
+      `so its finding set is an unknown subset of the merge input. An artifact built on a truncated root is ` +
+      `not defensible — re-merge the root before publishing.`
+    );
+  }
+
+  // Truncated NON-root nodes do not block: their content is already folded into
+  // ancestors, and re-merging them means re-running the subtree. They are
+  // reported so the degradation is on the record rather than silent.
+  const nonRootTruncatedIds = truncatedNodeIds.filter(id => id !== actualFinalNodeId);
+  const treeDegraded = nonRootTruncatedIds.length > 0;
 
   // If there are siblings at the proposed final level that are not complete
   if (actualFinalNodeLevel != null && actualFinalNodeLevel <= expectedRootLevel) {
@@ -300,6 +383,14 @@ export function validateTreeCompletion(params: {
       }
     }
   }
+
+  // Publication eligibility = all checks pass.
+  // NOTE (Fix 25): this MUST be the last computation in the function. It was
+  // previously evaluated before the sibling-completeness check below it, which
+  // meant a reason pushed by that check was reported in `blocking_reasons` but
+  // did not actually flip `publication_eligible` to false — a blocking reason
+  // that did not block. Do not move this above any blockingReasons.push().
+  const publicationEligible = blockingReasons.length === 0;
 
   return {
     expected_analysis_count: expectedAnalysisIds.length,
@@ -323,9 +414,15 @@ export function validateTreeCompletion(params: {
     total_expected_nodes: totalExpectedNodes,
     total_complete_nodes: totalCompleteNodes,
 
+    truncated_node_count: truncatedNodeCount,
+    truncated_node_ids: truncatedNodeIds,
+    root_truncated: rootTruncated,
+    root_truncation_count: rootTruncationCount,
+
     tree_complete: treeComplete,
     source_coverage_complete: sourceCoverageComplete,
     publication_eligible: publicationEligible,
+    tree_degraded: treeDegraded,
 
     blocking_reasons: blockingReasons,
 
@@ -407,7 +504,9 @@ export async function loadMergeNodeRecords(
 ): Promise<MergeNodeRecord[]> {
 
   const rows = await db.query(
-    `SELECT tree_level, node_index, status
+    `SELECT tree_level, node_index, status,
+            (merged_json->>'truncated')::boolean       AS truncated,
+            (merged_json->>'truncation_count')::int    AS truncation_count
      FROM merge_checkpoints
      WHERE module_run_id = $1
      ORDER BY tree_level, node_index`,
@@ -415,9 +514,11 @@ export async function loadMergeNodeRecords(
       tree_level: z.coerce.number(),
       node_index: z.coerce.number(),
       status: z.string().nullable(),
+      truncated: z.boolean().nullable(),
+      truncation_count: z.coerce.number().nullable(),
     }),
     [runId],
-    { label: "TreeValidator: load merge node records" }
+    { label: "TreeValidator: load merge node records (with truncation flags)" }
   );
 
   return rows;
@@ -469,9 +570,14 @@ export async function runPublicationGate(
         missing_node_count: 0,
         total_expected_nodes: 0,
         total_complete_nodes: 0,
+        truncated_node_count: 0,
+        truncated_node_ids: [],
+        root_truncated: false,
+        root_truncation_count: 0,
         tree_complete: false,
         source_coverage_complete: false,
         publication_eligible: false,
+        tree_degraded: false,
         blocking_reasons: [
           "Routing diagnostics checkpoint not found — cannot determine expected analysis population. " +
           "Publication gate requires a frozen source manifest."
@@ -515,9 +621,14 @@ export interface CompactCompletionDiagnostic {
   partial_node_count: number;
   failed_node_count: number;
   missing_node_count: number;
+  truncated_node_count: number;
+  truncated_node_ids: string[];
+  root_truncated: boolean;
+  root_truncation_count: number;
   tree_complete: boolean;
   source_coverage_complete: boolean;
   publication_eligible: boolean;
+  tree_degraded: boolean;
   blocking_reasons: string[];
   validated_at: string;
   validator_version: string;
@@ -540,9 +651,14 @@ export function toCompactDiagnostic(d: CompletionDiagnostic): CompactCompletionD
     partial_node_count: d.partial_node_count,
     failed_node_count: d.failed_node_count,
     missing_node_count: d.missing_node_count,
+    truncated_node_count: d.truncated_node_count,
+    truncated_node_ids: d.truncated_node_ids,
+    root_truncated: d.root_truncated,
+    root_truncation_count: d.root_truncation_count,
     tree_complete: d.tree_complete,
     source_coverage_complete: d.source_coverage_complete,
     publication_eligible: d.publication_eligible,
+    tree_degraded: d.tree_degraded,
     blocking_reasons: d.blocking_reasons,
     validated_at: d.validated_at,
     validator_version: d.validator_version,

@@ -923,6 +923,18 @@ export async function canonicalFinalize(
       `coverage=${gateResult.diagnostic.completed_analysis_count}/${gateResult.diagnostic.expected_analysis_count}, ` +
       `tree ${gateResult.diagnostic.total_complete_nodes}/${gateResult.diagnostic.total_expected_nodes} nodes`
     );
+
+    // Fix 25: a clean root can still sit above nodes that were accepted truncated.
+    // Publication proceeds — their content is already folded into ancestors — but
+    // the degradation is recorded rather than left silent.
+    if (gateResult.diagnostic.tree_degraded) {
+      console.warn(
+        `[canonicalFinalize] ⚠️ TREE DEGRADED for run ${runId} — root is clean but ` +
+        `${gateResult.diagnostic.truncated_node_count} non-root node(s) were accepted truncated: ` +
+        `${gateResult.diagnostic.truncated_node_ids.join(", ")}. ` +
+        `Fidelity is not guaranteed for the subtrees beneath them.`
+      );
+    }
   }
 
   // ── STEP 1: Validate prerequisites ────────────────────────────────────────

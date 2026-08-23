@@ -97,6 +97,7 @@ import { type RoutingDiagnosticEntry, type RoutingDiagnostics } from "./replay-c
 import { runPostMergeFinalizationStages, type PostMergeFinalizationResult } from "./post-merge-finalization.js";
 import { buildEngagementMap, type EngagementMapResult } from "./engagement-map.js";
 import { matchAbsenceFindings, type FindingInput, type MatcherOutput } from "./absence-map-matcher.js";
+import { dedupCarryForward } from "./finding-coordinate-dedup.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -4392,6 +4393,13 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     findings: MergedFinding[];
     housekeepingFindings?: MergedFinding[];
     truncated?: boolean; // true when stop_reason was "max_tokens" — findings may be thin
+    // Fix 25: how many Fix-16 carried findings were absorbed into an equivalent
+    // already present at the same coordinate (metric|scope|period) rather than
+    // appended. Recorded for checkpoint accounting / diagnostics.
+    dedupAbsorbedCount?: number;
+    // Fix 25: carried findings whose coordinate could not be determined and were
+    // therefore carried forward verbatim (the conservative path).
+    dedupUndeterminedCount?: number;
   }
 
   // Load existing merge checkpoints (paginated).
@@ -5008,6 +5016,8 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           // accounted for by exactly one of: (1) retained as output finding_id,
           // (2) referenced in output merged_from_finding_ids, (3) carried forward with
           // failure metadata. Zero unaccounted findings are permitted.
+          let dedupAbsorbedCount = 0;
+          let dedupUndeterminedCount = 0;
           if (inputFindingIds.length > 0) {
             const outputFindingIds = new Set(
               [...findings, ...housekeepingFindings].flatMap(f => {
@@ -5031,10 +5041,10 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
               // Always carry forward — no tolerance for unaccounted findings
               const allInputFindings = group.members.flatMap(m => m.findings ?? []);
               const missingSet = new Set(missingIds);
-              const carriedForward = allInputFindings.filter(f => missingSet.has(f.finding_id));
+              const carriedRaw = allInputFindings.filter(f => missingSet.has(f.finding_id));
 
               // Tag carried-forward findings with accounting metadata
-              for (const cf of carriedForward) {
+              for (const cf of carriedRaw) {
                 (cf as any)._merge_accounting = {
                   status: "carried_forward",
                   reason,
@@ -5044,8 +5054,56 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
                 };
               }
 
-              findings.push(...carriedForward);
-              console.log(`[Merge][Fix16] Carried forward ${carriedForward.length} unaccounted findings with failure metadata`);
+              // ── Fix 25: dedup-before-carry ──────────────────────────────────
+              // Fix 16 used to append every carried finding verbatim, without ever
+              // asking whether this node already holds an equivalent one. That is
+              // the accumulation mechanism: findings-per-node grows monotonically up
+              // the tree, the emission requirement grows with it, and past ~50 output
+              // findings the merge call can no longer emit them all inside its
+              // timeout — which is how R13e9c0d6 deadlocked at MAX_PARTIAL_RETRIES
+              // with 84–93% of findings code-carried rather than model-synthesized.
+              //
+              // Before appending, check whether the node already holds a finding at
+              // the same coordinate (metric|scope|period) that passes the same
+              // 14-field compatibility gate used by post-merge consolidation. If so,
+              // merge the PROVENANCE (claim_ids, source_docs, evidence[],
+              // structured_impact[], consolidated_analyses) instead of the finding.
+              //
+              // Fix 16's contract still holds: the absorbed id is recorded in the
+              // representative's `merged_from_finding_ids`, which is outcome (2) of
+              // the three accounting outcomes it already recognizes. Nothing is lost —
+              // duplicates become provenance instead of payload.
+              //
+              // Deterministic, zero token cost, and fail-safe toward preservation:
+              // an undetermined coordinate or a failing gate means carry forward
+              // verbatim, exactly as before.
+              const dedupResult = dedupCarryForward({ findings, carried: carriedRaw });
+              findings = dedupResult.findings as MergedFinding[];
+              dedupAbsorbedCount = dedupResult.absorbedCount;
+              dedupUndeterminedCount = dedupResult.undeterminedCoordinateCount;
+
+              if (dedupAbsorbedCount > 0) {
+                console.log(
+                  `[Merge][Fix25] Dedup-before-carry absorbed ${dedupAbsorbedCount}/${carriedRaw.length} carried findings into existing equivalents at R${currentRound}:G${group.idx}`
+                );
+                for (const d of dedupResult.diagnostics.slice(0, 40)) {
+                  console.log(`  [Fix25] ${d.absorbed_finding_id} → ${d.into_finding_id} @ ${d.coordinate}`);
+                }
+                if (dedupResult.diagnostics.length > 40) {
+                  console.log(`  [Fix25] …${dedupResult.diagnostics.length - 40} further absorptions omitted from log`);
+                }
+              }
+              if (dedupUndeterminedCount > 0) {
+                console.log(
+                  `[Merge][Fix25] ${dedupUndeterminedCount} carried finding(s) had an undetermined coordinate — carried forward verbatim`
+                );
+              }
+              // ── End Fix 25 ──────────────────────────────────────────────────
+
+              findings.push(...(dedupResult.carryForward as MergedFinding[]));
+              console.log(
+                `[Merge][Fix16] Carried forward ${dedupResult.carryForward.length}/${carriedRaw.length} unaccounted findings with failure metadata (${dedupAbsorbedCount} absorbed by Fix 25 dedup)`
+              );
             }
           }
 
@@ -5054,7 +5112,7 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
           if (housekeepingFindings.length > 0) accumulatedHousekeeping.push(...housekeepingFindings);
 
           const mergedTextForNode = buildMergedText(executiveHeader, findings);
-          const node: MergeNode = { text: mergedTextForNode, executiveHeader, findings, housekeepingFindings: housekeepingFindings.length > 0 ? housekeepingFindings : undefined, truncated };
+          const node: MergeNode = { text: mergedTextForNode, executiveHeader, findings, housekeepingFindings: housekeepingFindings.length > 0 ? housekeepingFindings : undefined, truncated, dedupAbsorbedCount, dedupUndeterminedCount };
 
           return { group, node };
         })
@@ -5107,6 +5165,11 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
                 inputFindingCount: group.members.reduce((sum, m) => sum + (m.findings?.length ?? 0), 0),
                 outputFindingCount: node.findings.length,
                 carriedForwardCount: node.findings.filter((f: any) => f._merge_accounting?.status === "carried_forward").length,
+                // Fix 25: carried findings absorbed into an existing equivalent at the
+                // same coordinate rather than appended. These are accounted for by
+                // reference in the representative's merged_from_finding_ids.
+                dedupAbsorbedCount: node.dedupAbsorbedCount ?? 0,
+                dedupUndeterminedCoordinateCount: node.dedupUndeterminedCount ?? 0,
               },
             }), getModuleModel(moduleId, useOpus), currentVersion, cpStatus],
             { label: `Save merge checkpoint R${currentRound}:G${group.idx} (status=${cpStatus})` }
