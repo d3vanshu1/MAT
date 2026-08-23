@@ -26,6 +26,8 @@ const PartialNodeSchema = z.object({
   has_executive_header: z.boolean(),
   has_findings: z.boolean(),
   attempt_count: z.coerce.number(),
+  truncated: z.boolean(),
+  truncation_count: z.coerce.number(),
 });
 
 const NodeLedgerEntry = z.object({
@@ -46,9 +48,23 @@ const NodeLedgerEntry = z.object({
   hasExecutiveHeader: z.boolean(),
   hasFindings: z.boolean(),
   attemptCount: z.number(),
+  truncated: z.boolean(),
+  truncationCount: z.number(),
   // Computed fields
   hasCompleteOutput: z.boolean(),
   recommendedAction: z.string(),
+});
+
+const LevelBreakdown = z.object({
+  treeLevel: z.number(),
+  complete: z.number(),
+  partial: z.number(),
+  errored: z.number(),
+  other: z.number(),
+  total: z.number(),
+  findingsSum: z.number(),
+  findingsMax: z.number(),
+  payloadMaxBytes: z.number(),
 });
 
 export default api({
@@ -62,6 +78,7 @@ export default api({
   input: z.object({
     runId: z.string(),
     level: z.number().optional().describe("Filter to specific level; omit for all levels"),
+    maxLevel: z.number().default(4).describe("Upper bound on tree_level for the node listing"),
     offset: z.number().default(0),
   }),
 
@@ -74,9 +91,51 @@ export default api({
       l3Partial: z.number(),
       l4Partial: z.number(),
     }),
+    // Full-tree status breakdown across ALL levels (not capped)
+    levels: z.array(LevelBreakdown),
   }),
 
-  async run(ctx, { runId, level, offset }) {
+  async run(ctx, { runId, level, maxLevel, offset }) {
+    // Full-tree status breakdown across every level — aggregate, so no row cap needed.
+    const levelRows = await ctx.integrations.db.query(
+      `SELECT tree_level,
+              COUNT(*) FILTER (WHERE status = 'complete' OR status IS NULL)::int AS complete,
+              COUNT(*) FILTER (WHERE status = 'partial')::int AS partial,
+              COUNT(*) FILTER (WHERE status IN ('error','failed'))::int AS errored,
+              COUNT(*)::int AS total,
+              COALESCE(SUM(jsonb_array_length(COALESCE(merged_json->'findings','[]'::jsonb))),0)::int AS findings_sum,
+              COALESCE(MAX(jsonb_array_length(COALESCE(merged_json->'findings','[]'::jsonb))),0)::int AS findings_max,
+              COALESCE(MAX(octet_length(merged_json::text)),0)::int AS payload_max
+       FROM merge_checkpoints
+       WHERE module_run_id = $1 AND node_index >= 0
+       GROUP BY tree_level
+       ORDER BY tree_level`,
+      z.object({
+        tree_level: z.coerce.number(),
+        complete: z.coerce.number(),
+        partial: z.coerce.number(),
+        errored: z.coerce.number(),
+        total: z.coerce.number(),
+        findings_sum: z.coerce.number(),
+        findings_max: z.coerce.number(),
+        payload_max: z.coerce.number(),
+      }),
+      [runId],
+      { label: "Full-tree status breakdown by level" }
+    );
+
+    const levels = levelRows.map(r => ({
+      treeLevel: r.tree_level,
+      complete: r.complete,
+      partial: r.partial,
+      errored: r.errored,
+      other: r.total - r.complete - r.partial - r.errored,
+      total: r.total,
+      findingsSum: r.findings_sum,
+      findingsMax: r.findings_max,
+      payloadMaxBytes: r.payload_max,
+    }));
+
     // Get total counts first
     const countRows = await ctx.integrations.db.query(
       `SELECT tree_level, COUNT(*)::int as cnt
@@ -101,7 +160,9 @@ export default api({
     const totalPartialCount = summary.l1Partial + summary.l2Partial + summary.l3Partial + summary.l4Partial;
 
     // Query the partial nodes (10 at a time due to limits)
-    const levelFilter = level !== undefined ? `AND tree_level = ${level}` : `AND tree_level <= 4`;
+    const levelFilter = level !== undefined
+      ? `AND tree_level = ${Math.trunc(level)}`
+      : `AND tree_level <= ${Math.trunc(maxLevel)}`;
     
     const rows = await ctx.integrations.db.query(
       `SELECT 
@@ -121,7 +182,9 @@ export default api({
         COALESCE(jsonb_array_length(COALESCE(merged_json->'child_ids', '[]'::jsonb)), 0)::int AS child_count,
         (merged_json->>'executive_header' IS NOT NULL AND merged_json->>'executive_header' != '') AS has_executive_header,
         (jsonb_array_length(COALESCE(merged_json->'findings', '[]'::jsonb)) > 0) AS has_findings,
-        COALESCE((merged_json->>'attempt_count')::int, 1) AS attempt_count
+        COALESCE((merged_json->>'attempt_count')::int, 1) AS attempt_count,
+        COALESCE((merged_json->>'truncated')::boolean, false) AS truncated,
+        COALESCE((merged_json->>'truncation_count')::int, 0) AS truncation_count
        FROM merge_checkpoints
        WHERE module_run_id = $1
          AND node_index >= 0
@@ -137,8 +200,14 @@ export default api({
     const nodes: z.infer<typeof NodeLedgerEntry>[] = rows.map(row => {
       // Determine recommended action
       let recommendedAction = "rebuild";
-      
-      if (row.findings_count > 0 && row.has_executive_header) {
+
+      // Deadlock signature: the merge loop ACCEPTS partial+truncated nodes once
+      // truncation_count >= MAX_PARTIAL_RETRIES (2) and stops retrying them, but
+      // never promotes the DB row to 'complete'. The publication gate reads DB
+      // status, so these block publication forever.
+      if (row.status === "partial" && row.truncated && row.truncation_count >= 2) {
+        recommendedAction = "accepted_partial_blocks_gate";
+      } else if (row.findings_count > 0 && row.has_executive_header) {
         // Has output — might just need status update
         recommendedAction = "mark_complete_after_validation";
       } else if (row.error_text) {
@@ -168,11 +237,13 @@ export default api({
         hasExecutiveHeader: row.has_executive_header,
         hasFindings: row.has_findings,
         attemptCount: row.attempt_count,
+        truncated: row.truncated,
+        truncationCount: row.truncation_count,
         hasCompleteOutput: row.findings_count > 0 && row.has_executive_header,
         recommendedAction,
       };
     });
 
-    return { nodes, totalPartialCount, summary };
+    return { nodes, totalPartialCount, summary, levels };
   },
 });
