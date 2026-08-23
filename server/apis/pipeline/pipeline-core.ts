@@ -102,6 +102,14 @@ import { matchAbsenceFindings, type FindingInput, type MatcherOutput } from "./a
 // Config
 // ---------------------------------------------------------------------------
 const SUB_AGENT_MAX_TOKENS = 4096;
+// HELD AT 15000 (2026-08-23). Raising this is unsafe on the client-invoked path:
+// the merge call's per-call timeout is 180s (line ~4823) inside a 300s platform
+// cap (EFFECTIVE_CAP_MS). Emitting ~45k output tokens takes ~300-450s on Haiku,
+// so a raised budget converts "stop_reason=max_tokens" (which preserves findings)
+// into a hard timeout, and the timeout path OVERWRITES merged_json with an error
+// stub for any row where status <> 'complete' (line ~5153). That destroys findings.
+// Fixing the L6/L7 partial deadlock requires reducing findings per node or moving
+// merge to a durable worker — not a larger single-call budget.
 const MERGE_MAX_TOKENS = 15000;
 
 const ANALYSIS_CONCURRENCY = 15;
