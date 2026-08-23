@@ -40,7 +40,35 @@ export interface ExcludedFinding {
     | "incompatible_comparison"
     | "housekeeping"
     | "placeholder"
-    | "degraded_notice";
+    | "degraded_notice"
+    | "reduction_gate";
+  /**
+   * Which suppression layer removed this finding. Absent on artifacts written
+   * before the suppression audit trail existed (migration 030).
+   *
+   * - `finalizer_report_filter` — §F non-reportable filter in canonical-finalizer
+   * - `reduction_gate`          — applyReductionGates in finding-reduction-gate
+   */
+  exclusion_layer?: "finalizer_report_filter" | "reduction_gate";
+  /**
+   * Name of the specific gate or filter rule that rejected it. For the reduction
+   * gate layer this is the `GateResult.gate` value (e.g. "actual_forecast",
+   * "period_compatibility"). For the finalizer layer it mirrors exclusion_reason.
+   */
+  gate_name?: string;
+  /**
+   * The reason string that gate returned. This is what makes a suppression
+   * traceable to a cause rather than inferred from absence.
+   */
+  reason?: string;
+  /**
+   * Names of any OTHER gates that also rejected this finding. Present when more
+   * than one gate would have dropped it — the first failure is recorded in
+   * gate_name/reason, the remainder here.
+   */
+  also_failed_gates?: string[];
+  /** Tier assigned by the reduction gate, when the gate layer produced this entry. */
+  tier?: "primary" | "secondary" | "suppressed";
 }
 
 export interface CheckpointStatusEntry {

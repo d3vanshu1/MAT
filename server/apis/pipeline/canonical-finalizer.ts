@@ -190,6 +190,271 @@ export function getReportExclusionReason(finding: any): ExcludedFinding["exclusi
   return null;
 }
 
+/**
+ * Human-readable reason string per §F exclusion_reason.
+ *
+ * `getReportExclusionReason` returns only the enum tag, which tells you a
+ * finding was excluded but not what tripped. These strings are what get written
+ * to the suppression audit trail so a reader can see the cause without having
+ * to reverse-engineer the filter.
+ */
+export const FINALIZER_EXCLUSION_REASON_TEXT: Record<ExcludedFinding["exclusion_reason"], string> = {
+  process_object: "Process/status object, not a substantive finding (title or finding_kind matched the process/housekeeping filter)",
+  housekeeping: "Housekeeping appendix item — recorded but not IC-facing",
+  placeholder: "Placeholder 'no findings/issues identified' object",
+  degraded_notice: "Degraded-run notice — reported in the disclosure section, not as a finding",
+  unlinked: "No canonical claim/evidence link — cannot be substantiated in the report",
+  no_canonical_record: "No canonical finding record exists for this finding_id",
+  invalid_evidence: "Evidence payload failed validation",
+  incompatible_comparison: "Comparison operands are not compatible (units, basis, or period)",
+  reduction_gate: "Suppressed upstream by the finding reduction gate — see gate_name/reason",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Suppression audit trail (module_run_diagnostics)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shape of one entry in the `finding_reduction_gate` pipeline checkpoint's
+ * suppressedLedger, as written by post-merge-finalization.
+ */
+interface PersistedGateDisposition {
+  findingId?: string;
+  title?: string;
+  tier?: string;
+  suppressionReason?: string;
+  gates?: Array<{ passed?: boolean; gate?: string; reason?: string }>;
+}
+
+/**
+ * Read the reduction-gate suppression ledger for a run and convert it into
+ * ExcludedFinding entries carrying gate attribution.
+ *
+ * The gate ledger already exists in `pipeline_checkpoints` under key
+ * `finding_reduction_gate`, but `pipeline_checkpoints` is purgeable. Reading it
+ * here and copying the attribution into the permanent side table is what makes
+ * "which gate dropped this, and why" survive a checkpoint purge.
+ *
+ * Reads the checkpoint rather than taking the ledger as a parameter so every
+ * finalization path (main, fast, retry, resume, admin re-finalize) gets the
+ * same attribution without new plumbing — including resumed runs where the gate
+ * was restored from checkpoint and never re-executed in this process.
+ */
+async function loadGateLayerExclusions(
+  db: { query: (...args: any[]) => Promise<any[]> },
+  runId: string,
+): Promise<{ entries: ExcludedFinding[]; gateStats: unknown; groundTruthSignals: unknown }> {
+  try {
+    const rows = await db.query(
+      `SELECT payload FROM pipeline_checkpoints
+       WHERE module_run_id = $1 AND checkpoint_key = 'finding_reduction_gate'
+       LIMIT 1`,
+      z.object({ payload: z.any().nullable() }),
+      [runId],
+      { label: "canonicalFinalize: load reduction gate ledger for audit trail" },
+    );
+    if (rows.length === 0 || !rows[0].payload) {
+      return { entries: [], gateStats: null, groundTruthSignals: null };
+    }
+    const payload = rows[0].payload as Record<string, unknown>;
+    const ledger = Array.isArray(payload.suppressedLedger)
+      ? (payload.suppressedLedger as PersistedGateDisposition[])
+      : [];
+
+    const entries: ExcludedFinding[] = ledger.map((d) => {
+      const failed = (d.gates ?? []).filter((g) => g && g.passed === false);
+      const first = failed[0];
+      return {
+        finding_id: d.findingId ?? "unknown",
+        title: d.title ?? "",
+        exclusion_reason: "reduction_gate",
+        exclusion_layer: "reduction_gate",
+        // First gate that rejected it. When several rejected it, the rest go in
+        // also_failed_gates — a finding dropped by three gates independently is
+        // a different signal than one dropped by a single rule.
+        gate_name: first?.gate ?? "unknown_gate",
+        reason: first?.reason ?? d.suppressionReason ?? "No reason recorded by gate",
+        also_failed_gates: failed.slice(1).map((g) => g.gate ?? "unknown_gate"),
+        tier: (d.tier as ExcludedFinding["tier"]) ?? "suppressed",
+      };
+    });
+
+    return {
+      entries,
+      gateStats: payload.gateStats ?? null,
+      groundTruthSignals: payload.groundTruthSignals ?? null,
+    };
+  } catch (e: any) {
+    console.warn(`[canonicalFinalize][audit] Gate ledger read failed (non-fatal): ${e?.message}`);
+    return { entries: [], gateStats: null, groundTruthSignals: null };
+  }
+}
+
+/**
+ * Read the qualifier-mismatch skip diagnostics from the numeric checkpoint.
+ *
+ * These are suppressed *comparisons*, not suppressed findings — no finding is
+ * ever constructed for a forecast-vs-actual pair, so it cannot appear in an
+ * exclusion ledger. The count and samples are recorded in the summary so the
+ * loss of coverage is visible instead of silent.
+ */
+async function loadQualifierSkipDiagnostics(
+  db: { query: (...args: any[]) => Promise<any[]> },
+  runId: string,
+): Promise<{ skipped: number | null; samples: string[] } | null> {
+  try {
+    const rows = await db.query(
+      `SELECT payload FROM pipeline_checkpoints
+       WHERE module_run_id = $1 AND checkpoint_key = 'numeric_report'
+       LIMIT 1`,
+      z.object({ payload: z.any().nullable() }),
+      [runId],
+      { label: "canonicalFinalize: load numeric checkpoint for qualifier-skip audit" },
+    );
+    const debug = (rows[0]?.payload as any)?.crossAgreementDebug;
+    if (!debug) return null;
+    const skipped = typeof debug.qualifierMismatchSkipped === "number"
+      ? debug.qualifierMismatchSkipped
+      : null;
+    const samples = Array.isArray(debug.qualifierMismatchSamples)
+      ? (debug.qualifierMismatchSamples as unknown[]).map(String)
+      : [];
+    if (skipped === null && samples.length === 0) return null;
+    return { skipped, samples };
+  } catch (e: any) {
+    console.warn(`[canonicalFinalize][audit] Qualifier-skip read failed (non-fatal): ${e?.message}`);
+    return null;
+  }
+}
+
+/**
+ * Persist the suppression audit trail for a run to `module_run_diagnostics`.
+ *
+ * WHY THIS EXISTS: `excluded_findings` and `degraded_conditions` were computed
+ * at finalization and discarded. `module_outputs` has six fixed columns and
+ * cannot be altered, and overloading its `findings` column would make every
+ * downstream reader of that column start seeing suppressed findings. So the
+ * audit trail goes to a side table keyed on module_run_id (the module_run_flags
+ * pattern), and `findings` stays the reportable set.
+ *
+ * Non-fatal by design: a failure here must never block a run from completing
+ * with a durable report. It is logged loudly instead.
+ */
+async function persistRunDiagnostics(
+  db: {
+    query: (...args: any[]) => Promise<any[]>;
+    execute: (...args: any[]) => Promise<unknown>;
+  },
+  runId: string,
+  finalizerExclusions: ExcludedFinding[],
+  degradedConditions: string[],
+  reportableCount: number,
+): Promise<{ written: boolean; totalExcluded: number; error?: string }> {
+  const gateLayer = await loadGateLayerExclusions(db, runId);
+  const qualifierSkips = await loadQualifierSkipDiagnostics(db, runId);
+
+  // Order: gate layer first (it runs first chronologically), then the
+  // finalizer's report filter. A finding can only appear in one — the gate
+  // removes it before the finalizer ever sees it.
+  const allExclusions: ExcludedFinding[] = [...gateLayer.entries, ...finalizerExclusions];
+
+  const byGate: Record<string, number> = {};
+  for (const e of allExclusions) {
+    const key = `${e.exclusion_layer ?? "unknown_layer"}:${e.gate_name ?? e.exclusion_reason}`;
+    byGate[key] = (byGate[key] ?? 0) + 1;
+  }
+
+  const summary = {
+    reportable_count: reportableCount,
+    excluded_total: allExclusions.length,
+    excluded_by_layer: {
+      reduction_gate: gateLayer.entries.length,
+      finalizer_report_filter: finalizerExclusions.length,
+    },
+    excluded_by_gate: byGate,
+    gate_stats: gateLayer.gateStats,
+    ground_truth_signals: gateLayer.groundTruthSignals,
+    // Suppressed comparisons, not suppressed findings — see loadQualifierSkipDiagnostics.
+    qualifier_mismatch_skips: qualifierSkips,
+    recorded_at: new Date().toISOString(),
+  };
+
+  try {
+    await db.execute(
+      `INSERT INTO module_run_diagnostics
+         (module_run_id, excluded_findings, degraded_conditions, suppression_summary)
+       VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb)
+       ON CONFLICT (module_run_id) DO UPDATE
+         SET excluded_findings   = EXCLUDED.excluded_findings,
+             degraded_conditions = EXCLUDED.degraded_conditions,
+             suppression_summary = EXCLUDED.suppression_summary,
+             updated_at          = now()`,
+      [
+        runId,
+        JSON.stringify(allExclusions),
+        JSON.stringify(degradedConditions),
+        JSON.stringify(summary),
+      ],
+      { label: "canonicalFinalize: persist suppression audit trail" },
+    );
+    console.log(
+      `[canonicalFinalize][audit] Persisted suppression trail — ` +
+      `excluded=${allExclusions.length} ` +
+      `(gate=${gateLayer.entries.length}, report_filter=${finalizerExclusions.length}), ` +
+      `degraded_conditions=${degradedConditions.length}, ` +
+      `qualifier_skips=${qualifierSkips?.skipped ?? "n/a"}`
+    );
+    return { written: true, totalExcluded: allExclusions.length };
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    // Loud but non-fatal. A missing audit row is a diagnostics gap; refusing to
+    // complete a run that has a durable report would be worse.
+    console.error(
+      `[canonicalFinalize][audit] FAILED to persist suppression trail for run ${runId}: ${msg}. ` +
+      `Run 'RunMigration030' if module_run_diagnostics does not exist.`
+    );
+    return { written: false, totalExcluded: allExclusions.length, error: msg };
+  }
+}
+
+/**
+ * Read back the persisted suppression audit trail for a run.
+ * Used by the rehydration path so a rebuilt artifact carries real diagnostics
+ * instead of an empty array.
+ */
+export async function loadRunDiagnostics(
+  db: { query: (...args: any[]) => Promise<any[]> },
+  runId: string,
+): Promise<{ excludedFindings: ExcludedFinding[]; degradedConditions: string[] } | null> {
+  try {
+    const rows = await db.query(
+      `SELECT excluded_findings, degraded_conditions
+       FROM module_run_diagnostics
+       WHERE module_run_id = $1
+       LIMIT 1`,
+      z.object({
+        excluded_findings: z.any().nullable(),
+        degraded_conditions: z.any().nullable(),
+      }),
+      [runId],
+      { label: "Load persisted suppression audit trail" },
+    );
+    if (rows.length === 0) return null;
+    return {
+      excludedFindings: Array.isArray(rows[0].excluded_findings)
+        ? (rows[0].excluded_findings as ExcludedFinding[])
+        : [],
+      degradedConditions: Array.isArray(rows[0].degraded_conditions)
+        ? (rows[0].degraded_conditions as unknown[]).map(String)
+        : [],
+    };
+  } catch {
+    // Table may not exist yet on an environment that has not run migration 030.
+    return null;
+  }
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Executive header synthesis (Item 2)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -765,6 +1030,12 @@ export async function canonicalFinalize(
         finding_id: f.finding_id ?? f.id ?? "unknown",
         title: f.title ?? "",
         exclusion_reason: exclusionReason,
+        // Attribution: which layer dropped it and why. Without these two fields
+        // an exclusion is only inferable from absence, which cannot distinguish
+        // "the filter removed a process object" from "a real finding vanished".
+        exclusion_layer: "finalizer_report_filter",
+        gate_name: exclusionReason,
+        reason: FINALIZER_EXCLUSION_REASON_TEXT[exclusionReason],
       });
     } else {
       reportableFindings.push(f);
@@ -876,9 +1147,18 @@ export async function canonicalFinalize(
   };
 
   // ── STEP 10: Persist artifact once ────────────────────────────────────────
-  // Write all findings (reportable + excluded) to findings column for full fidelity.
+  // Writes ONLY the reportable findings to `module_outputs.findings`.
+  //
+  // This is deliberate, not an oversight. `findings` is the IC-facing set: every
+  // downstream reader (report renderer, Q&A retrieval, deal dashboard) treats a
+  // row in this column as something that survived §F and the reduction gate.
+  // Putting suppressed findings here would silently promote them.
+  //
+  // The suppressed set is not discarded — STEP 10.5 writes the full exclusion
+  // ledger, with per-finding gate attribution, to `module_run_diagnostics`.
+  //
   // Schema: module_outputs has (id, module_run_id, executive_header, findings, full_report_markdown, created_at).
-  const allFindingsJson = JSON.stringify(reportableFindings);
+  const reportableFindingsJson = JSON.stringify(reportableFindings);
 
   try {
     let artifactId: string;
@@ -895,7 +1175,7 @@ export async function canonicalFinalize(
           [
             artifactId,
             effectiveHeader,
-            allFindingsJson,
+            reportableFindingsJson,
             reportMarkdown,
           ],
           { label: "canonicalFinalize: persist artifact (update)" }
@@ -911,7 +1191,7 @@ export async function canonicalFinalize(
         [
           runId,
           effectiveHeader,
-          allFindingsJson,
+          reportableFindingsJson,
           reportMarkdown,
         ],
         { label: "canonicalFinalize: persist artifact (insert)" }
@@ -929,6 +1209,24 @@ export async function canonicalFinalize(
     console.log(
       `[canonicalFinalize] Persisted artifact ${artifactId} — ` +
       `hash=${semanticHash}, reportable=${reportableFindings.length}, excluded=${excludedFindings.length}`
+    );
+
+    // ── STEP 10.5: Persist the suppression audit trail ─────────────────────
+    // `excluded_findings` and `degraded_conditions` used to exist only in the
+    // in-memory artifact and were lost the moment this function returned. The
+    // rehydration path proved it: it returned `excluded_findings: []` with a note
+    // that diagnostics were not re-derived.
+    //
+    // Everything the finalizer suppressed, plus everything the reduction gate
+    // suppressed (with gate name and reason per finding), now lands in
+    // `module_run_diagnostics`. Non-fatal — an audit-row failure must not block a
+    // run whose report is already durable.
+    const auditResult = await persistRunDiagnostics(
+      db,
+      runId,
+      excludedFindings,
+      degradedConditions,
+      reportableFindings.length,
     );
 
     // ── STEP 11: Verify persistence succeeded ─────────────────────────────
@@ -957,6 +1255,11 @@ export async function canonicalFinalize(
     );
 
     console.log(`[canonicalFinalize] Run ${runId} marked completed with hash ${semanticHash}`);
+    console.log(
+      `[canonicalFinalize] Audit trail: written=${auditResult.written}, ` +
+      `excluded_total=${auditResult.totalExcluded}` +
+      (auditResult.error ? `, error=${auditResult.error}` : "")
+    );
 
     return {
       status: "completed",

@@ -56,6 +56,10 @@ export interface NumericVerifyResult {
     divergedPairs: number;
     identicalPairs: number;
     sampleSharedEntries: Array<{ label: string; period: string; valueA: number; valueB: number }>;
+    /** Pairs skipped because actual/forecast qualifiers differ (see CrossAgreementDebug). */
+    qualifierMismatchSkipped?: number;
+    /** Samples of the skipped pairs. */
+    qualifierMismatchSamples?: string[];
   };
 }
 
@@ -578,6 +582,14 @@ interface CrossAgreementDebug {
   divergedPairs: number;
   identicalPairs: number;
   sampleSharedEntries: Array<{ label: string; period: string; valueA: number; valueB: number }>;
+  /**
+   * Count of label + fiscal-year pairs present on both sides that were NOT compared because the
+   * actual/forecast qualifiers differ. Persisted (not just logged) so the suppression is traceable
+   * to a cause in the module_run_diagnostics audit trail rather than inferred from absence.
+   */
+  qualifierMismatchSkipped: number;
+  /** Up to 5 human-readable samples of the skipped pairs, for triage. */
+  qualifierMismatchSamples: string[];
 }
 
 function runCrossAgreement(
@@ -586,7 +598,7 @@ function runCrossAgreement(
 ): { discrepancies: Discrepancy[]; figures: Figure[]; debug: CrossAgreementDebug } {
   const discrepancies: Discrepancy[] = [];
   const figures: Figure[] = [];
-  const emptyDebug: CrossAgreementDebug = { status: "source_not_found", sourceATablesFound: 0, sourceBTablesFound: 0, allTableSheets: tables.map(t => `${t.sheetOrPage} [${t.documentId.slice(0,8)}]`), mapASize: 0, mapBSize: 0, sharedKeys: 0, comparedPairs: 0, divergedPairs: 0, identicalPairs: 0, sampleSharedEntries: [] };
+  const emptyDebug: CrossAgreementDebug = { status: "source_not_found", sourceATablesFound: 0, sourceBTablesFound: 0, allTableSheets: tables.map(t => `${t.sheetOrPage} [${t.documentId.slice(0,8)}]`), mapASize: 0, mapBSize: 0, sharedKeys: 0, comparedPairs: 0, divergedPairs: 0, identicalPairs: 0, sampleSharedEntries: [], qualifierMismatchSkipped: 0, qualifierMismatchSamples: [] };
 
   // Find tables matching source A and source B (document-pinned when configured)
   const sourceATables = tables.filter((t) =>
@@ -691,6 +703,8 @@ function runCrossAgreement(
   // Diagnostic: count label/base-year pairs that exist on both sides but did NOT pair because
   // the actual/forecast qualifiers differ. These are deliberately not compared (see above), but
   // the count must stay visible so a silent collapse in coverage is detectable.
+  let qualifierMismatchSkipped = 0;
+  const qualifierMismatchSamples: string[] = [];
   {
     const baseKeysB = new Map<string, Set<string>>();
     for (const [key, e] of mapB) {
@@ -699,16 +713,14 @@ function runCrossAgreement(
       baseKeysB.get(baseKey)!.add(key);
     }
 
-    let qualifierMismatchSkipped = 0;
-    const skippedSamples: string[] = [];
     for (const [key, e] of mapA) {
       if (mapB.has(key)) continue;
       const baseKey = `${e.label.trim().toLowerCase()}::${periodBaseYear(e.period)}`;
       const candidates = baseKeysB.get(baseKey);
       if (!candidates || candidates.size === 0) continue;
       qualifierMismatchSkipped++;
-      if (skippedSamples.length < 5) {
-        skippedSamples.push(`${key} vs [${[...candidates].join(" | ")}]`);
+      if (qualifierMismatchSamples.length < 5) {
+        qualifierMismatchSamples.push(`${key} vs [${[...candidates].join(" | ")}]`);
       }
     }
 
@@ -716,7 +728,7 @@ function runCrossAgreement(
       console.log(
         `[NumericInline:CrossAgreement] Qualifier-mismatch pairs skipped: ${qualifierMismatchSkipped} ` +
         `(same label + fiscal year on both sides, but differing actual/forecast qualifier — not comparable). ` +
-        `Samples: ${skippedSamples.join("; ")}`
+        `Samples: ${qualifierMismatchSamples.join("; ")}`
       );
     } else {
       console.log(`[NumericInline:CrossAgreement] Qualifier-mismatch pairs skipped: 0`);
@@ -918,6 +930,8 @@ function runCrossAgreement(
     divergedPairs: divergedCount,
     identicalPairs: identicalCount,
     sampleSharedEntries,
+    qualifierMismatchSkipped,
+    qualifierMismatchSamples,
   };
 
   return { discrepancies, figures, debug };

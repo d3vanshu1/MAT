@@ -32,6 +32,7 @@ import { runReconciliationPipeline, type ReconciliationPipelineResult } from "./
 import {
   canonicalFinalize as f06CanonicalFinalize,
   loadCheckpointStatus,
+  loadRunDiagnostics,
   type FinalizerOutcome,
 } from "./canonical-finalizer.js";
 import type { CanonicalFinalArtifact } from "./canonical-final-artifact.js";
@@ -390,6 +391,16 @@ async function hydratePersistedArtifact(
     const row = rows[0];
     const persistedFindings: unknown[] = Array.isArray(row.findings) ? row.findings : [];
     const markdown = row.full_report_markdown ?? "";
+
+    // The `findings` column intentionally carries only the reportable set (see canonical-finalizer
+    // STEP 10). The suppression audit trail lives in the module_run_diagnostics side table, so
+    // rehydration recovers excluded_findings / degraded_conditions from there rather than
+    // returning an empty set and claiming diagnostics were not re-derived.
+    const persistedDiagnostics = await loadRunDiagnostics(ctx.integrations.db as any, runId);
+    const degradedConditions = persistedDiagnostics
+      ? [...persistedDiagnostics.degradedConditions, "Artifact rehydrated from persisted module_outputs"]
+      : ["Artifact rehydrated from persisted module_outputs — suppression audit trail unavailable (module_run_diagnostics missing or empty)"];
+
     return {
       schema_version: CANONICAL_FINAL_ARTIFACT_VERSION,
       run_id: runId,
@@ -400,8 +411,8 @@ async function hydratePersistedArtifact(
         .filter((id: unknown): id is string => typeof id === "string"),
       diagnostics: {
         narrative_validation: [],
-        excluded_findings: [],
-        degraded_conditions: ["Artifact rehydrated from persisted module_outputs — diagnostics not re-derived"],
+        excluded_findings: persistedDiagnostics?.excludedFindings ?? [],
+        degraded_conditions: degradedConditions,
         checkpoint_status: checkpointStatus,
       },
       report: {
@@ -940,6 +951,9 @@ export async function runPostMergeFinalizationStages(
   if (gateAlreadyApplied) {
     console.log(`${LOG_PREFIX} finding_reduction_gate: SKIPPED — restored from reduction_gate_done checkpoint (${postMergeFindings.length} primary findings)`);
   } else {
+    // Captured before the gate replaces `postMergeFindings` with the primary set.
+    // Used to attach titles to the suppression ledger below.
+    const preGateFindings = postMergeFindings as any[];
     const reductionResult = applyReductionGates(postMergeFindings as any[]);
     const beforeCount = postMergeFindings.length;
     const afterCount = reductionResult.primaryFindings.length;
@@ -952,7 +966,19 @@ export async function runPostMergeFinalizationStages(
       `ground_truth=[${reductionResult.groundTruthSignals.join(",")}])`
     );
 
-    // Persist reduction ledger as a pipeline checkpoint for audit / diagnostics
+    // Persist reduction ledger as a pipeline checkpoint for audit / diagnostics.
+    // The canonical finalizer reads this checkpoint at STEP 10.5 and copies the
+    // per-finding gate attribution into `module_run_diagnostics`, which is not
+    // purgeable. Titles are joined in here because FindingDisposition carries only
+    // findingId — and an audit line reading "cf-7a21 suppressed by actual_forecast"
+    // is not reviewable by a human without the title.
+    const preGateTitleById = new Map<string, string>();
+    for (const f of preGateFindings) {
+      const id = (f as any)?.finding_id ?? (f as any)?.id;
+      if (typeof id === "string" && id.length > 0) {
+        preGateTitleById.set(id, String((f as any)?.title ?? ""));
+      }
+    }
     try {
       await input.ctx.integrations.db.execute(
         `INSERT INTO pipeline_checkpoints (module_run_id, checkpoint_key, payload, status, version_hash)
@@ -966,7 +992,10 @@ export async function runPostMergeFinalizationStages(
             confirmationCount: reductionResult.confirmations.length,
             secondaryCount: reductionResult.secondaryObservations.length,
             suppressedCount: reductionResult.suppressedLedger.length,
-            suppressedLedger: reductionResult.suppressedLedger,
+            suppressedLedger: reductionResult.suppressedLedger.map(d => ({
+              ...d,
+              title: preGateTitleById.get(d.findingId) ?? "",
+            })),
             confirmations: reductionResult.confirmations.map(c => ({
               findingId: c.finding.finding_id ?? c.finding.id ?? "unknown",
               title: c.finding.title,
