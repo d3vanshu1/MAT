@@ -5152,13 +5152,36 @@ The LATEST memo is authoritative for the team's CURRENT claims and thesis. Earli
             const newFailureCount = prevFailures + 1;
             errorCountMap.set(errCpKey, newFailureCount);
             errorMessageMap.set(errCpKey, errMsg);
+            // NON-DESTRUCTIVE ERROR WRITE.
+            // Previously this replaced merged_json wholesale with {error, failureCount,
+            // timestamp}, destroying any findings already persisted at this node. That
+            // loss was unrecoverable and it landed hardest on partial/truncated nodes —
+            // exactly the ones most likely to fail again, and the ones whose findings
+            // matter most. The `WHERE status <> 'complete'` guard did not protect them,
+            // because a partial row is by definition not complete.
+            //
+            // Now the error keys are merged ON TOP of the existing payload via `||`, so
+            // findings / executiveHeader / truncated / truncation_count survive. The
+            // jsonb_typeof guard keeps this safe if merged_json is NULL or a non-object.
+            //
+            // Recovery behaviour is unchanged: checkpoint load keys off `data.error`
+            // (see the error branch at the top of the checkpoint loop), so the row is
+            // still treated as retryable and is not admitted to checkpointMap.
             await ctx.integrations.db.execute(
               `INSERT INTO merge_checkpoints (module_run_id, tree_level, node_index, merged_json, model_used, prompt_version, status)
                VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'error')
-               ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE SET merged_json = $4::jsonb, model_used = $5, prompt_version = $6, status = 'error'
+               ON CONFLICT (module_run_id, tree_level, node_index) DO UPDATE
+                 SET merged_json = CASE
+                       WHEN jsonb_typeof(merge_checkpoints.merged_json) = 'object'
+                         THEN merge_checkpoints.merged_json || $4::jsonb
+                       ELSE $4::jsonb
+                     END,
+                     model_used = $5,
+                     prompt_version = $6,
+                     status = 'error'
                  WHERE merge_checkpoints.status <> 'complete'`,
-              [runId, currentRound, group.idx, JSON.stringify({ error: errMsg, failureCount: newFailureCount, timestamp: new Date().toISOString() }), getModuleModel(moduleId, useOpus), currentVersion],
-              { label: `Save merge error checkpoint R${currentRound}:G${group.idx} (failure #${newFailureCount})` }
+              [runId, currentRound, group.idx, JSON.stringify({ error: errMsg, failureCount: newFailureCount, timestamp: new Date().toISOString(), error_payload_preserved: true }), getModuleModel(moduleId, useOpus), currentVersion],
+              { label: `Save merge error checkpoint R${currentRound}:G${group.idx} (failure #${newFailureCount}, payload preserved)` }
             );
           }
         }
