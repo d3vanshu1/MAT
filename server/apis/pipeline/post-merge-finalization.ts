@@ -40,6 +40,11 @@ import { CANONICAL_FINAL_ARTIFACT_VERSION, SEMANTIC_HASH_VERSION } from "./canon
 import type { MergedFinding } from "../modules/build-merged-text.js";
 import { computeContentHash } from "./source-snapshot.js";
 import { applyReductionGates } from "./finding-reduction-gate.js";
+import {
+  buildReconciliationReportMarkdown,
+  type ReconciliationP21Meta,
+  type ReductionGateSummary,
+} from "./reconciliation-report-builder.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -125,7 +130,7 @@ export interface PostMergeFinalizationInput {
   /** Returns time remaining in budget (ms) */
   timeRemaining: () => number;
   /** Which code path invoked this runner */
-  callerPath: "fast_path" | "normal_path";
+  callerPath: "fast_path" | "normal_path" | "reconciliation_path";
 
   /** File tag map for source routing */
   fileTagMap: Map<string, string>;
@@ -690,6 +695,12 @@ export async function runPostMergeFinalizationStages(
   // STAGE 2: reconciliation
   // ─────────────────────────────────────────────────────────────────────────
   let reconciliationResult: ReconciliationResult | null = null;
+  /**
+   * P2.1 hold/gate counters for the reconciliation report's §4. Populated whether
+   * reconciliation was executed this invocation or restored from its checkpoint,
+   * so a resumed run reports the same funnel as a single-pass run.
+   */
+  let reconP21Meta: ReconciliationP21Meta | null = null;
 
   if (CLAIMS_REQUIRED_MODULES.has(moduleId)) {
     // Load numeric report (dependency for reconciliation)
@@ -730,6 +741,8 @@ export async function runPostMergeFinalizationStages(
         reconExistingVersion = reconCpRows[0].version_hash;
         if (cpStatus === "complete" || cpStatus === "done") {
           reconciliationResult = reconCpRows[0].payload as ReconciliationResult;
+          const meta = (reconCpRows[0].payload as any)?._p21_metadata;
+          if (meta && typeof meta === "object") reconP21Meta = meta as ReconciliationP21Meta;
         }
       }
     } catch { /* treat as missing */ }
@@ -795,18 +808,24 @@ export async function runPostMergeFinalizationStages(
 
         // Persist with P2.1 metadata
         try {
+          reconP21Meta = {
+            bridgeFiguresCount: pipelineResult.bridgeFiguresCount,
+            magnitudeHeld: pipelineResult.magnitudeHeld,
+            parallelOffsetHeld: pipelineResult.parallelOffsetHeld,
+            gateVerified: pipelineResult.gateResult.verified.length,
+            gateRejected: pipelineResult.gateResult.rejected.length,
+            gateTotalSubmitted: pipelineResult.gateResult.total_submitted,
+            gateRejectionCounts: pipelineResult.gateResult.rejection_counts as unknown as Record<string, number>,
+            unmatchableScopeDetails: pipelineResult.unmatchableScopes,
+            elapsedMs: pipelineResult.elapsedMs,
+          };
           const checkpointPayload = {
             ...reconciliationResult,
             _p21_metadata: {
-              bridgeFiguresCount: pipelineResult.bridgeFiguresCount,
+              ...reconP21Meta,
               metricDerivation: pipelineResult.metricDerivation,
-              magnitudeHeld: pipelineResult.magnitudeHeld,
-              parallelOffsetHeld: pipelineResult.parallelOffsetHeld,
-              gateVerified: pipelineResult.gateResult.verified.length,
-              gateRejected: pipelineResult.gateResult.rejected.length,
               gateRejectionRate: pipelineResult.gateResult.rejection_rate,
               unmatchableScopes: pipelineResult.unmatchableScopes.length,
-              elapsedMs: pipelineResult.elapsedMs,
             },
           };
           await ctx.integrations.db.execute(
@@ -868,6 +887,8 @@ export async function runPostMergeFinalizationStages(
   );
 
   let gateAlreadyApplied = false;
+  /** Ten-gate reduction filter outcome, for the reconciliation report's §4. */
+  let reductionGateSummary: ReductionGateSummary | null = null;
   if (gateCp && Array.isArray(gateCp.primaryFindings)) {
     postMergeFindings = gateCp.primaryFindings;
     postMergeHousekeeping = Array.isArray(gateCp.housekeepingFindings)
@@ -875,6 +896,13 @@ export async function runPostMergeFinalizationStages(
       : housekeepingFindings;
     lineage.postMergeResultHash = gateCp.postMergeResultHash;
     gateAlreadyApplied = true;
+    reductionGateSummary = {
+      admitted: postMergeFindings.length,
+      // Not carried on this checkpoint. Left null so the report builder reads the
+      // authoritative `finding_reduction_gate` ledger instead of printing 0.
+      rejected: null,
+      byGate: (gateCp.gateStats as ReductionGateSummary["byGate"]) ?? null,
+    };
     stageStates.push({ stage: "post_merge", status: "completed_valid", detail: "restored from reduction_gate_done checkpoint", lineageValid: true });
     completedStages.push("post_merge");
     console.log(
@@ -1017,6 +1045,12 @@ export async function runPostMergeFinalizationStages(
     // Replace findings: only primary findings proceed into absence_verify and F06
     postMergeFindings = reductionResult.primaryFindings as any;
 
+    reductionGateSummary = {
+      admitted: afterCount,
+      rejected: reductionResult.suppressedLedger.length,
+      byGate: reductionResult.gateStats ?? null,
+    };
+
     // 3b: durable checkpoint. This is the linchpin of the loop fix — the gate
     // output is what F06 consumes, so restoring it lets a resumed invocation
     // jump straight to absence_verify/finalization instead of rebuilding the
@@ -1102,7 +1136,13 @@ export async function runPostMergeFinalizationStages(
   // reconstruction artifacts (tree_level=97/98/99) that ReplayClaimLinkage
   // requires to produce evidence_admission at tree_level=96. The check is
   // skipped for these runs — evidence admission is a P2.1 gate only.
-  if (CLAIMS_REQUIRED_MODULES.has(moduleId) && callerPath !== "normal_path") {
+  // EXCEPTION: reconciliation_path (CC direct-reconciliation) skips the merge
+  // tree entirely, so no P2.1 reconstruction artifacts exist either.
+  if (
+    CLAIMS_REQUIRED_MODULES.has(moduleId) &&
+    callerPath !== "normal_path" &&
+    callerPath !== "reconciliation_path"
+  ) {
     const evidenceEntry = checkpointStatus.find(s => s.key === "evidence_admission");
     if (evidenceEntry && !evidenceEntry.present) {
       console.error(`${LOG_PREFIX} canonical_finalize: BLOCKED — evidence_admission missing. Cannot fabricate.`);
@@ -1110,8 +1150,54 @@ export async function runPostMergeFinalizationStages(
       return buildResult("blocked", "canonical_finalize", stageStates, completedStages, progressAdvanced,
         ["Evidence admission (tree_level=96) checkpoint is missing. This stage must be executed by the production evidence-admission service. Finalization is blocked until genuine evidence admission data exists."]);
     }
-  } else if (CLAIMS_REQUIRED_MODULES.has(moduleId) && callerPath === "normal_path") {
-    console.log(`${LOG_PREFIX} canonical_finalize: evidence_admission check SKIPPED for normal_path — P2.1 reconstruction artifacts not available`);
+  } else if (
+    CLAIMS_REQUIRED_MODULES.has(moduleId) &&
+    (callerPath === "normal_path" || callerPath === "reconciliation_path")
+  ) {
+    console.log(`${LOG_PREFIX} canonical_finalize: evidence_admission check SKIPPED for ${callerPath} — P2.1 reconstruction artifacts not available`);
+  }
+
+  // ── Reconciliation-path report ────────────────────────────────────────────
+  // contradiction_check on the reconciliation path publishes a memo-vs-model
+  // reconciliation document, not the tier-based canonical report. It is rendered
+  // here — after the ten-gate reduction filter — so it can only ever present
+  // findings that survived every quality check. Presentation-only: a failure
+  // falls back to the canonical renderer and never fails the run.
+  let reportOverride: string | null = null;
+  if (callerPath === "reconciliation_path" && reconciliationResult) {
+    try {
+      const survivingTitles = new Set(
+        (postMergeFindings as any[]).map(f => String(f?.title ?? "")).filter(t => t.length > 0),
+      );
+      const built = await buildReconciliationReportMarkdown({
+        db: ctx.integrations.db,
+        dealId,
+        runId,
+        claimsLedger,
+        reconciliation: reconciliationResult,
+        p21: reconP21Meta,
+        reductionGate: reductionGateSummary,
+        survivingTitles,
+        timings: {
+          reconciliationMs: reconP21Meta?.elapsedMs ?? null,
+          totalMs: Date.now() - startTime,
+        },
+      });
+      if (built) {
+        reportOverride = built.markdown;
+        console.log(
+          `${LOG_PREFIX} reconciliation report: rendered ${built.markdown.length} chars — ` +
+          `${built.rankedCount} ranked, ${built.presentedCount} presented, ` +
+          `${built.rankedCount - built.presentedCount} in appendix.`
+        );
+        for (const line of built.rankAudit) console.log(`${LOG_PREFIX} rank ${line}`);
+      }
+    } catch (e: any) {
+      console.warn(
+        `${LOG_PREFIX} reconciliation report render FAILED (non-fatal, falling back to ` +
+        `canonical renderer): ${e?.message}`
+      );
+    }
   }
 
   // Invoke F06 — the sole authoritative finalizer
@@ -1126,17 +1212,25 @@ export async function runPostMergeFinalizationStages(
       executiveHeader,
       moduleType: moduleId,
       checkpointStatus,
-      proposedFinalNode: {
-        treeLevel: naturalRootTreeLevel,
-        nodeIndex: naturalRootNodeIndex,
-      },
+      // reconciliation_path writes no merge nodes, so there is no natural root
+      // to propose. F06's publication gate is bypassed for this path.
+      proposedFinalNode: callerPath === "reconciliation_path"
+        ? undefined
+        : {
+            treeLevel: naturalRootTreeLevel,
+            nodeIndex: naturalRootNodeIndex,
+          },
       claimsDegraded,
       degradedConditions: verificationErrored
         ? [`Absence verification phase errored (${postMergeHousekeeping.length} housekeeping findings present)`]
         : undefined,
       // Natural-merge-tree runs never produce P2.1 reconstruction artifacts
       // (tree_level=97/98/99), so evidence_admission cannot exist. Skip it.
-      skipEvidenceAdmission: callerPath === "normal_path",
+      skipEvidenceAdmission: callerPath === "normal_path" || callerPath === "reconciliation_path",
+      // No merge tree exists on the reconciliation path — the publication gate
+      // validates tree lineage, which is not applicable here.
+      bypassPublicationGate: callerPath === "reconciliation_path",
+      reportOverride,
     },
   );
 

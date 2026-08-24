@@ -143,6 +143,54 @@ export const ANALYSIS_WORKER_ENABLED = true;
 export const ANALYSIS_WORKER_BATCH_SIZE = 8;
 
 // ===========================================================================
+// contradiction_check Execution Path
+// ===========================================================================
+
+/** Which execution path contradiction_check takes.
+ *
+ *  ── History ───────────────────────────────────────────────────────────────
+ *  P2.1 built the claims-reconciliation path (Step 0.8/0.8b of pipeline-core)
+ *  and verified it in the harness, but never gave it a switch. Reconciliation
+ *  ran *additively*: the merge tree executed in full, then reconciliation
+ *  findings were appended on top at post-merge Stage 4
+ *  (appendReconciliationFindings). Every production contradiction_check run
+ *  therefore paid for hours of tree-reduce merging to produce findings that the
+ *  code-verified reconciliation path derives deterministically in seconds.
+ *
+ *  ── "reconciliation" (default) ────────────────────────────────────────────
+ *  Steps 1–5 of pipeline-core (routing, sub-agent analysis, tree-reduce merge,
+ *  root assembly/promotion) are SKIPPED for contradiction_check. Reconciliation
+ *  findings are the sole findings source. No merge_checkpoints rows are written.
+ *  The publication gate — the only guard that requires a complete tree — is
+ *  bypassed for this module on this path via the pre-existing
+ *  bypassPublicationGate flag on FinalizerPrerequisites.
+ *
+ *  ── "merge_tree" ──────────────────────────────────────────────────────────
+ *  Pre-P2.1-flip behaviour: full tree, reconciliation additive. Retained so the
+ *  old path can be re-selected without reverting code.
+ *
+ *  SCOPE: read ONLY inside `moduleId === "contradiction_check"` guards. The
+ *  other four tree modules (omission_audit, blind_spot_scanner,
+ *  diligence_completeness, and the web-research module) never evaluate it and
+ *  are structurally unaffected.
+ *
+ *  FROZEN: the merge tree constants (MERGE_GROUP_SIZE, MERGE_MAX_TOKENS,
+ *  MERGE_NODE_TEXT_CAP) are unchanged — the tree is bypassed, not tuned. */
+export const CONTRADICTION_CHECK_PATH: "reconciliation" | "merge_tree" = "reconciliation";
+
+/** True when contradiction_check should bypass the merge tree.
+ *  Callers MUST still gate on moduleId — this constant answers "which path",
+ *  not "which module". */
+export const CC_RECONCILIATION_PATH_ENABLED = CONTRADICTION_CHECK_PATH === "reconciliation";
+
+/** How many ranked reconciliation findings the report presents in the main body.
+ *
+ *  PRESENTATION PARAMETER ONLY. Nothing is discarded: every finding is persisted
+ *  in canonical_findings and rendered in the report appendix with its rank and
+ *  score. This constant decides what *leads*, not what survives. */
+export const RECONCILIATION_REPORT_TOP_N = 2;
+
+// ===========================================================================
 // Types (shared across pipeline files — lives here to avoid circular imports)
 // ===========================================================================
 

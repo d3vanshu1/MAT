@@ -85,7 +85,7 @@ import { runAbsenceVerificationPhase } from "./absence-verification-phase.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { parseDateFromFileName } from "./parse-date-from-filename.js";
 import { callLLMWithHeadroom, HeadroomExhaustedError, type LLMResponse } from "./call-llm.js";
-import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE, MERGE_GROUP_SIZE } from "./pipeline-config.js";
+import { TIME_BUDGET_MS, EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS, MIN_VIABLE_LLM_BUDGET_MS, CHECKPOINT_RESERVE_MS, ANALYSIS_WORKER_ENABLED, ANALYSIS_WORKER_BATCH_SIZE, MERGE_GROUP_SIZE, CC_RECONCILIATION_PATH_ENABLED } from "./pipeline-config.js";
 import { extractFindingsJsonTolerant } from "./extract-findings-tolerant.js";
 import type { NumericVerifyResult } from "./numeric-verify-inline.js";
 import { populateWorkItems, claimBatch, completeItem, failItem, getAnalysisCounts, isAnalysisComplete, detectMismatches, isWorkerEnabledForRun, WORKER_BATCH_SIZE } from "./analysis-worker.js";
@@ -3467,8 +3467,11 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
                   parallelOffsetHeld: pipelineResult.parallelOffsetHeld,
                   gateVerified: pipelineResult.gateResult.verified.length,
                   gateRejected: pipelineResult.gateResult.rejected.length,
+                  gateTotalSubmitted: pipelineResult.gateResult.total_submitted,
+                  gateRejectionCounts: pipelineResult.gateResult.rejection_counts,
                   gateRejectionRate: pipelineResult.gateResult.rejection_rate,
                   unmatchableScopes: pipelineResult.unmatchableScopes.length,
+                  unmatchableScopeDetails: pipelineResult.unmatchableScopes,
                   elapsedMs: pipelineResult.elapsedMs,
                 },
               };
@@ -3504,6 +3507,105 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       }
     }
   }
+
+  // ── Reconciliation path: contradiction_check bypasses Steps 1–5 ────────────
+  // When CC_RECONCILIATION_PATH_ENABLED, contradiction_check publishes directly
+  // from the claims ledger + reconciliation result produced in Steps 0.8/0.8b
+  // above. Routing, chunk analysis, tree merge, and root promotion are skipped —
+  // no merge nodes are written for this module.
+  //
+  // Every quality check still runs: claims extraction (0.8), the full P2.1
+  // reconciliation pipeline including magnitude guard, parallel-offset detector
+  // and verification gate (0.8b), then post-merge processing, the ten-gate
+  // finding reduction filter, and canonical finalization (F06) — all inside
+  // runPostMergeFinalizationStages, which is entered with
+  // callerPath="reconciliation_path" so the tree-lineage-only gates stand down.
+  //
+  // Scope: contradiction_check only. The other four modules never enter here.
+  if (moduleId === "contradiction_check" && CC_RECONCILIATION_PATH_ENABLED) {
+    const reconPathStart = Date.now();
+    console.log(
+      `[pipeline] CC reconciliation_path ENABLED — skipping Steps 1–5 ` +
+      `(routing, analysis, tree merge, root promotion). No merge nodes will be written. ` +
+      `Budget remaining: ${timeRemaining()}ms`
+    );
+    enterPhase("cc_reconciliation");
+
+    const finalizationResult = await runPostMergeFinalizationStages({
+      ctx,
+      runId,
+      dealId,
+      moduleId,
+      // No merge tree exists on this path. F06's publication gate is bypassed
+      // (see post-merge-finalization), so these coordinates are never dereferenced.
+      naturalRootTreeLevel: 0,
+      naturalRootNodeIndex: 0,
+      // Findings originate entirely from the reconciliation result, which
+      // post-merge appends. Nothing is inherited from a merge root.
+      canonicalRootFindings: [],
+      executiveHeader: "",
+      housekeepingFindings: [],
+      housekeepingValidated: true,
+      startTime,
+      timeRemaining,
+      callerPath: "reconciliation_path",
+      fileTagMap,
+      subjectDocumentIds: subjectIds,
+      useOpus,
+      sourceManifestHash: null,
+      runPostMergePipeline,
+      runAbsenceVerificationPhase,
+    });
+
+    console.log(
+      `[pipeline] CC reconciliation_path: runner returned status=${finalizationResult.status}, ` +
+      `stage=${finalizationResult.currentStage ?? "none"}, ` +
+      `completed=[${finalizationResult.completedStages.join(",")}], ` +
+      `elapsed=${Date.now() - reconPathStart}ms`
+    );
+
+    // Translate PostMergeFinalizationResult → pipeline return type
+    // (mirrors the fast-path translation above).
+    if (finalizationResult.status === "complete" && finalizationResult.artifact) {
+      const MAX_MERGED_TEXT_CHARS = 150_000;
+      let mergedText = finalizationResult.artifact.report?.markdown ?? "";
+      if (mergedText.length > MAX_MERGED_TEXT_CHARS) {
+        mergedText = mergedText.slice(0, MAX_MERGED_TEXT_CHARS) + "\n\n[…truncated for transport]";
+      }
+      return {
+        status: "completed",
+        runId,
+        phase: "done",
+        progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+        result: {
+          executiveHeader: finalizationResult.artifact.report?.executive_header ?? "",
+          findings: (finalizationResult.artifact.canonical_findings ?? []) as MergedFinding[],
+          mergedText,
+          fullReport: finalizationResult.artifact.report?.markdown ?? "",
+        },
+        failedChunks: 0,
+        truncatedChunks: 0,
+        truncatedMerges: 0,
+        firstError: null,
+      };
+    }
+
+    // In-progress, blocked, or failed — yield for the scheduler to resume.
+    return {
+      status: "in_progress",
+      runId,
+      phase: `cc_reconciliation_${finalizationResult.currentStage ?? "init"}`,
+      progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+      result: null,
+      failedChunks: 0,
+      truncatedChunks: 0,
+      truncatedMerges: 0,
+      firstError: finalizationResult.blockingReasons.length > 0
+        ? finalizationResult.blockingReasons.join("; ")
+        : null,
+    };
+  }
+  // ── End reconciliation path ────────────────────────────────────────────────
 
   // --- Step 1: Load universal extractions + route ---
   enterPhase("analysis_preparation");

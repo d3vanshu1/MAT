@@ -70,6 +70,50 @@ interface CoverageResult {
   filesExcluded: ExcludedFile[];
 }
 
+/**
+ * Display labels for the CC reconciliation-path finalization stages.
+ *
+ * Mirrors STAGE_SEQUENCE in server/apis/pipeline/post-merge-finalization.ts.
+ * The reconciliation path skips routing/analysis/merge entirely, so the
+ * pipeline's numeric `progress` fields are structurally zero there and the
+ * finalization stage — carried in the `phase` string as
+ * `cc_reconciliation_<stage>` — is the only signal that advances.
+ *
+ * Order matters: the index is rendered as "step N/5".
+ */
+const RECON_STAGE_LABELS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "claims_ledger", label: "Building claims ledger" },
+  { key: "reconciliation", label: "Reconciling claims against model" },
+  { key: "post_merge", label: "Post-merge processing" },
+  { key: "absence_verify", label: "Verifying absences" },
+  { key: "canonical_finalize", label: "Finalizing report" },
+] as const;
+
+/**
+ * Fix 3 — `diagnosticOnly` operator affordance.
+ *
+ * `diagnosticOnly` is threaded into RunModulePipeline so a run can be tagged in
+ * `module_run_flags` at creation time (and carried forward if pipeline-core has
+ * to mint a fresh run on version mismatch). It changes nothing about how the
+ * pipeline executes, and — deliberately — nothing about GetRunnableRuns, which
+ * stays unfiltered so a diagnostic run is still resumable like any other.
+ *
+ * This is NOT a product control: there is no button for it anywhere in the UI.
+ * An operator opts in per-tab by loading the dashboard with `?diag=1` (alias
+ * `?diagnosticOnly=1`). Every other code path defaults to `false`.
+ */
+function readDiagnosticOnlyFromUrl(): boolean {
+  try {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get("diag") ?? params.get("diagnosticOnly");
+    if (raw === null) return false;
+    return raw === "" || /^(1|true|yes|on)$/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -285,6 +329,9 @@ export default function DealDashboardPage() {
   const lastKnownCheckpointsRef = useRef<Record<string, number>>({});
   // Consecutive progress poll failures (persists across effect re-runs)
   const pollFailureCountRef = useRef(0);
+  // Fix 3 — operator-only diagnostic flag, resolved once per tab from the URL.
+  // Default false. Not surfaced as a product control.
+  const diagnosticOnlyRef = useRef<boolean>(readDiagnosticOnlyFromUrl());
 
   const completedModules = useMemo(
     () =>
@@ -1444,6 +1491,12 @@ export default function DealDashboardPage() {
     async (moduleId: string, resumeRunId?: string) => {
       const displayName = MODULE_MAP[moduleId]?.displayName ?? moduleId;
 
+      // Fix 3 — resolved once per tab from the URL; false unless an operator opted in.
+      const diagnosticOnly = diagnosticOnlyRef.current;
+      if (diagnosticOnly) {
+        console.warn(`[pipeline] diagnosticOnly=true for ${moduleId} (operator URL flag)`);
+      }
+
       // Ensure universal extractions exist on the server
       // (they were saved during previous client-side runs or bulk-extract)
       setModuleProgress(moduleId, { message: "Preparing server-side pipeline…" });
@@ -1477,7 +1530,7 @@ export default function DealDashboardPage() {
 
       // Helper: call RunModulePipeline with network-error retries
       // The server pipeline runs independently — a fetch timeout doesn't mean it failed
-      const callPipelineWithRetry = async (runIdArg?: string) => {
+      const callPipelineWithRetry = async (runIdArg?: string, diagnosticOnly: boolean = false) => {
         const MAX_RETRIES = 3;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
           try {
@@ -1489,6 +1542,7 @@ export default function DealDashboardPage() {
               subjectDocumentIds: selectedSubjectIds.length > 0 ? selectedSubjectIds : undefined,
               numericReport,
               numericPartial: numericPartial || undefined,
+              diagnosticOnly: diagnosticOnly || undefined,
             });
           } catch (err) {
             const msg = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : String(err);
@@ -1501,7 +1555,7 @@ export default function DealDashboardPage() {
         }
       };
 
-      let pipelineResult = await callPipelineWithRetry(resumeRunId);
+      let pipelineResult = await callPipelineWithRetry(resumeRunId, diagnosticOnly);
 
       if (!pipelineResult) throw new Error("Pipeline returned no result");
 
@@ -1554,6 +1608,37 @@ export default function DealDashboardPage() {
             message: `Merging findings (server)… round ${prog.mergeRound}/${prog.mergeTotal}${groupInfo}`,
             detail: { current: prog.mergeRound, total: prog.mergeTotal, phase: "synthesizing" },
           });
+        } else if (phase.startsWith("cc_reconciliation")) {
+          // CC reconciliation path. Server emits `cc_reconciliation_<stage>`, where
+          // <stage> is a STAGE_SEQUENCE member (or "init" before the first stage is
+          // entered). The numeric `progress` fields are all zero on this path by
+          // construction — routing/analysis/merge never run — so the stage index is
+          // what we render. Deliberately NOT written to lastKnownCheckpointsRef: that
+          // ref is compared against DB checkpoint counts (hundreds), and mixing a
+          // 0–5 stage index into it would make the stall detector read false progress.
+          const stageKey = phase.slice("cc_reconciliation_".length);
+          const stageIdx = RECON_STAGE_LABELS.findIndex((s) => s.key === stageKey);
+          const total = RECON_STAGE_LABELS.length;
+          if (stageIdx >= 0) {
+            setModuleProgress(moduleId, {
+              message: `${RECON_STAGE_LABELS[stageIdx].label}… (step ${stageIdx + 1}/${total})`,
+              detail: { current: stageIdx + 1, total, phase: "synthesizing" },
+            });
+          } else {
+            // "init", or a stage added server-side that this list doesn't know yet.
+            setModuleProgress(moduleId, {
+              message: "Starting reconciliation…",
+              detail: { current: 0, total, phase: "synthesizing" },
+            });
+          }
+        } else {
+          // Fallback so an unrecognized phase can never freeze the progress UI.
+          // Before this branch existed, any phase outside the known set left the
+          // last message on screen indefinitely, which reads as a hang.
+          setModuleProgress(moduleId, {
+            message: `Working (server)… ${phase}`,
+            detail: { current: prog.analysisCompleted, total: prog.analysisTotal, phase: "analyzing" },
+          });
         }
 
         // Check cancellation
@@ -1567,7 +1652,7 @@ export default function DealDashboardPage() {
         if (cancelledRunsRef.current.has(runId)) return;
 
         // Re-invoke pipeline to continue from checkpoints
-        const pollResult = await callPipelineWithRetry(runId);
+        const pollResult = await callPipelineWithRetry(runId, diagnosticOnly);
 
         if (!pollResult) throw new Error("Pipeline continuation returned no result");
         pipelineResult = pollResult;
@@ -1750,11 +1835,21 @@ export default function DealDashboardPage() {
         [moduleId]: { message: "Starting…", detail: null, chunkErrors: [] },
       }));
 
-      // Auto-purge stale runs (>30 min stuck as "running") before starting
-      // Exclude the current module so we don't kill its own prior run (we'll resume it instead)
-      if (dealId) {
-        purgeStaleRunsApi({ dealId, staleMinutes: 30, excludeModuleId: moduleId }).catch(() => {});
-      }
+      // NOTE: PurgeStaleRuns is deliberately NOT called here any more.
+      //
+      // It used to fire-and-forget on every run start with
+      // `excludeModuleId: moduleId`. That exclusion means it could never clear
+      // the only thing that actually blocks the module being started — the
+      // run-creation CTE guard in pipeline-core keys on
+      // (deal_id, module_id, status='running') for the SAME module, which the
+      // exclusion skips by construction. So the call provided zero benefit to
+      // the run it was attached to, and its only observable effect was marking
+      // OTHER modules' long-running rows as 'failed' as a side effect of
+      // pressing Run on an unrelated module.
+      //
+      // Zombie cleanup is a deliberate operator action, not a side effect of
+      // starting a run. The PurgeStaleRuns API still exists server-side for
+      // that purpose.
 
       let exitedEarlyForResume = false;
 
@@ -1787,7 +1882,14 @@ export default function DealDashboardPage() {
             const runs = progress?.runs ?? [];
             const run = runs.find((r: { moduleId: string }) => r.moduleId === moduleId);
             if (run) {
-              const currentCheckpoints = (run.analysisCheckpointCount ?? 0) + (run.mergeCheckpointCount ?? 0);
+              // Sum all three signals. Analysis and merge counts are structurally
+              // zero on the CC reconciliation path (both phases are skipped), where
+              // stage checkpoints are the only thing that advances. All three counts
+              // are non-decreasing, so ANY one of them increasing increases the sum.
+              const currentCheckpoints =
+                (run.analysisCheckpointCount ?? 0) +
+                (run.mergeCheckpointCount ?? 0) +
+                (run.stageCheckpointCount ?? 0);
               const lastKnown = lastKnownCheckpointsRef.current[moduleId] ?? 0;
               if (currentCheckpoints > lastKnown) {
                 serverMadeProgress = true;
@@ -1831,7 +1933,11 @@ export default function DealDashboardPage() {
                   const runs = progress?.runs ?? [];
                   const run = runs.find((r: { moduleId: string }) => r.moduleId === moduleId);
                   if (run) {
-                    const currentCp = (run.analysisCheckpointCount ?? 0) + (run.mergeCheckpointCount ?? 0);
+                    // Same three-signal sum as the first-pass check above.
+                    const currentCp =
+                      (run.analysisCheckpointCount ?? 0) +
+                      (run.mergeCheckpointCount ?? 0) +
+                      (run.stageCheckpointCount ?? 0);
                     const lastKnown = lastKnownCheckpointsRef.current[moduleId] ?? 0;
                     if (currentCp > lastKnown) {
                       progressAfterWait = true;

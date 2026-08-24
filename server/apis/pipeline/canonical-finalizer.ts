@@ -92,6 +92,18 @@ export interface FinalizerPrerequisites {
    * artifacts (tree_level=97/98/99) and therefore cannot have evidence_admission.
    */
   skipEvidenceAdmission?: boolean;
+  /**
+   * Fully-rendered report markdown that REPLACES `formatCanonicalReport` output.
+   *
+   * Unlike the deprecated `preFormattedReport`, this is honoured: it exists for
+   * modules whose report is a different document class than the tier-based
+   * canonical report (contradiction_check on the reconciliation path renders a
+   * memo-vs-model reconciliation memo instead). It is substituted BEFORE the
+   * semantic hash is computed, so identity still covers the published text.
+   *
+   * The caller is responsible for building it from post-gate records only.
+   */
+  reportOverride?: string | null;
 }
 
 export type FinalizerOutcome =
@@ -1096,10 +1108,23 @@ export async function canonicalFinalize(
   // ALWAYS rebuild report from canonical reportable records (MAT-F06 §1).
   // preFormattedReport is never used as authoritative — it may contain excluded
   // items, F05-rejected text, or unlinked entries that passed through LLM formatting.
-  const reportMarkdown = formatCanonicalReport(effectiveHeader, reportableFindings, {
+  const canonicalMarkdown = formatCanonicalReport(effectiveHeader, reportableFindings, {
     degradedConditions,
     excludedCount: excludedFindings.length,
   });
+
+  // A caller-supplied renderer wins when present (see `reportOverride`). The
+  // substitution happens here, before hashing, so the semantic hash always
+  // describes the text that actually gets published.
+  const usingOverride =
+    typeof prereqs.reportOverride === "string" && prereqs.reportOverride.trim().length > 0;
+  const reportMarkdown = usingOverride ? prereqs.reportOverride!.trim() : canonicalMarkdown;
+  if (usingOverride) {
+    console.log(
+      `[canonicalFinalize] report: using caller-supplied renderer ` +
+      `(${reportMarkdown.length} chars; canonical renderer produced ${canonicalMarkdown.length} chars and was not used)`
+    );
+  }
 
   // ── STEP 7: Compute semantic hash ─────────────────────────────────────────
   const hashInput = buildSemanticHashInput(

@@ -45,6 +45,14 @@ export default api({
         documentsIncluded: z.array(z.string()),
         analysisCheckpointCount: z.number(),
         mergeCheckpointCount: z.number(),
+        // Stage checkpoints (pipeline_checkpoints). Reported SEPARATELY and never
+        // folded into the two counts above — those retain their exact prior
+        // meaning for the four merge-tree modules.
+        //
+        // This is the only progress signal the CC reconciliation path emits:
+        // analysis and merge checkpoints are structurally zero there because both
+        // phases are skipped by design.
+        stageCheckpointCount: z.number(),
         // Errors surfaced from checkpoint JSONB (if any)
         checkpointErrors: z.array(z.string()),
       })
@@ -92,6 +100,31 @@ export default api({
         { label: `Count merge checkpoints for ${run.module_id}` }
       );
 
+      // Stage checkpoints — claims_ledger, reconciliation, gate, finalization.
+      //
+      // GUARDED DELIBERATELY: pipeline_checkpoints is created by migration 013,
+      // but the pipeline's own writes to it are wrapped in try/catch with the
+      // comment "table may not exist yet — non-fatal", so the codebase does not
+      // assume the migration has run everywhere. An unguarded count here would
+      // throw for EVERY run in the loop and take down progress reporting for all
+      // five modules. Degrade to 0 instead: CC loses its new signal, no module
+      // loses its existing one.
+      //
+      // Consequence for callers: a persistent 0 is INCONCLUSIVE, not proof that
+      // the reconciliation path failed to checkpoint.
+      let stageCheckpointCount = 0;
+      try {
+        const stageRows = await ctx.integrations.db.query(
+          `SELECT COUNT(*) AS cnt FROM pipeline_checkpoints WHERE module_run_id = $1`,
+          CountSchema,
+          [run.id],
+          { label: `Count stage checkpoints for ${run.module_id}` }
+        );
+        stageCheckpointCount = stageRows[0]?.cnt ?? 0;
+      } catch {
+        // Table absent or unreadable — leave at 0.
+      }
+
       // Surface errors from merge checkpoint JSONB
       const errorRows = await ctx.integrations.db.query(
         `SELECT merged_json->>'error' AS error_text
@@ -117,6 +150,7 @@ export default api({
         documentsIncluded: docsIncluded,
         analysisCheckpointCount: analysisRows[0]?.cnt ?? 0,
         mergeCheckpointCount: ckptRows[0]?.cnt ?? 0,
+        stageCheckpointCount,
         checkpointErrors: errorRows
           .map((r) => r.error_text)
           .filter((e): e is string => e !== null),
