@@ -309,7 +309,6 @@ export default function DealDashboardPage() {
   const { run: numericVerifyApi } = useApi("NumericVerify");
   const { run: cancelModuleRunApi } = useApi("CancelModuleRun");
   const { run: checkRunCancelledApi } = useApi("CheckRunCancelled");
-  const { run: purgeStaleRunsApi } = useApi("PurgeStaleRuns");
   const { run: backfillDocTablesApi } = useApi("BackfillDocTablesFromText");
   const { run: getDocTablesSummaryApi } = useApi("GetDocTablesSummary");
   const { run: runModulePipelineApi } = useApi("RunModulePipeline");

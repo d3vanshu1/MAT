@@ -282,6 +282,14 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
   const cov = ctx.coverage;
   const rec = ctx.reconciliation;
 
+  // UNIT CONTRACT: claims-reconciliation.ts computes coverage_pct as a FRACTION
+  // (matched / adjudicable, range 0..1) despite the `_pct` suffix. Its own log
+  // line multiplies by 100 before printing. Render must do the same or a 1.1%
+  // coverage renders as "0.0%" and reads as total reconciliation failure.
+  // Convert once here rather than at each call site.
+  const coveragePctDisplay = cov.coverage_pct * 100;
+  const coverageWithNearMissPctDisplay = cov.coverage_with_near_miss_pct * 100;
+
   // ── Header ────────────────────────────────────────────────────────────────
   lines.push("# Memo–Model Reconciliation");
   lines.push("");
@@ -294,7 +302,7 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
       `${presented.length} presented below · ${appendix.length} in the appendix`
   );
   lines.push(
-    `> Coverage: ${cov.matched} of ${cov.adjudicable} adjudicable claims matched (${cov.coverage_pct.toFixed(1)}%)`
+    `> Coverage: ${cov.matched} of ${cov.adjudicable} adjudicable claims matched (${coveragePctDisplay.toFixed(1)}%)`
   );
   lines.push("");
   lines.push(
@@ -439,8 +447,8 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
   lines.push(`| Unmatched | ${cov.unmatched} |`);
   lines.push("");
   lines.push(
-    `**Coverage: ${cov.coverage_pct.toFixed(1)}%** of adjudicable claims matched a model figure ` +
-      `(${cov.coverage_with_near_miss_pct.toFixed(1)}% counting near-misses, which are reported ` +
+    `**Coverage: ${coveragePctDisplay.toFixed(1)}%** of adjudicable claims matched a model figure ` +
+      `(${coverageWithNearMissPctDisplay.toFixed(1)}% counting near-misses, which are reported ` +
       `separately and never asserted as contradictions).`
   );
   lines.push("");
