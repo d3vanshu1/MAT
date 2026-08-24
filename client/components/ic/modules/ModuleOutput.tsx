@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AlertCircle, AlertTriangle, Info, ChevronDown, ChevronUp, FileText } from "lucide-react";
+import { readableSourceDocs } from "@/lib/reportText";
 import type { ModuleOutput as ModuleOutputType, Finding } from "@/types/module";
 import ICBadge from "../ui/ICBadge";
 import StreamingText from "../ui/StreamingText";
@@ -31,17 +32,7 @@ export default function ModuleOutput({ output }: ModuleOutputProps) {
 
   return (
     <div className="space-y-5">
-      {/* Executive header — suppress error messages */}
-      {output.executive_header &&
-        !/^(merge|analysis|extraction|pipeline)\s*(failed|error)/i.test(output.executive_header.trim()) && (
-        <div className="p-4 rounded-lg bg-ic-surface-light border border-ic-border">
-          <p className="text-sm text-ic-text leading-relaxed font-bold">
-            {output.executive_header}
-          </p>
-        </div>
-      )}
-
-      {/* Full report toggle */}
+      {/* Full report toggle — the summary already sits on the card above */}
       {reportText && (
         <div>
           <button
@@ -86,6 +77,8 @@ export default function ModuleOutput({ output }: ModuleOutputProps) {
 
 function FindingItem({ finding }: { finding: Finding }) {
   const [expanded, setExpanded] = useState(false);
+  // Bare document IDs carry no reader value, so they never reach the chips.
+  const sourceDocs = readableSourceDocs(finding.source_docs);
 
   return (
     <div className="p-3 rounded-lg bg-ic-surface border border-ic-border">
@@ -117,9 +110,9 @@ function FindingItem({ finding }: { finding: Finding }) {
             </>
           )}
 
-          {finding.source_docs.length > 0 && (
+          {sourceDocs.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-2">
-              {finding.source_docs.map((doc, j) => (
+              {sourceDocs.map((doc, j) => (
                 <span key={j} className="text-[10px] text-ic-muted bg-ic-surface-light px-1.5 py-0.5 rounded">
                   {doc}
                 </span>

@@ -16,6 +16,7 @@ import {
   Loader2,
   XCircle,
 } from "lucide-react";
+import { summaryLead } from "@/lib/reportText";
 import type { ModuleDefinition } from "@/lib/moduleConfig";
 import type { ModuleStatus } from "@/types/module";
 import type { AnalysisProgress } from "./ModuleGrid";
@@ -184,13 +185,8 @@ export default function ModuleCard({
         {/* Completed state */}
         {isComplete && hasOutput && (
           <div className="space-y-3">
-            {/* Executive summary — suppress if it's just an error message */}
-            {status!.latestOutput!.executive_header &&
-              !/^(merge|analysis|extraction|pipeline)\s*(failed|error)/i.test(status!.latestOutput!.executive_header.trim()) && (
-              <p className="text-xs text-ic-text/75 font-light leading-relaxed line-clamp-3">
-                {status!.latestOutput!.executive_header}
-              </p>
-            )}
+            {/* Summary — the finding headline and lead, not process detail */}
+            <ModuleCardSummary markdown={status!.latestOutput!.executive_header} />
 
             {/* Severity badges */}
             {severityCounts && (
@@ -241,6 +237,42 @@ export default function ModuleCard({
         <div className="px-5 pb-5 border-t border-ic-border/50 pt-4">
           <ModuleOutput output={status!.latestOutput!} />
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Flash-card summary: the finding headline and its lead sentence, as plain text.
+ *
+ * The stored summary is markdown, so it is reduced to readable text here rather
+ * than rendered — markdown syntax inside a clamped card reads as noise.
+ */
+function ModuleCardSummary({ markdown }: { markdown: string | null | undefined }) {
+  if (!markdown) return null;
+
+  const trimmed = markdown.trim();
+  if (trimmed.length === 0) return null;
+
+  // Pipeline failure text is surfaced by the run status, not the summary slot.
+  if (/^(merge|analysis|extraction|pipeline)\s*(failed|error)/i.test(trimmed)) return null;
+
+  const { headline, lead } = summaryLead(trimmed);
+  if (!headline && !lead) return null;
+
+  return (
+    <div>
+      {headline && (
+        <p className="text-xs font-bold text-ic-text leading-tight line-clamp-2">{headline}</p>
+      )}
+      {lead && (
+        <p
+          className={`text-xs text-ic-text/75 font-light leading-relaxed line-clamp-2 ${
+            headline ? "mt-0.5" : ""
+          }`}
+        >
+          {lead}
+        </p>
       )}
     </div>
   );
