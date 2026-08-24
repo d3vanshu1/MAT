@@ -104,6 +104,22 @@ export interface FinalizerPrerequisites {
    * The caller is responsible for building it from post-gate records only.
    */
   reportOverride?: string | null;
+
+  /**
+   * Fully-rendered executive header that REPLACES `synthesizeExecutiveHeader`
+   * output.
+   *
+   * Symmetric with `reportOverride`, and required for the same reason. STEP 5.5
+   * regenerates the header from `reportableFindings` unconditionally, which is
+   * correct for the tier-based canonical report but wrong for any module whose
+   * published document is a different class. `ic_challenge_mode` on the
+   * ic_questions path publishes questions, not findings: a regenerated
+   * "N reportable findings (M warnings)" header would contradict the body.
+   *
+   * When supplied and non-blank, it is used verbatim and STEP 5.5's regenerated
+   * header is discarded. Existing callers pass nothing and behaviour is unchanged.
+   */
+  headerOverride?: string | null;
 }
 
 export type FinalizerOutcome =
@@ -1095,8 +1111,22 @@ export async function canonicalFinalize(
   // Rebuilding it here from `reportableFindings` makes header↔finding
   // correspondence structural rather than something that has to be validated.
   const regeneratedHeader = synthesizeExecutiveHeader(reportableFindings);
-  const effectiveHeader = regeneratedHeader ?? executiveHeader;
-  if (regeneratedHeader && regeneratedHeader !== executiveHeader) {
+  // A caller-supplied header wins when present (see `headerOverride`). Modules
+  // that publish a non-finding document class must be able to keep their own
+  // header text; regenerating a severity tally over a projected finding set
+  // would describe a document that was never published.
+  const usingHeaderOverride =
+    typeof prereqs.headerOverride === "string" && prereqs.headerOverride.trim().length > 0;
+  const effectiveHeader = usingHeaderOverride
+    ? prereqs.headerOverride!.trim()
+    : (regeneratedHeader ?? executiveHeader);
+  if (usingHeaderOverride) {
+    console.log(
+      `[canonicalFinalize][header] using caller-supplied headerOverride ` +
+      `(${effectiveHeader.length} chars; STEP 5.5 regenerated ` +
+      `${(regeneratedHeader ?? "").length} chars and was not used)`
+    );
+  } else if (regeneratedHeader && regeneratedHeader !== executiveHeader) {
     console.log(
       `[canonicalFinalize][header] regenerated from ${reportableFindings.length} ` +
       `reportable finding(s) — pre-gate header discarded ` +

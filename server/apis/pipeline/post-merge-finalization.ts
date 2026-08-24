@@ -130,7 +130,7 @@ export interface PostMergeFinalizationInput {
   /** Returns time remaining in budget (ms) */
   timeRemaining: () => number;
   /** Which code path invoked this runner */
-  callerPath: "fast_path" | "normal_path" | "reconciliation_path";
+  callerPath: "fast_path" | "normal_path" | "reconciliation_path" | "ic_questions_path";
 
   /** File tag map for source routing */
   fileTagMap: Map<string, string>;
@@ -1164,6 +1164,9 @@ export async function runPostMergeFinalizationStages(
   // findings that survived every quality check. Presentation-only: a failure
   // falls back to the canonical renderer and never fails the run.
   let reportOverride: string | null = null;
+  // Caller-supplied executive header. Only the IC-questions path sets this; F06
+  // falls back to its own regenerated/passed-through header when it stays null.
+  let headerOverride: string | null = null;
   if (callerPath === "reconciliation_path" && reconciliationResult) {
     try {
       const survivingTitles = new Set(
@@ -1212,25 +1215,33 @@ export async function runPostMergeFinalizationStages(
       executiveHeader,
       moduleType: moduleId,
       checkpointStatus,
-      // reconciliation_path writes no merge nodes, so there is no natural root
-      // to propose. F06's publication gate is bypassed for this path.
-      proposedFinalNode: callerPath === "reconciliation_path"
-        ? undefined
-        : {
-            treeLevel: naturalRootTreeLevel,
-            nodeIndex: naturalRootNodeIndex,
-          },
+      // reconciliation_path and ic_questions_path write no merge nodes, so there
+      // is no natural root to propose. F06's publication gate is bypassed for
+      // these paths.
+      proposedFinalNode:
+        callerPath === "reconciliation_path" || callerPath === "ic_questions_path"
+          ? undefined
+          : {
+              treeLevel: naturalRootTreeLevel,
+              nodeIndex: naturalRootNodeIndex,
+            },
       claimsDegraded,
       degradedConditions: verificationErrored
         ? [`Absence verification phase errored (${postMergeHousekeeping.length} housekeeping findings present)`]
         : undefined,
       // Natural-merge-tree runs never produce P2.1 reconstruction artifacts
       // (tree_level=97/98/99), so evidence_admission cannot exist. Skip it.
-      skipEvidenceAdmission: callerPath === "normal_path" || callerPath === "reconciliation_path",
-      // No merge tree exists on the reconciliation path — the publication gate
-      // validates tree lineage, which is not applicable here.
-      bypassPublicationGate: callerPath === "reconciliation_path",
+      // ic_questions_path skips the merge tree entirely for the same reason.
+      skipEvidenceAdmission:
+        callerPath === "normal_path" ||
+        callerPath === "reconciliation_path" ||
+        callerPath === "ic_questions_path",
+      // No merge tree exists on the reconciliation or IC-questions paths — the
+      // publication gate validates tree lineage, which is not applicable here.
+      bypassPublicationGate:
+        callerPath === "reconciliation_path" || callerPath === "ic_questions_path",
       reportOverride,
+      headerOverride,
     },
   );
 

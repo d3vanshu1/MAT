@@ -28,6 +28,10 @@ export const SONNET_MODULES = new Set([
   "omission_audit",
   "blind_spot_scanner",
   "diligence_completeness",
+  // ic_challenge_mode synthesises IC questions in a single call over the full
+  // memo corpus. Haiku produces generic, non-anchored questions at that context
+  // size; the module's output is read directly by deal teams.
+  "ic_challenge_mode",
 ]);
 
 // ---------------------------------------------------------------------------
