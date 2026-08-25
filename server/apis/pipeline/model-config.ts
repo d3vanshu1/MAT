@@ -27,6 +27,11 @@ export const DEFAULT_MODEL = HAIKU_MODEL;
 export const SONNET_MODULES = new Set([
   "omission_audit",
   "blind_spot_scanner",
+  // blind_spot_scanner_v2 registers here so its structural/thesis profile calls
+  // resolve to Sonnet rather than silently falling through to DEFAULT_MODEL.
+  // Parts 3 and 4 pass useOpus: true where generating failure modes from a bare
+  // profile is the reasoning that warrants Opus; profile extraction does not.
+  "blind_spot_scanner_v2",
   "diligence_completeness",
   // ic_challenge_mode synthesises IC questions in a single call over the full
   // memo corpus. Haiku produces generic, non-anchored questions at that context
