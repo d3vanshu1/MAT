@@ -39,6 +39,7 @@ import type { CanonicalFinalArtifact } from "./canonical-final-artifact.js";
 import { CANONICAL_FINAL_ARTIFACT_VERSION, SEMANTIC_HASH_VERSION } from "./canonical-final-artifact.js";
 import type { MergedFinding } from "../modules/build-merged-text.js";
 import type { ICQuestionsArtifact } from "./ic-questions-contract.js";
+import { renderICQuestionsReport } from "./ic-questions-render.js";
 import { computeContentHash } from "./source-snapshot.js";
 import { applyReductionGates } from "./finding-reduction-gate.js";
 import {
@@ -468,6 +469,7 @@ export async function runPostMergeFinalizationStages(
     housekeepingFindings, housekeepingValidated,
     fileTagMap, subjectDocumentIds, useOpus,
     sourceManifestHash,
+    icQuestionsArtifact,
     runPostMergePipeline, runAbsenceVerificationPhase,
   } = input;
 
@@ -1206,6 +1208,27 @@ export async function runPostMergeFinalizationStages(
         `${LOG_PREFIX} reconciliation report render FAILED (non-fatal, falling back to ` +
         `canonical renderer): ${e?.message}`
       );
+    }
+  }
+
+  // ── IC-questions-path report ──────────────────────────────────────────────
+  // ic_challenge_mode v2 publishes a single-call synthesis over the IC memo
+  // corpus. Unlike the reconciliation report above, a render failure here is
+  // FATAL: the canonical renderer would silently emit a tier-based report over
+  // findings projected from IC questions, which is a different document than
+  // the one the module promises. Publishing that instead would be worse than
+  // failing the run, so the error is rethrown.
+  if (callerPath === "ic_questions_path" && icQuestionsArtifact) {
+    try {
+      const built = renderICQuestionsReport(icQuestionsArtifact);
+      if (built) {
+        reportOverride = built.markdown;
+        headerOverride = built.executiveHeader;
+        console.log(`${LOG_PREFIX} ic-questions report: rendered ${built.markdown.length} chars — ${built.questionCount} question(s).`);
+      }
+    } catch (e: any) {
+      console.error(`${LOG_PREFIX} ic-questions report render FAILED: ${e?.message}`);
+      throw e;
     }
   }
 

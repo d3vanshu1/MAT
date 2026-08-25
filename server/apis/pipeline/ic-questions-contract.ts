@@ -305,3 +305,129 @@ export function parseICQuestions(raw: unknown, source = "unknown"): ICQuestionPa
 
   return { questions, rejected, rankDerivedCount };
 }
+
+// ---------------------------------------------------------------------------
+// P5.4 — canonical projection
+// ---------------------------------------------------------------------------
+
+/**
+ * Cross-environment UUID v4.
+ *
+ * Deliberately duplicated from `canonical-finding.ts` (where it is module-private)
+ * rather than importing Node's `crypto`, which Vite externalizes.
+ */
+function randomUUID(): string {
+  if (typeof globalThis !== "undefined" && typeof (globalThis as any).crypto?.randomUUID === "function") {
+    return (globalThis as any).crypto.randomUUID() as string;
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/** Max length of the generated `issue_key` slug. */
+const ISSUE_KEY_MAX_LEN = 60;
+
+/**
+ * snake_case slug of a question, capped at {@link ISSUE_KEY_MAX_LEN} chars.
+ *
+ * Truncation happens on a word boundary where one exists inside the cap, so the
+ * key stays readable in consolidation logs instead of ending mid-word.
+ */
+function toIssueKey(question: string): string {
+  const slug = question
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (slug.length <= ISSUE_KEY_MAX_LEN) return slug;
+
+  const clipped = slug.slice(0, ISSUE_KEY_MAX_LEN);
+  const lastBoundary = clipped.lastIndexOf("_");
+  // Only honour the boundary if it leaves a usefully long key.
+  const trimmed = lastBoundary > ISSUE_KEY_MAX_LEN / 2 ? clipped.slice(0, lastBoundary) : clipped;
+  return trimmed.replace(/_+$/g, "");
+}
+
+/** Distinct values in first-seen order. */
+function distinct(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of values) {
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/**
+ * Shape of one projected canonical finding.
+ *
+ * Structurally a subset of `CanonicalFinding` — only the fields the P5.4 table
+ * sanctions are present. Typed locally (rather than importing `CanonicalFinding`)
+ * so that the ABSENCE of the excluded fields is visible in the type itself:
+ * `gap_type`, `absence_confidence`, `evidence_docs`, `independent`,
+ * `structured_impact`, `severity_anchor`, `numeric_unverified`, and
+ * `materiality_tier` are NOT set. Those fields drive the absence-verification,
+ * materiality, and numeric-validation gates; populating them for an IC question
+ * would fabricate signal those gates then act on.
+ */
+export interface ProjectedICQuestionFinding {
+  finding_id: string;
+  merged_from_finding_ids: string[];
+  severity: "info";
+  title: string;
+  detail: string;
+  full_analysis: string;
+  source_docs: string[];
+  category: "principal_finding";
+  finding_kind: "process_observation";
+  issue_key: string;
+  claim_ids: string[];
+}
+
+/**
+ * Project parsed IC questions onto canonical findings (P5.4).
+ *
+ * One finding per question, in the order given. The projection is total: every
+ * input question yields exactly one finding, because `parseICQuestions` has
+ * already rejected anything that could not be published.
+ *
+ * `full_analysis` renders each anchor as its verbatim quote followed by the
+ * attribution line, matching the P4 report body so the DB record and the
+ * rendered report never disagree.
+ */
+export function projectICQuestionsToCanonicalFindings(
+  questions: ICQuestion[],
+): ProjectedICQuestionFinding[] {
+  const findings = questions.map((q) => {
+    const fullAnalysis = q.anchors
+      .map((a) => `${a.quote}\n— ${a.source_doc}, ${a.memo_version}`)
+      .join("\n\n");
+
+    return {
+      finding_id: randomUUID(),
+      merged_from_finding_ids: [],
+      severity: "info" as const,
+      title: q.question,
+      detail: q.why_it_matters,
+      full_analysis: fullAnalysis,
+      source_docs: distinct(q.anchors.map((a) => a.source_doc)),
+      category: "principal_finding" as const,
+      finding_kind: "process_observation" as const,
+      issue_key: toIssueKey(q.question),
+      claim_ids: distinct(q.anchors.map((a) => a.claim_id)),
+    };
+  });
+
+  console.log(
+    `${LOG_PREFIX} projectICQuestionsToCanonicalFindings: projected ${findings.length} finding(s) ` +
+    `from ${questions.length} question(s).`,
+  );
+
+  return findings;
+}
