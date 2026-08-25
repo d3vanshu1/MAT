@@ -41,7 +41,7 @@ const EXTRACTION_PAGE_SIZE = 50;
 export interface ICMemoDoc {
   id: string;
   file_name: string;
-  /** e.g. `"MEMO 3 of 4 — 2026-06-15"`, or `"MEMO 4 of 4"` when no date parsed. */
+  /** e.g. `"MEMO 3 of 4 — 2026-06-15"`, or `"MEMO 4 of 4 (position inferred)"`. */
   version_label: string;
 }
 
@@ -135,16 +135,22 @@ export async function resolveICQuestionsScope(
   });
 
   // ── Step 3: version labels ───────────────────────────────────────────────
-  // A memo with no parsed date gets a label with NO date segment. Substituting
-  // a neighbouring memo's date, or the upload timestamp, would put a fabricated
-  // date in front of the reader inside a verbatim attribution line.
+  // A memo with no parsed date is labelled "(position inferred)" INSTEAD of a
+  // date. This marker is load-bearing, not cosmetic: the P3 synthesis prompt
+  // keys off the literal string "(position inferred)" to suppress version_drift
+  // claims across that memo and downgrade them to internal_inconsistency. A bare
+  // "MEMO n of N" would leave the model unable to tell a guessed position from a
+  // known one, and it would assert drift direction across an ordering nobody
+  // established. Substituting a neighbouring memo's date or the upload timestamp
+  // would be worse still — fabricated provenance inside an attribution line the
+  // reader treats as verbatim.
   const total = keyed.length;
   const memoDocs: ICMemoDoc[] = keyed.map((doc, i) => ({
     id: doc.id,
     file_name: doc.file_name,
     version_label:
       doc.parsedDate === null
-        ? `MEMO ${i + 1} of ${total}`
+        ? `MEMO ${i + 1} of ${total} (position inferred)`
         : `MEMO ${i + 1} of ${total} — ${doc.parsedDate}`,
   }));
 
