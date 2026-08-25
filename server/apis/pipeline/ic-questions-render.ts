@@ -174,44 +174,66 @@ function renderQuestion(q: ICQuestion): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Vocabulary that must not appear in an IC Questions report.
+ * C1 — the G1 vocabulary check is split into two classes, because the original
+ * single flat list conflated two entirely different failure modes.
  *
- * Every entry belongs to the canonical/tier-based renderer this module replaces.
- * Their presence would mean the reader is looking at the wrong document, or at a
- * hybrid of the two — which is what G1 exists to detect.
+ * FATAL: structural markers of the canonical/tier-based renderer this module
+ * replaces. They are markdown headings and a field name — they cannot occur in
+ * prose, and this module's own scaffolding emits none of them. If one appears at
+ * the START of a line, the only explanation is that F06's canonical formatter
+ * produced the document instead of the IC-questions override, or that the two
+ * were spliced. That is not a wording problem, it is the wrong document, and it
+ * must never be published. Hence: line-start, case-sensitive, throw.
+ *
+ * ADVISORY: `severity`, `critical`, `warning` are ordinary English. A memo that
+ * says "critical to the thesis" or "warning signs in Q3" is quoted verbatim, and
+ * a verbatim anchor outranks G1 — suppressing or rewriting the quote would breach
+ * the fidelity guarantee the whole module exists to provide. These are therefore
+ * counted and logged for an operator to adjudicate, and NEVER fatal.
  */
-const G1_BANNED_STRINGS = [
-  "Diligence Report",
-  "Memo Omissions",
-  "Diligence Gaps",
+
+/** Structural canonical-renderer markers. Line-start, case-sensitive, FATAL. */
+const G1_FATAL_STRINGS = [
+  "# Diligence Report",
+  "## Memo Omissions",
+  "## Diligence Gaps",
+  "## Housekeeping",
+  "## Human Review Flags",
+  "## Tier 1 —",
+  "## Tier 2 —",
+  "## Tier 3 —",
   "gap_type",
-  "severity",
-  "critical",
-  "warning",
-  "Housekeeping",
-  "Human Review Flags",
-  "Tier 1",
-  "Tier 2",
-  "Tier 3",
 ] as const;
 
+/** Ordinary English that overlaps banned vocabulary. Counted, never fatal. */
+const G1_ADVISORY_STRINGS = ["severity", "critical", "warning"] as const;
+
 /**
- * Audit the rendered markdown for G1 banned vocabulary and LOG any hits.
+ * Audit the rendered markdown for G1 vocabulary.
  *
- * Deliberately non-fatal. This module's own scaffolding contains none of these
- * strings by construction, so a hit can only come from model-authored text: a
- * question, a `why_it_matters`, the executive header, or a verbatim memo quote.
- * A memo that genuinely says "critical to the investment thesis" would fail a
- * hard gate, and dropping or rewriting that quote would breach the verbatim-anchor
- * guarantee that outranks G1. So the violation is reported loudly for the
- * operator to adjudicate rather than silently suppressed or fatally enforced.
+ * @throws {Error} when a FATAL structural marker begins any line — the document
+ *         is not an IC Questions report and must not be published.
  */
-function auditBannedStrings(markdown: string): string[] {
+function auditBannedStrings(markdown: string): void {
+  // ── FATAL pass: line-start, case-sensitive ──────────────────────────────
+  const lines = markdown.split("\n");
+  for (const fatal of G1_FATAL_STRINGS) {
+    const hitIndex = lines.findIndex((line) => line.startsWith(fatal));
+    if (hitIndex !== -1) {
+      throw new Error(
+        `${LOG_PREFIX} G1 FATAL: rendered report contains structural canonical-renderer ` +
+        `vocabulary "${fatal}" at line ${hitIndex + 1}. This indicates F06's canonical ` +
+        "formatter ran instead of the IC-questions override, or that the two documents were " +
+        "spliced. Refusing to publish.",
+      );
+    }
+  }
+
+  // ── ADVISORY pass: case-insensitive, count-based, never fatal ───────────
   const haystack = markdown.toLowerCase();
   const hits: string[] = [];
-
-  for (const banned of G1_BANNED_STRINGS) {
-    const needle = banned.toLowerCase();
+  for (const advisory of G1_ADVISORY_STRINGS) {
+    const needle = advisory.toLowerCase();
     let count = 0;
     let from = 0;
     while (true) {
@@ -220,20 +242,25 @@ function auditBannedStrings(markdown: string): string[] {
       count++;
       from = at + needle.length;
     }
-    if (count > 0) hits.push(`"${banned}" ×${count}`);
+    if (count > 0) hits.push(`"${advisory}" ×${count}`);
   }
 
   if (hits.length > 0) {
-    console.error(
-      `${LOG_PREFIX} G1 AUDIT: rendered report contains banned vocabulary — ${hits.join(", ")}. ` +
-      "Source is model-authored text (question, why_it_matters, header, or a verbatim quote); " +
-      "not suppressed, because rewriting an anchor quote would breach verbatim fidelity.",
+    // Deliberately stdout, not stderr. The platform surfaces anything a step
+    // writes to stderr as a step error, which would make this advisory fatal —
+    // the exact opposite of the contract above. The "G1 ADVISORY" label keeps it
+    // greppable in the run log.
+    console.log(
+      `${LOG_PREFIX} G1 ADVISORY: rendered report contains ordinary English that also appears ` +
+      `in banned vocabulary — ${hits.join(", ")}. Source is model-authored text (question, ` +
+      "why_it_matters, header, or a verbatim quote); not suppressed, because rewriting an " +
+      "anchor quote would breach verbatim fidelity. FATAL pass clean.",
     );
   } else {
-    console.log(`${LOG_PREFIX} G1 AUDIT: clean — 0 banned strings in rendered report.`);
+    console.log(
+      `${LOG_PREFIX} G1 AUDIT: clean — 0 fatal markers, 0 advisory strings in rendered report.`,
+    );
   }
-
-  return hits;
 }
 
 // ---------------------------------------------------------------------------

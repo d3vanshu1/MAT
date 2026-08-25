@@ -205,8 +205,10 @@ export async function resolveICQuestionsScope(
   // it is surfaced loudly instead of silently removed.
   for (const c of memoCoverage) {
     if (c.chunks_used === 0) {
-      console.error(
-        `${LOG_PREFIX} memo "${c.file_name}" has 0 usable chunks — it will be ` +
+      // stdout, not stderr: a stderr write is surfaced as a step error, and this
+      // memo is disclosed rather than dropped, so the run must still succeed.
+      console.log(
+        `${LOG_PREFIX} ADVISORY: memo "${c.file_name}" has 0 usable chunks — it will be ` +
         "named in the disclosure but contribute no text.",
       );
     }

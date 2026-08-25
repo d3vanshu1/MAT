@@ -98,6 +98,7 @@ import { runPostMergeFinalizationStages, type PostMergeFinalizationResult } from
 import { buildEngagementMap, type EngagementMapResult } from "./engagement-map.js";
 import { matchAbsenceFindings, type FindingInput, type MatcherOutput } from "./absence-map-matcher.js";
 import { dedupCarryForward } from "./finding-coordinate-dedup.js";
+import { runICQuestionsPath } from "./ic-questions-path.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -121,6 +122,13 @@ const MERGE_CONCURRENCY = 5;
 const MAX_MERGE_GROUP_FAILURES = 5; // Skip (use fallback) after this many error checkpoints across invocations
 const MAX_PARTIAL_RETRIES = 2; // Accept truncated merge checkpoints after this many re-merges still truncate
 const MERGE_NODE_TEXT_CAP = 2000; // Max chars per node's text in merge input — prevents token overflow
+
+// When true, ic_challenge_mode runs the single-call IC Questions v2 synthesis
+// over the IC memo corpus instead of the merge tree. Frozen true: the merge-tree
+// path no longer carries the module-specific prompts needed to produce a valid
+// ic_challenge_mode report, so flipping this false yields a broken module rather
+// than the old behaviour. See ic-questions-path.ts.
+const IC_QUESTIONS_V2_ENABLED = true;
 // TIME_BUDGET_MS is imported from pipeline-config.ts (derived from EFFECTIVE_CAP_MS - 100s, floor 120s)
 
 // Report formatting config (inline, post-merge)
@@ -2887,6 +2895,21 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
 
   // === CANCEL GATE: post-extraction ===
   if (await checkCancelled(ctx, runId, "post_extraction")) return cancelledResult(runId, "post_extraction");
+
+  // ── IC Questions v2 path ──────────────────────────────────────────────────
+  // ic_challenge_mode synthesises its report from the IC memo corpus in a single
+  // call, so it needs extraction and nothing after it: no source snapshot, no
+  // doc_tables, no numeric verification, no routing, no merge tree. Everything
+  // path-specific lives in ic-questions-path.ts.
+  if (moduleId === "ic_challenge_mode" && IC_QUESTIONS_V2_ENABLED) {
+    enterPhase("ic_questions");
+    return await runICQuestionsPath({
+      ctx, runId, dealId, moduleId, useOpus, startTime, timeRemaining,
+      fileTagMap, subjectDocumentIds: subjectIds,
+      markRunFailed, runPostMergePipeline,
+    });
+  }
+  // ── End IC Questions v2 path ──────────────────────────────────────────────
 
   // --- Step 0.5.5: Build or validate Source Snapshot (Fix 5) ---
   // After extraction is complete, build a unified snapshot of all source documents

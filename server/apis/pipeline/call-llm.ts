@@ -22,7 +22,15 @@ export const MessageResponseSchema = z.object({
   content: z.array(z.object({ type: z.literal("text"), text: z.string() })),
   model: z.string(),
   stop_reason: z.string().nullable(),
-  usage: z.object({ input_tokens: z.number(), output_tokens: z.number() }),
+  usage: z.object({
+    input_tokens: z.number(),
+    output_tokens: z.number(),
+    // Present only when prompt caching is in play. Optional so every existing
+    // caller keeps working unchanged; captured so cached calls can report
+    // whether the cache was written or read.
+    cache_creation_input_tokens: z.number().optional(),
+    cache_read_input_tokens: z.number().optional(),
+  }),
 });
 
 export type LLMResponse = z.infer<typeof MessageResponseSchema>;
