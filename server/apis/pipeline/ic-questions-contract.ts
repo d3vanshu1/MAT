@@ -79,6 +79,33 @@ export interface ICQuestion {
 export interface ICQuestionParseResult {
   questions: ICQuestion[];
   rejected: Array<{ reason: string; raw: unknown }>;
+  /**
+   * How many questions had NO inbound `rank` and were assigned their 1-based
+   * emission position instead. Surfaced in the P8 disclosure (F4).
+   */
+  rankDerivedCount: number;
+}
+
+/**
+ * The complete input to the P4 renderer — it needs nothing else.
+ *
+ * `runICQuestionsSynthesis` produces everything except `orderingFallbackDocs`,
+ * which P0 supplies; the artifact is assembled in the P6 pipeline-core branch.
+ */
+export interface ICQuestionsArtifact {
+  /** Post-drop, re-ranked 1..N contiguously (P2 step 7). */
+  questions: ICQuestion[];
+  /** From P2 step 9. */
+  executiveHeader: string;
+  memoCoverage: Array<{ file_name: string; chunks_used: number }>;
+  /** P1 contract rejections. */
+  rejectedCount: number;
+  /** Anchor drops from P2 steps 5–6. */
+  anchorDropCount: number;
+  /** Questions whose ordering came from emission order (see F2). */
+  rankDerivedCount: number;
+  /** File names whose ordering fell back to filename sort (P0), no date parsed. */
+  orderingFallbackDocs: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -130,21 +157,31 @@ function anchorIssues(raw: unknown, index: number): string[] {
 }
 
 /**
- * Validate one question. Returns the specific failure reasons — empty array
- * means every field satisfies `ICQuestion`.
+ * Validate one question.
+ *
+ * `issues` empty means every field satisfies `ICQuestion` except possibly an
+ * ABSENT `rank`, which the caller supplies from emission order (F2).
+ * `rankAbsent` reports that case.
  */
-function questionIssues(raw: unknown): string[] {
+function questionIssues(raw: unknown): { issues: string[]; rankAbsent: boolean } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return [`item is not an object (got ${Array.isArray(raw) ? "array" : typeof raw})`];
+    return {
+      issues: [`item is not an object (got ${Array.isArray(raw) ? "array" : typeof raw})`],
+      rankAbsent: false,
+    };
   }
 
   const obj = raw as Record<string, unknown>;
   const issues: string[] = [];
 
-  // rank — required number. Not derived from array position: deriving it would
-  // be a default, which this parser is forbidden from doing.
-  if (typeof obj.rank !== "number" || !Number.isFinite(obj.rank)) {
-    issues.push(`rank is missing or not a finite number (got ${JSON.stringify(obj.rank)})`);
+  // rank — P2 step 7 re-ranks survivors 1..N contiguously, so an inbound value
+  // never reaches output. Rejecting a fully-anchored question over a field the
+  // pipeline overwrites is a false negative, so an ABSENT rank is tolerated and
+  // filled from emission order. A rank that is PRESENT but not a finite number
+  // is a malformed field, not an absent one, and is still rejected.
+  const rankAbsent = obj.rank === undefined || obj.rank === null;
+  if (!rankAbsent && (typeof obj.rank !== "number" || !Number.isFinite(obj.rank))) {
+    issues.push(`rank is present but not a finite number (got ${JSON.stringify(obj.rank)})`);
   }
 
   // question — empty is a hard reject (spec: fail-closed).
@@ -186,7 +223,7 @@ function questionIssues(raw: unknown): string[] {
     }
   }
 
-  return issues;
+  return { issues, rankAbsent };
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +248,7 @@ function questionIssues(raw: unknown): string[] {
 export function parseICQuestions(raw: unknown, source = "unknown"): ICQuestionParseResult {
   const questions: ICQuestion[] = [];
   const rejected: Array<{ reason: string; raw: unknown }> = [];
+  let rankDerivedCount = 0;
 
   // Unwrap the common `{ questions: [...] }` envelope. This is a container
   // shape, not a field value, so unwrapping it is not a repair.
@@ -229,14 +267,22 @@ export function parseICQuestions(raw: unknown, source = "unknown"): ICQuestionPa
       items === null ? "null" : Array.isArray(items) ? "array" : typeof items
     })`;
     console.error(`${LOG_PREFIX} parseICQuestions: ${reason} (source=${source})`);
-    return { questions: [], rejected: [{ reason, raw }] };
+    return { questions: [], rejected: [{ reason, raw }], rankDerivedCount: 0 };
   }
 
-  for (const item of items) {
-    const issues = questionIssues(item);
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const { issues, rankAbsent } = questionIssues(item);
     if (issues.length === 0) {
       // Safe to assert: questionIssues verified every field of the contract.
-      questions.push(item as ICQuestion);
+      if (rankAbsent) {
+        // Assign the 1-based emission position. Copied, never mutated in place,
+        // so the caller's raw payload stays intact for diagnostics.
+        questions.push({ ...(item as ICQuestion), rank: i + 1 });
+        rankDerivedCount++;
+      } else {
+        questions.push(item as ICQuestion);
+      }
     } else {
       rejected.push({ reason: issues.join("; "), raw: item });
     }
@@ -244,17 +290,18 @@ export function parseICQuestions(raw: unknown, source = "unknown"): ICQuestionPa
 
   if (rejected.length > 0) {
     console.warn(
-      `${LOG_PREFIX} parseICQuestions: accepted ${questions.length}, rejected ${rejected.length} ` +
-      `(source=${source})`,
+      `${LOG_PREFIX} parseICQuestions: accepted ${questions.length}, rejected ${rejected.length}, ` +
+      `rankDerived ${rankDerivedCount} (source=${source})`,
     );
     for (let i = 0; i < rejected.length; i++) {
       console.warn(`${LOG_PREFIX}   rejected[${i}]: ${rejected[i].reason}`);
     }
   } else {
     console.log(
-      `${LOG_PREFIX} parseICQuestions: accepted ${questions.length}, rejected 0 (source=${source})`,
+      `${LOG_PREFIX} parseICQuestions: accepted ${questions.length}, rejected 0, ` +
+      `rankDerived ${rankDerivedCount} (source=${source})`,
     );
   }
 
-  return { questions, rejected };
+  return { questions, rejected, rankDerivedCount };
 }

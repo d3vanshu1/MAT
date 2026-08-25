@@ -38,6 +38,7 @@ import {
 import type { CanonicalFinalArtifact } from "./canonical-final-artifact.js";
 import { CANONICAL_FINAL_ARTIFACT_VERSION, SEMANTIC_HASH_VERSION } from "./canonical-final-artifact.js";
 import type { MergedFinding } from "../modules/build-merged-text.js";
+import type { ICQuestionsArtifact } from "./ic-questions-contract.js";
 import { computeContentHash } from "./source-snapshot.js";
 import { applyReductionGates } from "./finding-reduction-gate.js";
 import {
@@ -138,6 +139,11 @@ export interface PostMergeFinalizationInput {
   subjectDocumentIds?: string[];
   /** Whether to use Opus model for absence verification */
   useOpus?: boolean | null;
+  /**
+   * IC Questions (v2) synthesis artifact. Present only on `ic_questions_path`;
+   * optional and null-defaulted so no existing caller changes.
+   */
+  icQuestionsArtifact?: ICQuestionsArtifact | null;
 
   /** Source manifest hash from the validated root-completion manifest */
   sourceManifestHash: string | null;
