@@ -2227,9 +2227,13 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     // Only resume runs that are still in 'running' status.
     // Completed or failed runs must NOT be resurrected — that causes the
     // "zombie run" bug where terminated runs get re-opened.
+    // `triggered_at` is read as text so the full microsecond precision survives
+    // the round-trip into the compare-and-swap below. A Date round-trip
+    // truncates to milliseconds and the CAS would then never match.
     const currentStatus = await ctx.integrations.db.query(
-      `SELECT status FROM module_runs WHERE id = $1 LIMIT 1`,
-      z.object({ status: z.string() }),
+      `SELECT status, triggered_at::text AS triggered_at
+       FROM module_runs WHERE id = $1 LIMIT 1`,
+      z.object({ status: z.string(), triggered_at: z.string().nullable() }),
       [runId],
       { label: "Check run status before resume" }
     );
@@ -2239,6 +2243,7 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
     }
 
     const status = currentStatus[0].status;
+    const observedTriggeredAt = currentStatus[0].triggered_at;
 
     if (status === "completed") {
       // Already done — return immediately with a synthetic completed result
@@ -2271,12 +2276,60 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       };
     }
 
-    // Status is 'running' — refresh triggered_at to claim ownership
-    await ctx.integrations.db.execute(
-      `UPDATE module_runs SET triggered_at = now() WHERE id = $1`,
-      [runId],
-      { label: "Resume run — refresh triggered_at" }
+    // Status is 'running' — claim ownership via compare-and-swap on the exact
+    // `triggered_at` value read above, rather than an unconditional refresh.
+    //
+    // Mirrors the claim in `resume-stale-pipelines.ts` (already labelled there
+    // as "CAS on triggered_at to prevent double-pickup"), with one deliberate
+    // difference: that job gates on staleness
+    // (`triggered_at < now() - STALENESS_THRESHOLD_MINUTES`) because it only
+    // ever wants abandoned runs. This path cannot gate on staleness — the
+    // client's poll loop re-invokes every 5s against a run whose `triggered_at`
+    // it is actively heartbeating (extraction-phase.ts:659 and the refreshes
+    // further down this file), so a staleness gate would reject every
+    // legitimate resume. Comparing against the observed value keeps normal
+    // resumes working while still making the claim conditional.
+    //
+    // SCOPE — this closes the simultaneous-resumer window only: two invocations
+    // that read the same `triggered_at` race here and exactly one wins. It does
+    // NOT close time-separated overlap, where a second resumer arrives after the
+    // winner's heartbeat has already advanced `triggered_at`, reads the fresh
+    // value, and legitimately wins its own CAS. Telling "the owner resuming
+    // itself" apart from "a foreign resumer" requires owner identity on the row
+    // — the claim_owner / lease_expires / fence_token upgrade modelled in
+    // analysis-worker.ts, which needs a migration.
+    const claimed = await ctx.integrations.db.query(
+      `UPDATE module_runs
+       SET triggered_at = now()
+       WHERE id = $1
+         AND status = 'running'::module_status
+         AND triggered_at IS NOT DISTINCT FROM $2::timestamptz
+       RETURNING id`,
+      z.object({ id: z.string() }),
+      [runId, observedTriggeredAt],
+      { label: "Resume run — claim ownership (CAS on triggered_at)" }
     );
+
+    if (claimed.length === 0) {
+      // Lost the race: another driver claimed this run, or it left 'running',
+      // between the status read and this update. Yield rather than proceed —
+      // two drivers over one run is exactly what this guard exists to prevent.
+      // `in_progress` keeps the caller's poll loop intact; it re-invokes in 5s.
+      console.warn(
+        `[pipeline] Resume CAS lost for run ${runId} — another driver holds the claim. Yielding.`
+      );
+      return {
+        status: "in_progress",
+        runId,
+        phase: "awaiting_claim",
+        progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
+        result: null,
+        failedChunks: 0,
+        truncatedChunks: 0,
+        truncatedMerges: 0,
+        firstError: null,
+      };
+    }
   }
 
   // --- Step 0.3.5: Load filename→tag map for deterministic independent flag ---
