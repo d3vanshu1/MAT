@@ -40,6 +40,7 @@ import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { callLLMWithHeadroom } from "./call-llm.js";
 import { getModuleModel } from "./model-config.js";
 import { sha256hex } from "./sha256-pure.js";
+import { classifyChunk, BOILERPLATE_MARKER_THRESHOLD } from "./bss-chunk-quality.js";
 import type { PipelineContext } from "./pipeline-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -89,11 +90,16 @@ export const PROFILE_FIELDS = [
 ] as const;
 
 /**
- * Safety bound on rows pulled from document_chunks. Applied AFTER the relevance
- * ordering, so it never changes which text the budget selects — it only stops an
- * unbounded scan. Well above the chunk count any single allowlisted document has.
+ * How many top-ranked chunks are pulled BEFORE classification.
+ *
+ * Deliberately larger than the number the budget can hold. The v1 flow ranked
+ * and then spent the budget immediately, so when full-text search put the
+ * confidentiality notice in the top 10 — which it did, because a disclaimer is
+ * dense in generic words like "business", "company" and "information" — that
+ * text consumed budget that substantive passages then could not have.
+ * Over-fetching gives the boilerplate filter something to fall back on.
  */
-const CHUNK_FETCH_LIMIT = 500;
+export const STRUCTURAL_PROFILE_OVERFETCH = 30;
 
 const MAX_OUTPUT_TOKENS = 2000;
 
@@ -122,6 +128,9 @@ const ChunkRowSchema = z.object({
   file_name: z.string(),
   content: z.string(),
   rank: z.union([z.number(), z.string()]),
+  // count(*) OVER () is evaluated before LIMIT, so this reports how many
+  // allowlisted chunks exist in total, not how many were over-fetched.
+  total_available: z.union([z.number(), z.string()]),
 });
 
 const InsertedRowSchema = z.object({
@@ -186,6 +195,9 @@ export function buildStructuralProfilePrompt(args: {
     .join("\n\n---\n\n");
 
   const shape = PROFILE_FIELDS.map((f) => `    "${f}": "<one short phrase>"`).join(",\n");
+  const supportShape = PROFILE_FIELDS.map(
+    (f) => `    "${f}": <chunk number, or null>`,
+  ).join(",\n");
 
   return `You are building a STRUCTURAL PROFILE of a company for an investment diligence system.
 
@@ -201,21 +213,30 @@ ${dealBlock}
 ${excerptBlock}
 </source_excerpts>
 
-Return ONLY a JSON object. No prose before or after it, no markdown code fences. It must have exactly this shape, with "profile" first and "notes" second:
+Return ONLY a JSON object. No prose before or after it, no markdown code fences. It must have exactly this shape, with "profile" first, "field_support" second and "notes" third:
 
 {
   "profile": {
 ${shape}
   },
+  "field_support": {
+${supportShape}
+  },
   "notes": "<at most two sentences on how confidently the shape could be read from these excerpts>"
 }
 
+EVIDENCE RULE — this is the most important rule here:
+- Every profile value must be STATED in the excerpts above. Not implied by them, not derivable from them, not consistent with them: stated.
+- For each field, "field_support" gives the number of the single chunk that states it, using the [chunk N] labels above.
+- If the excerpts do not state the value, the profile value is exactly "unknown" and the support is null. This is the expected outcome for several fields and is not a failure.
+- Do NOT derive, estimate, back-calculate or infer a value from adjacent figures. If a revenue figure is absent, you may not reconstruct it from percentages, ratios or margins that appear near it. Write "unknown".
+- A value with no supporting chunk will be rejected by the receiving system, and the whole response discarded. When in doubt, write "unknown" with null.
+
 Rules:
 - Every profile field is ONE short phrase, under 15 words. Not a sentence, not a paragraph.
-- If the excerpts do not support a value, write exactly "unknown". Do not guess and do not infer from the document's tone.
-- "scale_band" means an order-of-magnitude revenue or headcount band, e.g. "~£50-100m revenue". Use "unknown" if no figure is present.
+- "scale_band" means an order-of-magnitude revenue or headcount band, e.g. "~£50-100m revenue", and only if such a figure is stated outright. Use "unknown" if no such figure is present.
 - "deal_archetype" means the structural transaction type, e.g. "founder-owned buyout", "carve-out", "platform for buy-and-build".
-- Do not add, remove or rename any key. Do not nest anything further.
+- Do not add, remove or rename any key. "field_support" must contain exactly the same eight keys as "profile". Do not nest anything further.
 - Do not emit any key containing "severity", "confidence", "priority", "tier" or "risk_level". This is a description of shape, not an assessment.`;
 }
 
@@ -254,7 +275,20 @@ export default api({
     totalDocumentsOnDeal: z.number(),
     chunksSelected: z.number(),
     chunksAvailableInAllowlist: z.number(),
+    chunksRetrievedForClassification: z.number(),
+    chunksDroppedAsBoilerplate: z.number(),
     selectedChunkIndexes: z.array(z.number()),
+    retrievedChunkDiagnostics: z.array(
+      z.object({
+        chunkIndex: z.number(),
+        rank: z.number(),
+        markerCount: z.number(),
+        markersHit: z.array(z.string()),
+        isBoilerplate: z.boolean(),
+        inFinalSet: z.boolean(),
+      }),
+    ),
+    fieldSupport: z.record(z.string(), z.number().nullable()),
     dealFieldsIncluded: z.array(z.string()),
     dealFieldsAllNull: z.boolean(),
     partitionAssertionPassed: z.boolean(),
@@ -321,7 +355,8 @@ export default api({
               dc.chunk_index,
               dc.file_name,
               dc.content,
-              ts_rank_cd(dc.tsv, q.tsq) AS rank
+              ts_rank_cd(dc.tsv, q.tsq) AS rank,
+              count(*) OVER () AS total_available
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
          CROSS JOIN q
@@ -329,28 +364,68 @@ export default api({
           AND d.deal_id = $1::uuid
           AND d.document_tag = ANY($3::text[])
         ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
-        LIMIT ${CHUNK_FETCH_LIMIT}`,
+        LIMIT ${STRUCTURAL_PROFILE_OVERFETCH}`,
       ChunkRowSchema,
       [dealId, BUSINESS_DESCRIPTION_QUERY, STRUCTURAL_PROFILE_ALLOWLIST],
       { label: "BSSProfile: rank allowlisted chunks" },
     );
 
+    const chunksAvailableInAllowlist = chunkRows.length === 0 ? 0 : Number(chunkRows[0].total_available);
+
+    // Over-fetch → classify → drop boilerplate → spend budget in rank order.
+    // The filter is applied HERE, at the call site, and not inside retrieval:
+    // this is an input-selection step, where dropping boilerplate costs nothing
+    // but budget. The absence sweep must make the opposite choice and discount
+    // rather than drop. See the header of ./bss-chunk-quality.ts.
     const selected: Array<{ document_id: string; chunk_index: number; content: string }> = [];
+    const diagnostics: Array<{
+      chunkIndex: number;
+      rank: number;
+      markerCount: number;
+      markersHit: string[];
+      isBoilerplate: boolean;
+      inFinalSet: boolean;
+    }> = [];
     let charTotal = 0;
+    let droppedAsBoilerplate = 0;
+
     for (const row of chunkRows) {
-      if (charTotal + row.content.length > STRUCTURAL_PROFILE_CHAR_BUDGET) continue;
-      selected.push({
-        document_id: row.document_id,
-        chunk_index: row.chunk_index,
-        content: row.content,
+      const classification = classifyChunk(row.content);
+      let inFinalSet = false;
+
+      if (classification.isBoilerplate) {
+        droppedAsBoilerplate += 1;
+      } else if (charTotal + row.content.length <= STRUCTURAL_PROFILE_CHAR_BUDGET) {
+        selected.push({
+          document_id: row.document_id,
+          chunk_index: row.chunk_index,
+          content: row.content,
+        });
+        charTotal += row.content.length;
+        inFinalSet = true;
+      }
+
+      diagnostics.push({
+        chunkIndex: row.chunk_index,
+        rank: Number(row.rank),
+        markerCount: classification.markerCount,
+        markersHit: classification.markersHit,
+        isBoilerplate: classification.isBoilerplate,
+        inFinalSet,
       });
-      charTotal += row.content.length;
     }
+
+    console.log(
+      `${LOG_PREFIX} chunk selection: ${chunksAvailableInAllowlist} allowlisted, ` +
+        `${chunkRows.length} retrieved, ${droppedAsBoilerplate} dropped as boilerplate ` +
+        `(>=${BOILERPLATE_MARKER_THRESHOLD} distinct markers), ${selected.length} in final set.`,
+    );
 
     if (selected.length === 0) {
       throw new Error(
         `${LOG_PREFIX} no chunks selected from allowlist [${STRUCTURAL_PROFILE_ALLOWLIST.join(", ")}] ` +
-          `(${chunkRows.length} candidate chunks available). Refusing to build a profile with no source text.`,
+          `(${chunksAvailableInAllowlist} allowlisted, ${chunkRows.length} retrieved, ` +
+          `${droppedAsBoilerplate} dropped as boilerplate). Refusing to build a profile with no source text.`,
       );
     }
 
@@ -451,13 +526,92 @@ export default api({
       throw new Error(`${LOG_PREFIX} profile has unexpected fields: ${extra.join(", ")}`);
     }
 
-    // Rebuild in fixed key order: profile first, notes second.
+    // ── Step 7b: field-level support ──────────────────────────────────────
+    // v1 returned scale_band "~£145–185m revenue implied by capex percentages",
+    // which is a back-calculation presented as an observation — and it was low.
+    // A blind generator that inherits an understated scale reasons about the
+    // wrong size of business. Requiring a citing chunk per field makes the
+    // difference between observed and derived checkable rather than trusted.
+    const rawSupport = parsed.field_support;
+    if (rawSupport === null || typeof rawSupport !== "object" || Array.isArray(rawSupport)) {
+      throw new Error(
+        `${LOG_PREFIX} response has no "field_support" object. Raw: ${rawText.slice(0, 400)}`,
+      );
+    }
+    const supportIn = rawSupport as Record<string, unknown>;
+
+    const supportExtra = Object.keys(supportIn).filter(
+      (k) => !(PROFILE_FIELDS as readonly string[]).includes(k),
+    );
+    if (supportExtra.length > 0) {
+      throw new Error(`${LOG_PREFIX} field_support has unexpected keys: ${supportExtra.join(", ")}`);
+    }
+
+    const selectedIndexSet = new Set(selected.map((c) => c.chunk_index));
+    const fieldSupport: Record<string, number | null> = {};
+    const unsupportedFields: string[] = [];
+    const uncitedChunks: string[] = [];
+
+    for (const f of PROFILE_FIELDS) {
+      const raw = supportIn[f];
+      const value = String(profileIn[f]);
+      const isUnknown = value.trim().toLowerCase() === "unknown";
+
+      let support: number | null = null;
+      if (typeof raw === "number" && Number.isInteger(raw)) {
+        support = raw;
+      } else if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
+        // Tolerate a numeric string; the value is unambiguous.
+        support = Number(raw.trim());
+      }
+
+      // A citation to a chunk that was never shown is a fabricated citation,
+      // which is worse than an absent one — it would survive the null check.
+      if (support !== null && !selectedIndexSet.has(support)) {
+        uncitedChunks.push(`${f} -> chunk ${support}`);
+      }
+
+      if (!isUnknown && support === null) {
+        unsupportedFields.push(f);
+      }
+
+      // "unknown" carries no support by definition; normalise so the persisted
+      // JSON cannot claim a source for a value it does not have.
+      fieldSupport[f] = isUnknown ? null : support;
+      if (isUnknown && support !== null) {
+        console.warn(
+          `${LOG_PREFIX} field_support.${f} cited chunk ${support} for an "unknown" value; normalised to null.`,
+        );
+      }
+    }
+
+    if (uncitedChunks.length > 0) {
+      throw new Error(
+        `${LOG_PREFIX} field_support cites chunks that were never shown to the model: ` +
+          `${uncitedChunks.join(", ")}. Shown: [${[...selectedIndexSet].join(", ")}]. No insert performed.`,
+      );
+    }
+    if (unsupportedFields.length > 0) {
+      throw new Error(
+        `${LOG_PREFIX} EVIDENCE RULE VIOLATION: fields with a non-"unknown" value and no ` +
+          `supporting chunk: ${unsupportedFields.join(", ")}. A value the extract does not ` +
+          "state must be \"unknown\". No insert performed.",
+      );
+    }
+
+    // Rebuild in fixed key order: profile, field_support, notes.
     const profile: Record<string, string> = {};
     for (const f of PROFILE_FIELDS) profile[f] = String(profileIn[f]);
     const profileJson = {
       profile,
+      field_support: fieldSupport,
       notes: typeof parsed.notes === "string" ? parsed.notes : "",
     };
+
+    console.log(
+      `${LOG_PREFIX} field support: ` +
+        PROFILE_FIELDS.map((f) => `${f}=${fieldSupport[f] ?? "null"}`).join(" "),
+    );
 
     // ── Step 8: append-only insert ────────────────────────────────────────
     // profile_version = MAX + 1 for this (deal_id, profile_kind). Never an
@@ -512,8 +666,12 @@ export default api({
       })),
       totalDocumentsOnDeal: allDocs.length,
       chunksSelected: selected.length,
-      chunksAvailableInAllowlist: chunkRows.length,
+      chunksAvailableInAllowlist,
+      chunksRetrievedForClassification: chunkRows.length,
+      chunksDroppedAsBoilerplate: droppedAsBoilerplate,
       selectedChunkIndexes: selected.map((c) => c.chunk_index),
+      retrievedChunkDiagnostics: diagnostics,
+      fieldSupport,
       dealFieldsIncluded,
       dealFieldsAllNull,
       partitionAssertionPassed,
