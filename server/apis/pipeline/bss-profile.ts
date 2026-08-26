@@ -40,7 +40,7 @@ import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { callLLMWithHeadroom } from "./call-llm.js";
 import { getModuleModel } from "./model-config.js";
 import { sha256hex } from "./sha256-pure.js";
-import { classifyChunk, BOILERPLATE_MARKERS, BOILERPLATE_MARKER_THRESHOLD } from "./bss-chunk-quality.js";
+import { classifyChunk, classifyTable, BOILERPLATE_MARKERS, BOILERPLATE_MARKER_THRESHOLD, TABLE_NUMERIC_TOKEN_RATIO } from "./bss-chunk-quality.js";
 import {
   matchSnippet,
   SNIPPET_MAX_GAPS,
@@ -86,6 +86,27 @@ export const THESIS_DRIVER_QUERY =
   "investment thesis OR investment highlights OR key attractions OR " +
   "value creation plan OR why now OR recommendation OR base case OR " +
   "underwriting assumptions OR path to exit";
+
+/**
+ * Per-field FTS queries for thesis profiles. Each field gets its own query
+ * so that round-robin assembly guarantees every field receives budget even
+ * when one field's query happens to rank highest overall.
+ *
+ * The umbrella THESIS_DRIVER_QUERY pulled financial sensitivities tables
+ * on every attempt because terms like "base case", "exit", and
+ * "recommendation" appear at high density in tabular data. Per-field
+ * queries with table filtering fix this by (a) targeting each field's
+ * language individually, and (b) dropping chunks whose numeric token ratio
+ * exceeds TABLE_NUMERIC_TOKEN_RATIO.
+ */
+export const THESIS_FIELD_QUERIES: Record<string, string> = {
+  core_thesis:          "investment recommendation OR the opportunity OR why we like OR compelling OR attractive entry",
+  growth_drivers:       "growth drivers OR organic growth OR new logo OR cross-sell OR upsell",
+  margin_thesis:        "margin expansion OR EBITDA margin OR operating leverage OR cost synergies",
+  ma_strategy:          "acquisition strategy OR buy and build OR M&A pipeline OR bolt-on integration",
+  exit_thesis:          "exit multiple OR exit optionality OR profile at exit OR re-rating OR trade sale OR carve-out",
+  base_case_dependency: "underwriting assumptions OR key assumptions OR management case OR downside case",
+};
 
 /** Ordered structural profile fields. Order is fixed so the persisted JSON is deterministic. */
 export const PROFILE_FIELDS = [
@@ -135,7 +156,7 @@ export const PROFILE_KINDS = {
   },
   thesis: {
     allowlist: ["ic_memo"] as string[],
-    charBudget: 20_000,
+    charBudget: 24_000,
     ftsQuery: THESIS_DRIVER_QUERY,
     fields: THESIS_FIELDS as readonly string[],
   },
@@ -473,6 +494,7 @@ export default api({
     chunksAvailableInAllowlist: z.number(),
     chunksRetrievedForClassification: z.number(),
     chunksDroppedAsBoilerplate: z.number(),
+    chunksDroppedAsTable: z.number(),
     selectedChunkIndexes: z.array(z.number()),
     retrievedChunkDiagnostics: z.array(
       z.object({
@@ -481,9 +503,13 @@ export default api({
         markerCount: z.number(),
         markersHit: z.array(z.string()),
         isBoilerplate: z.boolean(),
+        isTable: z.boolean(),
+        numericTokenRatio: z.number(),
+        pullingField: z.string().nullable(),
         inFinalSet: z.boolean(),
       }),
     ),
+    perFieldChunkCounts: z.record(z.string(), z.number()).nullable(),
     fieldSupport: z.record(z.string(), FieldSupportSchema.nullable()),
     literalMatchCount: z.number(),
     elidedMatchCount: z.number(),
@@ -568,7 +594,195 @@ export default api({
     // the tag allowlist. This lets the caller narrow to specific documents
     // (e.g. only the 3rd IC memo + update) without changing the config.
     const hasDocFilter = Array.isArray(documentIds) && documentIds.length > 0;
-    const chunkSql = `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
+
+    // Shared types for the two selection paths.
+    const selected: Array<{ document_id: string; chunk_index: number; content: string }> = [];
+    const diagnostics: Array<{
+      chunkIndex: number;
+      rank: number;
+      markerCount: number;
+      markersHit: string[];
+      isBoilerplate: boolean;
+      isTable: boolean;
+      numericTokenRatio: number;
+      pullingField: string | null;
+      inFinalSet: boolean;
+    }> = [];
+    let charTotal = 0;
+    let droppedAsBoilerplate = 0;
+    let droppedAsTable = 0;
+    let chunksAvailableInAllowlist = 0;
+    /** Per-field tracking for thesis per-field retrieval. null for structural. */
+    const perFieldChunkCounts: Record<string, number> | null =
+      profileKind === "thesis" ? {} : null;
+
+    if (profileKind === "thesis") {
+      // ── Thesis: per-field retrieval with table filter + round-robin ────
+      // Each THESIS_FIELD gets its own FTS query. For each, take top 3 by
+      // ts_rank_cd, drop boilerplate and table-dense chunks, then assemble
+      // round-robin: every field's best surviving chunk, then every field's
+      // second, and so on, until the budget is spent.
+      //
+      // Round-robin matters. A straight rank-ordered cut would spend the
+      // budget on whichever field happens to rank highest and starve the
+      // others — which is how three umbrella-query attempts all returned
+      // financial tables instead of thesis narrative.
+      const CHUNKS_PER_FIELD = 3;
+
+      type FieldCandidate = {
+        field: string;
+        document_id: string;
+        chunk_index: number;
+        file_name: string;
+        content: string;
+        rank: number;
+      };
+
+      const fieldCandidates: Record<string, FieldCandidate[]> = {};
+      const seenChunkKeys = new Set<string>();
+
+      for (const [field, query] of Object.entries(THESIS_FIELD_QUERIES)) {
+        const fieldSql = `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
+         SELECT dc.document_id,
+                dc.chunk_index,
+                dc.file_name,
+                dc.content,
+                ts_rank_cd(dc.tsv, q.tsq) AS rank,
+                count(*) OVER () AS total_available
+           FROM document_chunks dc
+           JOIN documents d ON d.id = dc.document_id
+           CROSS JOIN q
+          WHERE dc.deal_id = $1::uuid
+            AND d.deal_id = $1::uuid
+            AND d.document_tag = ANY($3::text[])${hasDocFilter ? "\n            AND d.id = ANY($4::uuid[])" : ""}
+          ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
+          LIMIT ${STRUCTURAL_PROFILE_OVERFETCH}`;
+        const params: unknown[] = [dealId, query, kindConfig.allowlist];
+        if (hasDocFilter) params.push(documentIds);
+
+        const rows = await ctx.integrations.db.query(
+          fieldSql,
+          ChunkRowSchema,
+          params,
+          { label: `BSSProfile: thesis field query [${field}]` },
+        );
+
+        // Track total available (same for all queries on same allowlist, take max).
+        if (rows.length > 0) {
+          const avail = Number(rows[0].total_available);
+          if (avail > chunksAvailableInAllowlist) chunksAvailableInAllowlist = avail;
+        }
+
+        // Classify and filter, keep top CHUNKS_PER_FIELD survivors.
+        const survivors: FieldCandidate[] = [];
+        for (const row of rows) {
+          const chunkKey = `${row.document_id}:${row.chunk_index}`;
+          const boilerplate = classifyChunk(row.content);
+          const table = classifyTable(row.content);
+
+          // Record diagnostics for every retrieved chunk (first encounter only).
+          if (!seenChunkKeys.has(chunkKey)) {
+            seenChunkKeys.add(chunkKey);
+            diagnostics.push({
+              chunkIndex: row.chunk_index,
+              rank: Number(row.rank),
+              markerCount: boilerplate.markerCount,
+              markersHit: boilerplate.markersHit,
+              isBoilerplate: boilerplate.isBoilerplate,
+              isTable: table.isTable,
+              numericTokenRatio: table.numericTokenRatio,
+              pullingField: null, // set during round-robin
+              inFinalSet: false,  // set during round-robin
+            });
+          }
+
+          if (boilerplate.isBoilerplate) {
+            droppedAsBoilerplate += 1;
+            continue;
+          }
+          if (table.isTable) {
+            droppedAsTable += 1;
+            continue;
+          }
+          if (survivors.length < CHUNKS_PER_FIELD) {
+            survivors.push({
+              field,
+              document_id: row.document_id,
+              chunk_index: row.chunk_index,
+              file_name: row.file_name,
+              content: row.content,
+              rank: Number(row.rank),
+            });
+          }
+        }
+        fieldCandidates[field] = survivors;
+        perFieldChunkCounts![field] = survivors.length;
+        console.log(
+          `${LOG_PREFIX} thesis field [${field}]: ${rows.length} retrieved, ` +
+            `${survivors.length} survived (boilerplate/table filtered), ` +
+            `top rank=${survivors[0]?.rank.toFixed(4) ?? "n/a"}.`,
+        );
+      }
+
+      // Round-robin assembly: every field's best, then every field's second, etc.
+      // Deduplication: a chunk serving multiple fields is included once with the
+      // first field that claimed it.
+      const fieldOrder = Object.keys(THESIS_FIELD_QUERIES);
+      const selectedKeys = new Set<string>();
+      for (let slot = 0; slot < CHUNKS_PER_FIELD; slot++) {
+        for (const field of fieldOrder) {
+          const candidates = fieldCandidates[field];
+          // Walk candidates to find the next one not yet selected.
+          let picked: FieldCandidate | null = null;
+          for (const c of candidates) {
+            const key = `${c.document_id}:${c.chunk_index}`;
+            if (!selectedKeys.has(key)) {
+              picked = c;
+              break;
+            }
+          }
+          if (!picked) continue;
+          const key = `${picked.document_id}:${picked.chunk_index}`;
+          if (charTotal + picked.content.length > kindConfig.charBudget) continue;
+
+          selectedKeys.add(key);
+          selected.push({
+            document_id: picked.document_id,
+            chunk_index: picked.chunk_index,
+            content: picked.content,
+          });
+          charTotal += picked.content.length;
+
+          // Update the diagnostic entry for this chunk.
+          const diag = diagnostics.find(
+            (d) => d.chunkIndex === picked!.chunk_index &&
+              // Multiple docs can have same chunk_index; match by content length
+              // as a tiebreak. The diagnostic was recorded with seenChunkKeys.
+              true,
+          );
+          // Find by the unique key instead.
+          for (const d of diagnostics) {
+            // diagnostics don't store document_id, but chunk_index is unique
+            // within the set because seenChunkKeys deduped on doc_id:chunk_index.
+            // We'll match on chunk_index and verify it's not already marked.
+            if (d.chunkIndex === picked.chunk_index && !d.inFinalSet) {
+              d.inFinalSet = true;
+              d.pullingField = field;
+              break;
+            }
+          }
+        }
+      }
+
+      if (hasDocFilter) {
+        console.log(
+          `${LOG_PREFIX} documentIds filter active: ${documentIds!.length} document(s) specified. ` +
+            `Chunks drawn only from these, within the [${kindConfig.allowlist.join(", ")}] tag allowlist.`,
+        );
+      }
+    } else {
+      // ── Structural: single umbrella query (existing logic) ─────────────
+      const chunkSql = `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
        SELECT dc.document_id,
               dc.chunk_index,
               dc.file_name,
@@ -583,64 +797,51 @@ export default api({
           AND d.document_tag = ANY($3::text[])${hasDocFilter ? "\n          AND d.id = ANY($4::uuid[])" : ""}
         ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
         LIMIT ${STRUCTURAL_PROFILE_OVERFETCH}`;
-    const chunkParams: unknown[] = [dealId, kindConfig.ftsQuery, kindConfig.allowlist];
-    if (hasDocFilter) chunkParams.push(documentIds);
-    if (hasDocFilter) {
-      console.log(
-        `${LOG_PREFIX} documentIds filter active: ${documentIds!.length} document(s) specified. ` +
-          `Chunks will be drawn only from these, within the [${kindConfig.allowlist.join(", ")}] tag allowlist.`,
-      );
-    }
-    const chunkRows = await ctx.integrations.db.query(
-      chunkSql,
-      ChunkRowSchema,
-      chunkParams,
-      { label: `BSSProfile: rank ${profileKind} allowlisted chunks` },
-    );
-
-    const chunksAvailableInAllowlist = chunkRows.length === 0 ? 0 : Number(chunkRows[0].total_available);
-
-    // Over-fetch → classify → drop boilerplate → spend budget in rank order.
-    // The filter is applied HERE, at the call site, and not inside retrieval:
-    // this is an input-selection step, where dropping boilerplate costs nothing
-    // but budget. The absence sweep must make the opposite choice and discount
-    // rather than drop. See the header of ./bss-chunk-quality.ts.
-    const selected: Array<{ document_id: string; chunk_index: number; content: string }> = [];
-    const diagnostics: Array<{
-      chunkIndex: number;
-      rank: number;
-      markerCount: number;
-      markersHit: string[];
-      isBoilerplate: boolean;
-      inFinalSet: boolean;
-    }> = [];
-    let charTotal = 0;
-    let droppedAsBoilerplate = 0;
-
-    for (const row of chunkRows) {
-      const classification = classifyChunk(row.content);
-      let inFinalSet = false;
-
-      if (classification.isBoilerplate) {
-        droppedAsBoilerplate += 1;
-      } else if (charTotal + row.content.length <= kindConfig.charBudget) {
-        selected.push({
-          document_id: row.document_id,
-          chunk_index: row.chunk_index,
-          content: row.content,
-        });
-        charTotal += row.content.length;
-        inFinalSet = true;
+      const chunkParams: unknown[] = [dealId, kindConfig.ftsQuery, kindConfig.allowlist];
+      if (hasDocFilter) chunkParams.push(documentIds);
+      if (hasDocFilter) {
+        console.log(
+          `${LOG_PREFIX} documentIds filter active: ${documentIds!.length} document(s) specified. ` +
+            `Chunks will be drawn only from these, within the [${kindConfig.allowlist.join(", ")}] tag allowlist.`,
+        );
       }
+      const chunkRows = await ctx.integrations.db.query(
+        chunkSql,
+        ChunkRowSchema,
+        chunkParams,
+        { label: `BSSProfile: rank ${profileKind} allowlisted chunks` },
+      );
 
-      diagnostics.push({
-        chunkIndex: row.chunk_index,
-        rank: Number(row.rank),
-        markerCount: classification.markerCount,
-        markersHit: classification.markersHit,
-        isBoilerplate: classification.isBoilerplate,
-        inFinalSet,
-      });
+      chunksAvailableInAllowlist = chunkRows.length === 0 ? 0 : Number(chunkRows[0].total_available);
+
+      for (const row of chunkRows) {
+        const classification = classifyChunk(row.content);
+        let inFinalSet = false;
+
+        if (classification.isBoilerplate) {
+          droppedAsBoilerplate += 1;
+        } else if (charTotal + row.content.length <= kindConfig.charBudget) {
+          selected.push({
+            document_id: row.document_id,
+            chunk_index: row.chunk_index,
+            content: row.content,
+          });
+          charTotal += row.content.length;
+          inFinalSet = true;
+        }
+
+        diagnostics.push({
+          chunkIndex: row.chunk_index,
+          rank: Number(row.rank),
+          markerCount: classification.markerCount,
+          markersHit: classification.markersHit,
+          isBoilerplate: classification.isBoilerplate,
+          isTable: false,
+          numericTokenRatio: 0,
+          pullingField: null,
+          inFinalSet,
+        });
+      }
     }
 
     // Per-marker firing count across every retrieved chunk, whether or not it
@@ -659,13 +860,21 @@ export default api({
 
     console.log(
       `${LOG_PREFIX} chunk selection: ${chunksAvailableInAllowlist} allowlisted, ` +
-        `${chunkRows.length} retrieved, ${droppedAsBoilerplate} dropped as boilerplate ` +
-        `(>=${BOILERPLATE_MARKER_THRESHOLD} distinct markers), ${selected.length} in final set ` +
-        `(budget ${kindConfig.charBudget}).`,
-
+        `${diagnostics.length} unique retrieved, ${droppedAsBoilerplate} dropped as boilerplate ` +
+        `(>=${BOILERPLATE_MARKER_THRESHOLD} distinct markers), ` +
+        `${droppedAsTable} dropped as table (ratio>=${TABLE_NUMERIC_TOKEN_RATIO}), ` +
+        `${selected.length} in final set (budget ${kindConfig.charBudget}, used ${charTotal}).`,
     );
+    if (perFieldChunkCounts) {
+      console.log(
+        `${LOG_PREFIX} per-field survivors: ` +
+          Object.entries(perFieldChunkCounts)
+            .map(([f, n]) => `${f}=${n}`)
+            .join(", "),
+      );
+    }
     console.log(
-      `${LOG_PREFIX} marker fires across ${chunkRows.length} retrieved chunks: ` +
+      `${LOG_PREFIX} marker fires across ${diagnostics.length} retrieved chunks: ` +
         (Object.entries(markerFireCounts)
           .filter(([, n]) => n > 0)
           .sort((a, b) => b[1] - a[1])
@@ -681,7 +890,7 @@ export default api({
     if (selected.length === 0) {
       throw new Error(
         `${LOG_PREFIX} no chunks selected from allowlist [${kindConfig.allowlist.join(", ")}] ` +
-          `(${chunksAvailableInAllowlist} allowlisted, ${chunkRows.length} retrieved, ` +
+          `(${chunksAvailableInAllowlist} allowlisted, ${diagnostics.length} retrieved, ` +
           `${droppedAsBoilerplate} dropped as boilerplate). Refusing to build a ${profileKind} profile with no source text.`,
       );
     }
@@ -1061,10 +1270,12 @@ export default api({
       totalDocumentsOnDeal: allDocs.length,
       chunksSelected: selected.length,
       chunksAvailableInAllowlist,
-      chunksRetrievedForClassification: chunkRows.length,
+      chunksRetrievedForClassification: diagnostics.length,
       chunksDroppedAsBoilerplate: droppedAsBoilerplate,
+      chunksDroppedAsTable: droppedAsTable,
       selectedChunkIndexes: selected.map((c) => c.chunk_index),
       retrievedChunkDiagnostics: diagnostics,
+      perFieldChunkCounts,
       fieldSupport,
       literalMatchCount,
       elidedMatchCount,

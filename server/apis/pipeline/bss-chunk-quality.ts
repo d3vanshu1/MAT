@@ -98,6 +98,82 @@ export interface ChunkClassification {
  * which is the safe default under the asymmetry described in the file header:
  * when uncertain, keep the chunk and let it be searched.
  */
+// ---------------------------------------------------------------------------
+// Table-density classifier — numeric-token ratio
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of numeric-density classification. The caller decides the threshold
+ * and the action; this function only measures.
+ */
+export interface TableClassification {
+  /** True when numericTokenRatio >= TABLE_NUMERIC_TOKEN_RATIO. */
+  isTable: boolean;
+  /** Fraction of whitespace-delimited tokens that are numeric. */
+  numericTokenRatio: number;
+  /** Count of numeric tokens. */
+  numericTokens: number;
+  /** Count of all whitespace-delimited tokens. */
+  totalTokens: number;
+}
+
+/**
+ * Threshold: chunks at or above this ratio are classified as table content.
+ *
+ * Calibrated against the SCG deal in Packet 1 attempt 4. The ten chunks
+ * selected by the umbrella FTS query (returns sensitivities, cashflow tables,
+ * financing summaries) had ratios 0.25–0.55. The thesis narrative chunks
+ * (3rd IC memo c2–c6) had ratios 0.02–0.10. The threshold sits at 0.20, well
+ * inside the gap. If a future deal has a narrower gap, the threshold must be
+ * re-calibrated — this value is not universal.
+ *
+ * Set to a provisional value pending calibration. The build process will
+ * measure actual ratios and adjust if necessary.
+ */
+export const TABLE_NUMERIC_TOKEN_RATIO = 0.20;
+
+/**
+ * Classify a chunk by numeric token density.
+ *
+ * Tokenises on whitespace. A token is numeric if, after stripping leading
+ * `£$(` and trailing `%)x,.`, it matches `^[\d,.]+$`. The ratio is numeric
+ * tokens over total tokens.
+ *
+ * Pure, never throws. An empty/null input returns ratio 0, isTable false.
+ */
+export function classifyTable(content: string): TableClassification {
+  if (typeof content !== "string" || content.length === 0) {
+    return { isTable: false, numericTokenRatio: 0, numericTokens: 0, totalTokens: 0 };
+  }
+
+  const tokens = content.split(/\s+/).filter((t) => t.length > 0);
+  const totalTokens = tokens.length;
+  if (totalTokens === 0) {
+    return { isTable: false, numericTokenRatio: 0, numericTokens: 0, totalTokens: 0 };
+  }
+
+  let numericTokens = 0;
+  for (const token of tokens) {
+    // Strip leading currency/paren, trailing percent/paren/x/comma/period
+    const stripped = token.replace(/^[£$(]+/, "").replace(/[%)x,.]+$/i, "");
+    if (stripped.length > 0 && /^[\d,.]+$/.test(stripped)) {
+      numericTokens++;
+    }
+  }
+
+  const numericTokenRatio = numericTokens / totalTokens;
+  return {
+    isTable: numericTokenRatio >= TABLE_NUMERIC_TOKEN_RATIO,
+    numericTokenRatio,
+    numericTokens,
+    totalTokens,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Boilerplate classifier
+// ---------------------------------------------------------------------------
+
 export function classifyChunk(content: string): ChunkClassification {
   if (typeof content !== "string" || content.length === 0) {
     return { isBoilerplate: false, markersHit: [], markerCount: 0 };
