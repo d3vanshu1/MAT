@@ -381,6 +381,7 @@ export default api({
     forbiddenKeysFound: z.array(z.string()),
     llmCallMs: z.number(),
     usage: z.any(),
+    rawModelResponse: z.string(),
   }),
 
   async run(ctx, { dealId, profileKind }) {
@@ -907,6 +908,7 @@ export default api({
       forbiddenKeysFound,
       llmCallMs,
       usage: response.usage,
+      rawModelResponse: rawText,
     };
   },
 });

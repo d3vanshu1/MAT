@@ -350,6 +350,7 @@ export default api({
         failureMode: z.string(),
         kept: z.string(),
         dropped: z.string(),
+        originalQueryCount: z.number(),
       }),
     ),
     insertedCount: z.number(),
@@ -358,6 +359,7 @@ export default api({
     llmCallMs: z.number(),
     stopReason: z.string().nullable(),
     usage: z.any(),
+    rawModelResponse: z.string(),
   }),
 
   async run(ctx, { dealId, profileId }) {
@@ -566,6 +568,7 @@ export default api({
       failureMode: string;
       kept: string;
       dropped: string;
+      originalQueryCount: number;
     }> = [];
 
     for (let i = 0; i < rawList.length; i++) {
@@ -647,6 +650,7 @@ export default api({
               failureMode: failureMode.slice(0, 80),
               kept: p.kept,
               dropped: p.dropped,
+              originalQueryCount: queryStrings.length,
             })),
           );
           console.log(
@@ -683,14 +687,17 @@ export default api({
       // Guard: if pruning occurred, the property must reflect the pruned set.
       // A mismatch means the binding was broken — the diagnostic output would
       // attest to pruning that the persisted rows do not reflect.
+      // Single variable for both assertion and insert — no second read of c.proposed_queries.
       const queriesForInsert = ((c as Record<string, unknown>).proposed_queries as unknown[]);
       const prunedThisCandidate = allPrunedQueries.filter((p) => p.candidateIndex === i);
       if (prunedThisCandidate.length > 0) {
-        const expectedLength = (q as unknown[]).length - prunedThisCandidate.length;
+        // Original count comes from the pruning accumulator, not from the stale `q` reference.
+        const originalCount = prunedThisCandidate[0].originalQueryCount;
+        const expectedLength = originalCount - prunedThisCandidate.length;
         if (queriesForInsert.length !== expectedLength) {
           throw new Error(
             `${LOG_PREFIX} PRUNING ASSERTION FAILED at candidate [${i}] "${failureMode.slice(0, 60)}": ` +
-              `expected ${expectedLength} queries after pruning ${prunedThisCandidate.length}, ` +
+              `expected ${expectedLength} queries after pruning ${prunedThisCandidate.length} from ${originalCount}, ` +
               `but proposed_queries has ${queriesForInsert.length}. ` +
               "The insert array does not match the pruning diagnostics. No insert performed.",
           );
@@ -796,6 +803,7 @@ export default api({
       llmCallMs,
       stopReason: response.stop_reason,
       usage: response.usage,
+      rawModelResponse: rawText,
     };
   },
 });
