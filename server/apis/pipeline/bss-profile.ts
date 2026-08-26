@@ -911,14 +911,21 @@ export default api({
         }
       }
 
-      if (!isUnknown && support === null) {
+      // Recompute after possible match-failure degradation (which sets
+      // profileIn[f] = "unknown" above). Without this, the flag stays false
+      // from the original model value and the field lands in unsupportedFields
+      // even though it was already degraded.
+      const isUnknownFinal =
+        String(profileIn[f]).trim().toLowerCase() === "unknown";
+
+      if (!isUnknownFinal && support === null) {
         unsupportedFields.push(f);
       }
 
       // "unknown" carries no support by definition; normalise so the persisted
       // JSON cannot claim a source for a value it does not have.
-      fieldSupport[f] = isUnknown ? null : support;
-      if (isUnknown && support !== null) {
+      fieldSupport[f] = isUnknownFinal ? null : support;
+      if (isUnknownFinal && support !== null) {
         console.warn(
           `${LOG_PREFIX} field_support.${f} cited chunk ${support.chunk_index} for an "unknown" value; normalised to null.`,
         );
