@@ -105,7 +105,7 @@ export const THESIS_FIELD_QUERIES: Record<string, string> = {
   margin_thesis:        "margin expansion OR EBITDA margin OR operating leverage OR cost synergies",
   ma_strategy:          "acquisition strategy OR buy and build OR M&A pipeline OR bolt-on integration",
   exit_thesis:          "exit multiple OR exit optionality OR profile at exit OR re-rating OR trade sale OR carve-out",
-  base_case_dependency: "underwriting assumptions OR key assumptions OR management case OR downside case",
+  base_case_dependency: "assumes OR depends on OR predicated on OR contingent on OR relies on delivering OR key assumption OR provided that",
 };
 
 /** Ordered structural profile fields. Order is fixed so the persisted JSON is deterministic. */
@@ -233,7 +233,7 @@ export const THESIS_FIELD_RULES = `- "core_thesis" is the central investment bet
 - "margin_thesis" is how margins are expected to move during the hold period and why — not the current margin, the trajectory.
 - "ma_strategy" is the role of acquisitions in the plan — bolt-on, platform, consolidation, or not material.
 - "exit_thesis" is how value is expected to be realised — trade sale, IPO, secondary buyout, dividend recap.
-- "base_case_dependency" is what the base case most depends on being true — the single proposition whose failure breaks the model.`;
+- "base_case_dependency" is the stated assumption the return depends on — the proposition the case treats as given, expressed in prose, not the sensitivity table's numbers.`;
 
 /**
  * Build the JSON shape block and support shape block for any field list.
