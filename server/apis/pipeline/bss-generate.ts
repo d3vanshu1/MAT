@@ -639,6 +639,9 @@ export default api({
       }
 
       // Query diversity: prune overlapping pairs, drop only if too few survive.
+      // `candidateQueries` is the single variable that flows to accepted.push —
+      // set once here, never re-read from `c.proposed_queries`.
+      let candidateQueries: string[] | null = null;
       if (Array.isArray(q) && reasons.length === 0) {
         const queryStrings = (q as unknown[]).map((e) => String(e).trim());
         const { pruned, prunedPairs } = pruneOverlappingQueries(queryStrings);
@@ -664,8 +667,7 @@ export default api({
               `minimum is ${MIN_QUERIES_PER_CANDIDATE}`,
           );
         } else {
-          // Replace with pruned set for downstream insert.
-          (c as Record<string, unknown>).proposed_queries = pruned;
+          candidateQueries = pruned.map((s) => s.trim());
         }
       }
 
@@ -684,24 +686,10 @@ export default api({
       }
       seenHashes.add(hash);
 
-      // Guard: if pruning occurred, the property must reflect the pruned set.
-      // A mismatch means the binding was broken — the diagnostic output would
-      // attest to pruning that the persisted rows do not reflect.
-      // Single variable for both assertion and insert — no second read of c.proposed_queries.
-      const queriesForInsert = ((c as Record<string, unknown>).proposed_queries as unknown[]);
-      const prunedThisCandidate = allPrunedQueries.filter((p) => p.candidateIndex === i);
-      if (prunedThisCandidate.length > 0) {
-        // Original count comes from the pruning accumulator, not from the stale `q` reference.
-        const originalCount = prunedThisCandidate[0].originalQueryCount;
-        const expectedLength = originalCount - prunedThisCandidate.length;
-        if (queriesForInsert.length !== expectedLength) {
-          throw new Error(
-            `${LOG_PREFIX} PRUNING ASSERTION FAILED at candidate [${i}] "${failureMode.slice(0, 60)}": ` +
-              `expected ${expectedLength} queries after pruning ${prunedThisCandidate.length} from ${originalCount}, ` +
-              `but proposed_queries has ${queriesForInsert.length}. ` +
-              "The insert array does not match the pruning diagnostics. No insert performed.",
-          );
-        }
+      // Single variable: candidateQueries was set by the pruning block above,
+      // or defaults to the original array here. No re-read of c.proposed_queries.
+      if (candidateQueries === null) {
+        candidateQueries = (q as unknown[]).map((e) => String(e).trim());
       }
 
       accepted.push({
@@ -709,7 +697,7 @@ export default api({
         implied_assumption: impliedAssumption,
         hypothesis: hypothesis,
         rationale: rationaleRaw === "" ? null : rationaleRaw,
-        proposed_queries: queriesForInsert.map((e) => String(e).trim()),
+        proposed_queries: candidateQueries,
         candidate_hash: hash,
       });
     }

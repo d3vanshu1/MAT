@@ -85,6 +85,33 @@ export const BUSINESS_DESCRIPTION_QUERY =
 export const THESIS_DRIVER_QUERY =
   "investment thesis OR value creation OR growth drivers OR strategic rationale OR returns potential";
 
+/** Ordered structural profile fields. Order is fixed so the persisted JSON is deterministic. */
+export const PROFILE_FIELDS = [
+  "sector",
+  "business_model",
+  "revenue_model",
+  "customer_type",
+  "deal_archetype",
+  "geography",
+  "scale_band",
+  "capital_structure_notes",
+] as const;
+
+/**
+ * Ordered thesis profile fields. Six fields describing the investment bet,
+ * not the business shape. Separate from PROFILE_FIELDS because the thesis
+ * profile is a different artifact — running the structural fields against IC
+ * memos produces a duplicate structural profile from the wrong source.
+ */
+export const THESIS_FIELDS = [
+  "core_thesis",
+  "growth_drivers",
+  "margin_thesis",
+  "ma_strategy",
+  "exit_thesis",
+  "base_case_dependency",
+] as const;
+
 // ---------------------------------------------------------------------------
 // Profile-kind configuration
 // ---------------------------------------------------------------------------
@@ -102,11 +129,13 @@ export const PROFILE_KINDS = {
     allowlist: ["cim"] as string[],
     charBudget: 20_000,
     ftsQuery: BUSINESS_DESCRIPTION_QUERY,
+    fields: PROFILE_FIELDS as readonly string[],
   },
   thesis: {
     allowlist: ["ic_memo"] as string[],
     charBudget: 6_000,
     ftsQuery: THESIS_DRIVER_QUERY,
+    fields: THESIS_FIELDS as readonly string[],
   },
 } as const;
 
@@ -135,18 +164,6 @@ export const STRUCTURAL_PROFILE_CHAR_BUDGET = PROFILE_KINDS.structural.charBudge
 export const FORBIDDEN_KEY_PATTERN =
   /sever|confidence|priorit|tier|risk_level|critical|impact_level/i;
 
-/** Ordered profile fields. Order is fixed so the persisted JSON is deterministic. */
-export const PROFILE_FIELDS = [
-  "sector",
-  "business_model",
-  "revenue_model",
-  "customer_type",
-  "deal_archetype",
-  "geography",
-  "scale_band",
-  "capital_structure_notes",
-] as const;
-
 /**
  * How many top-ranked chunks are pulled BEFORE classification.
  *
@@ -160,6 +177,52 @@ export const PROFILE_FIELDS = [
 export const STRUCTURAL_PROFILE_OVERFETCH = 30;
 
 const MAX_OUTPUT_TOKENS = 2000;
+
+// ---------------------------------------------------------------------------
+// Shared prompt blocks — used by both prompt builders
+// ---------------------------------------------------------------------------
+
+/**
+ * Evidence rule, field_support format, unknown handling, and forbidden-key
+ * instruction. Extracted so the two prompt builders share the same text
+ * rather than drifting apart, which is how two FORBIDDEN_KEY_PATTERN values
+ * happened (finding #10).
+ */
+export const EVIDENCE_RULE_BLOCK = `EVIDENCE RULE:
+- Every profile value must be STATED in the excerpts above. Not implied by them, not derivable from them, not consistent with them: stated.
+- For each field, "field_support" gives an object with exactly two keys: "chunk_index", the number of the single chunk that states the value, using the [chunk N] labels above; and "verbatim_snippet", the passage in that chunk which states it, at most 200 characters.
+- The snippet must be copied CHARACTER FOR CHARACTER out of that chunk. Do not paraphrase it, correct its spelling, expand its abbreviations, or add ellipses. The receiving system locates the snippet inside the chunk text and discards the entire response if it cannot find it.
+- Quote the SHORTEST run of text that states the value. A short exact quote is always safer than a long tidied one.
+- Some excerpts are extracted from tables and slides, so the text may read oddly and may have fragments of neighbouring columns running through it. Quote it as it appears. Do not clean it up, do not close up the gaps, and do not join text from two different parts of the chunk into one quote — pick a single continuous run instead.
+- If the excerpts do not state the value, the profile value is exactly "unknown" and the support is null — the bare JSON literal null, not an object. This is the expected outcome for several fields and is not a failure.
+- Do NOT derive, estimate, back-calculate or infer a value from adjacent figures. If a revenue figure is absent, you may not reconstruct it from percentages, ratios or margins that appear near it. Write "unknown".
+- A value with no supporting chunk will be rejected by the receiving system, and the whole response discarded. When in doubt, write "unknown" with null.`;
+
+export const SHARED_FIELD_RULES = `- Every profile field is ONE short phrase, under 15 words. Not a sentence, not a paragraph.
+- Do not add, remove or rename any key. "field_support" must contain exactly the same keys as "profile". Each of its values is either the two-key object described above or null, and nothing else. Do not nest anything further inside it.
+- Do not emit any key containing "severity", "confidence", "priority", "tier" or "risk_level". This is a description of shape, not an assessment.`;
+
+export const STRUCTURAL_FIELD_RULES = `- "scale_band" means an order-of-magnitude revenue or headcount band, e.g. "~£50-100m revenue", and only if such a figure is stated outright. Use "unknown" if no such figure is present.
+- "deal_archetype" means the structural transaction type, e.g. "founder-owned buyout", "carve-out", "platform for buy-and-build".`;
+
+export const THESIS_FIELD_RULES = `- "core_thesis" is the central investment bet in one sentence — what makes this business worth buying at this price.
+- "growth_drivers" is where the growth in the investment case comes from — organic, M&A, pricing, or a combination.
+- "margin_thesis" is how margins are expected to move during the hold period and why — not the current margin, the trajectory.
+- "ma_strategy" is the role of acquisitions in the plan — bolt-on, platform, consolidation, or not material.
+- "exit_thesis" is how value is expected to be realised — trade sale, IPO, secondary buyout, dividend recap.
+- "base_case_dependency" is what the base case most depends on being true — the single proposition whose failure breaks the model.`;
+
+/**
+ * Build the JSON shape block and support shape block for any field list.
+ */
+function buildJsonShapeBlocks(fields: readonly string[]): { shape: string; supportShape: string } {
+  const shape = fields.map((f) => `    "${f}": "<one short phrase>"`).join(",\n");
+  const supportShape = fields.map(
+    (f) =>
+      `    "${f}": {"chunk_index": <chunk number>, "verbatim_snippet": "<exact quote, at most 200 characters>"}`,
+  ).join(",\n");
+  return { shape, supportShape };
+}
 
 /**
  * A field's evidence record. `match_mode` and `chars_skipped` are written by
@@ -266,11 +329,7 @@ export function buildStructuralProfilePrompt(args: {
     .map((c) => `[chunk ${c.chunk_index}]\n${c.content}`)
     .join("\n\n---\n\n");
 
-  const shape = PROFILE_FIELDS.map((f) => `    "${f}": "<one short phrase>"`).join(",\n");
-  const supportShape = PROFILE_FIELDS.map(
-    (f) =>
-      `    "${f}": {"chunk_index": <chunk number>, "verbatim_snippet": "<exact quote, at most 200 characters>"}`,
-  ).join(",\n");
+  const { shape, supportShape } = buildJsonShapeBlocks(PROFILE_FIELDS);
 
   return `You are building a STRUCTURAL PROFILE of a company for an investment diligence system.
 
@@ -298,22 +357,79 @@ ${supportShape}
   "notes": "<at most two sentences on how confidently the shape could be read from these excerpts>"
 }
 
-EVIDENCE RULE — this is the most important rule here:
-- Every profile value must be STATED in the excerpts above. Not implied by them, not derivable from them, not consistent with them: stated.
-- For each field, "field_support" gives an object with exactly two keys: "chunk_index", the number of the single chunk that states the value, using the [chunk N] labels above; and "verbatim_snippet", the passage in that chunk which states it, at most 200 characters.
-- The snippet must be copied CHARACTER FOR CHARACTER out of that chunk. Do not paraphrase it, correct its spelling, expand its abbreviations, or add ellipses. The receiving system locates the snippet inside the chunk text and discards the entire response if it cannot find it.
-- Quote the SHORTEST run of text that states the value. A short exact quote is always safer than a long tidied one.
-- Some excerpts are extracted from tables and slides, so the text may read oddly and may have fragments of neighbouring columns running through it. Quote it as it appears. Do not clean it up, do not close up the gaps, and do not join text from two different parts of the chunk into one quote — pick a single continuous run instead.
-- If the excerpts do not state the value, the profile value is exactly "unknown" and the support is null — the bare JSON literal null, not an object. This is the expected outcome for several fields and is not a failure.
-- Do NOT derive, estimate, back-calculate or infer a value from adjacent figures. If a revenue figure is absent, you may not reconstruct it from percentages, ratios or margins that appear near it. Write "unknown".
-- A value with no supporting chunk will be rejected by the receiving system, and the whole response discarded. When in doubt, write "unknown" with null.
+${EVIDENCE_RULE_BLOCK}
 
 Rules:
-- Every profile field is ONE short phrase, under 15 words. Not a sentence, not a paragraph.
-- "scale_band" means an order-of-magnitude revenue or headcount band, e.g. "~£50-100m revenue", and only if such a figure is stated outright. Use "unknown" if no such figure is present.
-- "deal_archetype" means the structural transaction type, e.g. "founder-owned buyout", "carve-out", "platform for buy-and-build".
-- Do not add, remove or rename any key. "field_support" must contain exactly the same eight keys as "profile". Each of its values is either the two-key object described above or null, and nothing else. Do not nest anything further inside it.
-- Do not emit any key containing "severity", "confidence", "priority", "tier" or "risk_level". This is a description of shape, not an assessment.`;
+${STRUCTURAL_FIELD_RULES}
+${SHARED_FIELD_RULES}`;
+}
+
+/**
+ * Thesis profile prompt — describes value drivers and strategic rationale
+ * from IC memos. Uses the INVERSION rule: locate the passage first, then
+ * write the value from that passage. This avoids the post-hoc receipt problem
+ * observed in the structural profile.
+ */
+export function buildThesisProfilePrompt(args: {
+  dealFields: Record<string, string>;
+  chunks: Array<{ chunk_index: number; content: string }>;
+}): string {
+  const { dealFields, chunks } = args;
+
+  const dealBlock =
+    Object.keys(dealFields).length === 0
+      ? "(No structural fields are populated on the deal record. Nothing from the deal " +
+        "record is available to you. Free-text deal fields are withheld by design.)"
+      : Object.entries(dealFields)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\n");
+
+  const excerptBlock = chunks
+    .map((c) => `[chunk ${c.chunk_index}]\n${c.content}`)
+    .join("\n\n---\n\n");
+
+  const { shape, supportShape } = buildJsonShapeBlocks(THESIS_FIELDS);
+
+  return `You are building a THESIS PROFILE of a company for an investment diligence system.
+
+You are being shown a deliberately narrow input set: excerpts from Investment Committee memoranda, plus any populated numeric fields from the deal record. Nothing else — no CIM, no consultant reports, no financial model. This narrowness is intentional and is not an error. Do not speculate about what other documents might contain, and do not note that information is missing.
+
+Your task is to describe what the investment thesis says about this company — the value drivers, strategic rationale, and growth levers the IC memos present. You are not assessing them. Do not comment on quality, risk, prospects, or whether the thesis is persuasive. Capture the thesis's own account of why this business is being bought at this price and what must happen during the hold period.
+
+<deal_structural_fields>
+${dealBlock}
+</deal_structural_fields>
+
+<source_excerpts>
+${excerptBlock}
+</source_excerpts>
+
+Return ONLY a JSON object. No prose before or after it, no markdown code fences. It must have exactly this shape, with "profile" first, "field_support" second and "notes" third:
+
+{
+  "profile": {
+${shape}
+  },
+  "field_support": {
+${supportShape}
+  },
+  "notes": "<at most two sentences on how confidently the thesis could be read from these excerpts>"
+}
+
+TASK ORDERING — this is the most important instruction here:
+For each of the six profile fields, work in this order:
+  1. SCAN the excerpts for a passage that states a value for this field.
+  2. If you find one: COPY the verbatim snippet into field_support FIRST.
+  3. THEN write the profile value FROM that snippet, and only from it.
+  4. If no passage states the value: write "unknown" with null support immediately. Do not search harder, do not infer, do not derive.
+
+This ordering exists because the alternative — forming the value first, then searching for a snippet to justify it — produces post-hoc receipts where the snippet is located in the right area but does not actually state the claimed value. The passage must say the thing; the value must come from the passage.
+
+${EVIDENCE_RULE_BLOCK}
+
+Rules:
+${THESIS_FIELD_RULES}
+${SHARED_FIELD_RULES}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,7 +700,10 @@ export default api({
     );
 
     // ── Step 5: assemble prompt, measure, hash ────────────────────────────
-    const prompt = buildStructuralProfilePrompt({ dealFields, chunks: selected });
+    const prompt =
+      profileKind === "thesis"
+        ? buildThesisProfilePrompt({ dealFields, chunks: selected })
+        : buildStructuralProfilePrompt({ dealFields, chunks: selected });
     const inputCharCount = prompt.length; // measured, never estimated
     const promptHash = sha256hex(prompt);
     const generationModel = getModuleModel(BSS_V2_MODULE_ID);
@@ -634,11 +753,12 @@ export default api({
     }
     const profileIn = rawProfile as Record<string, unknown>;
 
-    const missing = PROFILE_FIELDS.filter((f) => typeof profileIn[f] !== "string" || profileIn[f] === "");
+    const fields = kindConfig.fields;
+    const missing = fields.filter((f) => typeof profileIn[f] !== "string" || profileIn[f] === "");
     if (missing.length > 0) {
       throw new Error(`${LOG_PREFIX} profile missing/non-string fields: ${missing.join(", ")}`);
     }
-    const extra = Object.keys(profileIn).filter((k) => !(PROFILE_FIELDS as readonly string[]).includes(k));
+    const extra = Object.keys(profileIn).filter((k) => !(fields as readonly string[]).includes(k));
     if (extra.length > 0) {
       throw new Error(`${LOG_PREFIX} profile has unexpected fields: ${extra.join(", ")}`);
     }
@@ -658,7 +778,7 @@ export default api({
     const supportIn = rawSupport as Record<string, unknown>;
 
     const supportExtra = Object.keys(supportIn).filter(
-      (k) => !(PROFILE_FIELDS as readonly string[]).includes(k),
+      (k) => !(fields as readonly string[]).includes(k),
     );
     if (supportExtra.length > 0) {
       throw new Error(`${LOG_PREFIX} field_support has unexpected keys: ${supportExtra.join(", ")}`);
@@ -673,7 +793,7 @@ export default api({
     const malformedSupport: string[] = [];
     const snippetMismatches: string[] = [];
 
-    for (const f of PROFILE_FIELDS) {
+    for (const f of fields) {
       const raw = supportIn[f];
       const value = String(profileIn[f]);
       const isUnknown = value.trim().toLowerCase() === "unknown";
@@ -796,7 +916,7 @@ export default api({
 
     // Rebuild in fixed key order: profile, field_support, notes.
     const profile: Record<string, string> = {};
-    for (const f of PROFILE_FIELDS) profile[f] = String(profileIn[f]);
+    for (const f of fields) profile[f] = String(profileIn[f]);
     const profileJson = {
       profile,
       field_support: fieldSupport,
@@ -806,26 +926,27 @@ export default api({
     // Match-quality summary. If most fields need elision, the extracted corpus
     // is more degraded than a single CIM would suggest, which is a design input
     // for later phases rather than a detail of this one.
-    const supportEntries = PROFILE_FIELDS.map((f) => fieldSupport[f]).filter(
+    const supportEntries = fields.map((f) => fieldSupport[f]).filter(
       (s): s is FieldSupport => s !== null,
     );
     const literalMatchCount = supportEntries.filter((s) => s.match_mode === "literal").length;
     const elidedMatchCount = supportEntries.filter((s) => s.match_mode === "elided").length;
     const maxCharsSkipped = supportEntries.reduce((max, s) => Math.max(max, s.chars_skipped), 0);
 
-    const scaleBandValue = profile.scale_band;
+    // scale_band is structural-only. For thesis profiles, these are empty/null.
+    const scaleBandValue = profile.scale_band ?? "(not a structural field)";
     const scaleBandSupport = fieldSupport.scale_band ?? null;
 
     console.log(
       `${LOG_PREFIX} field support: ` +
-        PROFILE_FIELDS.map((f) => {
+        fields.map((f) => {
           const s = fieldSupport[f];
           return s ? `${f}=chunk ${s.chunk_index}/${s.match_mode}` : `${f}=null`;
         }).join(" "),
     );
     console.log(
       `${LOG_PREFIX} match quality: ${literalMatchCount} literal, ${elidedMatchCount} elided, ` +
-        `${PROFILE_FIELDS.length - supportEntries.length} unsupported ("unknown"), ` +
+        `${fields.length - supportEntries.length} unsupported ("unknown"), ` +
         `max chars skipped ${maxCharsSkipped}.`,
     );
     console.log(
