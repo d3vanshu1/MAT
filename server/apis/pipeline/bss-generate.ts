@@ -184,7 +184,7 @@ export function candidateHash(failureMode: string): string {
 // Query diversity — stopword-filtered term overlap
 // ---------------------------------------------------------------------------
 
-const STOPWORDS = new Set([
+export const STOPWORDS = new Set([
   "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
   "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
   "has", "have", "had", "do", "does", "did", "will", "would", "could",
@@ -196,7 +196,7 @@ const STOPWORDS = new Set([
 ]);
 
 /** Extract content terms from a query string, lowercased, stopwords removed. */
-function contentTerms(query: string): Set<string> {
+export function contentTerms(query: string): Set<string> {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   return new Set(words.filter((w) => !STOPWORDS.has(w)));
 }
