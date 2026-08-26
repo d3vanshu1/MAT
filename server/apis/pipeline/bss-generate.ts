@@ -119,6 +119,10 @@ const ProfileRowSchema = z.object({
   profile_json: z.any(),
 });
 
+const MaxVersionSchema = z.object({
+  max_version: z.number(),
+});
+
 const UpsertedRowSchema = z.object({
   candidate_id: z.string(),
   candidate_hash: z.string(),
@@ -157,14 +161,60 @@ function wordCount(s: string): number {
   return s.trim().split(/\s+/).filter(Boolean).length;
 }
 
+/** Max failure_mode length in characters. Beyond this the label is a sentence. */
+export const MAX_FAILURE_MODE_CHARS = 60;
+
 /**
  * candidate_hash — SHA-256 of the failure_mode reduced to lowercase
- * alphanumerics. Punctuation and casing are stripped so that "Churn in the SME
- * base" and "churn in the SME base." collapse to one row. Exported because the
- * dedupe key must be reproducible outside this file.
+ * alphanumerics. Because failure_mode is a short snake_case label, hashing it
+ * gives stable dedupe: the same concept always produces the same hash.
+ * Exported because the dedupe key must be reproducible outside this file.
  */
 export function candidateHash(failureMode: string): string {
   return sha256hex(failureMode.toLowerCase().replace(/[^a-z0-9]/g, ""));
+}
+
+// ---------------------------------------------------------------------------
+// Query diversity — stopword-filtered term overlap
+// ---------------------------------------------------------------------------
+
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+  "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+  "has", "have", "had", "do", "does", "did", "will", "would", "could",
+  "should", "may", "might", "shall", "can", "not", "no", "if", "it",
+  "its", "this", "that", "these", "those", "as", "so", "up", "out",
+  "about", "into", "over", "after", "before", "between", "under",
+  "above", "each", "all", "any", "both", "more", "most", "other",
+  "some", "such", "than", "too", "very", "just", "also",
+]);
+
+/** Extract content terms from a query string, lowercased, stopwords removed. */
+function contentTerms(query: string): Set<string> {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return new Set(words.filter((w) => !STOPWORDS.has(w)));
+}
+
+/**
+ * Returns true if any pair of queries shares more than half their content terms.
+ * "More than half" means overlap > min(|A|, |B|) / 2.
+ */
+export function hasQueryOverlap(queries: string[]): [boolean, string, string] | null {
+  for (let i = 0; i < queries.length; i++) {
+    const termsA = contentTerms(queries[i]);
+    if (termsA.size === 0) continue;
+    for (let j = i + 1; j < queries.length; j++) {
+      const termsB = contentTerms(queries[j]);
+      if (termsB.size === 0) continue;
+      let overlap = 0;
+      for (const t of termsA) if (termsB.has(t)) overlap++;
+      const threshold = Math.min(termsA.size, termsB.size) / 2;
+      if (overlap > threshold) {
+        return [true, queries[i], queries[j]];
+      }
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +266,7 @@ Return ONLY a JSON object. No prose before or after it, no markdown code fences.
 {
   "candidates": [
     {
-      "failure_mode": "<the mechanism, one sentence, specific to this shape>",
+      "failure_mode": "<short_snake_case_label>",
       "implied_assumption": "<what an investor must be taking to be true for that mechanism not to bite here, one sentence, positive and declarative>",
       "hypothesis": "<the concrete, checkable claim about this company that would be true if the mechanism is live>",
       "rationale": "<why this mechanism is structurally plausible given the eight fields above, two sentences at most>",
@@ -227,11 +277,11 @@ Return ONLY a JSON object. No prose before or after it, no markdown code fences.
 
 FIELD RULES
 
-- "failure_mode": the mechanism itself, not its consequence. "Margin compresses" is a consequence; "per-seat pricing is renegotiated downward at renewal while the service desk cost per seat is fixed" is a mechanism.
+- "failure_mode": a short snake_case label naming the mechanism, 2–5 words joined by underscores, no spaces. Examples: "renewal_pricing_erosion", "acquired_cohort_churn", "service_desk_cost_creep". The label is a tag, not a sentence — the mechanism sentence goes in "hypothesis".
 - "implied_assumption": write it as a positive statement of belief. It must NOT be phrased as a question and must NOT begin with "No", "Not", "Lack of" or "Absence of". Write "Renewal pricing holds at current levels", not "No pricing pressure at renewal" and not "Is renewal pricing holding?".
 - "hypothesis": what would actually be the case if the mechanism is live here. It must be the kind of statement that a document could confirm or contradict. It is a claim to go and test, not a conclusion.
 - "rationale": tie it to the eight fields. If the connection runs through a field marked "unknown", say so rather than inventing the missing value.
-- "proposed_queries": between ${MIN_QUERIES_PER_CANDIDATE} and ${MAX_QUERIES_PER_CANDIDATE} of them. Each is a short search phrase of ${MIN_QUERY_WORDS} to ${MAX_QUERY_WORDS} words, of the kind you would type to find the relevant passage in a pile of company documents. Terms, not sentences, and not questions. Any candidate whose queries fall outside those bounds is discarded whole, so count the words.
+- "proposed_queries": between ${MIN_QUERIES_PER_CANDIDATE} and ${MAX_QUERIES_PER_CANDIDATE} of them. Each is a short search phrase of ${MIN_QUERY_WORDS} to ${MAX_QUERY_WORDS} words, of the kind you would type to find the relevant passage in a pile of company documents. Terms, not sentences, and not questions. Any candidate whose queries fall outside those bounds is discarded whole, so count the words. Attack the same concept through different vocabulary — each query should use mostly different content words from the others. If two queries share more than half their non-stopword terms, the candidate is dropped.
 
 Do not emit any key containing "severity", "confidence", "priority", "tier", "critical" or "impact_level", and do not rank, score, order by importance, or flag any candidate as more serious than another. Nothing here has been checked against anything. An ordering would be a fabrication.`;
 }
@@ -325,6 +375,24 @@ export default api({
       throw new Error(
         `${LOG_PREFIX} profile ${profileId} has profile_kind='${profileRow.profile_kind}'. ` +
           "The blind pass generates from the structural profile only.",
+      );
+    }
+
+    // ── Step 1b: reject superseded profiles ───────────────────────────────
+    // Passing an older profile_id would silently generate from stale data.
+    const maxVersionRows = await ctx.integrations.db.query(
+      `SELECT MAX(profile_version) AS max_version FROM bss_profiles
+         WHERE deal_id = $1::uuid AND profile_kind = 'structural'`,
+      MaxVersionSchema,
+      [dealId],
+      { label: "BSSGenerate: check max profile version" },
+    );
+    const maxVersion = maxVersionRows[0]?.max_version ?? 0;
+    if (profileRow.profile_version !== maxVersion) {
+      throw new Error(
+        `${LOG_PREFIX} profile ${profileId} is v${profileRow.profile_version} but the current ` +
+          `structural profile for deal ${dealId} is v${maxVersion}. ` +
+          "Generating from a superseded profile would silently use stale data. No LLM call, no insert.",
       );
     }
 
@@ -489,6 +557,14 @@ export default api({
       if (failureMode === "") reasons.push("failure_mode empty or not a string");
       if (hypothesis === "") reasons.push("hypothesis empty or not a string");
 
+      // failure_mode must be a short snake_case label — no spaces, ≤60 chars.
+      if (failureMode !== "" && /\s/.test(failureMode)) {
+        reasons.push(`failure_mode contains whitespace — expected snake_case label: "${failureMode.slice(0, 80)}"`);
+      }
+      if (failureMode.length > MAX_FAILURE_MODE_CHARS) {
+        reasons.push(`failure_mode is ${failureMode.length} chars, exceeds ${MAX_FAILURE_MODE_CHARS}: "${failureMode.slice(0, 80)}"`);
+      }
+
       // implied_assumption must be a positive declarative belief.
       if (impliedAssumption === "") {
         reasons.push("implied_assumption empty or not a string");
@@ -525,6 +601,17 @@ export default api({
               `proposed_queries[${j}] has ${w} words, outside ${MIN_QUERY_WORDS}-${MAX_QUERY_WORDS}: "${entry.trim().slice(0, 80)}"`,
             );
           }
+        }
+      }
+
+      // Query diversity: drop if any pair shares >50% content terms.
+      if (Array.isArray(q) && reasons.length === 0) {
+        const queryStrings = (q as unknown[]).map((e) => String(e).trim());
+        const overlap = hasQueryOverlap(queryStrings);
+        if (overlap !== null) {
+          reasons.push(
+            `proposed_queries have >50% term overlap: "${overlap[1].slice(0, 60)}" vs "${overlap[2].slice(0, 60)}"`,
+          );
         }
       }
 
