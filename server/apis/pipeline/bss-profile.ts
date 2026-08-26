@@ -83,7 +83,9 @@ export const BUSINESS_DESCRIPTION_QUERY =
  * are tracker rows about vendor DD progress, this query is wrong.
  */
 export const THESIS_DRIVER_QUERY =
-  "investment thesis OR value creation OR growth drivers OR strategic rationale OR returns potential";
+  "investment thesis OR investment highlights OR key attractions OR " +
+  "value creation plan OR why now OR recommendation OR base case OR " +
+  "underwriting assumptions OR path to exit";
 
 /** Ordered structural profile fields. Order is fixed so the persisted JSON is deterministic. */
 export const PROFILE_FIELDS = [
@@ -133,7 +135,7 @@ export const PROFILE_KINDS = {
   },
   thesis: {
     allowlist: ["ic_memo"] as string[],
-    charBudget: 6_000,
+    charBudget: 20_000,
     ftsQuery: THESIS_DRIVER_QUERY,
     fields: THESIS_FIELDS as readonly string[],
   },
