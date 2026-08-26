@@ -448,6 +448,7 @@ export default api({
   input: z.object({
     dealId: z.string().uuid(),
     profileKind: z.enum(["structural", "thesis"]).default("structural"),
+    documentIds: z.array(z.string().uuid()).optional(),
   }),
 
   output: z.object({
@@ -490,6 +491,14 @@ export default api({
     // evidence rule was added to catch.
     scaleBandValue: z.string(),
     scaleBandSupport: FieldSupportSchema.nullable(),
+    matchFailures: z.array(
+      z.object({
+        field: z.string(),
+        chunkIndex: z.number(),
+        snippet: z.string(),
+        reason: z.string(),
+      }),
+    ),
     markerFireCounts: z.record(z.string(), z.number()),
     dealFieldsIncluded: z.array(z.string()),
     dealFieldsAllNull: z.boolean(),
@@ -500,7 +509,7 @@ export default api({
     rawModelResponse: z.string(),
   }),
 
-  async run(ctx, { dealId, profileKind }) {
+  async run(ctx, { dealId, profileKind, documentIds }) {
     const kindConfig = PROFILE_KINDS[profileKind];
     // Standalone API, not a pipeline runner: it owns its own platform clock.
     const pipelineStartTime = Date.now();
@@ -553,8 +562,11 @@ export default api({
     // ── Step 3: relevance-ranked chunk selection within the allowlist ─────
     // The budget must cut the LEAST relevant text, so ordering is by
     // ts_rank_cd DESC first; chunk_index is only a deterministic tiebreak.
-    const chunkRows = await ctx.integrations.db.query(
-      `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
+    // When documentIds is provided, add an explicit document filter on top of
+    // the tag allowlist. This lets the caller narrow to specific documents
+    // (e.g. only the 3rd IC memo + update) without changing the config.
+    const hasDocFilter = Array.isArray(documentIds) && documentIds.length > 0;
+    const chunkSql = `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
        SELECT dc.document_id,
               dc.chunk_index,
               dc.file_name,
@@ -566,11 +578,21 @@ export default api({
          CROSS JOIN q
         WHERE dc.deal_id = $1::uuid
           AND d.deal_id = $1::uuid
-          AND d.document_tag = ANY($3::text[])
+          AND d.document_tag = ANY($3::text[])${hasDocFilter ? "\n          AND d.id = ANY($4::uuid[])" : ""}
         ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
-        LIMIT ${STRUCTURAL_PROFILE_OVERFETCH}`,
+        LIMIT ${STRUCTURAL_PROFILE_OVERFETCH}`;
+    const chunkParams: unknown[] = [dealId, kindConfig.ftsQuery, kindConfig.allowlist];
+    if (hasDocFilter) chunkParams.push(documentIds);
+    if (hasDocFilter) {
+      console.log(
+        `${LOG_PREFIX} documentIds filter active: ${documentIds!.length} document(s) specified. ` +
+          `Chunks will be drawn only from these, within the [${kindConfig.allowlist.join(", ")}] tag allowlist.`,
+      );
+    }
+    const chunkRows = await ctx.integrations.db.query(
+      chunkSql,
       ChunkRowSchema,
-      [dealId, kindConfig.ftsQuery, kindConfig.allowlist],
+      chunkParams,
       { label: `BSSProfile: rank ${profileKind} allowlisted chunks` },
     );
 
@@ -791,7 +813,12 @@ export default api({
     const unsupportedFields: string[] = [];
     const uncitedChunks: string[] = [];
     const malformedSupport: string[] = [];
-    const snippetMismatches: string[] = [];
+    const matchFailures: Array<{
+      field: string;
+      chunkIndex: number;
+      snippet: string;
+      reason: string;
+    }> = [];
 
     for (const f of fields) {
       const raw = supportIn[f];
@@ -846,9 +873,21 @@ export default api({
           const content = contentByIndex.get(claimIndex) ?? "";
           const m = matchSnippet(content, claimSnippet);
           if (!m.matched) {
-            snippetMismatches.push(
-              `${f} -> chunk ${claimIndex}: ${m.reason} — "${claimSnippet.slice(0, 140)}"`,
+            // A failed match degrades the field to "unknown" with null
+            // support rather than aborting the whole profile. The gate
+            // (Section 2) decides whether enough fields survived.
+            matchFailures.push({
+              field: f,
+              chunkIndex: claimIndex,
+              snippet: claimSnippet.slice(0, 200),
+              reason: m.reason ?? "unknown",
+            });
+            console.warn(
+              `${LOG_PREFIX} field_support.${f} snippet failed match on chunk ${claimIndex}: ` +
+                `${m.reason} — "${claimSnippet.slice(0, 140)}". Field degraded to "unknown".`,
             );
+            // Force this field to "unknown" with null support below.
+            (profileIn as Record<string, unknown>)[f] = "unknown";
           } else {
             support = {
               chunk_index: claimIndex,
@@ -898,19 +937,20 @@ export default api({
           `${uncitedChunks.join(", ")}. Shown: [${[...selectedIndexSet].join(", ")}]. No insert performed.`,
       );
     }
-    if (snippetMismatches.length > 0) {
-      throw new Error(
-        `${LOG_PREFIX} EVIDENCE RULE VIOLATION: verbatim_snippet could not be located in the cited ` +
-          `chunk within the elision bounds (<=${SNIPPET_MAX_GAPS} gaps, <=${SNIPPET_MAX_GAP_CHARS} chars each, ` +
-          `<=${SNIPPET_MAX_TOTAL_SKIPPED} total): ${snippetMismatches.join("; ")}. A quote that does not ` +
-          "appear in the source is not evidence. No insert performed.",
-      );
-    }
+    // Match failures have already degraded those fields to "unknown" with null
+    // support above, so unsupportedFields should be empty unless a field had
+    // no citation at all (not even a failed one). That case is still fatal.
     if (unsupportedFields.length > 0) {
       throw new Error(
         `${LOG_PREFIX} EVIDENCE RULE VIOLATION: fields with a non-"unknown" value and no ` +
           `supporting chunk: ${unsupportedFields.join(", ")}. A value the extract does not ` +
           "state must be \"unknown\". No insert performed.",
+      );
+    }
+    if (matchFailures.length > 0) {
+      console.warn(
+        `${LOG_PREFIX} ${matchFailures.length} field(s) degraded to "unknown" due to snippet match failure: ` +
+          matchFailures.map((mf) => `${mf.field} (chunk ${mf.chunkIndex}: ${mf.reason})`).join("; "),
       );
     }
 
@@ -1022,6 +1062,7 @@ export default api({
       maxCharsSkipped,
       scaleBandValue,
       scaleBandSupport,
+      matchFailures,
       markerFireCounts,
       dealFieldsIncluded,
       dealFieldsAllNull,
