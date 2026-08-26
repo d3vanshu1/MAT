@@ -62,21 +62,59 @@ const LOG_PREFIX = "[BSS-PROFILE]";
 /** Module id used for model resolution. Registered in SONNET_MODULES. */
 export const BSS_V2_MODULE_ID = "blind_spot_scanner_v2";
 
-/** Only documents carrying one of these `documents.document_tag` values may be read. */
-export const STRUCTURAL_PROFILE_ALLOWLIST = ["cim"];
-
-/** Hard cap on characters of document text entering the prompt. */
-export const STRUCTURAL_PROFILE_CHAR_BUDGET = 20000;
-
 /** Free-text `deals` columns. Listed so the exclusion is explicit, never sent. */
 export const DEALS_FREETEXT_FIELDS = ["name", "description", "sector"];
 
 /** Numeric/date `deals` columns. Sent only when non-null. */
 export const DEALS_STRUCTURAL_FIELDS = ["entry_ev", "entry_multiple", "equity_check", "ic_date"];
 
-/** Full-text query used to rank chunks. The budget must cut the least relevant text. */
+/** Full-text query used to rank CIM chunks for structural profiles. */
 export const BUSINESS_DESCRIPTION_QUERY =
   "business overview OR products services OR customers markets OR what the company does";
+
+/**
+ * Full-text query for IC memo chunks in thesis profiles.
+ *
+ * Targets value-creation language — the "why buy" section: investment thesis,
+ * growth drivers, strategic rationale, returns potential. Deliberately avoids
+ * diligence-process terms ("risk", "status", "workstream", "findings",
+ * "outstanding") which pull from status tables and red-flag registers rather
+ * than from the thesis the IC paper is built around. If the top-ranked chunks
+ * are tracker rows about vendor DD progress, this query is wrong.
+ */
+export const THESIS_DRIVER_QUERY =
+  "investment thesis OR value creation OR growth drivers OR strategic rationale OR returns potential";
+
+// ---------------------------------------------------------------------------
+// Profile-kind configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Each profile kind declares which documents may enter the prompt (allowlist),
+ * how much text budget they receive, and which FTS query ranks their chunks.
+ *
+ * Adding a kind here does NOT enable it — the prompt builder and any kind-
+ * specific assertions must also be in place. The configuration block is the
+ * routing table; the logic is elsewhere.
+ */
+export const PROFILE_KINDS = {
+  structural: {
+    allowlist: ["cim"] as string[],
+    charBudget: 20_000,
+    ftsQuery: BUSINESS_DESCRIPTION_QUERY,
+  },
+  thesis: {
+    allowlist: ["ic_memo"] as string[],
+    charBudget: 6_000,
+    ftsQuery: THESIS_DRIVER_QUERY,
+  },
+} as const;
+
+export type ProfileKind = keyof typeof PROFILE_KINDS;
+
+/** Legacy aliases — existing imports continue to work, values are unchanged. */
+export const STRUCTURAL_PROFILE_ALLOWLIST = PROFILE_KINDS.structural.allowlist;
+export const STRUCTURAL_PROFILE_CHAR_BUDGET = PROFILE_KINDS.structural.charBudget;
 
 /**
  * Any key matching this anywhere in a model response is a contract violation.
@@ -293,6 +331,7 @@ export default api({
 
   input: z.object({
     dealId: z.string().uuid(),
+    profileKind: z.enum(["structural", "thesis"]).default("structural"),
   }),
 
   output: z.object({
@@ -344,7 +383,8 @@ export default api({
     usage: z.any(),
   }),
 
-  async run(ctx, { dealId }) {
+  async run(ctx, { dealId, profileKind }) {
+    const kindConfig = PROFILE_KINDS[profileKind];
     // Standalone API, not a pipeline runner: it owns its own platform clock.
     const pipelineStartTime = Date.now();
 
@@ -413,8 +453,8 @@ export default api({
         ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
         LIMIT ${STRUCTURAL_PROFILE_OVERFETCH}`,
       ChunkRowSchema,
-      [dealId, BUSINESS_DESCRIPTION_QUERY, STRUCTURAL_PROFILE_ALLOWLIST],
-      { label: "BSSProfile: rank allowlisted chunks" },
+      [dealId, kindConfig.ftsQuery, kindConfig.allowlist],
+      { label: `BSSProfile: rank ${profileKind} allowlisted chunks` },
     );
 
     const chunksAvailableInAllowlist = chunkRows.length === 0 ? 0 : Number(chunkRows[0].total_available);
@@ -442,7 +482,7 @@ export default api({
 
       if (classification.isBoilerplate) {
         droppedAsBoilerplate += 1;
-      } else if (charTotal + row.content.length <= STRUCTURAL_PROFILE_CHAR_BUDGET) {
+      } else if (charTotal + row.content.length <= kindConfig.charBudget) {
         selected.push({
           document_id: row.document_id,
           chunk_index: row.chunk_index,
@@ -479,7 +519,9 @@ export default api({
     console.log(
       `${LOG_PREFIX} chunk selection: ${chunksAvailableInAllowlist} allowlisted, ` +
         `${chunkRows.length} retrieved, ${droppedAsBoilerplate} dropped as boilerplate ` +
-        `(>=${BOILERPLATE_MARKER_THRESHOLD} distinct markers), ${selected.length} in final set.`,
+        `(>=${BOILERPLATE_MARKER_THRESHOLD} distinct markers), ${selected.length} in final set ` +
+        `(budget ${kindConfig.charBudget}).`,
+
     );
     console.log(
       `${LOG_PREFIX} marker fires across ${chunkRows.length} retrieved chunks: ` +
@@ -497,9 +539,9 @@ export default api({
 
     if (selected.length === 0) {
       throw new Error(
-        `${LOG_PREFIX} no chunks selected from allowlist [${STRUCTURAL_PROFILE_ALLOWLIST.join(", ")}] ` +
+        `${LOG_PREFIX} no chunks selected from allowlist [${kindConfig.allowlist.join(", ")}] ` +
           `(${chunksAvailableInAllowlist} allowlisted, ${chunkRows.length} retrieved, ` +
-          `${droppedAsBoilerplate} dropped as boilerplate). Refusing to build a profile with no source text.`,
+          `${droppedAsBoilerplate} dropped as boilerplate). Refusing to build a ${profileKind} profile with no source text.`,
       );
     }
 
@@ -526,7 +568,7 @@ export default api({
     // Every contributing document must itself be allowlisted — a defence in
     // depth against a future join change silently widening the input set.
     const nonAllowlisted = inputDocs.filter(
-      (d) => d.document_tag === null || !STRUCTURAL_PROFILE_ALLOWLIST.includes(d.document_tag),
+      (d) => d.document_tag === null || !kindConfig.allowlist.includes(d.document_tag),
     );
     if (nonAllowlisted.length > 0) {
       throw new Error(
@@ -804,9 +846,9 @@ export default api({
          input_char_count, generation_model, prompt_hash
        )
        SELECT $1::uuid,
-              'structural',
+              $9::text,
               COALESCE((SELECT MAX(profile_version) FROM bss_profiles
-                         WHERE deal_id = $1::uuid AND profile_kind = 'structural'), 0) + 1,
+                         WHERE deal_id = $1::uuid AND profile_kind = $9::text), 0) + 1,
               $2::jsonb, $3::uuid[], $4::text[], $5::uuid[], $6::int, $7::text, $8::text
        RETURNING profile_id, profile_version, created_at`,
       InsertedRowSchema,
@@ -819,8 +861,9 @@ export default api({
         inputCharCount,
         generationModel,
         promptHash,
+        profileKind,
       ],
-      { label: "BSSProfile: insert structural profile" },
+      { label: `BSSProfile: insert ${profileKind} profile` },
     );
     const row = inserted[0] ?? null;
     console.log(

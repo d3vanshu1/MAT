@@ -196,25 +196,37 @@ function contentTerms(query: string): Set<string> {
 }
 
 /**
- * Returns true if any pair of queries shares more than half their content terms.
- * "More than half" means overlap > min(|A|, |B|) / 2.
+ * Prune queries so no pair shares >50% content terms.
+ * For each overlapping pair the later query (higher index) is removed.
+ * Repeat until no pair exceeds the threshold.
+ * The caller drops the candidate only if fewer than MIN_QUERIES_PER_CANDIDATE survive.
  */
-export function hasQueryOverlap(queries: string[]): [boolean, string, string] | null {
-  for (let i = 0; i < queries.length; i++) {
-    const termsA = contentTerms(queries[i]);
-    if (termsA.size === 0) continue;
-    for (let j = i + 1; j < queries.length; j++) {
-      const termsB = contentTerms(queries[j]);
-      if (termsB.size === 0) continue;
-      let overlap = 0;
-      for (const t of termsA) if (termsB.has(t)) overlap++;
-      const threshold = Math.min(termsA.size, termsB.size) / 2;
-      if (overlap > threshold) {
-        return [true, queries[i], queries[j]];
+export function pruneOverlappingQueries(
+  queries: string[],
+): { pruned: string[]; prunedPairs: Array<{ kept: string; dropped: string }> } {
+  const active = [...queries];
+  const prunedPairs: Array<{ kept: string; dropped: string }> = [];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    outer: for (let i = 0; i < active.length; i++) {
+      const termsA = contentTerms(active[i]);
+      if (termsA.size === 0) continue;
+      for (let j = i + 1; j < active.length; j++) {
+        const termsB = contentTerms(active[j]);
+        if (termsB.size === 0) continue;
+        let overlap = 0;
+        for (const t of termsA) if (termsB.has(t)) overlap++;
+        if (overlap > Math.min(termsA.size, termsB.size) / 2) {
+          prunedPairs.push({ kept: active[i], dropped: active[j] });
+          active.splice(j, 1);
+          changed = true;
+          break outer;
+        }
       }
     }
   }
-  return null;
+  return { pruned: active, prunedPairs };
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +293,7 @@ FIELD RULES
 - "implied_assumption": write it as a positive statement of belief. It must NOT be phrased as a question and must NOT begin with "No", "Not", "Lack of" or "Absence of". Write "Renewal pricing holds at current levels", not "No pricing pressure at renewal" and not "Is renewal pricing holding?".
 - "hypothesis": what would actually be the case if the mechanism is live here. It must be the kind of statement that a document could confirm or contradict. It is a claim to go and test, not a conclusion.
 - "rationale": tie it to the eight fields. If the connection runs through a field marked "unknown", say so rather than inventing the missing value.
-- "proposed_queries": between ${MIN_QUERIES_PER_CANDIDATE} and ${MAX_QUERIES_PER_CANDIDATE} of them. Each is a short search phrase of ${MIN_QUERY_WORDS} to ${MAX_QUERY_WORDS} words, of the kind you would type to find the relevant passage in a pile of company documents. Terms, not sentences, and not questions. Any candidate whose queries fall outside those bounds is discarded whole, so count the words. Attack the same concept through different vocabulary — each query should use mostly different content words from the others. If two queries share more than half their non-stopword terms, the candidate is dropped.
+- "proposed_queries": between ${MIN_QUERIES_PER_CANDIDATE} and ${MAX_QUERIES_PER_CANDIDATE} of them. Each is a short search phrase of ${MIN_QUERY_WORDS} to ${MAX_QUERY_WORDS} words, of the kind you would type to find the relevant passage in a pile of company documents. Terms, not sentences, and not questions. Any candidate whose queries fall outside those bounds is discarded whole, so count the words. Attack the same concept through different vocabulary — each query should use mostly different content words from the others. If two queries share more than half their non-stopword terms, the later one is pruned rather than costing you the whole candidate — but if fewer than ${MIN_QUERIES_PER_CANDIDATE} survive, the candidate is dropped.
 
 Do not emit any key containing "severity", "confidence", "priority", "tier", "critical" or "impact_level", and do not rank, score, order by importance, or flag any candidate as more serious than another. Nothing here has been checked against anything. An ordering would be a fabrication.`;
 }
@@ -330,6 +342,15 @@ export default api({
     ),
     inBatchDuplicates: z.array(
       z.object({ index: z.number(), failureMode: z.string(), candidateHash: z.string() }),
+    ),
+    prunedQueryCount: z.number(),
+    prunedQueries: z.array(
+      z.object({
+        candidateIndex: z.number(),
+        failureMode: z.string(),
+        kept: z.string(),
+        dropped: z.string(),
+      }),
     ),
     insertedCount: z.number(),
     updatedCount: z.number(),
@@ -537,6 +558,16 @@ export default api({
     const inBatchDuplicates: Array<{ index: number; failureMode: string; candidateHash: string }> = [];
     const seenHashes = new Set<string>();
 
+    // Query-pruning accumulators — track which individual queries were removed
+    // (rather than whole candidates) so the output diagnostics show what happened.
+    let totalPrunedQueryCount = 0;
+    const allPrunedQueries: Array<{
+      candidateIndex: number;
+      failureMode: string;
+      kept: string;
+      dropped: string;
+    }> = [];
+
     for (let i = 0; i < rawList.length; i++) {
       const item = rawList[i];
       const reasons: string[] = [];
@@ -604,14 +635,33 @@ export default api({
         }
       }
 
-      // Query diversity: drop if any pair shares >50% content terms.
+      // Query diversity: prune overlapping pairs, drop only if too few survive.
       if (Array.isArray(q) && reasons.length === 0) {
         const queryStrings = (q as unknown[]).map((e) => String(e).trim());
-        const overlap = hasQueryOverlap(queryStrings);
-        if (overlap !== null) {
-          reasons.push(
-            `proposed_queries have >50% term overlap: "${overlap[1].slice(0, 60)}" vs "${overlap[2].slice(0, 60)}"`,
+        const { pruned, prunedPairs } = pruneOverlappingQueries(queryStrings);
+        if (prunedPairs.length > 0) {
+          totalPrunedQueryCount += prunedPairs.length;
+          allPrunedQueries.push(
+            ...prunedPairs.map((p) => ({
+              candidateIndex: i,
+              failureMode: failureMode.slice(0, 80),
+              kept: p.kept,
+              dropped: p.dropped,
+            })),
           );
+          console.log(
+            `${LOG_PREFIX} [${i}] "${failureMode.slice(0, 60)}": pruned ${prunedPairs.length} overlapping quer${prunedPairs.length === 1 ? "y" : "ies"}, ` +
+              `${pruned.length} survive.`,
+          );
+        }
+        if (pruned.length < MIN_QUERIES_PER_CANDIDATE) {
+          reasons.push(
+            `only ${pruned.length} queries survive after pruning ${prunedPairs.length} overlapping pair(s), ` +
+              `minimum is ${MIN_QUERIES_PER_CANDIDATE}`,
+          );
+        } else {
+          // Replace with pruned set for downstream insert.
+          (c as Record<string, unknown>).proposed_queries = pruned;
         }
       }
 
@@ -630,12 +680,29 @@ export default api({
       }
       seenHashes.add(hash);
 
+      // Guard: if pruning occurred, the property must reflect the pruned set.
+      // A mismatch means the binding was broken — the diagnostic output would
+      // attest to pruning that the persisted rows do not reflect.
+      const queriesForInsert = ((c as Record<string, unknown>).proposed_queries as unknown[]);
+      const prunedThisCandidate = allPrunedQueries.filter((p) => p.candidateIndex === i);
+      if (prunedThisCandidate.length > 0) {
+        const expectedLength = (q as unknown[]).length - prunedThisCandidate.length;
+        if (queriesForInsert.length !== expectedLength) {
+          throw new Error(
+            `${LOG_PREFIX} PRUNING ASSERTION FAILED at candidate [${i}] "${failureMode.slice(0, 60)}": ` +
+              `expected ${expectedLength} queries after pruning ${prunedThisCandidate.length}, ` +
+              `but proposed_queries has ${queriesForInsert.length}. ` +
+              "The insert array does not match the pruning diagnostics. No insert performed.",
+          );
+        }
+      }
+
       accepted.push({
         failure_mode: failureMode,
         implied_assumption: impliedAssumption,
         hypothesis: hypothesis,
         rationale: rationaleRaw === "" ? null : rationaleRaw,
-        proposed_queries: (q as unknown[]).map((e) => String(e).trim()),
+        proposed_queries: queriesForInsert.map((e) => String(e).trim()),
         candidate_hash: hash,
       });
     }
@@ -721,6 +788,8 @@ export default api({
       droppedCount: dropped.length,
       dropped,
       inBatchDuplicates,
+      prunedQueryCount: totalPrunedQueryCount,
+      prunedQueries: allPrunedQueries,
       insertedCount,
       updatedCount,
       upsertedHashes: upserted.map((r) => r.candidate_hash),
