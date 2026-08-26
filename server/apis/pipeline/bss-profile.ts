@@ -40,7 +40,14 @@ import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { callLLMWithHeadroom } from "./call-llm.js";
 import { getModuleModel } from "./model-config.js";
 import { sha256hex } from "./sha256-pure.js";
-import { classifyChunk, BOILERPLATE_MARKER_THRESHOLD } from "./bss-chunk-quality.js";
+import { classifyChunk, BOILERPLATE_MARKERS, BOILERPLATE_MARKER_THRESHOLD } from "./bss-chunk-quality.js";
+import {
+  matchSnippet,
+  SNIPPET_MAX_GAPS,
+  SNIPPET_MAX_GAP_CHARS,
+  SNIPPET_MAX_TOTAL_SKIPPED,
+  type SnippetMatchMode,
+} from "./bss-snippet-match.js";
 import type { PipelineContext } from "./pipeline-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -72,10 +79,23 @@ export const BUSINESS_DESCRIPTION_QUERY =
   "business overview OR products services OR customers markets OR what the company does";
 
 /**
- * Any key matching this anywhere in the model response is a contract violation.
- * The profile describes shape, not quality — assessment language must not appear.
+ * Any key matching this anywhere in a model response is a contract violation.
+ * These modules describe shape and mechanism, not quality — assessment
+ * language must not appear.
+ *
+ * CANONICAL. One parser at every boundary (recorded finding #10). This is the
+ * union of the two patterns that previously lived separately here and in
+ * bss-generate.ts: `risk_level` came from the profile builder, `critical` and
+ * `impact_level` from the candidate generator. Each alternation was written to
+ * catch something real, so the union is the correct merge rather than either
+ * original taken alone.
+ *
+ * Note this is WIDER than the pattern the profile builder used before — a
+ * response carrying a `critical` or `impact_level` key now aborts where it
+ * previously passed. That is the intended direction: fail closed.
  */
-export const FORBIDDEN_KEY_PATTERN = /sever|confidence|priorit|tier|risk_level/i;
+export const FORBIDDEN_KEY_PATTERN =
+  /sever|confidence|priorit|tier|risk_level|critical|impact_level/i;
 
 /** Ordered profile fields. Order is fixed so the persisted JSON is deterministic. */
 export const PROFILE_FIELDS = [
@@ -102,6 +122,20 @@ export const PROFILE_FIELDS = [
 export const STRUCTURAL_PROFILE_OVERFETCH = 30;
 
 const MAX_OUTPUT_TOKENS = 2000;
+
+/**
+ * A field's evidence record. `match_mode` and `chars_skipped` are written by
+ * the matcher, never by the model: an elided match is weaker evidence, and the
+ * generator that produced it is not a trustworthy narrator of its own rigour.
+ */
+const FieldSupportSchema = z.object({
+  chunk_index: z.number(),
+  verbatim_snippet: z.string(),
+  match_mode: z.enum(["literal", "elided"]),
+  chars_skipped: z.number(),
+});
+
+type FieldSupport = z.infer<typeof FieldSupportSchema>;
 
 // ---------------------------------------------------------------------------
 // Row schemas
@@ -196,7 +230,8 @@ export function buildStructuralProfilePrompt(args: {
 
   const shape = PROFILE_FIELDS.map((f) => `    "${f}": "<one short phrase>"`).join(",\n");
   const supportShape = PROFILE_FIELDS.map(
-    (f) => `    "${f}": <chunk number, or null>`,
+    (f) =>
+      `    "${f}": {"chunk_index": <chunk number>, "verbatim_snippet": "<exact quote, at most 200 characters>"}`,
   ).join(",\n");
 
   return `You are building a STRUCTURAL PROFILE of a company for an investment diligence system.
@@ -227,8 +262,11 @@ ${supportShape}
 
 EVIDENCE RULE — this is the most important rule here:
 - Every profile value must be STATED in the excerpts above. Not implied by them, not derivable from them, not consistent with them: stated.
-- For each field, "field_support" gives the number of the single chunk that states it, using the [chunk N] labels above.
-- If the excerpts do not state the value, the profile value is exactly "unknown" and the support is null. This is the expected outcome for several fields and is not a failure.
+- For each field, "field_support" gives an object with exactly two keys: "chunk_index", the number of the single chunk that states the value, using the [chunk N] labels above; and "verbatim_snippet", the passage in that chunk which states it, at most 200 characters.
+- The snippet must be copied CHARACTER FOR CHARACTER out of that chunk. Do not paraphrase it, correct its spelling, expand its abbreviations, or add ellipses. The receiving system locates the snippet inside the chunk text and discards the entire response if it cannot find it.
+- Quote the SHORTEST run of text that states the value. A short exact quote is always safer than a long tidied one.
+- Some excerpts are extracted from tables and slides, so the text may read oddly and may have fragments of neighbouring columns running through it. Quote it as it appears. Do not clean it up, do not close up the gaps, and do not join text from two different parts of the chunk into one quote — pick a single continuous run instead.
+- If the excerpts do not state the value, the profile value is exactly "unknown" and the support is null — the bare JSON literal null, not an object. This is the expected outcome for several fields and is not a failure.
 - Do NOT derive, estimate, back-calculate or infer a value from adjacent figures. If a revenue figure is absent, you may not reconstruct it from percentages, ratios or margins that appear near it. Write "unknown".
 - A value with no supporting chunk will be rejected by the receiving system, and the whole response discarded. When in doubt, write "unknown" with null.
 
@@ -236,7 +274,7 @@ Rules:
 - Every profile field is ONE short phrase, under 15 words. Not a sentence, not a paragraph.
 - "scale_band" means an order-of-magnitude revenue or headcount band, e.g. "~£50-100m revenue", and only if such a figure is stated outright. Use "unknown" if no such figure is present.
 - "deal_archetype" means the structural transaction type, e.g. "founder-owned buyout", "carve-out", "platform for buy-and-build".
-- Do not add, remove or rename any key. "field_support" must contain exactly the same eight keys as "profile". Do not nest anything further.
+- Do not add, remove or rename any key. "field_support" must contain exactly the same eight keys as "profile". Each of its values is either the two-key object described above or null, and nothing else. Do not nest anything further inside it.
 - Do not emit any key containing "severity", "confidence", "priority", "tier" or "risk_level". This is a description of shape, not an assessment.`;
 }
 
@@ -288,7 +326,16 @@ export default api({
         inFinalSet: z.boolean(),
       }),
     ),
-    fieldSupport: z.record(z.string(), z.number().nullable()),
+    fieldSupport: z.record(z.string(), FieldSupportSchema.nullable()),
+    literalMatchCount: z.number(),
+    elidedMatchCount: z.number(),
+    maxCharsSkipped: z.number(),
+    // Called out separately: scale_band is the field v1 got wrong by
+    // back-calculating from a capex table, so it is the specific case the
+    // evidence rule was added to catch.
+    scaleBandValue: z.string(),
+    scaleBandSupport: FieldSupportSchema.nullable(),
+    markerFireCounts: z.record(z.string(), z.number()),
     dealFieldsIncluded: z.array(z.string()),
     dealFieldsAllNull: z.boolean(),
     partitionAssertionPassed: z.boolean(),
@@ -415,10 +462,37 @@ export default api({
       });
     }
 
+    // Per-marker firing count across every retrieved chunk, whether or not it
+    // was classified as boilerplate. A marker set whose behaviour rests on one
+    // string is one document-template change away from doing nothing, and the
+    // aggregate drop count hides that completely. Counting each marker
+    // separately puts the dependence in the record instead of leaving it to be
+    // inferred later from a number that happens to look healthy.
+    const markerFireCounts: Record<string, number> = {};
+    for (const marker of BOILERPLATE_MARKERS) markerFireCounts[marker] = 0;
+    for (const d of diagnostics) {
+      for (const m of d.markersHit) {
+        markerFireCounts[m] = (markerFireCounts[m] ?? 0) + 1;
+      }
+    }
+
     console.log(
       `${LOG_PREFIX} chunk selection: ${chunksAvailableInAllowlist} allowlisted, ` +
         `${chunkRows.length} retrieved, ${droppedAsBoilerplate} dropped as boilerplate ` +
         `(>=${BOILERPLATE_MARKER_THRESHOLD} distinct markers), ${selected.length} in final set.`,
+    );
+    console.log(
+      `${LOG_PREFIX} marker fires across ${chunkRows.length} retrieved chunks: ` +
+        (Object.entries(markerFireCounts)
+          .filter(([, n]) => n > 0)
+          .sort((a, b) => b[1] - a[1])
+          .map(([m, n]) => `"${m}"=${n}`)
+          .join(", ") || "none") +
+        `. Silent markers: ` +
+        (Object.entries(markerFireCounts)
+          .filter(([, n]) => n === 0)
+          .map(([m]) => `"${m}"`)
+          .join(", ") || "none"),
     );
 
     if (selected.length === 0) {
@@ -548,27 +622,91 @@ export default api({
     }
 
     const selectedIndexSet = new Set(selected.map((c) => c.chunk_index));
-    const fieldSupport: Record<string, number | null> = {};
+    const contentByIndex = new Map(selected.map((c) => [c.chunk_index, c.content]));
+
+    const fieldSupport: Record<string, FieldSupport | null> = {};
     const unsupportedFields: string[] = [];
     const uncitedChunks: string[] = [];
+    const malformedSupport: string[] = [];
+    const snippetMismatches: string[] = [];
 
     for (const f of PROFILE_FIELDS) {
       const raw = supportIn[f];
       const value = String(profileIn[f]);
       const isUnknown = value.trim().toLowerCase() === "unknown";
 
-      let support: number | null = null;
-      if (typeof raw === "number" && Number.isInteger(raw)) {
-        support = raw;
-      } else if (typeof raw === "string" && /^\d+$/.test(raw.trim())) {
-        // Tolerate a numeric string; the value is unambiguous.
-        support = Number(raw.trim());
+      // Parse the model's two declared keys. Anything the model may have added
+      // beyond them — including match_mode, which is the matcher's to set — is
+      // ignored rather than trusted.
+      let claimIndex: number | null = null;
+      let claimSnippet: string | null = null;
+
+      if (raw !== null && raw !== undefined) {
+        if (typeof raw !== "object" || Array.isArray(raw)) {
+          malformedSupport.push(`${f} (expected {chunk_index, verbatim_snippet} or null, got ${typeof raw})`);
+        } else {
+          const obj = raw as Record<string, unknown>;
+          const idxRaw = obj.chunk_index;
+          const snippetRaw = obj.verbatim_snippet;
+          const idx =
+            typeof idxRaw === "number" && Number.isInteger(idxRaw)
+              ? idxRaw
+              : typeof idxRaw === "string" && /^\d+$/.test(idxRaw.trim())
+                ? Number(idxRaw.trim()) // tolerate a numeric string; unambiguous
+                : null;
+          if (idx === null || typeof snippetRaw !== "string" || snippetRaw.trim() === "") {
+            malformedSupport.push(`${f} (chunk_index or verbatim_snippet missing / wrong type)`);
+          } else {
+            claimIndex = idx;
+            claimSnippet = snippetRaw;
+            if ("match_mode" in obj || "chars_skipped" in obj) {
+              console.warn(
+                `${LOG_PREFIX} field_support.${f} supplied match_mode/chars_skipped; ignored. ` +
+                  "Those are set by the matcher, not the model.",
+              );
+            }
+          }
+        }
       }
 
-      // A citation to a chunk that was never shown is a fabricated citation,
-      // which is worse than an absent one — it would survive the null check.
-      if (support !== null && !selectedIndexSet.has(support)) {
-        uncitedChunks.push(`${f} -> chunk ${support}`);
+      let support: FieldSupport | null = null;
+      if (claimIndex !== null && claimSnippet !== null) {
+        // A citation to a chunk that was never shown is a fabricated citation,
+        // which is worse than an absent one — it would survive the null check.
+        if (!selectedIndexSet.has(claimIndex)) {
+          uncitedChunks.push(`${f} -> chunk ${claimIndex}`);
+        } else {
+          // A chunk number on its own is cheap to produce and cannot distinguish
+          // a passage the model read from one it composed. Matching the snippet
+          // against the exact text that was sent is the only check here that a
+          // plausible-sounding derivation cannot pass.
+          const content = contentByIndex.get(claimIndex) ?? "";
+          const m = matchSnippet(content, claimSnippet);
+          if (!m.matched) {
+            snippetMismatches.push(
+              `${f} -> chunk ${claimIndex}: ${m.reason} — "${claimSnippet.slice(0, 140)}"`,
+            );
+          } else {
+            support = {
+              chunk_index: claimIndex,
+              verbatim_snippet: claimSnippet,
+              match_mode: m.mode as SnippetMatchMode,
+              chars_skipped: m.charsSkipped,
+            };
+            if (m.mode === "elided") {
+              console.warn(
+                `${LOG_PREFIX} field_support.${f} matched chunk ${claimIndex} with ${m.gapCount} gap(s), ` +
+                  `${m.charsSkipped} chars skipped. Recorded as elided — weaker evidence than a literal match.`,
+              );
+            }
+            if (claimSnippet.length > 200) {
+              console.warn(
+                `${LOG_PREFIX} field_support.${f} snippet is ${claimSnippet.length} chars, ` +
+                  "over the 200-char instruction; it matches so it is accepted.",
+              );
+            }
+          }
+        }
       }
 
       if (!isUnknown && support === null) {
@@ -580,15 +718,29 @@ export default api({
       fieldSupport[f] = isUnknown ? null : support;
       if (isUnknown && support !== null) {
         console.warn(
-          `${LOG_PREFIX} field_support.${f} cited chunk ${support} for an "unknown" value; normalised to null.`,
+          `${LOG_PREFIX} field_support.${f} cited chunk ${support.chunk_index} for an "unknown" value; normalised to null.`,
         );
       }
     }
 
+    if (malformedSupport.length > 0) {
+      throw new Error(
+        `${LOG_PREFIX} field_support entries are malformed: ${malformedSupport.join(", ")}. ` +
+          "Each entry must be {chunk_index, verbatim_snippet} or null. No insert performed.",
+      );
+    }
     if (uncitedChunks.length > 0) {
       throw new Error(
         `${LOG_PREFIX} field_support cites chunks that were never shown to the model: ` +
           `${uncitedChunks.join(", ")}. Shown: [${[...selectedIndexSet].join(", ")}]. No insert performed.`,
+      );
+    }
+    if (snippetMismatches.length > 0) {
+      throw new Error(
+        `${LOG_PREFIX} EVIDENCE RULE VIOLATION: verbatim_snippet could not be located in the cited ` +
+          `chunk within the elision bounds (<=${SNIPPET_MAX_GAPS} gaps, <=${SNIPPET_MAX_GAP_CHARS} chars each, ` +
+          `<=${SNIPPET_MAX_TOTAL_SKIPPED} total): ${snippetMismatches.join("; ")}. A quote that does not ` +
+          "appear in the source is not evidence. No insert performed.",
       );
     }
     if (unsupportedFields.length > 0) {
@@ -608,9 +760,37 @@ export default api({
       notes: typeof parsed.notes === "string" ? parsed.notes : "",
     };
 
+    // Match-quality summary. If most fields need elision, the extracted corpus
+    // is more degraded than a single CIM would suggest, which is a design input
+    // for later phases rather than a detail of this one.
+    const supportEntries = PROFILE_FIELDS.map((f) => fieldSupport[f]).filter(
+      (s): s is FieldSupport => s !== null,
+    );
+    const literalMatchCount = supportEntries.filter((s) => s.match_mode === "literal").length;
+    const elidedMatchCount = supportEntries.filter((s) => s.match_mode === "elided").length;
+    const maxCharsSkipped = supportEntries.reduce((max, s) => Math.max(max, s.chars_skipped), 0);
+
+    const scaleBandValue = profile.scale_band;
+    const scaleBandSupport = fieldSupport.scale_band ?? null;
+
     console.log(
       `${LOG_PREFIX} field support: ` +
-        PROFILE_FIELDS.map((f) => `${f}=${fieldSupport[f] ?? "null"}`).join(" "),
+        PROFILE_FIELDS.map((f) => {
+          const s = fieldSupport[f];
+          return s ? `${f}=chunk ${s.chunk_index}/${s.match_mode}` : `${f}=null`;
+        }).join(" "),
+    );
+    console.log(
+      `${LOG_PREFIX} match quality: ${literalMatchCount} literal, ${elidedMatchCount} elided, ` +
+        `${PROFILE_FIELDS.length - supportEntries.length} unsupported ("unknown"), ` +
+        `max chars skipped ${maxCharsSkipped}.`,
+    );
+    console.log(
+      `${LOG_PREFIX} scale_band = "${scaleBandValue}" | support = ` +
+        (scaleBandSupport
+          ? `chunk ${scaleBandSupport.chunk_index} (${scaleBandSupport.match_mode}, ${scaleBandSupport.chars_skipped} skipped)`
+          : "null") +
+        ". v1 back-calculated this field from a capex table; null or a cited figure both mean the rule held.",
     );
 
     // ── Step 8: append-only insert ────────────────────────────────────────
@@ -672,6 +852,12 @@ export default api({
       selectedChunkIndexes: selected.map((c) => c.chunk_index),
       retrievedChunkDiagnostics: diagnostics,
       fieldSupport,
+      literalMatchCount,
+      elidedMatchCount,
+      maxCharsSkipped,
+      scaleBandValue,
+      scaleBandSupport,
+      markerFireCounts,
       dealFieldsIncluded,
       dealFieldsAllNull,
       partitionAssertionPassed,

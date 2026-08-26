@@ -34,7 +34,7 @@ import {
   type ICQuestionType,
 } from "./ic-questions-contract.js";
 import { buildOriginMapFromRoutedArray, resolveProvenance } from "./claim-origin-map.js";
-import type { ICQuestionsScope, ICMemoDoc } from "./ic-questions-scope.js";
+import type { ICQuestionsScope, ICMemoDoc } from "./ic-questions-path.js";
 import type { PipelineContext } from "./pipeline-config.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 
