@@ -45,7 +45,7 @@ import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { callLLMWithHeadroom } from "./call-llm.js";
 import { getModuleModel } from "./model-config.js";
 import { sha256hex } from "./sha256-pure.js";
-import { BSS_V2_MODULE_ID, FORBIDDEN_KEY_PATTERN, PROFILE_FIELDS } from "./bss-profile.js";
+import { BSS_V2_MODULE_ID, FORBIDDEN_KEY_PATTERN, PROFILE_FIELDS, THESIS_FIELDS } from "./bss-profile.js";
 import type { PipelineContext } from "./pipeline-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -57,8 +57,14 @@ const LOG_PREFIX = "[BSS-GEN]";
 // Contract constants — exported so the rules are auditable, not buried
 // ---------------------------------------------------------------------------
 
-/** pass_type written by this API. Part 4 writes a different value. */
+/** pass_type written by this API for the blind pass. */
 export const BLIND_PASS_TYPE = "blind";
+
+/** pass_type written by this API for the informed pass. */
+export const INFORMED_PASS_TYPE = "informed";
+
+/** Valid pass types accepted by the input schema. */
+const VALID_PASS_TYPES = [BLIND_PASS_TYPE, INFORMED_PASS_TYPE] as const;
 
 /**
  * Ceiling, not a target. The prompt says "at most"; a model that has ten
@@ -299,12 +305,94 @@ Do not emit any key containing "severity", "confidence", "priority", "tier", "cr
 }
 
 // ---------------------------------------------------------------------------
+// Informed-pass prompt
+// ---------------------------------------------------------------------------
+
+/**
+ * Assemble the informed-pass prompt. This call sees TWO profiles — the
+ * structural shape (same eight fields the blind pass used) and the thesis
+ * (six fields extracted from IC memos naming the investment bet). Neither
+ * field_support block, neither notes block, and no document text enters.
+ *
+ * The question changes in kind, not just scope: the blind pass asked what
+ * kills businesses of this shape. The informed pass asks what THIS bet takes
+ * for granted — the unstated propositions beneath each stated value driver.
+ *
+ * A stated assumption is not implicit; Contradiction Check owns stated claims
+ * that conflict with data. This pass produces what the thesis treats as given
+ * rather than argued.
+ */
+export function buildInformedCandidatePrompt(args: {
+  structuralProfile: Record<string, string>;
+  thesisProfile: Record<string, string>;
+}): string {
+  const { structuralProfile, thesisProfile } = args;
+
+  const structuralBlock = PROFILE_FIELDS.map((f) => `${f}: ${structuralProfile[f]}`).join("\n");
+  const thesisBlock = THESIS_FIELDS.map((f) => `${f}: ${thesisProfile[f]}`).join("\n");
+
+  return `Here is a company's structural shape — eight short phrases — and the thesis an investor wrote for buying it — six short phrases.
+
+<company_shape>
+${structuralBlock}
+</company_shape>
+
+<investment_thesis>
+${thesisBlock}
+</investment_thesis>
+
+Some fields may read "unknown". That means the value was not established. Treat "unknown" as genuinely unknown: do not guess a value, do not reason as if you had one, and do not build a candidate whose whole force depends on a value you supplied yourself.
+
+You have no documents. You have not seen the company's accounts, contracts, customer list, analysis, or any diligence material. You see only these fourteen phrases. Do not pretend otherwise.
+
+THE QUESTION
+
+What does this thesis rely on that it never says?
+
+For each stated value driver — each element of the thesis that the investor is counting on — name the unstated proposition beneath it: what must be true for that driver to behave as modelled, which the thesis treats as given rather than argued.
+
+Discard any assumption the thesis extract explicitly states. A stated assumption is not implicit. If the thesis says margins expand via mix shift, "mix shift continues" is stated, not implicit. What is implicit is everything that must hold for mix shift to deliver what it promises — that the product growing fastest carries the margin the investor expects, that volume in that product grows into the mix without cannibalising higher-margin legacy, that pricing on the growing product is not under pressure that the legacy product absorbed.
+
+Work through each thesis field in turn. If a driver depends on something in the structural shape, use both. If the thesis is vague on a driver (or it reads "unknown"), say so — do not invent a thesis the investor did not state.
+
+Return at most ${MAX_CANDIDATES} of these. That is a ceiling, not a target. Do not pad the list to reach a number, and do not produce two entries that are the same mechanism worded differently.
+
+If a candidate would appear unchanged on any company with any thesis, it is generic. Either sharpen it until it depends on what THIS thesis says, or drop it.
+
+OUTPUT
+
+Return ONLY a JSON object. No prose before or after it, no markdown code fences.
+
+{
+  "candidates": [
+    {
+      "failure_mode": "<short_snake_case_label>",
+      "implied_assumption": "<what the investor must be taking to be true for this thesis element to work, one sentence, positive and declarative>",
+      "hypothesis": "<the concrete, checkable claim about this company that would be true if the assumption is wrong>",
+      "rationale": "<why this is structurally implicit in the thesis given the company shape, two sentences at most>",
+      "proposed_queries": ["<search phrase>", "<search phrase>", "<search phrase>"]
+    }
+  ]
+}
+
+FIELD RULES
+
+- "failure_mode": a short snake_case label naming the mechanism, 2–5 words joined by underscores, no spaces. Examples: "own_ip_margin_assumption", "surgery_connect_pricing_power", "acquisition_churn_drag". The label is a tag, not a sentence.
+- "implied_assumption": write it as a positive statement of belief. It must NOT be phrased as a question and must NOT begin with "No", "Not", "Lack of" or "Absence of". Write "Own-IP products carry higher gross margins than legacy", not "No margin compression on own-IP products" and not "Do own-IP products carry higher margins?".
+- "hypothesis": what would actually be the case if the assumption is wrong. It must be the kind of statement that a document could confirm or contradict. It is a claim to go and test, not a conclusion.
+- "rationale": tie it to both the structural shape and the thesis. Name the thesis field whose driver depends on this assumption. If the connection runs through a field marked "unknown", say so.
+- "proposed_queries": between ${MIN_QUERIES_PER_CANDIDATE} and ${MAX_QUERIES_PER_CANDIDATE} of them. Each is a short search phrase of ${MIN_QUERY_WORDS} to ${MAX_QUERY_WORDS} words, of the kind you would type to find the relevant passage in a pile of company documents. Terms, not sentences, and not questions. Any candidate whose queries fall outside those bounds is discarded whole, so count the words. Attack the same concept through different vocabulary — each query should use mostly different content words from the others. If two queries share more than half their non-stopword terms, the later one is pruned rather than costing you the whole candidate — but if fewer than ${MIN_QUERIES_PER_CANDIDATE} survive, the candidate is dropped.
+
+Do not emit any key containing "severity", "confidence", "priority", "tier", "critical" or "impact_level", and do not rank, score, order by importance, or flag any candidate as more serious than another. Nothing here has been checked against anything. An ordering would be a fabrication.`;
+}
+
+// ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 
 export default api({
   name: "BssGenerateBlindCandidates",
-  description: "Generates blind failure-mode candidates from a structural profile",
+  description: "Generates blind or informed failure-mode candidates from profiles",
 
   integrations: {
     db: postgres(IC_DILIGENCE_DB),
@@ -314,6 +402,7 @@ export default api({
   input: z.object({
     dealId: z.string().uuid(),
     profileId: z.string().uuid(),
+    passType: z.enum([BLIND_PASS_TYPE, INFORMED_PASS_TYPE]).default(BLIND_PASS_TYPE),
   }),
 
   output: z.object({
@@ -362,7 +451,7 @@ export default api({
     rawModelResponse: z.string(),
   }),
 
-  async run(ctx, { dealId, profileId }) {
+  async run(ctx, { dealId, profileId, passType }) {
     // Standalone API, not a pipeline runner: it owns its own platform clock.
     const pipelineStartTime = Date.now();
 
@@ -373,13 +462,16 @@ export default api({
       },
     };
 
+    const isInformed = passType === INFORMED_PASS_TYPE;
+    const expectedKind = isInformed ? "thesis" : "structural";
+
     // ── Step 1: load the profile ──────────────────────────────────────────
     const profileRows = await ctx.integrations.db.query(
       `SELECT profile_id, deal_id, profile_kind, profile_version, profile_json
          FROM bss_profiles WHERE profile_id = $1::uuid`,
       ProfileRowSchema,
       [profileId],
-      { label: "BSSGenerate: load structural profile" },
+      { label: `BSSGenerate: load ${expectedKind} profile` },
     );
     if (profileRows.length === 0) {
       throw new Error(`${LOG_PREFIX} profile ${profileId} not found.`);
@@ -394,10 +486,10 @@ export default api({
           "No LLM call, no insert.",
       );
     }
-    if (profileRow.profile_kind !== "structural") {
+    if (profileRow.profile_kind !== expectedKind) {
       throw new Error(
-        `${LOG_PREFIX} profile ${profileId} has profile_kind='${profileRow.profile_kind}'. ` +
-          "The blind pass generates from the structural profile only.",
+        `${LOG_PREFIX} profile ${profileId} has profile_kind='${profileRow.profile_kind}' ` +
+          `but passType='${passType}' requires '${expectedKind}'. No LLM call, no insert.`,
       );
     }
 
@@ -405,21 +497,47 @@ export default api({
     // Passing an older profile_id would silently generate from stale data.
     const maxVersionRows = await ctx.integrations.db.query(
       `SELECT MAX(profile_version) AS max_version FROM bss_profiles
-         WHERE deal_id = $1::uuid AND profile_kind = 'structural'`,
+         WHERE deal_id = $1::uuid AND profile_kind = $2::text`,
       MaxVersionSchema,
-      [dealId],
-      { label: "BSSGenerate: check max profile version" },
+      [dealId, expectedKind],
+      { label: `BSSGenerate: check max ${expectedKind} profile version` },
     );
     const maxVersion = maxVersionRows[0]?.max_version ?? 0;
     if (profileRow.profile_version !== maxVersion) {
       throw new Error(
         `${LOG_PREFIX} profile ${profileId} is v${profileRow.profile_version} but the current ` +
-          `structural profile for deal ${dealId} is v${maxVersion}. ` +
+          `${expectedKind} profile for deal ${dealId} is v${maxVersion}. ` +
           "Generating from a superseded profile would silently use stale data. No LLM call, no insert.",
       );
     }
 
-    // ── Step 2: extract profile_json.profile, and only that ───────────────
+    // ── Step 1c (informed only): load the structural profile too ──────────
+    // The informed prompt sees both the structural shape and the thesis.
+    // The structural profile is always the latest for this deal.
+    let structuralProfileJson: Record<string, unknown> | null = null;
+    if (isInformed) {
+      const structRows = await ctx.integrations.db.query(
+        `SELECT profile_id, deal_id, profile_kind, profile_version, profile_json
+           FROM bss_profiles
+          WHERE deal_id = $1::uuid AND profile_kind = 'structural'
+          ORDER BY profile_version DESC LIMIT 1`,
+        ProfileRowSchema,
+        [dealId],
+        { label: "BSSGenerate: load latest structural profile for informed pass" },
+      );
+      if (structRows.length === 0) {
+        throw new Error(
+          `${LOG_PREFIX} informed pass requires a structural profile for deal ${dealId} but none exists.`,
+        );
+      }
+      structuralProfileJson = structRows[0].profile_json as Record<string, unknown> | null;
+      console.log(
+        `${LOG_PREFIX} loaded structural profile v${structRows[0].profile_version} ` +
+          `(${structRows[0].profile_id}) alongside thesis profile for informed pass.`,
+      );
+    }
+
+    // ── Step 2: extract profile fields ────────────────────────────────────
     const profileJson = profileRow.profile_json as Record<string, unknown> | null;
     const rawProfile = profileJson?.profile;
     if (rawProfile === null || rawProfile === undefined || typeof rawProfile !== "object" || Array.isArray(rawProfile)) {
@@ -427,53 +545,93 @@ export default api({
     }
     const profileIn = rawProfile as Record<string, unknown>;
 
-    const missing = PROFILE_FIELDS.filter((f) => typeof profileIn[f] !== "string" || profileIn[f] === "");
+    const fieldsToCheck = isInformed ? THESIS_FIELDS : PROFILE_FIELDS;
+    const missing = (fieldsToCheck as readonly string[]).filter(
+      (f) => typeof profileIn[f] !== "string" || profileIn[f] === "",
+    );
     if (missing.length > 0) {
       throw new Error(`${LOG_PREFIX} profile_json.profile missing fields: ${missing.join(", ")}`);
     }
 
     // Rebuild in fixed order. Anything the stored object carries beyond the
-    // eight fields is dropped here rather than passed through by accident.
+    // expected fields is dropped here rather than passed through by accident.
     const profileFieldsSent: Record<string, string> = {};
-    for (const f of PROFILE_FIELDS) profileFieldsSent[f] = String(profileIn[f]);
 
-    const unknownFields = PROFILE_FIELDS.filter(
-      (f) => profileFieldsSent[f].trim().toLowerCase() === "unknown",
-    );
+    if (isInformed) {
+      // Thesis fields from the thesis profile
+      for (const f of THESIS_FIELDS) profileFieldsSent[`thesis.${f}`] = String(profileIn[f]);
+
+      // Structural fields from the structural profile
+      const structRaw = structuralProfileJson?.profile;
+      if (structRaw === null || structRaw === undefined || typeof structRaw !== "object" || Array.isArray(structRaw)) {
+        throw new Error(`${LOG_PREFIX} structural profile_json.profile is missing or not an object.`);
+      }
+      const structIn = structRaw as Record<string, unknown>;
+      const structMissing = PROFILE_FIELDS.filter((f) => typeof structIn[f] !== "string" || structIn[f] === "");
+      if (structMissing.length > 0) {
+        throw new Error(`${LOG_PREFIX} structural profile missing fields: ${structMissing.join(", ")}`);
+      }
+      for (const f of PROFILE_FIELDS) profileFieldsSent[`structural.${f}`] = String(structIn[f]);
+    } else {
+      for (const f of PROFILE_FIELDS) profileFieldsSent[f] = String(profileIn[f]);
+    }
+
+    const allFieldValues = Object.values(profileFieldsSent);
+    const unknownFields = Object.entries(profileFieldsSent).filter(
+      ([, v]) => v.trim().toLowerCase() === "unknown",
+    ).map(([k]) => k);
     console.log(
-      `${LOG_PREFIX} profile v${profileRow.profile_version} loaded; sending ${PROFILE_FIELDS.length} fields, ` +
+      `${LOG_PREFIX} ${expectedKind} profile v${profileRow.profile_version} loaded; ` +
+        `sending ${Object.keys(profileFieldsSent).length} fields, ` +
         `${unknownFields.length} of them "unknown"` +
         (unknownFields.length > 0 ? ` (${unknownFields.join(", ")})` : "") +
         ". field_support and notes withheld.",
     );
 
     // ── Step 3: assemble prompt, assert no leakage, hash ──────────────────
-    const prompt = buildBlindCandidatePrompt({ profile: profileFieldsSent });
+    let prompt: string;
+    if (isInformed) {
+      const structFields: Record<string, string> = {};
+      for (const f of PROFILE_FIELDS) structFields[f] = profileFieldsSent[`structural.${f}`];
+      const thesisFields: Record<string, string> = {};
+      for (const f of THESIS_FIELDS) thesisFields[f] = profileFieldsSent[`thesis.${f}`];
+      prompt = buildInformedCandidatePrompt({ structuralProfile: structFields, thesisProfile: thesisFields });
+    } else {
+      prompt = buildBlindCandidatePrompt({ profile: profileFieldsSent });
+    }
 
     // field_support holds verbatim CIM snippets and notes is the profile
     // generator's self-assessment. Neither may reach this call. Checking the
     // assembled string rather than the assembly logic means a future edit to
     // the prompt builder cannot quietly widen the input.
+    // For the informed pass, check BOTH the thesis AND structural profiles.
     const leaks: string[] = [];
     if (prompt.includes("field_support")) leaks.push("field_support key name present in prompt");
-    const notesText = typeof profileJson?.notes === "string" ? profileJson.notes.trim() : "";
-    if (notesText.length > 0 && prompt.includes(notesText)) {
-      leaks.push("profile_json.notes text present in prompt");
-    }
-    const supportObj = profileJson?.field_support;
-    if (supportObj !== null && supportObj !== undefined && typeof supportObj === "object") {
-      for (const [field, entry] of Object.entries(supportObj as Record<string, unknown>)) {
-        if (entry === null || typeof entry !== "object") continue;
-        const snippet = (entry as Record<string, unknown>).verbatim_snippet;
-        if (typeof snippet === "string" && snippet.trim().length > 0 && prompt.includes(snippet.trim())) {
-          leaks.push(`field_support.${field}.verbatim_snippet present in prompt`);
+
+    const profilesToCheck: Array<Record<string, unknown> | null> = [profileJson];
+    if (isInformed && structuralProfileJson) profilesToCheck.push(structuralProfileJson);
+
+    for (const pJson of profilesToCheck) {
+      if (!pJson) continue;
+      const notesText = typeof pJson.notes === "string" ? pJson.notes.trim() : "";
+      if (notesText.length > 0 && prompt.includes(notesText)) {
+        leaks.push("profile_json.notes text present in prompt");
+      }
+      const supportObj = pJson.field_support;
+      if (supportObj !== null && supportObj !== undefined && typeof supportObj === "object") {
+        for (const [field, entry] of Object.entries(supportObj as Record<string, unknown>)) {
+          if (entry === null || typeof entry !== "object") continue;
+          const snippet = (entry as Record<string, unknown>).verbatim_snippet;
+          if (typeof snippet === "string" && snippet.trim().length > 0 && prompt.includes(snippet.trim())) {
+            leaks.push(`field_support.${field}.verbatim_snippet present in prompt`);
+          }
         }
       }
     }
     if (leaks.length > 0) {
       throw new Error(
         `${LOG_PREFIX} BLINDNESS ASSERTION FAILED: ${leaks.join("; ")}. ` +
-          "The blind pass may see the eight profile fields and nothing else. No LLM call, no insert.",
+          `The ${passType} pass may see profile fields and nothing else. No LLM call, no insert.`,
       );
     }
     const leakageAssertionPassed = true;
@@ -499,7 +657,7 @@ export default api({
         max_tokens: MAX_OUTPUT_TOKENS,
         messages: [{ role: "user", content: prompt }],
       },
-      "BSSGenerate: blind candidates",
+      `BSSGenerate: ${passType} candidates`,
       { pipelineStartTime, maxPerCallTimeout: MAX_PER_CALL_TIMEOUT_MS, retries: RETRIES },
     );
     const llmCallMs = Date.now() - callStart;
@@ -749,7 +907,7 @@ export default api({
       [
         dealId,
         profileId,
-        BLIND_PASS_TYPE,
+        passType,
         generationModel,
         promptHash,
         JSON.stringify(accepted),
@@ -769,7 +927,7 @@ export default api({
       dealId,
       profileId,
       profileVersion: profileRow.profile_version,
-      passType: BLIND_PASS_TYPE,
+      passType,
       generationModel,
       modelReported: response.model,
       promptHash,
