@@ -59,6 +59,21 @@ const ENTITY_TYPES = [
   "counterparty",
 ] as const;
 
+// ── Company-name normalization (Layer 2) ────────────────────────────
+// Strips trailing company suffixes to produce a dedup KEY.
+// The stored legal_name keeps its original form — only the key is normalized.
+const COMPANY_SUFFIX_RE = /\s+(?:limited|ltd\.?|plc|l\.?l\.?c\.?|inc\.?|\(uk\))\s*$/i;
+
+function normalizeCompanyName(name: string): string {
+  let key = name.toLowerCase().trim();
+  // Collapse internal whitespace
+  key = key.replace(/\s+/g, " ");
+  // Strip trailing suffix (repeat once in case of double like "Ltd.")
+  key = key.replace(COMPANY_SUFFIX_RE, "");
+  key = key.trim();
+  return key;
+}
+
 // ── Zod schemas ─────────────────────────────────────────────────────
 const ChunkRow = z.object({
   document_id: z.string(),
@@ -553,16 +568,16 @@ Return ONLY a JSON array. No markdown, no explanation.`;
           return LlmEntity.parse(e);
         });
 
-        // Dedup set: names already in survivors (case-insensitive)
-        const existingNames = new Set(
-          survivors.map((s) => s.legal_name.toLowerCase()),
+        // Dedup set: normalized keys already in survivors
+        const existingNormKeys = new Set(
+          survivors.map((s) => normalizeCompanyName(s.legal_name)),
         );
 
         for (const entity of appendixEntities) {
           appendixExtracted++;
 
-          // Skip if already extracted in main pass
-          if (existingNames.has(entity.legal_name.toLowerCase())) {
+          // Skip if already extracted in main pass (normalized match)
+          if (existingNormKeys.has(normalizeCompanyName(entity.legal_name))) {
             continue;
           }
 
@@ -620,7 +635,7 @@ Return ONLY a JSON array. No markdown, no explanation.`;
           entity.rank_signal = { ...sig, roster_pass: true };
 
           survivors.push(entity);
-          existingNames.add(entity.legal_name.toLowerCase());
+          existingNormKeys.add(normalizeCompanyName(entity.legal_name));
         }
       }
     } catch (err: any) {
@@ -632,6 +647,79 @@ Return ONLY a JSON array. No markdown, no explanation.`;
         reason: `Roster LLM call failed: ${err.message?.slice(0, 200)}`,
       });
     }
+  }
+
+  // ── 6c. Name-normalization dedup (Layer 2) ─────────────────────────
+  // Collapse suffix variants (Limited/Ltd/Ltd.) into one row per real
+  // entity. Registration-number-aware: same-name + different non-null
+  // reg numbers are kept as distinct rows and flagged for Family A.
+  const beforeNormCount = survivors.length;
+  let normCollapses = 0;
+  let normConflictPairs = 0;
+
+  {
+    // Group survivors by normalized key
+    const groups = new Map<
+      string,
+      z.infer<typeof LlmEntity>[]
+    >();
+    for (const s of survivors) {
+      const key = normalizeCompanyName(s.legal_name);
+      const arr = groups.get(key);
+      if (arr) arr.push(s);
+      else groups.set(key, [s]);
+    }
+
+    const deduped: z.infer<typeof LlmEntity>[] = [];
+
+    for (const [normKey, group] of groups) {
+      if (group.length === 1) {
+        deduped.push(group[0]);
+        continue;
+      }
+
+      // Partition by registration_number
+      const byReg = new Map<string, z.infer<typeof LlmEntity>[]>();
+      for (const e of group) {
+        const regKey = e.registration_number ?? "";
+        const arr = byReg.get(regKey);
+        if (arr) arr.push(e);
+        else byReg.set(regKey, [e]);
+      }
+
+      // Collect non-null distinct reg numbers
+      const nonNullRegs = [...byReg.keys()].filter((k) => k !== "");
+
+      if (nonNullRegs.length <= 1) {
+        // Same or compatible reg numbers: collapse to one.
+        // Prefer: row with reg number > row without; among those, longest legal_name.
+        const sorted = [...group].sort((a, b) => {
+          // Prefer non-null reg
+          const aHasReg = a.registration_number ? 1 : 0;
+          const bHasReg = b.registration_number ? 1 : 0;
+          if (bHasReg !== aHasReg) return bHasReg - aHasReg;
+          // Prefer longer legal_name (fuller form)
+          return b.legal_name.length - a.legal_name.length;
+        });
+        deduped.push(sorted[0]);
+        normCollapses += group.length - 1;
+      } else {
+        // Different non-null reg numbers: keep ALL rows, flag each.
+        normConflictPairs++;
+        for (const e of group) {
+          const sig =
+            e.rank_signal && typeof e.rank_signal === "object"
+              ? { ...(e.rank_signal as Record<string, unknown>) }
+              : {};
+          e.rank_signal = { ...sig, name_reg_conflict: true };
+          deduped.push(e);
+        }
+      }
+    }
+
+    // Replace survivors in-place
+    survivors.length = 0;
+    survivors.push(...deduped);
   }
 
   // ── 7. Insert surviving entities ──────────────────────────────────
@@ -710,6 +798,11 @@ Return ONLY a JSON array. No markdown, no explanation.`;
   if (rosterChunks.length > 0) {
     messageParts.push(
       `roster: ${rosterChunks.length} chunks (suffix≥${ROSTER_SUFFIX_FLOOR}), ${appendixExtracted} extracted, ${appendixDropped} dropped, tokens: in=${appendixTokensIn} out=${appendixTokensOut}`,
+    );
+  }
+  if (normCollapses > 0 || normConflictPairs > 0) {
+    messageParts.push(
+      `norm: ${beforeNormCount}->${survivors.length} (${normCollapses} collapsed, ${normConflictPairs} conflict groups kept)`,
     );
   }
   const message = messageParts.join(" | ");
