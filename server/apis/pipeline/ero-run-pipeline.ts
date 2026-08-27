@@ -76,6 +76,7 @@ export default api({
     status: z.string(),
     invocationCount: z.number(),
     message: z.string(),
+    stageData: z.record(z.unknown()).nullable(),
   }),
 
   async run(ctx, { dealId, runId }) {
@@ -104,6 +105,7 @@ export default api({
         status: "pending",
         invocationCount: 0,
         message: "Run created. Invoke again with this runId to begin.",
+        stageData: null,
       };
     }
 
@@ -137,6 +139,7 @@ export default api({
         status: "complete",
         invocationCount: state.invocation_count,
         message: "Pipeline already complete. No further stages to run.",
+        stageData: null,
       };
     }
 
@@ -180,6 +183,7 @@ export default api({
         status: "in_progress",
         invocationCount,
         message: `Budget exhausted (${elapsed}ms). Re-invoke to continue.`,
+        stageData: null,
       };
     }
 
@@ -254,6 +258,7 @@ export default api({
       status: result.status,
       invocationCount,
       message: result.message,
+      stageData: result.stageData ?? null,
     };
   },
 });

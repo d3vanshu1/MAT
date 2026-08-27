@@ -73,8 +73,9 @@ export default api({
     );
 
     // ── 4. Read dropped list from stage result ──────────────────────
-    // buildEntityManifest now returns dropped[] in its result.
-    const dropped: DroppedEntity[] = stageResult?.dropped ?? [];
+    // buildEntityManifest returns dropped[] inside stageData.
+    const sd = stageResult?.stageData as Record<string, unknown> | undefined;
+    const dropped: DroppedEntity[] = (sd?.dropped as DroppedEntity[]) ?? [];
 
     // ── 5. Independent re-verification (belt & suspenders) ──────────
     // For every inserted entity, independently confirm the snippet is

@@ -139,7 +139,7 @@ export async function buildEntityManifest(
   ctx: any,
   runId: string,
   dealId: string,
-): Promise<StageResult & { dropped?: DroppedEntity[] }> {
+): Promise<StageResult & { dropped?: DroppedEntity[]; semanticDedup?: any }> {
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
@@ -722,6 +722,213 @@ Return ONLY a JSON array. No markdown, no explanation.`;
     survivors.push(...deduped);
   }
 
+  // ── 6d. LLM semantic dedup (acquired_entity only) ──────────────────
+  // The deterministic Layer 2 catches suffix variants but cannot detect
+  // semantic duplicates: acronym↔expansion (TIC Ltd = TIC (The Independent
+  // Choice) Limited), or related trading names within the same group.
+  // An LLM proposes groupings; code enforces that different non-null
+  // registration numbers NEVER merge regardless of what the model says.
+  const acquiredBefore = survivors.filter(
+    (s) => s.entity_type === "acquired_entity",
+  );
+  const nonAcquired = survivors.filter(
+    (s) => s.entity_type !== "acquired_entity",
+  );
+
+  let semanticMerges = 0;
+  let semanticVetoes = 0;
+  let semanticTokensIn = 0;
+  let semanticTokensOut = 0;
+  const semanticAliasMap: Record<string, string[]> = {};
+  const semanticVetoLog: Array<{
+    proposed_group: string[];
+    blocked_pair: [string, string];
+    regs: [string, string];
+  }> = [];
+  let semanticRawGroups: string[][] = [];
+
+  if (acquiredBefore.length > 1) {
+    // Build input: name + reg for the model
+    const inputLines = acquiredBefore.map((e) => {
+      const reg = e.registration_number ? ` [reg: ${e.registration_number}]` : "";
+      return `- ${e.legal_name}${reg}`;
+    });
+
+    const semanticSystemPrompt = `You are an entity deduplication specialist for corporate group structures. The following are company names extracted from due diligence documents. Some may be the SAME underlying company appearing under different names — an acronym and its expansion (e.g. "TIC Ltd" and "TIC (The Independent Choice) Limited"), or closely related trading names within the same corporate group.
+
+Group the names that refer to the same underlying company. Return a JSON array where each element is an array of the input company names (exactly as provided) that refer to one company. Names you are unsure about go in their own single-element group.
+
+CRITICAL RULES:
+1. Do NOT group companies merely because they share a word like "Southern", "Communications", "MPS", or "Pink". Only group when you are CONFIDENT they are the same legal entity.
+2. Registration numbers in [reg: ...] are authoritative identifiers. If two names have DIFFERENT registration numbers, they are DIFFERENT companies even if the names look similar. Do NOT group them.
+3. If two names have the SAME registration number, they are definitely the same company — group them.
+4. Names without registration numbers can be grouped with a named entity if you are confident they refer to the same company (e.g. "GHM (NexusCare)" with "GHM Care Limited").
+5. Copy names EXACTLY as provided — do not modify, abbreviate, or invent names.
+6. Every input name must appear in exactly one group.
+
+Return ONLY a JSON array of arrays. No markdown, no explanation.`;
+
+    const semanticUserPrompt = `Group these company names by underlying entity:\n\n${inputLines.join("\n")}`;
+
+    try {
+      const semanticLlm = await claude.apiRequest(
+        {
+          method: "POST",
+          path: "/v1/messages",
+          body: {
+            model: MODEL,
+            max_tokens: 4096,
+            system: semanticSystemPrompt,
+            messages: [{ role: "user", content: semanticUserPrompt }],
+          },
+        },
+        { response: AnthropicResponse },
+        { label: "EntityManifest: semantic dedup acquired_entity" },
+      );
+
+      semanticTokensIn = semanticLlm.usage.input_tokens;
+      semanticTokensOut = semanticLlm.usage.output_tokens;
+
+      const semText = semanticLlm.content.find((c: any) => c.type === "text");
+      if (semText?.text) {
+        let semJson = semText.text.trim();
+        if (semJson.startsWith("```")) {
+          semJson = semJson
+            .replace(/^```(?:json)?\s*\n?/, "")
+            .replace(/\n?```\s*$/, "");
+        }
+        const proposedGroups: string[][] = JSON.parse(semJson);
+
+        // Validate: only keep names that are in our input set
+        const inputNameSet = new Set(acquiredBefore.map((e) => e.legal_name));
+        const validGroups = proposedGroups
+          .map((g: string[]) => g.filter((n: string) => inputNameSet.has(n)))
+          .filter((g: string[]) => g.length > 0);
+
+        semanticRawGroups = validGroups;
+
+        // Build entity lookup by legal_name
+        const entityByName = new Map<string, z.infer<typeof LlmEntity>>();
+        for (const e of acquiredBefore) {
+          entityByName.set(e.legal_name, e);
+        }
+
+        const mergedAcquired: z.infer<typeof LlmEntity>[] = [];
+        const consumed = new Set<string>();
+
+        for (const group of validGroups) {
+          if (group.length === 1) {
+            const ent = entityByName.get(group[0]);
+            if (ent && !consumed.has(group[0])) {
+              mergedAcquired.push(ent);
+              consumed.add(group[0]);
+            }
+            continue;
+          }
+
+          // Multi-name group: apply reg-number veto
+          // Collect all entities in this group
+          const groupEntities = group
+            .map((n: string) => entityByName.get(n))
+            .filter((e): e is z.infer<typeof LlmEntity> => !!e && !consumed.has(e.legal_name));
+
+          if (groupEntities.length === 0) continue;
+
+          // Partition by registration_number
+          const regBuckets = new Map<string, z.infer<typeof LlmEntity>[]>();
+          for (const e of groupEntities) {
+            const rk = e.registration_number ?? "";
+            const arr = regBuckets.get(rk);
+            if (arr) arr.push(e);
+            else regBuckets.set(rk, [e]);
+          }
+
+          const nonNullRegKeys = [...regBuckets.keys()].filter((k) => k !== "");
+
+          // Log vetoes: if model grouped entities with different non-null regs
+          if (nonNullRegKeys.length > 1) {
+            for (let i = 0; i < nonNullRegKeys.length; i++) {
+              for (let j = i + 1; j < nonNullRegKeys.length; j++) {
+                const nameA = regBuckets.get(nonNullRegKeys[i])![0].legal_name;
+                const nameB = regBuckets.get(nonNullRegKeys[j])![0].legal_name;
+                semanticVetoLog.push({
+                  proposed_group: group,
+                  blocked_pair: [nameA, nameB],
+                  regs: [nonNullRegKeys[i], nonNullRegKeys[j]],
+                });
+                semanticVetoes++;
+              }
+            }
+          }
+
+          // Build mergeable subgroups: each unique non-null reg is its own
+          // subgroup. Null-reg entities join the first non-null subgroup if
+          // one exists; otherwise they form their own subgroup.
+          const subgroups: z.infer<typeof LlmEntity>[][] = [];
+
+          // Non-null reg subgroups first
+          for (const rk of nonNullRegKeys) {
+            subgroups.push(regBuckets.get(rk)!);
+          }
+
+          // Null-reg entities
+          const nullRegEntities = regBuckets.get("") ?? [];
+          if (nullRegEntities.length > 0) {
+            if (subgroups.length > 0) {
+              // Attach null-reg entities to the first non-null subgroup
+              subgroups[0].push(...nullRegEntities);
+            } else {
+              // All null-reg: form one subgroup
+              subgroups.push(nullRegEntities);
+            }
+          }
+
+          // Merge each subgroup: keep fullest record, record aliases
+          for (const sub of subgroups) {
+            const sorted = [...sub].sort((a, b) => {
+              const aHasReg = a.registration_number ? 1 : 0;
+              const bHasReg = b.registration_number ? 1 : 0;
+              if (bHasReg !== aHasReg) return bHasReg - aHasReg;
+              return b.legal_name.length - a.legal_name.length;
+            });
+
+            const winner = sorted[0];
+            const aliases = sorted.slice(1).map((e) => e.legal_name);
+
+            if (aliases.length > 0) {
+              const sig =
+                winner.rank_signal && typeof winner.rank_signal === "object"
+                  ? { ...(winner.rank_signal as Record<string, unknown>) }
+                  : {};
+              sig.merged_aliases = aliases;
+              winner.rank_signal = sig;
+              semanticMerges += aliases.length;
+              semanticAliasMap[winner.legal_name] = aliases;
+            }
+
+            mergedAcquired.push(winner);
+            for (const e of sorted) consumed.add(e.legal_name);
+          }
+        }
+
+        // Any input entity not consumed by valid groups (model dropped it)
+        for (const e of acquiredBefore) {
+          if (!consumed.has(e.legal_name)) {
+            mergedAcquired.push(e);
+          }
+        }
+
+        // Replace survivors
+        survivors.length = 0;
+        survivors.push(...nonAcquired, ...mergedAcquired);
+      }
+    } catch (err: any) {
+      // Non-fatal: semantic dedup failure leaves Layer 2 result intact
+      survivors.length = 0;
+      survivors.push(...nonAcquired, ...acquiredBefore);
+    }
+  }
+
   // ── 7. Insert surviving entities ──────────────────────────────────
   if (survivors.length > 0) {
     // Build batch INSERT
@@ -802,16 +1009,39 @@ Return ONLY a JSON array. No markdown, no explanation.`;
   }
   if (normCollapses > 0 || normConflictPairs > 0) {
     messageParts.push(
-      `norm: ${beforeNormCount}->${survivors.length} (${normCollapses} collapsed, ${normConflictPairs} conflict groups kept)`,
+      `norm: ${beforeNormCount}->${beforeNormCount - normCollapses} (${normCollapses} collapsed, ${normConflictPairs} conflict groups kept)`,
+    );
+  }
+  if (semanticMerges > 0 || semanticVetoes > 0) {
+    const acquiredAfter = survivors.filter(
+      (s) => s.entity_type === "acquired_entity",
+    ).length;
+    messageParts.push(
+      `semantic: ${acquiredBefore.length}->${acquiredAfter} (${semanticMerges} merged, ${semanticVetoes} reg-vetoed, tokens: in=${semanticTokensIn} out=${semanticTokensOut})`,
     );
   }
   const message = messageParts.join(" | ");
+
+  const semanticDedup = {
+    rawGroups: semanticRawGroups,
+    vetoes: semanticVetoLog,
+    aliasMap: semanticAliasMap,
+    merges: semanticMerges,
+    vetoeCount: semanticVetoes,
+    acquiredBefore: acquiredBefore.length,
+    acquiredAfter: survivors.filter(
+      (s) => s.entity_type === "acquired_entity",
+    ).length,
+  };
 
   return {
     stage: "build_entity_manifest",
     status: "complete",
     message,
-    dropped,
+    stageData: {
+      dropped,
+      semanticDedup,
+    },
   };
 }
 
