@@ -42,12 +42,21 @@ export default api({
     const steps: Array<{ name: string; status: string }> = [];
 
     // ── 1. owner_token on module_runs ──────────────────────────────────
-    await ctx.integrations.db.execute(
-      `ALTER TABLE module_runs ADD COLUMN IF NOT EXISTS owner_token UUID NULL`,
-      [],
-      { label: "Mig034: add owner_token to module_runs" },
-    );
-    steps.push({ name: "owner_token on module_runs", status: "done" });
+    // Wrapped in try/catch: the connected DB user may not own module_runs,
+    // and this column is only for v1's RunModulePipeline B2 fix — not
+    // required by BssRunPipeline, which uses bss_pipeline_state._lock.
+    try {
+      await ctx.integrations.db.execute(
+        `ALTER TABLE module_runs ADD COLUMN IF NOT EXISTS owner_token UUID NULL`,
+        [],
+        { label: "Mig034: add owner_token to module_runs" },
+      );
+      steps.push({ name: "owner_token on module_runs", status: "done" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Mig034] owner_token on module_runs skipped: ${msg}`);
+      steps.push({ name: "owner_token on module_runs", status: `skipped: ${msg.slice(0, 200)}` });
+    }
 
     // ── 2. Unique on bss_coverage(candidate_id) ──────────────────────
     // First drop the old (candidate_id, swept_at) unique if it exists,
