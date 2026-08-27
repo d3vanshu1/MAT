@@ -3013,15 +3013,15 @@ export default function DealDashboardPage() {
             onViewHistory={setHistoryModule}
             disableAnalysis={!canRunAnalysis}
             disableReason={runDisabledReason}
+            slotAfter={bssResults ? {
+              blind_spot_scanner: (
+                <BssResultsPanel
+                  findings={bssResults.findings}
+                  funnel={bssResults.funnel}
+                />
+              ),
+            } : undefined}
           />
-
-          {/* BSS v2 findings — shown after orchestrator completes */}
-          {bssResults && (
-            <BssResultsPanel
-              findings={bssResults.findings}
-              funnel={bssResults.funnel}
-            />
-          )}
 
           <QAPanel
             dealId={dealId!}

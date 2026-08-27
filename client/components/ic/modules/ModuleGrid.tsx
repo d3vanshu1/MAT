@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { ModuleStatus } from "@/types/module";
 import { MODULE_DEFINITIONS } from "@/lib/moduleConfig";
 import ModuleCard from "./ModuleCard";
@@ -18,6 +19,8 @@ interface ModuleGridProps {
   /** When true, disables Run buttons on all analysis modules (not exec summary) */
   disableAnalysis?: boolean;
   disableReason?: string;
+  /** Optional slot content keyed by moduleId, rendered as full-width row after that module's card */
+  slotAfter?: Record<string, ReactNode>;
 }
 
 export default function ModuleGrid({
@@ -29,6 +32,7 @@ export default function ModuleGrid({
   onViewHistory,
   disableAnalysis = false,
   disableReason,
+  slotAfter,
 }: ModuleGridProps) {
   return (
     <div>
@@ -39,7 +43,8 @@ export default function ModuleGrid({
           const isRunning = runningModules.has(mod.id) || status?.latestRun?.status === "running";
           // Executive Summary has its own gate (≥1 completed module); analysis modules use disableAnalysis
           const isDisabled = mod.id !== "executive_summary" && disableAnalysis;
-          return (
+          const slot = slotAfter?.[mod.id];
+          return [
             <ModuleCard
               key={mod.id}
               definition={mod}
@@ -51,8 +56,13 @@ export default function ModuleGrid({
               onViewHistory={() => onViewHistory(mod.id)}
               disabled={isDisabled}
               disabledReason={disableReason}
-            />
-          );
+            />,
+            slot ? (
+              <div key={`${mod.id}-slot`} className="col-span-1 xl:col-span-2">
+                {slot}
+              </div>
+            ) : null,
+          ];
         })}
       </div>
     </div>
