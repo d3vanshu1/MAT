@@ -6,15 +6,17 @@
  * customers, competitors, regulators, jurisdictions.
  *
  * Each entity carries a source_document_id and verbatim_snippet.
- * The FABRICATION GATE (code, not prompt) verifies every snippet
- * is an exact substring of the cited source. Unverifiable rows
- * are dropped — never inserted.
+ * The FABRICATION GATE (code, not prompt) verifies every entity's
+ * legal_name appears as a word-boundary match in the retrieved chunks.
+ * The stored snippet is extracted from source in code — the model's
+ * snippet is advisory only. Unverifiable names are dropped.
  *
  * Single-LLM-call stage: builds full list in memory, inserts once.
  */
 import { z } from "@superblocksteam/sdk-api";
 import type { StageResult } from "./ero-stage-contract.js";
-import { matchSnippet } from "./bss-snippet-match.js";
+// matchSnippet no longer used — gate verifies legal_name directly
+// and extracts snippet from source in code.
 
 // ── Model ───────────────────────────────────────────────────────────
 // Hardcoded per-stage. Model-config centralization happens at Phase 5
@@ -253,7 +255,7 @@ ENTITY TYPE DEFINITIONS:
 
 RULES:
 1. Extract entities of these types ONLY: ${ENTITY_TYPES.join(", ")}.
-2. Every entity MUST include a verbatim_snippet — an EXACT substring copied from the source text. Do not paraphrase, summarize, or reconstruct. Copy character-for-character from the document.
+2. Every entity MUST include a verbatim_snippet — a short passage from the source text near where the entity name appears. This is advisory context only (the system will verify the entity name and extract the final snippet from source). Include enough surrounding text to show the entity in context.
 3. source_document_id must be the exact DOC_ID from the marker line of the chunk where you found the entity.
 4. For subsidiaries and acquired entities, include any stated EBITDA, revenue, acquisition year, or employee count in rank_signal as a JSON object (e.g. {"ebitda": "£2.1m", "year": "2019"}). Set rank_signal to null if no such data is present.
 5. registration_number: company registration / incorporation number if stated, else null.
@@ -314,16 +316,41 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
     };
   }
 
-  // ── 6. FABRICATION GATE (code, not prompt) ────────────────────────
-  // For each entity, verify verbatim_snippet is an exact substring
-  // of the chunk text from the cited source_document_id.
-  // Uses matchSnippet for normalised matching (tolerates punctuation
-  // transliteration and bounded elision from column-interleaved extraction).
+  // ── 6. FABRICATION GATE — name-anchored verification ────────────
+  // The model's verbatim_snippet is advisory only. The gate verifies
+  // each entity by searching for legal_name as an exact (case-insensitive,
+  // word-boundary) substring across ALL retrieved chunks. If found, the
+  // snippet is extracted from source in code (200-char centred window).
+  // If the name is not found anywhere in retrieved context, the entity
+  // is dropped — this keeps recalled-from-training names out.
+
+  /** Build a word-boundary regex for a legal_name. */
+  function buildNameRegex(name: string): RegExp {
+    // Escape regex special characters in the name
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Word-boundary anchors: \b works for alphanumeric boundaries.
+    // For names starting/ending with non-word chars (e.g. parenthesised),
+    // use a lookaround that accepts start/end of string or whitespace.
+    return new RegExp(`(?:^|\\b|(?<=\\s))${escaped}(?:$|\\b|(?=\\s))`, "i");
+  }
+
+  /** Extract a ~200-char snippet centred on `matchIndex` from `text`. */
+  function extractSnippet(text: string, matchIndex: number, nameLen: number): string {
+    const WINDOW = 200;
+    const pad = Math.max(0, Math.floor((WINDOW - nameLen) / 2));
+    let start = Math.max(0, matchIndex - pad);
+    let end = Math.min(text.length, matchIndex + nameLen + pad);
+    // Extend to word boundaries to avoid mid-word cuts
+    while (start > 0 && !/\s/.test(text[start - 1]!)) start--;
+    while (end < text.length && !/\s/.test(text[end]!)) end++;
+    return text.slice(start, end).trim();
+  }
+
   const survivors: z.infer<typeof LlmEntity>[] = [];
   const dropped: DroppedEntity[] = [];
 
   for (const entity of rawEntities) {
-    // Validate entity_type
+    // ── Check 1: entity_type validity ───────────────────────────────
     if (!ENTITY_TYPES.includes(entity.entity_type as any)) {
       dropped.push({
         legal_name: entity.legal_name,
@@ -334,75 +361,58 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
       continue;
     }
 
-    // Get chunk texts for the cited document
-    const docChunks = chunksByDocId.get(entity.source_document_id);
-    if (!docChunks || docChunks.length === 0) {
+    // ── Check 2: cited document in retrieved context ────────────────
+    if (!chunksByDocId.has(entity.source_document_id)) {
       dropped.push({
         legal_name: entity.legal_name,
         entity_type: entity.entity_type,
         source_document_id: entity.source_document_id,
-        reason: `source_document_id not in retrieved context`,
+        reason: `cited document not in retrieved context`,
       });
       continue;
     }
 
-    // Try matching against any chunk from the cited document first
-    let matched = false;
-    for (const chunkContent of docChunks) {
-      const result = matchSnippet(chunkContent, entity.verbatim_snippet);
-      if (result.matched) {
-        matched = true;
+    // ── Check 3: name-anchored search across ALL retrieved chunks ───
+    const nameRegex = buildNameRegex(entity.legal_name);
+    let foundDocId: string | null = null;
+    let foundSnippet: string | null = null;
+
+    for (const chunk of contextChunks) {
+      const match = nameRegex.exec(chunk.content);
+      if (match) {
+        foundDocId = chunk.document_id;
+        foundSnippet = extractSnippet(chunk.content, match.index, entity.legal_name.length);
         break;
       }
     }
 
-    if (matched) {
-      // Cited-doc match — keep as-is
-      survivors.push(entity);
+    if (!foundDocId || !foundSnippet) {
+      dropped.push({
+        legal_name: entity.legal_name,
+        entity_type: entity.entity_type,
+        source_document_id: entity.source_document_id,
+        reason: `legal_name not present in any retrieved chunk`,
+      });
       continue;
     }
 
-    // ── Attribution repair: sweep ALL retrieved documents ──────────
-    // The model read the name from retrieved context but cited the
-    // wrong source_document_id. Search every document's chunks.
-    let repairedDocId: string | null = null;
-    for (const [docId, chunks] of chunksByDocId.entries()) {
-      if (docId === entity.source_document_id) continue; // already tried
-      for (const chunkContent of chunks) {
-        const result = matchSnippet(chunkContent, entity.verbatim_snippet);
-        if (result.matched) {
-          repairedDocId = docId;
-          break;
-        }
-      }
-      if (repairedDocId) break;
-    }
+    // ── Survivor: set source + code-extracted snippet ───────────────
+    const sourceCorrected = foundDocId !== entity.source_document_id;
+    entity.source_document_id = foundDocId;
+    entity.verbatim_snippet = foundSnippet;
 
-    if (repairedDocId) {
-      // Found in a different document — repoint and tag as repaired
-      const originalCitedDoc = entity.source_document_id;
-      entity.source_document_id = repairedDocId;
+    if (sourceCorrected) {
       const existingSignal =
         entity.rank_signal && typeof entity.rank_signal === "object"
           ? { ...(entity.rank_signal as Record<string, unknown>) }
           : {};
       entity.rank_signal = {
         ...existingSignal,
-        attribution_repaired: true,
-        original_cited_doc: originalCitedDoc,
+        source_corrected: true,
       };
-      survivors.push(entity);
-      continue;
     }
 
-    // Not found anywhere in retrieved context — genuine fabrication
-    dropped.push({
-      legal_name: entity.legal_name,
-      entity_type: entity.entity_type,
-      source_document_id: entity.source_document_id,
-      reason: `verbatim_snippet not found in any chunk of cited document`,
-    });
-    continue;
+    survivors.push(entity);
   }
 
   // ── 7. Insert surviving entities ──────────────────────────────────
