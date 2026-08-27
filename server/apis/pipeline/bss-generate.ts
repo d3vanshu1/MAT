@@ -452,13 +452,28 @@ export default api({
   }),
 
   async run(ctx, { dealId, profileId, passType }) {
+    return runBssGenerateCore(ctx.integrations.db, ctx.integrations.ai, dealId, profileId, passType);
+  },
+});
+
+/**
+ * Exported core logic — callable from both the standalone API and the
+ * BssRunPipeline orchestrator.  Accepts raw integration clients.
+ */
+export async function runBssGenerateCore(
+  db: PipelineContext["integrations"]["db"],
+  ai: PipelineContext["integrations"]["ai"],
+  dealId: string,
+  profileId: string,
+  passType: string,
+) {
     // Standalone API, not a pipeline runner: it owns its own platform clock.
     const pipelineStartTime = Date.now();
 
     const pipelineCtx: PipelineContext = {
       integrations: {
-        db: ctx.integrations.db,
-        ai: ctx.integrations.ai,
+        db,
+        ai,
       },
     };
 
@@ -466,7 +481,7 @@ export default api({
     const expectedKind = isInformed ? "thesis" : "structural";
 
     // ── Step 1: load the profile ──────────────────────────────────────────
-    const profileRows = await ctx.integrations.db.query(
+    const profileRows = await db.query(
       `SELECT profile_id, deal_id, profile_kind, profile_version, profile_json
          FROM bss_profiles WHERE profile_id = $1::uuid`,
       ProfileRowSchema,
@@ -495,7 +510,7 @@ export default api({
 
     // ── Step 1b: reject superseded profiles ───────────────────────────────
     // Passing an older profile_id would silently generate from stale data.
-    const maxVersionRows = await ctx.integrations.db.query(
+    const maxVersionRows = await db.query(
       `SELECT MAX(profile_version) AS max_version FROM bss_profiles
          WHERE deal_id = $1::uuid AND profile_kind = $2::text`,
       MaxVersionSchema,
@@ -516,7 +531,7 @@ export default api({
     // The structural profile is always the latest for this deal.
     let structuralProfileJson: Record<string, unknown> | null = null;
     if (isInformed) {
-      const structRows = await ctx.integrations.db.query(
+      const structRows = await db.query(
         `SELECT profile_id, deal_id, profile_kind, profile_version, profile_json
            FROM bss_profiles
           WHERE deal_id = $1::uuid AND profile_kind = 'structural'
@@ -876,7 +891,7 @@ export default api({
     }
 
     // ── Step 7: upsert on the dedupe key ──────────────────────────────────
-    const upserted = await ctx.integrations.db.query(
+    const upserted = await db.query(
       `INSERT INTO bss_candidates (
          deal_id, profile_id, module_run_id, pass_type, failure_mode,
          implied_assumption, hypothesis, rationale, proposed_queries,
@@ -951,5 +966,4 @@ export default api({
       usage: response.usage,
       rawModelResponse: rawText,
     };
-  },
-});
+}

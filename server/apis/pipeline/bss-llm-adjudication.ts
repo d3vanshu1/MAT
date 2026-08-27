@@ -666,7 +666,7 @@ Reason: [one sentence]`;
       );
     }
 
-    // ── Insert dependency rows ────────────────────────────────────────────
+    // ── Upsert dependency rows (idempotent on deal_id + candidate_id) ────
     if (dependencyResults.length > 0) {
       await ctx.integrations.db.execute(
         `INSERT INTO bss_dependencies
@@ -681,7 +681,14 @@ Reason: [one sentence]`;
            j->'memo_documents_searched',
            j->'memo_hits',
            NOW()
-         FROM jsonb_array_elements($2::jsonb) AS j`,
+         FROM jsonb_array_elements($2::jsonb) AS j
+         ON CONFLICT (deal_id, candidate_id) DO UPDATE SET
+           thesis_hit = EXCLUDED.thesis_hit,
+           latest_memo_hit = EXCLUDED.latest_memo_hit,
+           queries_run = EXCLUDED.queries_run,
+           memo_documents_searched = EXCLUDED.memo_documents_searched,
+           hits = EXCLUDED.hits,
+           swept_at = now()`,
         [
           dealId,
           JSON.stringify(dependencyResults.map(d => {
@@ -699,9 +706,9 @@ Reason: [one sentence]`;
             };
           })),
         ],
-        { label: "Insert bss_dependencies" },
+        { label: "Upsert bss_dependencies" },
       );
-      console.log(`${LOG_PREFIX} Inserted ${dependencyResults.length} dependency rows`);
+      console.log(`${LOG_PREFIX} Upserted ${dependencyResults.length} dependency rows`);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -758,7 +765,7 @@ Reason: [one sentence]`;
       }
     }
 
-    // ── Insert disposition rows ────────────────────────────────────────────
+    // ── Upsert disposition rows (idempotent on candidate_id) ─────────────
     if (dispositions.length > 0) {
       await ctx.integrations.db.execute(
         `INSERT INTO bss_dispositions
@@ -770,7 +777,12 @@ Reason: [one sentence]`;
            j->>'gate',
            j->>'reason',
            NOW()
-         FROM jsonb_array_elements($2::jsonb) AS j`,
+         FROM jsonb_array_elements($2::jsonb) AS j
+         ON CONFLICT (candidate_id) DO UPDATE SET
+           outcome = EXCLUDED.outcome,
+           gate = EXCLUDED.gate,
+           reason = EXCLUDED.reason,
+           decided_at = now()`,
         [
           dealId,
           JSON.stringify(dispositions.map(d => ({
@@ -780,9 +792,9 @@ Reason: [one sentence]`;
             reason: d.reason,
           }))),
         ],
-        { label: "Insert bss_dispositions" },
+        { label: "Upsert bss_dispositions" },
       );
-      console.log(`${LOG_PREFIX} Inserted ${dispositions.length} disposition rows`);
+      console.log(`${LOG_PREFIX} Upserted ${dispositions.length} disposition rows`);
     }
 
     // ── Distribution ──────────────────────────────────────────────────────
@@ -864,3 +876,405 @@ Reason: [one sentence]`;
     };
   },
 });
+
+// ---------------------------------------------------------------------------
+// Exported per-candidate functions for orchestrator use
+// ---------------------------------------------------------------------------
+
+export interface AdjudicationRow {
+  candidate_id: string;
+  failure_mode: string;
+  pass_type: string;
+  adjudicated_verdict: string;
+  old_verdict: string;
+  quote: string;
+  reason: string;
+  chunks_retrieved: number;
+  docs_retrieved: number;
+  overridden: boolean;
+  overrideReason: string | null;
+  retrievedDocNames: string[];
+}
+
+type DbClient = {
+  query: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]>;
+  execute: (sql: string, params: unknown[], meta?: { label: string }) => Promise<any>;
+};
+type AiClient = {
+  apiRequest: (req: { method: "POST" | "GET" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"; path: string; body: Record<string, unknown> }, opts: { response: any }, meta?: { label: string }) => Promise<any>;
+};
+
+/**
+ * Adjudicate a single candidate — FTS retrieval + LLM + quote verification.
+ * Writes the result to bss_coverage immediately.
+ */
+export async function adjudicateOneCandidate(
+  db: DbClient,
+  ai: AiClient,
+  cand: { candidate_id: string; failure_mode: string; pass_type: string; implied_assumption: string; hypothesis: string; proposed_queries: any },
+  dealId: string,
+  oldVerdict: string,
+): Promise<AdjudicationRow> {
+  const queries: string[] = Array.isArray(cand.proposed_queries)
+    ? cand.proposed_queries
+    : JSON.parse(String(cand.proposed_queries));
+
+  const queryInput = queries.map((qt, idx) => ({
+    idx,
+    qt: sanitiseForFts(qt),
+  }));
+
+  let hitRows: Array<z.infer<typeof ChunkHitSchema>> = [];
+  try {
+    hitRows = await db.query(
+      `WITH qi AS (
+         SELECT (j->>'idx')::int AS query_idx,
+                j->>'qt'         AS query_text
+         FROM jsonb_array_elements($1::jsonb) AS j
+       ),
+       matched AS (
+         SELECT qi.query_idx,
+                dc.id        AS chunk_id,
+                dc.document_id,
+                dc.file_name,
+                dc.chunk_index,
+                dc.content,
+                ts_rank(dc.tsv, websearch_to_tsquery('english', qi.query_text)) AS rank,
+                ROW_NUMBER() OVER (
+                  PARTITION BY qi.query_idx
+                  ORDER BY ts_rank(dc.tsv, websearch_to_tsquery('english', qi.query_text)) DESC
+                ) AS rn
+         FROM qi
+         JOIN document_chunks dc
+           ON dc.deal_id = $2::uuid
+          AND dc.tsv @@ websearch_to_tsquery('english', qi.query_text)
+       )
+       SELECT query_idx, chunk_id, document_id, file_name,
+              chunk_index, content, rank
+       FROM matched
+       WHERE rn <= ${MAX_HITS_PER_QUERY}
+       ORDER BY rank DESC`,
+      ChunkHitSchema,
+      [JSON.stringify(queryInput), dealId],
+      { label: `FTS: ${cand.failure_mode}` },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${LOG_PREFIX} FTS error for ${cand.failure_mode}: ${msg}`);
+    hitRows = [];
+  }
+
+  // Deduplicate chunks by chunk_id
+  const seenChunks = new Map<string, z.infer<typeof ChunkHitSchema>>();
+  for (const hit of hitRows) {
+    const existing = seenChunks.get(hit.chunk_id);
+    if (!existing || hit.rank > existing.rank) {
+      seenChunks.set(hit.chunk_id, hit);
+    }
+  }
+  const uniqueHits = Array.from(seenChunks.values())
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, MAX_CHUNKS_PER_CANDIDATE);
+
+  const docsRetrieved = new Set(uniqueHits.map(h => h.document_id));
+  const docNames = [...new Set(uniqueHits.map(h => h.file_name))];
+
+  // Zero chunks → ABSENT
+  if (uniqueHits.length === 0) {
+    const row: AdjudicationRow = {
+      candidate_id: cand.candidate_id,
+      failure_mode: cand.failure_mode,
+      pass_type: cand.pass_type,
+      adjudicated_verdict: "ABSENT",
+      old_verdict: oldVerdict,
+      quote: "",
+      reason: "no retrieval",
+      chunks_retrieved: 0,
+      docs_retrieved: 0,
+      overridden: false,
+      overrideReason: null,
+      retrievedDocNames: [],
+    };
+    await writeAdjudicationResult(db, row, dealId);
+    console.log(`${LOG_PREFIX} ${cand.failure_mode}: ABSENT (no retrieval)`);
+    return row;
+  }
+
+  // Build LLM context
+  const chunkTexts = uniqueHits.map(
+    (h, i) => `[Passage ${i + 1}, from "${h.file_name}", chunk ${h.chunk_index}]\n${h.content}`
+  ).join("\n\n---\n\n");
+  const allRetrievedText = normaliseWs(uniqueHits.map(h => h.content).join(" "));
+
+  const systemPrompt = `You are a diligence analyst reviewing whether a specific risk assumption has been addressed in deal documents. Be precise and ground your answer in the supplied text only.`;
+  const userPrompt = `Here is a risk assumption an investor is relying on, and passages retrieved from the deal's diligence documents.
+
+RISK / FAILURE MODE: ${cand.failure_mode}
+IMPLIED ASSUMPTION: ${cand.implied_assumption}
+HYPOTHESIS: ${cand.hypothesis}
+
+RETRIEVED PASSAGES (${uniqueHits.length} passages from ${docsRetrieved.size} documents):
+
+${chunkTexts}
+
+---
+
+Does the diligence ADDRESS this risk — does it investigate, test, or provide evidence bearing on whether the assumption holds? Or does it merely MENTION the topic without engaging the risk? Answer with one of: ADDRESSED, MENTIONED, ABSENT.
+
+If ADDRESSED, quote the single sentence or passage that most directly engages the risk — verbatim, from the supplied text. If you cannot quote such a passage, the answer is not ADDRESSED.
+
+Then one sentence of reasoning.
+
+Format your response as:
+Verdict: [ADDRESSED/MENTIONED/ABSENT]
+Quote: "[verbatim quote if ADDRESSED, otherwise empty]"
+Reason: [one sentence]`;
+
+  let adjResult: AdjudicationResult;
+  try {
+    const llmResponse = await ai.apiRequest(
+      {
+        method: "POST",
+        path: "/v1/messages",
+        body: {
+          model: SONNET_MODEL,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userPrompt }],
+        },
+      },
+      { response: MessageResponseSchema },
+      { label: `Adjudicate: ${cand.failure_mode}` },
+    );
+
+    const responseText = llmResponse.content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text)
+      .join("");
+
+    const parsed = parseAdjudicationResponse(responseText);
+
+    let overridden = false;
+    let overrideReason: string | undefined;
+    let finalVerdict = parsed.verdict as "ADDRESSED" | "MENTIONED" | "ABSENT";
+    let finalQuote = parsed.quote;
+
+    if (finalVerdict === "ADDRESSED") {
+      if (!finalQuote || finalQuote.length < 10) {
+        overridden = true;
+        overrideReason = "ADDRESSED without quote — overridden to MENTIONED";
+        finalVerdict = "MENTIONED";
+        finalQuote = "";
+      } else {
+        const normQuote = normaliseWs(finalQuote);
+        if (!allRetrievedText.includes(normQuote)) {
+          let found = false;
+          for (const hit of uniqueHits) {
+            if (normaliseWs(hit.content).includes(normQuote)) { found = true; break; }
+          }
+          if (!found) {
+            overridden = true;
+            overrideReason = `Quote not found in retrieved chunks — overridden to MENTIONED`;
+            finalVerdict = "MENTIONED";
+          }
+        }
+      }
+    }
+    adjResult = { verdict: finalVerdict, quote: finalQuote, reason: parsed.reason, overridden, overrideReason };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${LOG_PREFIX} LLM error for ${cand.failure_mode}: ${msg}`);
+    adjResult = {
+      verdict: "MENTIONED",
+      quote: "",
+      reason: `LLM call failed: ${msg.slice(0, 200)}`,
+      overridden: true,
+      overrideReason: `LLM error — defaulted to MENTIONED`,
+    };
+  }
+
+  const row: AdjudicationRow = {
+    candidate_id: cand.candidate_id,
+    failure_mode: cand.failure_mode,
+    pass_type: cand.pass_type,
+    adjudicated_verdict: adjResult.verdict,
+    old_verdict: oldVerdict,
+    quote: adjResult.quote,
+    reason: adjResult.reason,
+    chunks_retrieved: uniqueHits.length,
+    docs_retrieved: docsRetrieved.size,
+    overridden: adjResult.overridden,
+    overrideReason: adjResult.overrideReason ?? null,
+    retrievedDocNames: docNames,
+  };
+  await writeAdjudicationResult(db, row, dealId);
+  console.log(
+    `${LOG_PREFIX} ${cand.failure_mode}: ${adjResult.verdict}` +
+    `${adjResult.overridden ? " [OVERRIDDEN]" : ""}` +
+    ` (${uniqueHits.length} chunks, ${docsRetrieved.size} docs) old=${oldVerdict}`
+  );
+  return row;
+}
+
+/** Write adjudication result to bss_coverage (UPDATE). */
+async function writeAdjudicationResult(
+  db: DbClient,
+  adj: AdjudicationRow,
+  dealId: string,
+): Promise<void> {
+  await db.execute(
+    `UPDATE bss_coverage
+     SET adjudicated_verdict = $1,
+         adjudication_quote = $2,
+         adjudication_reason = $3
+     WHERE candidate_id = $4::uuid AND deal_id = $5::uuid`,
+    [adj.adjudicated_verdict, adj.quote, adj.reason, adj.candidate_id, dealId],
+    { label: `Update coverage: ${adj.failure_mode}` },
+  );
+}
+
+export interface DependencyRow {
+  candidate_id: string;
+  failure_mode: string;
+  thesis_hit: boolean;
+  latest_memo_hit: boolean;
+  memo_hits: Array<{ document_id: string; file_name: string; hit_count: number }>;
+}
+
+/**
+ * Check dependency for a single non-ADDRESSED candidate — FTS against IC memos.
+ * Returns dependency result and upserts the row.
+ */
+export async function checkOneDependency(
+  db: DbClient,
+  cand: { candidate_id: string; failure_mode: string; proposed_queries: any },
+  dealId: string,
+): Promise<DependencyRow> {
+  const queries: string[] = Array.isArray(cand.proposed_queries)
+    ? cand.proposed_queries
+    : JSON.parse(String(cand.proposed_queries));
+
+  const queryInput = queries.map((qt, idx) => ({
+    idx,
+    qt: sanitiseForFts(qt),
+  }));
+
+  let memoHits: Array<{ document_id: string; file_name: string; hit_count: number }> = [];
+  try {
+    const rows = await db.query(
+      `WITH qi AS (
+         SELECT (j->>'idx')::int AS query_idx,
+                j->>'qt'         AS query_text
+         FROM jsonb_array_elements($1::jsonb) AS j
+       )
+       SELECT dc.document_id,
+              dc.file_name,
+              COUNT(DISTINCT dc.id)::int AS hit_count
+       FROM qi
+       JOIN document_chunks dc
+         ON dc.deal_id = $2::uuid
+        AND dc.document_id = ANY($3::uuid[])
+        AND dc.tsv @@ websearch_to_tsquery('english', qi.query_text)
+       GROUP BY dc.document_id, dc.file_name
+       ORDER BY hit_count DESC`,
+      z.object({
+        document_id: z.string(),
+        file_name: z.string(),
+        hit_count: z.coerce.number(),
+      }),
+      [JSON.stringify(queryInput), dealId, IC_MEMO_DOC_IDS],
+      { label: `Dependency: ${cand.failure_mode}` },
+    );
+    memoHits = rows;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${LOG_PREFIX} Dependency FTS error for ${cand.failure_mode}: ${msg}`);
+  }
+
+  const thesis_hit = memoHits.length > 0;
+  const latest_memo_hit = memoHits.some(h => LATEST_MEMO_DOC_IDS.includes(h.document_id));
+
+  const result: DependencyRow = {
+    candidate_id: cand.candidate_id,
+    failure_mode: cand.failure_mode,
+    thesis_hit,
+    latest_memo_hit,
+    memo_hits: memoHits,
+  };
+
+  // Upsert dependency row
+  await db.execute(
+    `INSERT INTO bss_dependencies
+       (deal_id, candidate_id, thesis_hit, latest_memo_hit,
+        queries_run, memo_documents_searched, hits, swept_at)
+     VALUES ($1::uuid, $2::uuid, $3::boolean, $4::boolean,
+             $5::jsonb, $6::jsonb, $7::jsonb, NOW())
+     ON CONFLICT (deal_id, candidate_id) DO UPDATE SET
+       thesis_hit = EXCLUDED.thesis_hit,
+       latest_memo_hit = EXCLUDED.latest_memo_hit,
+       queries_run = EXCLUDED.queries_run,
+       memo_documents_searched = EXCLUDED.memo_documents_searched,
+       hits = EXCLUDED.hits,
+       swept_at = now()`,
+    [
+      dealId,
+      cand.candidate_id,
+      thesis_hit,
+      latest_memo_hit,
+      JSON.stringify(queries),
+      JSON.stringify(IC_MEMO_DOC_IDS),
+      JSON.stringify(memoHits),
+    ],
+    { label: `Upsert dependency: ${cand.failure_mode}` },
+  );
+
+  console.log(
+    `${LOG_PREFIX} Dependency: ${cand.failure_mode}: thesis_hit=${thesis_hit} latest_memo_hit=${latest_memo_hit}`
+  );
+  return result;
+}
+
+/**
+ * Compute and write disposition for a single candidate.
+ */
+export async function computeAndWriteDisposition(
+  db: DbClient,
+  adj: AdjudicationRow,
+  dep: DependencyRow | null,
+  dealId: string,
+): Promise<{ outcome: string; gate: string; reason: string }> {
+  let outcome: string;
+  let gate: string;
+  let reason: string;
+
+  if (adj.adjudicated_verdict === "ADDRESSED") {
+    outcome = "dropped_covered";
+    gate = "coverage";
+    reason = `ADDRESSED — ${adj.reason}`;
+  } else {
+    if (!dep || !dep.thesis_hit) {
+      outcome = "dropped_no_dependency";
+      gate = "dependency";
+      reason = `${adj.adjudicated_verdict} — no thesis dependency in IC memos; ${adj.reason}`;
+    } else {
+      outcome = "finding";
+      gate = "dependency";
+      reason = `${adj.adjudicated_verdict} — ${adj.reason}; thesis relies on this per ${dep.latest_memo_hit ? "3rd IC/Update" : "IC memos"}`;
+    }
+  }
+
+  await db.execute(
+    `INSERT INTO bss_dispositions
+       (deal_id, candidate_id, outcome, gate, reason, decided_at)
+     VALUES ($1::uuid, $2::uuid, $3, $4, $5, NOW())
+     ON CONFLICT (candidate_id) DO UPDATE SET
+       outcome = EXCLUDED.outcome,
+       gate = EXCLUDED.gate,
+       reason = EXCLUDED.reason,
+       decided_at = now()`,
+    [dealId, adj.candidate_id, outcome, gate, reason],
+    { label: `Upsert disposition: ${adj.failure_mode}` },
+  );
+
+  return { outcome, gate, reason };
+}

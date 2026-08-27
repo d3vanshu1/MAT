@@ -538,19 +538,35 @@ export default api({
   }),
 
   async run(ctx, { dealId, profileKind, documentIds }) {
+    return runBuildProfileCore(ctx.integrations.db, ctx.integrations.ai, dealId, profileKind as ProfileKind, documentIds);
+  },
+});
+
+/**
+ * Exported core logic — callable from both the standalone API and the
+ * BssRunPipeline orchestrator.  Accepts raw integration clients so it
+ * does not depend on the Superblocks `ctx` envelope.
+ */
+export async function runBuildProfileCore(
+  db: PipelineContext["integrations"]["db"],
+  ai: PipelineContext["integrations"]["ai"],
+  dealId: string,
+  profileKind: ProfileKind,
+  documentIds?: string[] | null,
+) {
     const kindConfig = PROFILE_KINDS[profileKind];
     // Standalone API, not a pipeline runner: it owns its own platform clock.
     const pipelineStartTime = Date.now();
 
     const pipelineCtx: PipelineContext = {
       integrations: {
-        db: ctx.integrations.db,
-        ai: ctx.integrations.ai,
+        db,
+        ai,
       },
     };
 
     // ── Step 1: deal record — numeric/date fields only ────────────────────
-    const dealRows = await ctx.integrations.db.query(
+    const dealRows = await db.query(
       `SELECT id, entry_ev, entry_multiple, equity_check, ic_date
          FROM deals WHERE id = $1::uuid`,
       DealRowSchema,
@@ -576,7 +592,7 @@ export default api({
     );
 
     // ── Step 2: enumerate every document on the deal ──────────────────────
-    const allDocs = await ctx.integrations.db.query(
+    const allDocs = await db.query(
       `SELECT id, file_name, document_tag, document_source
          FROM documents WHERE deal_id = $1::uuid ORDER BY file_name`,
       DocumentRowSchema,
@@ -660,7 +676,7 @@ export default api({
         const params: unknown[] = [dealId, query, kindConfig.allowlist];
         if (hasDocFilter) params.push(documentIds);
 
-        const rows = await ctx.integrations.db.query(
+        const rows = await db.query(
           fieldSql,
           ChunkRowSchema,
           params,
@@ -805,7 +821,7 @@ export default api({
             `Chunks will be drawn only from these, within the [${kindConfig.allowlist.join(", ")}] tag allowlist.`,
         );
       }
-      const chunkRows = await ctx.integrations.db.query(
+      const chunkRows = await db.query(
         chunkSql,
         ChunkRowSchema,
         chunkParams,
@@ -1219,7 +1235,7 @@ export default api({
     // profile_version = MAX + 1 for this (deal_id, profile_kind). Never an
     // upsert: bss_candidates.profile_id points here, so an in-place update
     // would rewrite the provenance of candidates already generated.
-    const inserted = await ctx.integrations.db.query(
+    const inserted = await db.query(
       `INSERT INTO bss_profiles (
          deal_id, profile_kind, profile_version, profile_json,
          input_document_ids, input_document_names, excluded_document_ids,
@@ -1292,5 +1308,4 @@ export default api({
       usage: response.usage,
       rawModelResponse: rawText,
     };
-  },
-});
+}

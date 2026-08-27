@@ -1529,6 +1529,9 @@ export default function DealDashboardPage() {
 
       // Helper: call RunModulePipeline with network-error retries
       // The server pipeline runs independently — a fetch timeout doesn't mean it failed
+      // B2 FIX — capture the owner token from the first response and pass it on resumes
+      let pipelineOwnerToken: string | undefined;
+
       const callPipelineWithRetry = async (runIdArg?: string, diagnosticOnly: boolean = false) => {
         const MAX_RETRIES = 3;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -1542,6 +1545,7 @@ export default function DealDashboardPage() {
               numericReport,
               numericPartial: numericPartial || undefined,
               diagnosticOnly: diagnosticOnly || undefined,
+              ownerToken: pipelineOwnerToken ?? undefined,
             });
           } catch (err) {
             const msg = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : String(err);
@@ -1557,6 +1561,11 @@ export default function DealDashboardPage() {
       let pipelineResult = await callPipelineWithRetry(resumeRunId, diagnosticOnly);
 
       if (!pipelineResult) throw new Error("Pipeline returned no result");
+
+      // B2 FIX — capture owner token from first response
+      if ((pipelineResult as any).ownerToken) {
+        pipelineOwnerToken = (pipelineResult as any).ownerToken;
+      }
 
       const runId = pipelineResult.runId;
       activeRunIdRef.current[moduleId] = runId;

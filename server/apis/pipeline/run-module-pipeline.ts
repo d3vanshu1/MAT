@@ -43,6 +43,8 @@ export default api({
     numericPartial: z.boolean().nullable().optional(),
     // When true, the resulting module_run is hidden from dashboards and resume logic
     diagnosticOnly: z.boolean().nullable().optional(),
+    // B2 FIX — claim token for ownership continuity across resumes
+    ownerToken: z.string().nullable().optional(),
   }),
 
   output: z.object({
@@ -76,6 +78,8 @@ export default api({
       failedThisPass: z.number(),
       skippedDueToBudget: z.number(),
     }).optional(),
+    // B2 FIX — owner token for the caller to pass back on resume
+    ownerToken: z.string().optional(),
   }),
 
   async run(ctx, input): Promise<PipelineResult> {
@@ -88,6 +92,7 @@ export default api({
       numericReport: input.numericReport,
       numericPartial: input.numericPartial,
       diagnosticOnly: input.diagnosticOnly,
+      ownerToken: input.ownerToken,
     });
   },
 });

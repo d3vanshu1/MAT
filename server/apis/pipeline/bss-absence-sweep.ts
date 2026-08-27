@@ -333,7 +333,7 @@ export default api({
       );
     }
 
-    // ── 4. Bulk insert coverage rows ───────────────────────────────────
+    // ── 4. Bulk upsert coverage rows (idempotent on candidate_id) ──────
     await ctx.integrations.db.execute(
       `INSERT INTO bss_coverage
          (candidate_id, deal_id, verdict, queries_run, queries_with_hits,
@@ -352,9 +352,21 @@ export default api({
          (j->>'boilerplate_only')::boolean,
          (j->>'expansion_ran')::boolean,
          (j->>'expansion_overturned')::boolean
-       FROM jsonb_array_elements($1::jsonb) AS j`,
+       FROM jsonb_array_elements($1::jsonb) AS j
+       ON CONFLICT (candidate_id) DO UPDATE SET
+         verdict = EXCLUDED.verdict,
+         queries_run = EXCLUDED.queries_run,
+         queries_with_hits = EXCLUDED.queries_with_hits,
+         documents_searched = EXCLUDED.documents_searched,
+         documents_with_hits = EXCLUDED.documents_with_hits,
+         max_term_coverage = EXCLUDED.max_term_coverage,
+         hits = EXCLUDED.hits,
+         boilerplate_only = EXCLUDED.boilerplate_only,
+         expansion_ran = EXCLUDED.expansion_ran,
+         expansion_overturned = EXCLUDED.expansion_overturned,
+         swept_at = now()`,
       [JSON.stringify(coverageRows)],
-      { label: "Bulk insert bss_coverage rows" },
+      { label: "Bulk upsert bss_coverage rows" },
     );
 
     console.log(`${LOG_PREFIX} Inserted ${coverageRows.length} coverage rows`);
@@ -392,3 +404,202 @@ export default api({
     };
   },
 });
+
+// ---------------------------------------------------------------------------
+// Exported per-candidate function for orchestrator use
+// ---------------------------------------------------------------------------
+
+export interface SweepCoverageRow {
+  candidate_id: string;
+  deal_id: string;
+  verdict: "covered" | "thin" | "absent";
+  queries_run: string[];
+  queries_with_hits: number;
+  documents_searched: Array<{ id: string; file_name: string }>;
+  documents_with_hits: number;
+  max_term_coverage: number;
+  hits: any[];
+  boilerplate_only: boolean;
+  expansion_ran: boolean;
+  expansion_overturned: boolean;
+}
+
+/**
+ * Sweep a single candidate — FTS + term coverage + verdict.
+ * Callable from both the standalone API loop and the orchestrator's
+ * per-candidate resume loop.
+ */
+export async function sweepOneCandidate(
+  db: { query: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]> },
+  candidate: { candidate_id: string; failure_mode: string; pass_type: string; proposed_queries: any },
+  dealId: string,
+  documentsSearched: Array<{ id: string; file_name: string }>,
+): Promise<SweepCoverageRow> {
+  const queries: string[] = Array.isArray(candidate.proposed_queries)
+    ? candidate.proposed_queries
+    : JSON.parse(String(candidate.proposed_queries));
+
+  const queryInput = queries.map((qt, idx) => ({
+    idx,
+    qt: sanitiseForFts(qt),
+  }));
+
+  let hitRows: any[] = [];
+  try {
+    const raw = await db.query(
+      `WITH qi AS (
+         SELECT (j->>'idx')::int AS query_idx,
+                j->>'qt'         AS query_text
+         FROM jsonb_array_elements($1::jsonb) AS j
+       ),
+       matched AS (
+         SELECT qi.query_idx, qi.query_text,
+                dc.id        AS chunk_id,
+                dc.document_id,
+                dc.file_name,
+                dc.chunk_index,
+                dc.content,
+                ts_rank(dc.tsv, websearch_to_tsquery('english', qi.query_text)) AS rank,
+                ROW_NUMBER() OVER (
+                  PARTITION BY qi.query_idx
+                  ORDER BY ts_rank(dc.tsv, websearch_to_tsquery('english', qi.query_text)) DESC
+                ) AS rn
+         FROM qi
+         JOIN document_chunks dc
+           ON dc.deal_id = $2::uuid
+          AND dc.tsv @@ websearch_to_tsquery('english', qi.query_text)
+       )
+       SELECT query_idx, query_text, chunk_id, document_id,
+              file_name, chunk_index, content, rank
+       FROM matched
+       WHERE rn <= ${MAX_HITS_PER_QUERY}
+       ORDER BY query_idx, rank DESC`,
+      z.any(),
+      [JSON.stringify(queryInput), dealId],
+      { label: `FTS: ${candidate.failure_mode}` },
+    );
+    hitRows = Array.isArray(raw) ? raw : [];
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[BSS-SWEEP] FTS error for ${candidate.failure_mode}: ${msg}`);
+    return {
+      candidate_id: candidate.candidate_id,
+      deal_id: dealId,
+      verdict: "absent",
+      queries_run: queries,
+      queries_with_hits: 0,
+      documents_searched: documentsSearched,
+      documents_with_hits: 0,
+      max_term_coverage: 0,
+      hits: [{ error: msg }],
+      boilerplate_only: false,
+      expansion_ran: false,
+      expansion_overturned: false,
+    };
+  }
+
+  const queriesWithHitSet = new Set<number>();
+  const docsWithHitSet = new Set<string>();
+  let maxCovRatio = 0;
+  let allBoilerplate = true;
+  let anyHit = false;
+  const processedHits: any[] = [];
+
+  for (const row of hitRows) {
+    const qIdx = Number(row.query_idx);
+    const originalQuery = queries[qIdx] ?? row.query_text;
+    const content = String(row.content ?? "");
+
+    const cov = computeTermCoverage(originalQuery, content);
+    if (cov.ratio < MIN_TERM_COVERAGE) continue;
+
+    anyHit = true;
+    queriesWithHitSet.add(qIdx);
+    docsWithHitSet.add(row.document_id);
+    if (cov.ratio > maxCovRatio) maxCovRatio = cov.ratio;
+
+    const bp = classifyChunk(content);
+    if (!bp.isBoilerplate) allBoilerplate = false;
+
+    processedHits.push({
+      document_id: row.document_id,
+      file_name: row.file_name,
+      chunk_index: Number(row.chunk_index),
+      matched_terms: cov.matchedTerms,
+      term_coverage: Math.round(cov.ratio * 100),
+      rank: Number(row.rank),
+      is_boilerplate: bp.isBoilerplate,
+      query_idx: qIdx,
+    });
+  }
+
+  const qwh = queriesWithHitSet.size;
+  const verdict: "covered" | "thin" | "absent" =
+    qwh === 0 ? "absent" : qwh === 1 ? "thin" : "covered";
+
+  console.log(
+    `[BSS-SWEEP] ${candidate.failure_mode}: ${verdict} ` +
+      `(${qwh}/${queries.length} qHits, ${processedHits.length} chunks, ` +
+      `maxCov=${Math.round(maxCovRatio * 100)}%)`,
+  );
+
+  return {
+    candidate_id: candidate.candidate_id,
+    deal_id: dealId,
+    verdict,
+    queries_run: queries,
+    queries_with_hits: qwh,
+    documents_searched: documentsSearched,
+    documents_with_hits: docsWithHitSet.size,
+    max_term_coverage: Math.round(maxCovRatio * 100),
+    hits: processedHits,
+    boilerplate_only: anyHit && allBoilerplate,
+    expansion_ran: false,
+    expansion_overturned: false,
+  };
+}
+
+/**
+ * Upsert a single coverage row — idempotent on candidate_id.
+ */
+export async function upsertOneCoverageRow(
+  db: { execute: (sql: string, params: unknown[], meta?: { label: string }) => Promise<any> },
+  row: SweepCoverageRow,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO bss_coverage
+       (candidate_id, deal_id, verdict, queries_run, queries_with_hits,
+        documents_searched, documents_with_hits, max_term_coverage, hits,
+        boilerplate_only, expansion_ran, expansion_overturned)
+     VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5::int,
+             $6::jsonb, $7::int, $8::int, $9::jsonb,
+             $10::boolean, $11::boolean, $12::boolean)
+     ON CONFLICT (candidate_id) DO UPDATE SET
+       verdict = EXCLUDED.verdict,
+       queries_run = EXCLUDED.queries_run,
+       queries_with_hits = EXCLUDED.queries_with_hits,
+       documents_searched = EXCLUDED.documents_searched,
+       documents_with_hits = EXCLUDED.documents_with_hits,
+       max_term_coverage = EXCLUDED.max_term_coverage,
+       hits = EXCLUDED.hits,
+       boilerplate_only = EXCLUDED.boilerplate_only,
+       expansion_ran = EXCLUDED.expansion_ran,
+       expansion_overturned = EXCLUDED.expansion_overturned,
+       swept_at = now()`,
+    [
+      row.candidate_id,
+      row.deal_id,
+      row.verdict,
+      JSON.stringify(row.queries_run),
+      row.queries_with_hits,
+      JSON.stringify(row.documents_searched),
+      row.documents_with_hits,
+      row.max_term_coverage,
+      JSON.stringify(row.hits),
+      row.boilerplate_only,
+      row.expansion_ran,
+      row.expansion_overturned,
+    ],
+    { label: `Upsert coverage: ${row.candidate_id}` },
+  );
+}
