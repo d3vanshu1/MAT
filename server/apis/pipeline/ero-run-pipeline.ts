@@ -7,7 +7,7 @@
  *
  * No entity extraction, no profile, no hypotheses, no search.
  */
-import { api, z, postgres } from "@superblocksteam/sdk-api";
+import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import {
   ERO_STAGES,
   STAGE_BUDGET_MS,
@@ -15,9 +15,11 @@ import {
   type StageHandler,
   type StageResult,
 } from "./ero-stage-contract.js";
+import { buildEntityManifest } from "./ero-entity-manifest.js";
 
 // ── Integration ─────────────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
+const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
 // ── Schemas ─────────────────────────────────────────────────────────
 const PipelineStateRow = z.object({
@@ -42,7 +44,7 @@ function makeStub(stage: EroStageName): StageHandler {
 }
 
 const DISPATCH: Record<EroStageName, StageHandler> = {
-  build_entity_manifest: makeStub("build_entity_manifest"),
+  build_entity_manifest: (ctx, runId, dealId) => buildEntityManifest(ctx, runId, dealId),
   build_deal_profile: makeStub("build_deal_profile"),
   generate_hypotheses: makeStub("generate_hypotheses"),
   rank_hypotheses: makeStub("rank_hypotheses"),
@@ -58,6 +60,7 @@ export default api({
 
   integrations: {
     ic_diligence_db: postgres(IC_DILIGENCE_DB),
+    claude: anthropic(ANTHROPIC_ID),
   },
 
   input: z.object({

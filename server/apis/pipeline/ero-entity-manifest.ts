@@ -1,0 +1,425 @@
+/**
+ * ERO v2 — Stage 1: Build Entity Manifest (Packet 2.1)
+ *
+ * Extracts named entities the research agent will investigate:
+ * parent, target, subsidiaries, acquired entities, executives,
+ * customers, competitors, regulators, jurisdictions.
+ *
+ * Each entity carries a source_document_id and verbatim_snippet.
+ * The FABRICATION GATE (code, not prompt) verifies every snippet
+ * is an exact substring of the cited source. Unverifiable rows
+ * are dropped — never inserted.
+ *
+ * Single-LLM-call stage: builds full list in memory, inserts once.
+ */
+import { z } from "@superblocksteam/sdk-api";
+import type { StageResult } from "./ero-stage-contract.js";
+import { matchSnippet } from "./bss-snippet-match.js";
+
+// ── Model ───────────────────────────────────────────────────────────
+// Hardcoded per-stage. Model-config centralization happens at Phase 5
+// switchover — do NOT touch model-config.ts.
+const MODEL = "claude-sonnet-4-6";
+
+// ── Retrieval config ────────────────────────────────────────────────
+// Real tags from SCG deal (Step 0 query 4).
+// Primary: consultant_report (Legal DD + Vendor FDD with group structure).
+// Secondary: cim, ic_memo.
+// Excluded: financial_model (xlsx, low entity density).
+const ALLOWLIST_TAGS = ["consultant_report", "cim", "ic_memo"];
+
+// FTS boost queries — the group-structure / subsidiaries appendix is
+// the highest-value source for subsidiary names.
+const PRIMARY_QUERY = "subsidiaries group structure trading entities legal";
+const SECONDARY_QUERY = "parent company executive management team board";
+
+const MAX_CONTEXT_CHARS = 40_000;
+const MAX_CHUNKS_PER_QUERY = 60; // overfetch then dedupe + cap
+
+// ── Entity types ────────────────────────────────────────────────────
+const ENTITY_TYPES = [
+  "parent",
+  "target",
+  "subsidiary",
+  "acquired_entity",
+  "executive",
+  "customer",
+  "competitor",
+  "regulator",
+] as const;
+
+// ── Zod schemas ─────────────────────────────────────────────────────
+const ChunkRow = z.object({
+  document_id: z.string(),
+  chunk_index: z.coerce.number(),
+  file_name: z.string(),
+  content: z.string(),
+  rank: z.coerce.number(),
+});
+
+const EntityCountRow = z.object({
+  cnt: z.coerce.number(),
+});
+
+const EntityRow = z.object({
+  entity_id: z.string(),
+  run_id: z.string(),
+  entity_type: z.string(),
+  legal_name: z.string(),
+  registration_number: z.string().nullable(),
+  jurisdiction: z.string().nullable(),
+  role: z.string().nullable(),
+  source_document_id: z.string(),
+  verbatim_snippet: z.string(),
+  rank_signal: z.any().nullable(),
+  created_at: z.string(),
+});
+
+// LLM response schema (loose — we validate in code)
+const LlmEntity = z.object({
+  entity_type: z.string(),
+  legal_name: z.string(),
+  registration_number: z.string().nullable().optional(),
+  jurisdiction: z.string().nullable().optional(),
+  role: z.string().nullable().optional(),
+  source_document_id: z.string(),
+  verbatim_snippet: z.string(),
+  rank_signal: z.any().nullable().optional(),
+});
+
+const AnthropicResponse = z.object({
+  content: z.array(
+    z.object({
+      type: z.string(),
+      text: z.string().optional(),
+    }),
+  ),
+  usage: z.object({
+    input_tokens: z.coerce.number(),
+    output_tokens: z.coerce.number(),
+  }),
+});
+
+// ── Dropped entity record ───────────────────────────────────────────
+type DroppedEntity = {
+  legal_name: string;
+  entity_type: string;
+  source_document_id: string;
+  reason: string;
+};
+
+// ── Exported handler ────────────────────────────────────────────────
+export async function buildEntityManifest(
+  ctx: any,
+  runId: string,
+  dealId: string,
+): Promise<StageResult> {
+  const db = ctx.integrations.ic_diligence_db;
+  const claude = ctx.integrations.claude;
+
+  // ── 1. Idempotency check ──────────────────────────────────────────
+  const existing = await db.query(
+    `SELECT count(*)::int AS cnt FROM ero_entities WHERE run_id = $1`,
+    EntityCountRow,
+    [runId],
+    { label: "EntityManifest: idempotency check" },
+  );
+  if (existing[0].cnt > 0) {
+    return {
+      stage: "build_entity_manifest",
+      status: "complete",
+      message: `already built, ${existing[0].cnt} entities`,
+    };
+  }
+
+  // ── 2. Retrieve chunks via FTS ────────────────────────────────────
+  // Two queries: primary (group structure / subsidiaries) gets boosted,
+  // secondary (parent / executives) fills remaining budget.
+  const chunkSql = `
+    WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
+    SELECT dc.document_id,
+           dc.chunk_index,
+           dc.file_name,
+           dc.content,
+           ts_rank_cd(dc.tsv, q.tsq) AS rank
+      FROM document_chunks dc
+      JOIN documents d ON d.id = dc.document_id
+      CROSS JOIN q
+     WHERE dc.deal_id = $1::uuid
+       AND d.deal_id = $1::uuid
+       AND d.document_tag = ANY($3::text[])
+     ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
+     LIMIT $4`;
+
+  const primaryChunks = await db.query(
+    chunkSql,
+    ChunkRow,
+    [dealId, PRIMARY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
+    { label: "EntityManifest: FTS primary (subsidiaries/group)" },
+  );
+
+  const secondaryChunks = await db.query(
+    chunkSql,
+    ChunkRow,
+    [dealId, SECONDARY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
+    { label: "EntityManifest: FTS secondary (parent/exec)" },
+  );
+
+  // Deduplicate by (document_id, chunk_index), preserving primary rank boost
+  const seen = new Set<string>();
+  const allChunks: z.infer<typeof ChunkRow>[] = [];
+
+  // Primary first — these get priority in context window
+  for (const c of primaryChunks) {
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allChunks.push(c);
+    }
+  }
+  for (const c of secondaryChunks) {
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allChunks.push(c);
+    }
+  }
+
+  // Cap at MAX_CONTEXT_CHARS
+  let totalChars = 0;
+  const contextChunks: z.infer<typeof ChunkRow>[] = [];
+  for (const c of allChunks) {
+    const markerLen = 60; // approximate marker line length
+    if (totalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS) break;
+    contextChunks.push(c);
+    totalChars += c.content.length + markerLen;
+  }
+
+  if (contextChunks.length === 0) {
+    return {
+      stage: "build_entity_manifest",
+      status: "failed",
+      message: "No document chunks found for FTS retrieval. Check document_chunks and allowlist tags.",
+    };
+  }
+
+  // ── 3. Build context string with doc markers ──────────────────────
+  // Build a lookup of document_id → chunks (for fabrication gate later)
+  const chunksByDocId = new Map<string, string[]>();
+  const contextParts: string[] = [];
+
+  for (const c of contextChunks) {
+    const marker = `[DOC_ID: ${c.document_id} | FILE: ${c.file_name}]`;
+    contextParts.push(`${marker}\n${c.content}`);
+
+    if (!chunksByDocId.has(c.document_id)) {
+      chunksByDocId.set(c.document_id, []);
+    }
+    chunksByDocId.get(c.document_id)!.push(c.content);
+  }
+
+  const contextBlock = contextParts.join("\n\n---\n\n");
+
+  // ── 4. LLM call ──────────────────────────────────────────────────
+  const systemPrompt = `You are an entity extraction specialist for M&A due diligence. Your task is to extract every named entity from the provided document extracts that a research analyst would need to investigate.
+
+RULES:
+1. Extract entities of these types ONLY: ${ENTITY_TYPES.join(", ")}.
+2. Every entity MUST include a verbatim_snippet — an EXACT substring copied from the source text. Do not paraphrase, summarize, or reconstruct. Copy character-for-character from the document.
+3. source_document_id must be the exact DOC_ID from the marker line of the chunk where you found the entity.
+4. For subsidiaries and acquired entities, include any stated EBITDA, revenue, acquisition year, or employee count in rank_signal as a JSON object (e.g. {"ebitda": "£2.1m", "year": "2019"}). Set rank_signal to null if no such data is present.
+5. registration_number: company registration / incorporation number if stated, else null.
+6. jurisdiction: country or jurisdiction of incorporation if stated, else null.
+7. role: the entity's role in the deal context (e.g. "target parent", "trading subsidiary", "CEO", "key customer", "primary competitor").
+8. Do not invent entities. Every entity must be explicitly named in the text.
+9. Do not duplicate — if the same entity appears in multiple chunks, emit it once with the best snippet.
+
+Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
+
+  const userPrompt = `Extract all named entities from these due diligence document extracts:\n\n${contextBlock}`;
+
+  const llmResult = await claude.apiRequest(
+    {
+      method: "POST",
+      path: "/v1/messages",
+      body: {
+        model: MODEL,
+        max_tokens: 8192,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userPrompt }],
+      },
+    },
+    { response: AnthropicResponse },
+    { label: "EntityManifest: extract entities" },
+  );
+
+  // ── 5. Parse LLM response ────────────────────────────────────────
+  const textBlock = llmResult.content.find((c: any) => c.type === "text");
+  if (!textBlock?.text) {
+    return {
+      stage: "build_entity_manifest",
+      status: "failed",
+      message: "LLM returned no text content.",
+    };
+  }
+
+  let rawEntities: z.infer<typeof LlmEntity>[];
+  try {
+    // Strip markdown code fences if present (```json ... ```)
+    let jsonText = textBlock.text.trim();
+    if (jsonText.startsWith("```")) {
+      jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+    }
+    const parsed = JSON.parse(jsonText);
+    const arr = Array.isArray(parsed) ? parsed : parsed.entities ?? parsed.data ?? [];
+    // Normalise field names: LLM sometimes returns "name" instead of "legal_name"
+    rawEntities = arr.map((e: any) => {
+      if (e.name && !e.legal_name) e.legal_name = e.name;
+      return LlmEntity.parse(e);
+    });
+  } catch (err: any) {
+    return {
+      stage: "build_entity_manifest",
+      status: "failed",
+      message: `Failed to parse LLM JSON: ${err.message}. Raw head: ${textBlock.text.slice(0, 300)}`,
+    };
+  }
+
+  // ── 6. FABRICATION GATE (code, not prompt) ────────────────────────
+  // For each entity, verify verbatim_snippet is an exact substring
+  // of the chunk text from the cited source_document_id.
+  // Uses matchSnippet for normalised matching (tolerates punctuation
+  // transliteration and bounded elision from column-interleaved extraction).
+  const survivors: z.infer<typeof LlmEntity>[] = [];
+  const dropped: DroppedEntity[] = [];
+
+  for (const entity of rawEntities) {
+    // Validate entity_type
+    if (!ENTITY_TYPES.includes(entity.entity_type as any)) {
+      dropped.push({
+        legal_name: entity.legal_name,
+        entity_type: entity.entity_type,
+        source_document_id: entity.source_document_id,
+        reason: `invalid entity_type '${entity.entity_type}'`,
+      });
+      continue;
+    }
+
+    // Get chunk texts for the cited document
+    const docChunks = chunksByDocId.get(entity.source_document_id);
+    if (!docChunks || docChunks.length === 0) {
+      dropped.push({
+        legal_name: entity.legal_name,
+        entity_type: entity.entity_type,
+        source_document_id: entity.source_document_id,
+        reason: `source_document_id not in retrieved context`,
+      });
+      continue;
+    }
+
+    // Try matching against any chunk from that document
+    let matched = false;
+    for (const chunkContent of docChunks) {
+      const result = matchSnippet(chunkContent, entity.verbatim_snippet);
+      if (result.matched) {
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      dropped.push({
+        legal_name: entity.legal_name,
+        entity_type: entity.entity_type,
+        source_document_id: entity.source_document_id,
+        reason: `verbatim_snippet not found in any chunk of cited document`,
+      });
+      continue;
+    }
+
+    survivors.push(entity);
+  }
+
+  // ── 7. Insert surviving entities ──────────────────────────────────
+  if (survivors.length > 0) {
+    // Build batch INSERT
+    const valueClauses: string[] = [];
+    const params: unknown[] = [runId]; // $1 = runId
+    let paramIdx = 2;
+
+    for (const e of survivors) {
+      valueClauses.push(
+        `($1, $${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3}, $${paramIdx + 4}, $${paramIdx + 5}, $${paramIdx + 6})`,
+      );
+      params.push(
+        e.entity_type,
+        e.legal_name,
+        e.registration_number ?? null,
+        e.jurisdiction ?? null,
+        e.role ?? null,
+        e.source_document_id,
+        e.verbatim_snippet,
+      );
+      paramIdx += 7;
+    }
+
+    // rank_signal in a second pass to keep param indexing clean
+    // Actually, include rank_signal in the INSERT. Re-build.
+    const valueClauses2: string[] = [];
+    const params2: unknown[] = [runId]; // $1 = runId
+    let pIdx = 2;
+
+    for (const e of survivors) {
+      valueClauses2.push(
+        `($1, $${pIdx}, $${pIdx + 1}, $${pIdx + 2}, $${pIdx + 3}, $${pIdx + 4}, $${pIdx + 5}, $${pIdx + 6}, $${pIdx + 7}::jsonb)`,
+      );
+      params2.push(
+        e.entity_type,
+        e.legal_name,
+        e.registration_number ?? null,
+        e.jurisdiction ?? null,
+        e.role ?? null,
+        e.source_document_id,
+        e.verbatim_snippet,
+        e.rank_signal ? JSON.stringify(e.rank_signal) : null,
+      );
+      pIdx += 8;
+    }
+
+    await db.execute(
+      `INSERT INTO ero_entities
+         (run_id, entity_type, legal_name, registration_number,
+          jurisdiction, role, source_document_id, verbatim_snippet, rank_signal)
+       VALUES ${valueClauses2.join(", ")}`,
+      params2,
+      { label: `EntityManifest: insert ${survivors.length} entities` },
+    );
+  }
+
+  // ── 8. Build summary ─────────────────────────────────────────────
+  const byType: Record<string, number> = {};
+  for (const e of survivors) {
+    byType[e.entity_type] = (byType[e.entity_type] || 0) + 1;
+  }
+  const breakdown = Object.entries(byType)
+    .map(([t, n]) => `${t}:${n}`)
+    .join(", ");
+
+  const message = [
+    `${survivors.length} entities inserted`,
+    `${dropped.length} dropped`,
+    `breakdown: ${breakdown || "none"}`,
+    `context: ${contextChunks.length} chunks / ${totalChars} chars`,
+    `tokens: in=${llmResult.usage.input_tokens} out=${llmResult.usage.output_tokens}`,
+  ].join(" | ");
+
+  return {
+    stage: "build_entity_manifest",
+    status: "complete",
+    message,
+  };
+}
+
+// Re-export types the test harness needs
+export type { DroppedEntity };
+export { EntityRow, ALLOWLIST_TAGS };
