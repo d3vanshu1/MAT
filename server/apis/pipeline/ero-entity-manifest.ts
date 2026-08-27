@@ -187,7 +187,7 @@ export async function buildEntityManifest(
     chunkSql,
     ChunkRow,
     [dealId, REGULATORY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
-    { label: "EntityManifest: FTS regulatory" },
+    { label: "EntityManifest: FTS regulatory (Ofcom/ICO/CQC/NHS)" },
   );
 
   // ── Deduplicate and merge FTS results ──────────────────────────────
@@ -250,9 +250,9 @@ ENTITY TYPE DEFINITIONS:
 - subsidiary: A company currently owned by the target group.
 - acquired_entity: A company the target has acquired or is acquiring, named as a legal entity (typically ending Ltd, Limited). The group-structure appendix and acquisition history are the primary source. Emit EVERY named acquired trading entity individually as its own row. Do NOT summarise them as a count (e.g. do NOT emit "50 acquisitions" as one entity — emit each named entity separately).
 - executive: A named individual in a leadership, board, or deal team role.
-- customer: A specifically NAMED counterparty that buys from the target — a company or organisation name. NOT a market segment, vertical, or customer class. Generic labels like "schools", "care homes", "SMEs", or tier names are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
+- customer: A specifically NAMED counterparty that buys from the target — a company or organisation name (e.g. "Whitley Stimpson Limited", "Celtic Leisure"). NOT a market segment, vertical, or customer class. "GP practices", "schools", "care homes", "SMEs", "Diamond customers" are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
 - competitor: A named company that competes with the target.
-- regulator: A named government body or statutory authority with legal jurisdiction over the target's operations, OR a named statutory regime the business is legally subject to. A procurement framework, a commercial supplier framework, a clinical IT system, or an integration partner is NOT a regulator. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no named statutory regulator or regime appears verbatim in the source, emit NO regulator entities. An empty regulator set is the correct and expected output when the documents do not name regulators — do not substitute frameworks, systems, or deal parties to fill it.
+- regulator: A named government body or statutory authority with legal jurisdiction over the target's operations (e.g. Ofcom, ICO, CQC, NHS England), OR a named statutory regime the business is legally subject to. A procurement framework, a commercial supplier framework, a clinical IT system, or an integration partner is NOT a regulator. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no named statutory regulator or regime appears verbatim in the source, emit NO regulator entities. An empty regulator set is the correct and expected output when the documents do not name regulators — do not substitute frameworks, systems, or deal parties to fill it.
 - adviser: A professional services firm engaged on the transaction — financial/legal/commercial due diligence, investment banks, M&A advisers. Examples of the kind: a vendor DD accountant, a commercial DD consultancy, a sell-side bank.
 - counterparty: A financing party, lender, investor, prior owner, or competing bidder connected to the deal but not a customer, competitor, or adviser.
 
