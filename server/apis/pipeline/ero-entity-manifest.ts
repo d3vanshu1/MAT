@@ -44,6 +44,7 @@ const REGULATORY_QUERY = "Ofcom ICO data protection CQC NHS England regulator re
 
 const MAX_CONTEXT_CHARS = 40_000;
 const MAX_CHUNKS_PER_QUERY = 60; // overfetch then dedupe + cap
+const APPENDIX_RESERVED_CHUNKS = 4; // guaranteed slots for group-structure appendix
 
 // ── Entity types ────────────────────────────────────────────────────
 const ENTITY_TYPES = [
@@ -190,45 +191,67 @@ export async function buildEntityManifest(
     { label: "EntityManifest: FTS regulatory (Ofcom/ICO/CQC/NHS)" },
   );
 
-  // Deduplicate by (document_id, chunk_index), preserving primary rank boost
+  // ── Dedicated appendix slot ──────────────────────────────────────
+  // Reserve APPENDIX_RESERVED_CHUNKS from the tertiary (group-structure)
+  // query so appendix content is guaranteed in context regardless of
+  // how the primary/secondary/regulatory queries fill the budget.
   const seen = new Set<string>();
-  const allChunks: z.infer<typeof ChunkRow>[] = [];
+  const reservedChunks: z.infer<typeof ChunkRow>[] = [];
+  for (const c of tertiaryChunks) {
+    if (reservedChunks.length >= APPENDIX_RESERVED_CHUNKS) break;
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      reservedChunks.push(c);
+    }
+  }
 
-  // Primary first — these get priority in context window
+  // Fill remaining budget with primary → secondary → remaining tertiary → regulatory
+  const remainderChunks: z.infer<typeof ChunkRow>[] = [];
   for (const c of primaryChunks) {
     const key = `${c.document_id}:${c.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
-      allChunks.push(c);
+      remainderChunks.push(c);
     }
   }
   for (const c of secondaryChunks) {
     const key = `${c.document_id}:${c.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
-      allChunks.push(c);
+      remainderChunks.push(c);
     }
   }
+  // Remaining tertiary chunks (beyond the reserved set)
   for (const c of tertiaryChunks) {
     const key = `${c.document_id}:${c.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
-      allChunks.push(c);
+      remainderChunks.push(c);
     }
   }
   for (const c of regulatoryChunks) {
     const key = `${c.document_id}:${c.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
-      allChunks.push(c);
+      remainderChunks.push(c);
     }
   }
 
-  // Cap at MAX_CONTEXT_CHARS
+  // Cap at MAX_CONTEXT_CHARS — reserved chunks first, then remainder
   let totalChars = 0;
   const contextChunks: z.infer<typeof ChunkRow>[] = [];
-  for (const c of allChunks) {
-    const markerLen = 60; // approximate marker line length
+  const markerLen = 60; // approximate marker line length
+
+  // Place reserved appendix chunks first (guaranteed in context)
+  for (const c of reservedChunks) {
+    if (totalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS) break;
+    contextChunks.push(c);
+    totalChars += c.content.length + markerLen;
+  }
+
+  // Fill remaining budget
+  for (const c of remainderChunks) {
     if (totalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS) break;
     contextChunks.push(c);
     totalChars += c.content.length + markerLen;
@@ -270,7 +293,7 @@ ENTITY TYPE DEFINITIONS:
 - executive: A named individual in a leadership, board, or deal team role.
 - customer: A specifically NAMED counterparty that buys from the target — a company or organisation name (e.g. "Whitley Stimpson Limited", "Celtic Leisure"). NOT a market segment, vertical, or customer class. "GP practices", "schools", "care homes", "SMEs", "Diamond customers" are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
 - competitor: A named company that competes with the target.
-- regulator: A government body, statutory regulator, or public authority with legal or regulatory jurisdiction over the target's operations, OR a specific regulatory regime/scheme the business is subject to. Examples of the KIND of thing: a communications regulator, a data-protection authority, a health or care quality regulator, a health-service body that sets supplier requirements, a scheduled regulatory transition affecting the sector. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no true regulator appears in the text, emit NO regulator entities rather than substituting a deal party.
+- regulator: A named government body or statutory authority with legal jurisdiction over the target's operations (e.g. Ofcom, ICO, CQC, NHS England), OR a named statutory regime the business is legally subject to. A procurement framework, a commercial supplier framework, a clinical IT system, or an integration partner is NOT a regulator. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no named statutory regulator or regime appears verbatim in the source, emit NO regulator entities. An empty regulator set is the correct and expected output when the documents do not name regulators — do not substitute frameworks, systems, or deal parties to fill it.
 - adviser: A professional services firm engaged on the transaction — financial/legal/commercial due diligence, investment banks, M&A advisers. Examples of the kind: a vendor DD accountant, a commercial DD consultancy, a sell-side bank.
 - counterparty: A financing party, lender, investor, prior owner, or competing bidder connected to the deal but not a customer, competitor, or adviser.
 
