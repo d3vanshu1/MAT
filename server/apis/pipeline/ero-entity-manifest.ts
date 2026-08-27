@@ -459,6 +459,208 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
     survivors.push(entity);
   }
 
+  // ── 6b. TARGETED APPENDIX PASS — acquire subsidiary names from org chart ──
+  // The main extraction works from prose; the FDD group-structure appendix is
+  // a dense org chart with ~25 trading entity names that prose extraction skips.
+  // This pass runs a second LLM call against ONLY the appendix chunks, then
+  // gates and deduplicates against the main pass survivors.
+  //
+  // Direct content-based retrieval: the FTS queries use websearch_to_tsquery
+  // which ANDs all terms — appendix chunks don't contain all terms so they
+  // never rank. Instead, fetch them by ILIKE on distinctive section headers.
+  const AppendixChunkRow = z.object({
+    document_id: z.string(),
+    chunk_index: z.coerce.number(),
+    file_name: z.string(),
+    content: z.string(),
+  });
+
+  const directAppendixChunks = await db.query(
+    `SELECT dc.document_id,
+            dc.chunk_index,
+            dc.file_name,
+            dc.content
+       FROM document_chunks dc
+       JOIN documents d ON d.id = dc.document_id
+      WHERE dc.deal_id = $1::uuid
+        AND d.deal_id  = $1::uuid
+        AND d.document_tag = ANY($2::text[])
+        AND (   dc.content ILIKE '%subsidiaries of Southern%'
+             OR dc.content ILIKE '%Direct BUs%')
+      ORDER BY dc.chunk_index ASC
+      LIMIT 4`,
+    AppendixChunkRow,
+    [dealId, ["consultant_report"]],
+    { label: "EntityManifest: direct appendix chunk fetch" },
+  );
+
+  // Merge directly-fetched appendix chunks into contextChunks + chunksByDocId
+  // so the fabrication gate can verify names against them.
+  for (const ac of directAppendixChunks) {
+    const key = `${ac.document_id}:${ac.chunk_index}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      const chunkWithRank = { ...ac, rank: 0 };
+      contextChunks.push(chunkWithRank);
+      if (!chunksByDocId.has(ac.document_id)) {
+        chunksByDocId.set(ac.document_id, []);
+      }
+      chunksByDocId.get(ac.document_id)!.push(ac.content);
+    }
+  }
+
+  // Now filter contextChunks for appendix content (will include the directly-fetched ones)
+  const appendixChunks = contextChunks.filter(
+    (c) =>
+      c.content.includes("subsidiaries of Southern") ||
+      c.content.includes("Group structure (2 of 2)") ||
+      (c.content.includes("Direct BUs") && c.content.includes("Indirect BUs")),
+  );
+
+  let appendixTokensIn = 0;
+  let appendixTokensOut = 0;
+  let appendixExtracted = 0;
+  let appendixDropped = 0;
+
+  if (appendixChunks.length > 0) {
+    const appendixContext = appendixChunks
+      .map((c) => `[DOC_ID: ${c.document_id} | FILE: ${c.file_name}]\n${c.content}`)
+      .join("\n\n---\n\n");
+
+    const appendixSystemPrompt = `You are an entity extraction specialist. The following text is a group-structure / organisation chart listing the trading subsidiaries and acquired entities of a target company group.
+
+Each name is a separate acquired or subsidiary entity. Extract every distinct company name (typically ending Ltd, Limited, Pty Ltd, or similar) as an acquired_entity.
+
+This is a list or org-chart, not prose — do not expect sentences or "acquired" framing around each name. Each named company is its own entity.
+
+RULES:
+1. entity_type must be "acquired_entity" for every extracted entity.
+2. legal_name must be the company name EXACTLY as it appears in the text. Copy character-for-character. Do not add or remove "Ltd"/"Limited".
+3. source_document_id must be the exact DOC_ID from the marker line.
+4. verbatim_snippet: a short passage from the text near where the name appears (advisory — system will verify).
+5. role: brief description (e.g. "trading subsidiary", "direct business unit", "healthcare vertical entity").
+6. rank_signal: include any stated classification (e.g. {"category": "Direct BU"} or {"category": "Healthcare"}) if apparent from the layout, else null.
+7. Do not include holding companies (e.g. "Southern Communications Holdings Limited", "Saint Topco Limited", "Saint Bidco Limited", "Southern Communications Investments Limited", "Southern Communications EBT Newco Limited") — only trading/operational entities.
+8. Do not include the parent group name itself (e.g. "Southern Communications Group Limited").
+9. Do not duplicate — emit each company once even if it appears in multiple places.
+
+Return ONLY a JSON array. No markdown, no explanation.`;
+
+    const appendixUserPrompt = `Extract all named trading entities from this group-structure appendix:\n\n${appendixContext}`;
+
+    try {
+      const appendixLlmResult = await claude.apiRequest(
+        {
+          method: "POST",
+          path: "/v1/messages",
+          body: {
+            model: MODEL,
+            max_tokens: 4096,
+            system: appendixSystemPrompt,
+            messages: [{ role: "user", content: appendixUserPrompt }],
+          },
+        },
+        { response: AnthropicResponse },
+        { label: "EntityManifest: appendix subsidiary extraction" },
+      );
+
+      appendixTokensIn = appendixLlmResult.usage.input_tokens;
+      appendixTokensOut = appendixLlmResult.usage.output_tokens;
+
+      const appendixTextBlock = appendixLlmResult.content.find((c: any) => c.type === "text");
+      if (appendixTextBlock?.text) {
+        let jsonText = appendixTextBlock.text.trim();
+        if (jsonText.startsWith("```")) {
+          jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+        }
+        const parsed = JSON.parse(jsonText);
+        const arr = Array.isArray(parsed) ? parsed : parsed.entities ?? parsed.data ?? [];
+        const appendixEntities: z.infer<typeof LlmEntity>[] = arr.map((e: any) => {
+          if (e.name && !e.legal_name) e.legal_name = e.name;
+          return LlmEntity.parse(e);
+        });
+
+        // Dedup set: names already in survivors (case-insensitive)
+        const existingNames = new Set(
+          survivors.map((s) => s.legal_name.toLowerCase()),
+        );
+
+        for (const entity of appendixEntities) {
+          appendixExtracted++;
+
+          // Skip if already extracted in main pass
+          if (existingNames.has(entity.legal_name.toLowerCase())) {
+            continue;
+          }
+
+          // entity_type must be acquired_entity
+          if (entity.entity_type !== "acquired_entity") {
+            entity.entity_type = "acquired_entity";
+          }
+
+          // Run through the SAME fabrication gate
+          const nameRegex = buildNameRegex(entity.legal_name);
+          let foundDocId: string | null = null;
+          let foundSnippet: string | null = null;
+
+          for (const chunk of contextChunks) {
+            const match = nameRegex.exec(chunk.content);
+            if (match) {
+              foundDocId = chunk.document_id;
+              foundSnippet = extractSnippet(chunk.content, match.index, entity.legal_name.length);
+              break;
+            }
+          }
+
+          if (!foundDocId || !foundSnippet) {
+            appendixDropped++;
+            dropped.push({
+              legal_name: entity.legal_name,
+              entity_type: "acquired_entity",
+              source_document_id: entity.source_document_id,
+              reason: `appendix pass: legal_name not present in any retrieved chunk`,
+            });
+            continue;
+          }
+
+          // Survivor — set source + code-extracted snippet
+          const sourceCorrected = foundDocId !== entity.source_document_id;
+          entity.source_document_id = foundDocId;
+          entity.verbatim_snippet = foundSnippet;
+
+          if (sourceCorrected) {
+            const existingSignal =
+              entity.rank_signal && typeof entity.rank_signal === "object"
+                ? { ...(entity.rank_signal as Record<string, unknown>) }
+                : {};
+            entity.rank_signal = {
+              ...existingSignal,
+              source_corrected: true,
+            };
+          }
+
+          // Tag as appendix-sourced for diagnostics
+          const sig =
+            entity.rank_signal && typeof entity.rank_signal === "object"
+              ? { ...(entity.rank_signal as Record<string, unknown>) }
+              : {};
+          entity.rank_signal = { ...sig, appendix_pass: true };
+
+          survivors.push(entity);
+          existingNames.add(entity.legal_name.toLowerCase());
+        }
+      }
+    } catch (err: any) {
+      // Non-fatal: appendix pass failure should not block the main extraction
+      dropped.push({
+        legal_name: "[appendix_pass_error]",
+        entity_type: "acquired_entity",
+        source_document_id: "",
+        reason: `Appendix LLM call failed: ${err.message?.slice(0, 200)}`,
+      });
+    }
+  }
+
   // ── 7. Insert surviving entities ──────────────────────────────────
   if (survivors.length > 0) {
     // Build batch INSERT
@@ -524,13 +726,19 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
     .map(([t, n]) => `${t}:${n}`)
     .join(", ");
 
-  const message = [
+  const messageParts = [
     `${survivors.length} entities inserted`,
     `${dropped.length} dropped`,
     `breakdown: ${breakdown || "none"}`,
     `context: ${contextChunks.length} chunks / ${totalChars} chars`,
     `tokens: in=${llmResult.usage.input_tokens} out=${llmResult.usage.output_tokens}`,
-  ].join(" | ");
+  ];
+  if (appendixChunks.length > 0) {
+    messageParts.push(
+      `appendix: ${appendixChunks.length} chunks, ${appendixExtracted} extracted, ${appendixDropped} dropped, tokens: in=${appendixTokensIn} out=${appendixTokensOut}`,
+    );
+  }
+  const message = messageParts.join(" | ");
 
   return {
     stage: "build_entity_manifest",
