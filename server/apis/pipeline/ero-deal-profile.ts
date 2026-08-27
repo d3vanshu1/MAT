@@ -1,5 +1,5 @@
 /**
- * ERO v2 — Stage 2: Build Deal Profile (Packet 2.2)
+ * ERO v2 — Stage 2: Build Deal Profile (Packet 2.2 + 2.2-fix)
  *
  * Builds ERO's own understanding of the deal across two field groups:
  *   business_shape — what the company is (sector, revenue model, etc.)
@@ -8,9 +8,17 @@
  *
  * Same provenance discipline as the entity manifest: every field
  * carries a code-extracted verbatim snippet or it is not written.
- * Anchor verification uses the model's anchor_phrase as a substring
- * match against the retrieved chunks — no word-boundary needed for
- * multi-word phrases.
+ *
+ * 2.2-fix: TOKEN-ANCHORED verification gate. The model returns
+ * anchor_terms (1-3 short distinctive strings) instead of a full
+ * anchor_phrase. The gate requires ALL terms to co-occur within a
+ * SINGLE chunk. If they do, the snippet is code-extracted from that
+ * chunk (~250-char window spanning the matched terms).
+ *
+ * 2.2-fix: Thesis retrieval breadth. A secondary THESIS_CROWN_QUERY
+ * seeds crown-jewel dependency topics (Surgery Connect, own-IP,
+ * channel structure) to ensure those chunks rank in FTS. Reserved
+ * slots guarantee they aren't crowded out by generic thesis terms.
  *
  * Single LLM call per group. Survivors written to ero_profile.
  */
@@ -28,11 +36,20 @@ const THESIS_TAGS = ["ic_memo", "consultant_report"];
 
 const SHAPE_QUERY =
   "sector revenue model subscription recurring SaaS UCaaS connectivity B2B SME channel reseller direct geography UK market vertical customer type scale employees";
+
+// Primary thesis query — broad thesis / assumption / financial language
 const THESIS_QUERY =
   "thesis growth assumption M&A acquisition EBITDA revenue must churn retention NRR gross margin dependency risk base case returns multiple valuation organic inorganic";
 
+// Crown-jewel thesis query — seeds specific high-value dependency topics
+// that the broad query may not pull (Surgery Connect GP market share,
+// own-IP gross profit mix-shift, channel structure / disintermediation).
+const THESIS_CROWN_QUERY =
+  "Surgery Connect market share GP practices own IP gross profit mix shift organic GP growth channel-led disintermediation aggregator";
+
 const MAX_CONTEXT_CHARS = 20_000;
 const MAX_CHUNKS_PER_QUERY = 40;
+const THESIS_RESERVED_CHUNKS = 4; // guaranteed slots for crown-jewel thesis chunks
 
 // ── business_shape field names (fixed set of 7) ─────────────────────
 const SHAPE_FIELDS = [
@@ -69,10 +86,11 @@ const ProfileRow = z.object({
   created_at: z.string(),
 });
 
+// 2.2-fix: Model returns anchor_terms (1-3 short tokens) instead of anchor_phrase
 const LlmProfileField = z.object({
   field_name: z.string(),
   field_value: z.string(),
-  anchor_phrase: z.string(),
+  anchor_terms: z.array(z.string()).min(1).max(5),
   source_document_id: z.string(),
 });
 
@@ -94,9 +112,10 @@ type DroppedProfileField = {
   field_group: string;
   field_name: string;
   field_value: string;
-  anchor_phrase: string;
+  anchor_terms: string[];
   source_document_id: string;
   reason: string;
+  failed_terms?: string[];
 };
 
 // ── FTS retrieval SQL (same template as entity manifest) ────────────
@@ -116,21 +135,50 @@ const chunkSql = `
    ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
    LIMIT $4`;
 
-// ── Snippet extraction (reused from entity manifest approach) ───────
+// ── Token matching helpers ──────────────────────────────────────────
 
-/** Extract a ~200-char snippet centred on `matchIndex` from `text`. */
-function extractSnippet(
+/** Build a case-insensitive regex for an anchor term.
+ *  Short tokens (≤4 chars, e.g. "55%", "NRR") use word-boundary anchors
+ *  to avoid false positives. Longer tokens use plain indexOf. */
+function findTermInChunk(
+  chunkContent: string,
+  term: string,
+): { index: number; length: number } | null {
+  if (term.length <= 4) {
+    // Word-boundary regex for short tokens
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?:^|\\b|(?<=\\s))${escaped}(?:$|\\b|(?=\\s))`, "i");
+    const m = re.exec(chunkContent);
+    return m ? { index: m.index, length: term.length } : null;
+  }
+  // Case-insensitive substring for longer phrases
+  const idx = chunkContent.toLowerCase().indexOf(term.toLowerCase());
+  return idx >= 0 ? { index: idx, length: term.length } : null;
+}
+
+/** Extract a ~250-char snippet spanning ALL matched term positions in a chunk. */
+function extractSpanSnippet(
   text: string,
-  matchIndex: number,
-  anchorLen: number,
+  matches: Array<{ index: number; length: number }>,
 ): string {
-  const WINDOW = 200;
-  const pad = Math.max(0, Math.floor((WINDOW - anchorLen) / 2));
-  let start = Math.max(0, matchIndex - pad);
-  let end = Math.min(text.length, matchIndex + anchorLen + pad);
+  const WINDOW = 250;
+  // Find the span covering all matched terms
+  const spanStart = Math.min(...matches.map((m) => m.index));
+  const spanEnd = Math.max(...matches.map((m) => m.index + m.length));
+  const spanLen = spanEnd - spanStart;
+
+  // Distribute remaining window budget as padding around the span
+  const remaining = Math.max(0, WINDOW - spanLen);
+  const padBefore = Math.floor(remaining / 2);
+  const padAfter = remaining - padBefore;
+
+  let start = Math.max(0, spanStart - padBefore);
+  let end = Math.min(text.length, spanEnd + padAfter);
+
   // Extend to word boundaries to avoid mid-word cuts
   while (start > 0 && !/\s/.test(text[start - 1]!)) start--;
   while (end < text.length && !/\s/.test(text[end]!)) end++;
+
   return text.slice(start, end).trim();
 }
 
@@ -167,14 +215,23 @@ export async function buildDealProfile(
   );
 
   // ── 3. Retrieve chunks for thesis_dependency ──────────────────────
+  // Two queries: broad thesis terms + crown-jewel topic terms.
+  // Crown-jewel chunks get reserved slots (like entity manifest appendix).
   const thesisRawChunks = await db.query(
     chunkSql,
     ChunkRow,
     [dealId, THESIS_QUERY, THESIS_TAGS, MAX_CHUNKS_PER_QUERY],
-    { label: "DealProfile: FTS thesis_dependency" },
+    { label: "DealProfile: FTS thesis_dependency (broad)" },
   );
 
-  // ── 4. Dedupe & cap each group ────────────────────────────────────
+  const thesisCrownChunks = await db.query(
+    chunkSql,
+    ChunkRow,
+    [dealId, THESIS_CROWN_QUERY, THESIS_TAGS, MAX_CHUNKS_PER_QUERY],
+    { label: "DealProfile: FTS thesis_dependency (crown-jewel topics)" },
+  );
+
+  // ── 4. Dedupe & cap ───────────────────────────────────────────────
   function dedupeAndCap(
     chunks: z.infer<typeof ChunkRow>[],
     maxChars: number,
@@ -195,7 +252,54 @@ export async function buildDealProfile(
   }
 
   const shapeChunks = dedupeAndCap(shapeRawChunks, MAX_CONTEXT_CHARS);
-  const thesisChunks = dedupeAndCap(thesisRawChunks, MAX_CONTEXT_CHARS);
+
+  // ── Thesis: reserved slots for crown-jewel chunks, then fill ──────
+  const thesisSeen = new Set<string>();
+  const thesisReserved: z.infer<typeof ChunkRow>[] = [];
+  for (const c of thesisCrownChunks) {
+    if (thesisReserved.length >= THESIS_RESERVED_CHUNKS) break;
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!thesisSeen.has(key)) {
+      thesisSeen.add(key);
+      thesisReserved.push(c);
+    }
+  }
+
+  // Fill remaining budget with broad thesis chunks
+  const thesisRemainder: z.infer<typeof ChunkRow>[] = [];
+  for (const c of thesisRawChunks) {
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!thesisSeen.has(key)) {
+      thesisSeen.add(key);
+      thesisRemainder.push(c);
+    }
+  }
+  // Remaining crown chunks beyond reserved set
+  for (const c of thesisCrownChunks) {
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!thesisSeen.has(key)) {
+      thesisSeen.add(key);
+      thesisRemainder.push(c);
+    }
+  }
+
+  // Cap at MAX_CONTEXT_CHARS — reserved first, then remainder
+  let thesisTotalChars = 0;
+  const thesisChunks: z.infer<typeof ChunkRow>[] = [];
+  const markerLen = 60;
+
+  for (const c of thesisReserved) {
+    if (thesisTotalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS)
+      break;
+    thesisChunks.push(c);
+    thesisTotalChars += c.content.length + markerLen;
+  }
+  for (const c of thesisRemainder) {
+    if (thesisTotalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS)
+      break;
+    thesisChunks.push(c);
+    thesisTotalChars += c.content.length + markerLen;
+  }
 
   if (shapeChunks.length === 0 && thesisChunks.length === 0) {
     return {
@@ -236,7 +340,6 @@ export async function buildDealProfile(
   for (const [docId, texts] of thesisCtx.chunksByDocId) {
     const existing2 = allChunksByDocId.get(docId);
     if (existing2) {
-      // Dedupe by content — same chunk may appear in both groups
       const existingSet = new Set(existing2);
       for (const t of texts) {
         if (!existingSet.has(t)) existing2.push(t);
@@ -246,7 +349,7 @@ export async function buildDealProfile(
     }
   }
 
-  // Also flatten all chunks for sweep search
+  // Flatten all chunks for sweep search
   const allChunks = [
     ...shapeChunks,
     ...thesisChunks.filter(
@@ -273,11 +376,11 @@ FIELDS TO EXTRACT (exactly these 7):
 
 RULES:
 1. Each field_value must be a SHORT, FACTUAL phrase — not a paragraph. 5-30 words max.
-2. anchor_phrase must be a verbatim string of 5-15 words copied exactly from the source text that grounds the field_value. This phrase must appear VERBATIM in the document — do not paraphrase, reorder, or combine words from different sentences.
-3. source_document_id must be the exact DOC_ID from the marker line of the chunk where the anchor_phrase appears.
+2. anchor_terms: provide 1-3 SHORT, DISTINCTIVE strings that ground the claim. Each term should be a named entity, a specific number/percentage, or a short phrase (2-5 words) that appears verbatim in the source. Examples: ["96% recurring", "£187m"], ["UCaaS", "B2B communications"]. Do NOT provide full sentences.
+3. source_document_id must be the exact DOC_ID from the marker line of the chunk where the anchor terms appear. All anchor terms must appear in the SAME chunk.
 4. Do not invent facts. If a field cannot be determined from the text, omit that field entirely rather than guessing.
 
-Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_phrase, source_document_id. No markdown, no explanation.`;
+Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_terms, source_document_id. No markdown, no explanation.`;
 
   const shapeUserPrompt = `Extract business shape characteristics from these due diligence document extracts:\n\n${shapeCtx.contextBlock}`;
 
@@ -303,7 +406,7 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_p
       input: shapeResult.usage.input_tokens,
       output: shapeResult.usage.output_tokens,
     };
-    shapeFields = parseLlmFields(shapeResult, "business_shape");
+    shapeFields = parseLlmFields(shapeResult);
   }
 
   // ── 7. LLM call — thesis_dependency ───────────────────────────────
@@ -329,11 +432,11 @@ RULES:
 1. Extract 5-8 thesis dependencies. Quality over quantity — each must be grounded in specific text.
 2. Each field_value is the proposition itself — a single sentence, specific and falsifiable.
 3. field_name should be a short snake_case label (e.g. "td_mna_ebitda_delivery", "td_organic_nrr", "td_pstn_switchoff").
-4. anchor_phrase must be a verbatim string of 5-15 words copied exactly from the source text that grounds the proposition. This phrase must appear VERBATIM in the document — do not paraphrase, reorder, or combine words.
-5. source_document_id must be the exact DOC_ID from the marker line where the anchor_phrase appears.
+4. anchor_terms: provide 1-3 SHORT, DISTINCTIVE strings that ground the claim. Each term should be a named entity, a specific number/percentage, or a short phrase (2-5 words). Examples: ["Surgery Connect", "55%", "market share"], ["organic GP growth", "10%"]. All terms must appear in the SAME chunk. Do NOT provide full sentences — short load-bearing tokens only.
+5. source_document_id must be the exact DOC_ID from the marker line where the anchor terms appear.
 6. Extract what the memos actually assert. Do NOT invent propositions absent from text.
 
-Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_phrase, source_document_id. No markdown, no explanation.`;
+Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_terms, source_document_id. No markdown, no explanation.`;
 
   const thesisUserPrompt = `Extract thesis dependencies from these IC memo and due diligence document extracts:\n\n${thesisCtx.contextBlock}`;
 
@@ -359,18 +462,24 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_p
       input: thesisResult.usage.input_tokens,
       output: thesisResult.usage.output_tokens,
     };
-    thesisFields = parseLlmFields(thesisResult, "thesis_dependency");
+    thesisFields = parseLlmFields(thesisResult);
   }
 
-  // ── 8. VERIFICATION GATE — anchor-phrase grounding ────────────────
-  // For each field, verify the anchor_phrase is a real substring of the
-  // retrieved chunks. Multi-word phrases use case-insensitive indexOf
-  // (no word-boundary regex needed). First try cited doc, then sweep all.
+  // ── 8. VERIFICATION GATE — token-anchored co-occurrence ───────────
+  // For each field, ALL anchor_terms must co-occur within a SINGLE
+  // retrieved chunk. If they do, extract a ~250-char window spanning
+  // the matched terms. If any term is missing from every chunk, DROP.
+  //
+  // This replaces the 2.2 anchor_phrase substring gate. Same grounding
+  // principle — a dependency survives only if its key claim is verifiably
+  // in retrieved source — but anchoring on short tokens instead of a
+  // full sentence avoids transcription / table-format mismatches.
 
   const survivors: Array<{
     field_group: string;
     field_name: string;
     field_value: string;
+    anchor_terms: string[];
     source_document_id: string;
     verbatim_snippet: string;
   }> = [];
@@ -381,48 +490,89 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_p
     fieldGroup: string,
   ): void {
     for (const f of fields) {
-      const anchorLower = f.anchor_phrase.toLowerCase();
-
-      // Try cited document first
+      // Try cited document first, then sweep all chunks
       let foundDocId: string | null = null;
       let foundSnippet: string | null = null;
 
+      // Search order: cited doc chunks → all chunks
+      const searchPasses: Array<{
+        docId: string | null;
+        chunks: string[];
+      }> = [];
+
+      // Pass 1: cited document
       const citedChunks = allChunksByDocId.get(f.source_document_id);
       if (citedChunks) {
-        for (const text of citedChunks) {
-          const idx = text.toLowerCase().indexOf(anchorLower);
-          if (idx >= 0) {
-            foundDocId = f.source_document_id;
-            foundSnippet = extractSnippet(text, idx, f.anchor_phrase.length);
-            break;
-          }
-        }
+        searchPasses.push({
+          docId: f.source_document_id,
+          chunks: citedChunks,
+        });
       }
 
-      // Sweep all chunks if not found in cited doc
-      if (!foundDocId) {
-        for (const chunk of allChunks) {
-          const idx = chunk.content.toLowerCase().indexOf(anchorLower);
-          if (idx >= 0) {
+      // Pass 2: all chunks (sweep)
+      searchPasses.push({ docId: null, chunks: [] }); // sentinel for sweep
+
+      for (const pass of searchPasses) {
+        if (foundDocId) break;
+
+        const chunksToSearch =
+          pass.docId !== null
+            ? pass.chunks.map((content) => ({
+                content,
+                document_id: pass.docId!,
+              }))
+            : allChunks.map((c) => ({
+                content: c.content,
+                document_id: c.document_id,
+              }));
+
+        for (const chunk of chunksToSearch) {
+          // Check ALL anchor terms co-occur in THIS chunk
+          const termMatches: Array<{ index: number; length: number }> = [];
+          let allFound = true;
+
+          for (const term of f.anchor_terms) {
+            const m = findTermInChunk(chunk.content, term);
+            if (!m) {
+              allFound = false;
+              break;
+            }
+            termMatches.push(m);
+          }
+
+          if (allFound && termMatches.length === f.anchor_terms.length) {
             foundDocId = chunk.document_id;
-            foundSnippet = extractSnippet(
-              chunk.content,
-              idx,
-              f.anchor_phrase.length,
-            );
+            foundSnippet = extractSpanSnippet(chunk.content, termMatches);
             break;
           }
         }
       }
 
       if (!foundDocId || !foundSnippet) {
+        // Determine which terms failed for diagnostics
+        const failedTerms: string[] = [];
+        for (const term of f.anchor_terms) {
+          let termFound = false;
+          for (const chunk of allChunks) {
+            if (findTermInChunk(chunk.content, term)) {
+              termFound = true;
+              break;
+            }
+          }
+          if (!termFound) failedTerms.push(term);
+        }
+
         dropped.push({
           field_group: fieldGroup,
           field_name: f.field_name,
           field_value: f.field_value,
-          anchor_phrase: f.anchor_phrase,
+          anchor_terms: f.anchor_terms,
           source_document_id: f.source_document_id,
-          reason: "anchor_phrase not found in any retrieved chunk",
+          reason:
+            failedTerms.length > 0
+              ? `anchor terms not in any retrieved chunk: [${failedTerms.join(", ")}]`
+              : "anchor terms do not co-occur in any single chunk",
+          failed_terms: failedTerms.length > 0 ? failedTerms : undefined,
         });
         continue;
       }
@@ -431,6 +581,7 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_p
         field_group: fieldGroup,
         field_name: f.field_name,
         field_value: f.field_value,
+        anchor_terms: f.anchor_terms,
         source_document_id: foundDocId,
         verbatim_snippet: foundSnippet,
       });
@@ -486,7 +637,7 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_p
     `${survivors.length} profile fields inserted`,
     `${dropped.length} dropped`,
     `breakdown: ${breakdown || "none"}`,
-    `context: shape=${shapeChunks.length}chunks thesis=${thesisChunks.length}chunks`,
+    `context: shape=${shapeChunks.length}chunks thesis=${thesisChunks.length}chunks (${thesisReserved.length} reserved)`,
     `tokens: in=${totalIn} out=${totalOut}`,
   ].join(" | ");
 
@@ -501,7 +652,6 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_p
 // ── LLM response parser ─────────────────────────────────────────────
 function parseLlmFields(
   llmResult: z.infer<typeof AnthropicResponse>,
-  fieldGroup: string,
 ): z.infer<typeof LlmProfileField>[] {
   const textBlock = llmResult.content.find((c: any) => c.type === "text");
   if (!textBlock?.text) return [];
@@ -517,7 +667,13 @@ function parseLlmFields(
   const arr = Array.isArray(parsed)
     ? parsed
     : parsed.fields ?? parsed.data ?? [];
-  return arr.map((f: any) => LlmProfileField.parse(f));
+  return arr.map((f: any) => {
+    // Normalise: if model still sends anchor_phrase, convert to anchor_terms
+    if (f.anchor_phrase && !f.anchor_terms) {
+      f.anchor_terms = [f.anchor_phrase];
+    }
+    return LlmProfileField.parse(f);
+  });
 }
 
 // Re-export types the test harness needs
