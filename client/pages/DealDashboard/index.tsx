@@ -2159,6 +2159,9 @@ export default function DealDashboardPage() {
   // is a Superblocks Workflow (server-side cron) — this is complementary UX.
   // ---------------------------------------------------------------------------
   const resumingModulesRef = useRef<Set<string>>(new Set());
+  // B2 FIX — per-module resume attempt counter (cap at 3)
+  const resumeAttemptCountRef = useRef<Record<string, number>>({});
+  const MAX_RESUME_ATTEMPTS = 3;
 
   useEffect(() => {
     if (!dealId) return;
@@ -2203,8 +2206,19 @@ export default function DealDashboardPage() {
         if (pipelinePollingActive.current.has(moduleId)) continue;
         if (resumingModulesRef.current.has(moduleId)) continue;
 
+        // B2 FIX — cap resume attempts at 3 per module
+        const attempts = resumeAttemptCountRef.current[moduleId] ?? 0;
+        if (attempts >= MAX_RESUME_ATTEMPTS) {
+          console.warn(`[auto-resume] ${moduleId}: ${MAX_RESUME_ATTEMPTS} resume attempts exhausted — marking not-resumable`);
+          killedModulesRef.current.add(moduleId);
+          setRunningModules((prev) => { const next = new Set(prev); next.delete(moduleId); return next; });
+          toast.error(`[${MODULE_MAP[moduleId]?.displayName ?? moduleId}] Auto-resume failed after ${MAX_RESUME_ATTEMPTS} attempts. Refresh the page to retry.`);
+          continue;
+        }
+        resumeAttemptCountRef.current[moduleId] = attempts + 1;
+
         resumingModulesRef.current.add(moduleId);
-        console.log(`[auto-resume] Re-invoking orphaned pipeline: ${moduleId} (run ${runId})`);
+        console.log(`[auto-resume] Re-invoking orphaned pipeline: ${moduleId} (run ${runId}) [attempt ${attempts + 1}/${MAX_RESUME_ATTEMPTS}]`);
         // Fire-and-forget: handleRunModule manages its own state
         handleRunModule(moduleId, runId).finally(() => {
           resumingModulesRef.current.delete(moduleId);
@@ -2369,8 +2383,16 @@ export default function DealDashboardPage() {
           const isResuming = resumingModulesRef.current.has(moduleId);
 
           if (!hasActivePolling && !isResuming) {
+            // B2 FIX — watchdog shares the same per-module attempt cap
+            const attempts = resumeAttemptCountRef.current[moduleId] ?? 0;
+            if (attempts >= MAX_RESUME_ATTEMPTS) {
+              console.warn(`[watchdog] ${moduleId}: resume attempts exhausted — skipping`);
+              continue;
+            }
+            resumeAttemptCountRef.current[moduleId] = attempts + 1;
+
             console.log(
-              `[watchdog] Module ${moduleId} is DB-running with no client driver — forcing resume (run ${runId})`
+              `[watchdog] Module ${moduleId} is DB-running with no client driver — forcing resume (run ${runId}) [attempt ${attempts + 1}/${MAX_RESUME_ATTEMPTS}]`
             );
             handleRunModule(moduleId, runId);
           }

@@ -2276,47 +2276,46 @@ export async function runPipelineCore(ctx: PipelineContext, input: PipelineInput
       };
     }
 
-    // Status is 'running' — claim ownership via compare-and-swap on the exact
-    // `triggered_at` value read above, rather than an unconditional refresh.
+    // B2 FIX — Ownership claim with staleness guard.
     //
-    // Mirrors the claim in `resume-stale-pipelines.ts` (already labelled there
-    // as "CAS on triggered_at to prevent double-pickup"), with one deliberate
-    // difference: that job gates on staleness
-    // (`triggered_at < now() - STALENESS_THRESHOLD_MINUTES`) because it only
-    // ever wants abandoned runs. This path cannot gate on staleness — the
-    // client's poll loop re-invokes every 5s against a run whose `triggered_at`
-    // it is actively heartbeating (extraction-phase.ts:659 and the refreshes
-    // further down this file), so a staleness gate would reject every
-    // legitimate resume. Comparing against the observed value keeps normal
-    // resumes working while still making the claim conditional.
+    // Two conditions must hold for a resume to claim a run:
+    //   1. CAS on triggered_at: only one simultaneous resumer wins.
+    //   2. Staleness guard: triggered_at must be older than 30s, meaning the
+    //      prior owner has stopped heartbeating. A fresh triggered_at means
+    //      the owner is alive — yield.
     //
-    // SCOPE — this closes the simultaneous-resumer window only: two invocations
-    // that read the same `triggered_at` race here and exactly one wins. It does
-    // NOT close time-separated overlap, where a second resumer arrives after the
-    // winner's heartbeat has already advanced `triggered_at`, reads the fresh
-    // value, and legitimately wins its own CAS. Telling "the owner resuming
-    // itself" apart from "a foreign resumer" requires owner identity on the row
-    // — the claim_owner / lease_expires / fence_token upgrade modelled in
-    // analysis-worker.ts, which needs a migration.
+    // This closes BOTH the simultaneous-resumer window (condition 1) AND
+    // the time-separated overlap (condition 2) that the old CAS-only
+    // approach left open. Without condition 2, a second resumer arriving
+    // after the winner's heartbeat advanced triggered_at would read the
+    // fresh value and legitimately win its own CAS, producing two drivers.
+    //
+    // The 30s threshold is chosen so that:
+    //   - A healthy owner heartbeating every ~5–10s is never stale.
+    //   - A dead owner (platform ceiling, crash) becomes claimable within
+    //     30s — fast enough for the watchdog (60s interval) to pick it up.
+    const OWNERSHIP_STALENESS_SECONDS = 30;
+
     const claimed = await ctx.integrations.db.query(
       `UPDATE module_runs
        SET triggered_at = now()
        WHERE id = $1
          AND status = 'running'::module_status
          AND triggered_at IS NOT DISTINCT FROM $2::timestamptz
+         AND triggered_at < now() - interval '${OWNERSHIP_STALENESS_SECONDS} seconds'
        RETURNING id`,
       z.object({ id: z.string() }),
       [runId, observedTriggeredAt],
-      { label: "Resume run — claim ownership (CAS on triggered_at)" }
+      { label: "Resume run — claim ownership (CAS + staleness guard)" }
     );
 
     if (claimed.length === 0) {
-      // Lost the race: another driver claimed this run, or it left 'running',
-      // between the status read and this update. Yield rather than proceed —
-      // two drivers over one run is exactly what this guard exists to prevent.
-      // `in_progress` keeps the caller's poll loop intact; it re-invokes in 5s.
+      // Either lost the CAS race (simultaneous resumer) or the run's
+      // triggered_at is too fresh (active owner still heartbeating).
+      // In both cases, yield — two drivers over one run is exactly what
+      // this guard exists to prevent.
       console.warn(
-        `[pipeline] Resume CAS lost for run ${runId} — another driver holds the claim. Yielding.`
+        `[pipeline] Resume claim rejected for run ${runId} — another driver owns it or it was recently heartbeated. Yielding.`
       );
       return {
         status: "in_progress",
