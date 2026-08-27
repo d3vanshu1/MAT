@@ -36,15 +36,14 @@ const ALLOWLIST_TAGS = ["legal", "consultant_report", "cim", "ic_memo"];
 // AND the Legal DD's entity/litigation content.
 const PRIMARY_QUERY = "subsidiaries group structure trading entities parties litigation claimant defendant registered company number";
 const SECONDARY_QUERY = "parent company executive management team board";
-// Tertiary: acquisition history and FDD group-structure appendix — source for acquired_entity rows.
-// Seeds real appendix entity names and section language to rank the group-structure chunk in.
-const TERTIARY_QUERY = "subsidiaries of Southern Communications trading companies group structure organisation Glemnet Datakom Pinnacle Channel Communications Duocall business units direct indirect healthcare Ltd";
-// Regulatory content — pulls Ofcom/ICO/CQC/NHS mentions for regulator type.
-const REGULATORY_QUERY = "Ofcom ICO data protection CQC NHS England regulator regulatory compliance licence PSTN ISDN switch off approved supplier framework";
+// Tertiary: acquisition history and group-structure content — source for acquired_entity rows.
+// Generic terms only — roster pass (6b) handles dense company-name retrieval by suffix density.
+const TERTIARY_QUERY = "acquisition acquired trading companies group structure organisation business units direct indirect subsidiaries Ltd Limited";
+// Regulatory content — pulls regulator mentions for regulator type.
+const REGULATORY_QUERY = "regulator regulatory compliance licence authority statutory regime approved supplier framework";
 
 const MAX_CONTEXT_CHARS = 40_000;
 const MAX_CHUNKS_PER_QUERY = 60; // overfetch then dedupe + cap
-const APPENDIX_RESERVED_CHUNKS = 4; // guaranteed slots for group-structure appendix
 
 // ── Entity types ────────────────────────────────────────────────────
 const ENTITY_TYPES = [
@@ -188,70 +187,30 @@ export async function buildEntityManifest(
     chunkSql,
     ChunkRow,
     [dealId, REGULATORY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
-    { label: "EntityManifest: FTS regulatory (Ofcom/ICO/CQC/NHS)" },
+    { label: "EntityManifest: FTS regulatory" },
   );
 
-  // ── Dedicated appendix slot ──────────────────────────────────────
-  // Reserve APPENDIX_RESERVED_CHUNKS from the tertiary (group-structure)
-  // query so appendix content is guaranteed in context regardless of
-  // how the primary/secondary/regulatory queries fill the budget.
+  // ── Deduplicate and merge FTS results ──────────────────────────────
+  // Merge order: primary → secondary → tertiary → regulatory.
+  // Roster-density chunks are fetched separately in section 6b.
   const seen = new Set<string>();
-  const reservedChunks: z.infer<typeof ChunkRow>[] = [];
-  for (const c of tertiaryChunks) {
-    if (reservedChunks.length >= APPENDIX_RESERVED_CHUNKS) break;
-    const key = `${c.document_id}:${c.chunk_index}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      reservedChunks.push(c);
+  const allFtsChunks: z.infer<typeof ChunkRow>[] = [];
+  for (const pool of [primaryChunks, secondaryChunks, tertiaryChunks, regulatoryChunks]) {
+    for (const c of pool) {
+      const key = `${c.document_id}:${c.chunk_index}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        allFtsChunks.push(c);
+      }
     }
   }
 
-  // Fill remaining budget with primary → secondary → remaining tertiary → regulatory
-  const remainderChunks: z.infer<typeof ChunkRow>[] = [];
-  for (const c of primaryChunks) {
-    const key = `${c.document_id}:${c.chunk_index}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      remainderChunks.push(c);
-    }
-  }
-  for (const c of secondaryChunks) {
-    const key = `${c.document_id}:${c.chunk_index}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      remainderChunks.push(c);
-    }
-  }
-  // Remaining tertiary chunks (beyond the reserved set)
-  for (const c of tertiaryChunks) {
-    const key = `${c.document_id}:${c.chunk_index}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      remainderChunks.push(c);
-    }
-  }
-  for (const c of regulatoryChunks) {
-    const key = `${c.document_id}:${c.chunk_index}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      remainderChunks.push(c);
-    }
-  }
-
-  // Cap at MAX_CONTEXT_CHARS — reserved chunks first, then remainder
+  // Cap at MAX_CONTEXT_CHARS
   let totalChars = 0;
   const contextChunks: z.infer<typeof ChunkRow>[] = [];
   const markerLen = 60; // approximate marker line length
 
-  // Place reserved appendix chunks first (guaranteed in context)
-  for (const c of reservedChunks) {
-    if (totalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS) break;
-    contextChunks.push(c);
-    totalChars += c.content.length + markerLen;
-  }
-
-  // Fill remaining budget
-  for (const c of remainderChunks) {
+  for (const c of allFtsChunks) {
     if (totalChars + c.content.length + markerLen > MAX_CONTEXT_CHARS) break;
     contextChunks.push(c);
     totalChars += c.content.length + markerLen;
@@ -291,9 +250,9 @@ ENTITY TYPE DEFINITIONS:
 - subsidiary: A company currently owned by the target group.
 - acquired_entity: A company the target has acquired or is acquiring, named as a legal entity (typically ending Ltd, Limited). The group-structure appendix and acquisition history are the primary source. Emit EVERY named acquired trading entity individually as its own row. Do NOT summarise them as a count (e.g. do NOT emit "50 acquisitions" as one entity — emit each named entity separately).
 - executive: A named individual in a leadership, board, or deal team role.
-- customer: A specifically NAMED counterparty that buys from the target — a company or organisation name (e.g. "Whitley Stimpson Limited", "Celtic Leisure"). NOT a market segment, vertical, or customer class. "GP practices", "schools", "care homes", "SMEs", "Diamond customers" are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
+- customer: A specifically NAMED counterparty that buys from the target — a company or organisation name. NOT a market segment, vertical, or customer class. Generic labels like "schools", "care homes", "SMEs", or tier names are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
 - competitor: A named company that competes with the target.
-- regulator: A named government body or statutory authority with legal jurisdiction over the target's operations (e.g. Ofcom, ICO, CQC, NHS England), OR a named statutory regime the business is legally subject to. A procurement framework, a commercial supplier framework, a clinical IT system, or an integration partner is NOT a regulator. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no named statutory regulator or regime appears verbatim in the source, emit NO regulator entities. An empty regulator set is the correct and expected output when the documents do not name regulators — do not substitute frameworks, systems, or deal parties to fill it.
+- regulator: A named government body or statutory authority with legal jurisdiction over the target's operations, OR a named statutory regime the business is legally subject to. A procurement framework, a commercial supplier framework, a clinical IT system, or an integration partner is NOT a regulator. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no named statutory regulator or regime appears verbatim in the source, emit NO regulator entities. An empty regulator set is the correct and expected output when the documents do not name regulators — do not substitute frameworks, systems, or deal parties to fill it.
 - adviser: A professional services firm engaged on the transaction — financial/legal/commercial due diligence, investment banks, M&A advisers. Examples of the kind: a vendor DD accountant, a commercial DD consultancy, a sell-side bank.
 - counterparty: A financing party, lender, investor, prior owner, or competing bidder connected to the deal but not a customer, competitor, or adviser.
 
@@ -459,94 +418,107 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
     survivors.push(entity);
   }
 
-  // ── 6b. TARGETED APPENDIX PASS — acquire subsidiary names from org chart ──
-  // The main extraction works from prose; the FDD group-structure appendix is
-  // a dense org chart with ~25 trading entity names that prose extraction skips.
-  // This pass runs a second LLM call against ONLY the appendix chunks, then
-  // gates and deduplicates against the main pass survivors.
+  // ── 6b. ROSTER PASS — recover entity names from high-density company-name chunks ──
+  // Dense roster chunks (org charts, company schedules, guarantor lists) contain
+  // many company names that prose extraction misses because the names appear in
+  // list/table form rather than narrative sentences. This pass identifies roster
+  // chunks by a deal-agnostic structural signal: company-suffix token density
+  // (count of Ltd/Limited/plc/PLC/Pty word-boundary tokens per chunk). Chunks
+  // with high suffix density are entity rosters regardless of the deal. If no
+  // chunk exceeds the minimum floor, the pass silently produces nothing.
   //
-  // Direct content-based retrieval: the FTS queries use websearch_to_tsquery
-  // which ANDs all terms — appendix chunks don't contain all terms so they
-  // never rank. Instead, fetch them by ILIKE on distinctive section headers.
-  const AppendixChunkRow = z.object({
+  // The signal follows the same tokenize-count-ratio pattern as
+  // bss-chunk-quality.ts classifyTable (numeric-token ratio), applied here to
+  // company-suffix tokens instead.
+
+  // Minimum suffix count for a chunk to qualify as a roster candidate.
+  // Calibrated: prose chunks typically have 0-5 suffix tokens; roster/schedule
+  // chunks have 15+. Floor of 10 sits in the gap.
+  const ROSTER_SUFFIX_FLOOR = 10;
+  const ROSTER_MAX_CHUNKS = 6;
+
+  // Fetch the top suffix-density chunks from consultant_report documents.
+  // This is a direct SQL query — not FTS — so it does not depend on term overlap.
+  // The suffix counting is done in Postgres via regexp_matches for efficiency,
+  // then the top N are returned. No deal-specific strings anywhere.
+  const RosterChunkRow = z.object({
     document_id: z.string(),
     chunk_index: z.coerce.number(),
     file_name: z.string(),
     content: z.string(),
+    suffix_count: z.coerce.number(),
   });
 
-  const directAppendixChunks = await db.query(
+  const rosterCandidates = await db.query(
     `SELECT dc.document_id,
             dc.chunk_index,
             dc.file_name,
-            dc.content
+            dc.content,
+            (SELECT count(*)::int
+               FROM regexp_matches(dc.content, '\\m(Ltd|Limited|plc|PLC|Pty)\\M', 'g')
+            ) AS suffix_count
        FROM document_chunks dc
        JOIN documents d ON d.id = dc.document_id
       WHERE dc.deal_id = $1::uuid
         AND d.deal_id  = $1::uuid
         AND d.document_tag = ANY($2::text[])
-        AND (   dc.content ILIKE '%subsidiaries of Southern%'
-             OR dc.content ILIKE '%Direct BUs%')
-      ORDER BY dc.chunk_index ASC
-      LIMIT 4`,
-    AppendixChunkRow,
-    [dealId, ["consultant_report"]],
-    { label: "EntityManifest: direct appendix chunk fetch" },
+      ORDER BY suffix_count DESC
+      LIMIT $3`,
+    RosterChunkRow,
+    [dealId, ALLOWLIST_TAGS, ROSTER_MAX_CHUNKS],
+    { label: "EntityManifest: roster candidate fetch by suffix density" },
   );
 
-  // Merge directly-fetched appendix chunks into contextChunks + chunksByDocId
-  // so the fabrication gate can verify names against them.
-  for (const ac of directAppendixChunks) {
-    const key = `${ac.document_id}:${ac.chunk_index}`;
+  // Filter to chunks above the suffix floor
+  const rosterChunks = rosterCandidates.filter(
+    (c: z.infer<typeof RosterChunkRow>) => c.suffix_count >= ROSTER_SUFFIX_FLOOR,
+  );
+
+  // Merge roster chunks into contextChunks + chunksByDocId so the
+  // fabrication gate can verify names against them.
+  for (const rc of rosterChunks) {
+    const key = `${rc.document_id}:${rc.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
-      const chunkWithRank = { ...ac, rank: 0 };
+      const chunkWithRank = { ...rc, rank: 0 };
       contextChunks.push(chunkWithRank);
-      if (!chunksByDocId.has(ac.document_id)) {
-        chunksByDocId.set(ac.document_id, []);
+      if (!chunksByDocId.has(rc.document_id)) {
+        chunksByDocId.set(rc.document_id, []);
       }
-      chunksByDocId.get(ac.document_id)!.push(ac.content);
+      chunksByDocId.get(rc.document_id)!.push(rc.content);
     }
   }
-
-  // Now filter contextChunks for appendix content (will include the directly-fetched ones)
-  const appendixChunks = contextChunks.filter(
-    (c) =>
-      c.content.includes("subsidiaries of Southern") ||
-      c.content.includes("Group structure (2 of 2)") ||
-      (c.content.includes("Direct BUs") && c.content.includes("Indirect BUs")),
-  );
 
   let appendixTokensIn = 0;
   let appendixTokensOut = 0;
   let appendixExtracted = 0;
   let appendixDropped = 0;
 
-  if (appendixChunks.length > 0) {
-    const appendixContext = appendixChunks
-      .map((c) => `[DOC_ID: ${c.document_id} | FILE: ${c.file_name}]\n${c.content}`)
+  if (rosterChunks.length > 0) {
+    const rosterContext = rosterChunks
+      .map((c: z.infer<typeof RosterChunkRow>) => `[DOC_ID: ${c.document_id} | FILE: ${c.file_name}]\n${c.content}`)
       .join("\n\n---\n\n");
 
-    const appendixSystemPrompt = `You are an entity extraction specialist. The following text is a group-structure / organisation chart listing the trading subsidiaries and acquired entities of a target company group.
+    const rosterSystemPrompt = `You are an entity extraction specialist. The following text contains company roster sections — group-structure charts, company schedules, guarantor lists, or registration tables from due diligence documents.
 
-Each name is a separate acquired or subsidiary entity. Extract every distinct company name (typically ending Ltd, Limited, Pty Ltd, or similar) as an acquired_entity.
+Each distinct company name is a separate entity. Extract every distinct company name (typically ending Ltd, Limited, Pty Ltd, plc, or similar) as an acquired_entity.
 
-This is a list or org-chart, not prose — do not expect sentences or "acquired" framing around each name. Each named company is its own entity.
+These sections are lists or tables, not prose — do not expect sentences or "acquired" framing around each name. Each named company is its own entity.
 
 RULES:
 1. entity_type must be "acquired_entity" for every extracted entity.
 2. legal_name must be the company name EXACTLY as it appears in the text. Copy character-for-character. Do not add or remove "Ltd"/"Limited".
 3. source_document_id must be the exact DOC_ID from the marker line.
 4. verbatim_snippet: a short passage from the text near where the name appears (advisory — system will verify).
-5. role: brief description (e.g. "trading subsidiary", "direct business unit", "healthcare vertical entity").
-6. rank_signal: include any stated classification (e.g. {"category": "Direct BU"} or {"category": "Healthcare"}) if apparent from the layout, else null.
-7. Do not include holding companies (e.g. "Southern Communications Holdings Limited", "Saint Topco Limited", "Saint Bidco Limited", "Southern Communications Investments Limited", "Southern Communications EBT Newco Limited") — only trading/operational entities.
-8. Do not include the parent group name itself (e.g. "Southern Communications Group Limited").
+5. role: brief description (e.g. "trading subsidiary", "group company", "guarantor entity").
+6. rank_signal: include any stated classification or company number if apparent (e.g. {"company_number": "04236743"} or {"category": "Direct BU"}), else null.
+7. Do not include holding companies, topco/bidco/newco SPVs, or investment vehicles — only trading/operational entities. Indicators of non-trading entities: names containing "Holdings", "Investments", "Topco", "Bidco", "Newco", "EBT", or entities described as dormant/non-trading.
+8. Do not include the parent group name itself.
 9. Do not duplicate — emit each company once even if it appears in multiple places.
 
 Return ONLY a JSON array. No markdown, no explanation.`;
 
-    const appendixUserPrompt = `Extract all named trading entities from this group-structure appendix:\n\n${appendixContext}`;
+    const rosterUserPrompt = `Extract all named trading entities from these company roster sections:\n\n${rosterContext}`;
 
     try {
       const appendixLlmResult = await claude.apiRequest(
@@ -556,12 +528,12 @@ Return ONLY a JSON array. No markdown, no explanation.`;
           body: {
             model: MODEL,
             max_tokens: 4096,
-            system: appendixSystemPrompt,
-            messages: [{ role: "user", content: appendixUserPrompt }],
+            system: rosterSystemPrompt,
+            messages: [{ role: "user", content: rosterUserPrompt }],
           },
         },
         { response: AnthropicResponse },
-        { label: "EntityManifest: appendix subsidiary extraction" },
+        { label: "EntityManifest: roster pass entity extraction" },
       );
 
       appendixTokensIn = appendixLlmResult.usage.input_tokens;
@@ -618,7 +590,7 @@ Return ONLY a JSON array. No markdown, no explanation.`;
               legal_name: entity.legal_name,
               entity_type: "acquired_entity",
               source_document_id: entity.source_document_id,
-              reason: `appendix pass: legal_name not present in any retrieved chunk`,
+              reason: `roster pass: legal_name not present in any retrieved chunk`,
             });
             continue;
           }
@@ -639,24 +611,24 @@ Return ONLY a JSON array. No markdown, no explanation.`;
             };
           }
 
-          // Tag as appendix-sourced for diagnostics
+          // Tag as roster-pass-sourced for diagnostics
           const sig =
             entity.rank_signal && typeof entity.rank_signal === "object"
               ? { ...(entity.rank_signal as Record<string, unknown>) }
               : {};
-          entity.rank_signal = { ...sig, appendix_pass: true };
+          entity.rank_signal = { ...sig, roster_pass: true };
 
           survivors.push(entity);
           existingNames.add(entity.legal_name.toLowerCase());
         }
       }
     } catch (err: any) {
-      // Non-fatal: appendix pass failure should not block the main extraction
+      // Non-fatal: roster pass failure should not block the main extraction
       dropped.push({
-        legal_name: "[appendix_pass_error]",
+        legal_name: "[roster_pass_error]",
         entity_type: "acquired_entity",
         source_document_id: "",
-        reason: `Appendix LLM call failed: ${err.message?.slice(0, 200)}`,
+        reason: `Roster LLM call failed: ${err.message?.slice(0, 200)}`,
       });
     }
   }
@@ -733,9 +705,9 @@ Return ONLY a JSON array. No markdown, no explanation.`;
     `context: ${contextChunks.length} chunks / ${totalChars} chars`,
     `tokens: in=${llmResult.usage.input_tokens} out=${llmResult.usage.output_tokens}`,
   ];
-  if (appendixChunks.length > 0) {
+  if (rosterChunks.length > 0) {
     messageParts.push(
-      `appendix: ${appendixChunks.length} chunks, ${appendixExtracted} extracted, ${appendixDropped} dropped, tokens: in=${appendixTokensIn} out=${appendixTokensOut}`,
+      `roster: ${rosterChunks.length} chunks (suffix≥${ROSTER_SUFFIX_FLOOR}), ${appendixExtracted} extracted, ${appendixDropped} dropped, tokens: in=${appendixTokensIn} out=${appendixTokensOut}`,
     );
   }
   const message = messageParts.join(" | ");
