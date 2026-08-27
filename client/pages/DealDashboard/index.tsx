@@ -11,7 +11,7 @@ import { CHUNK_CHARS, CHUNK_CONCURRENCY, EXTRACTION_MODEL, isSpreadsheetFile } f
 import { getExtractionsForModule } from "@/lib/chunkRouting";
 import type { TaggedExtraction } from "@/lib/chunkRouting";
 import type { Document, DocumentTag, DocumentSource } from "@/types/document";
-import type { ModuleRun, ModuleStatus } from "@/types/module";
+import type { ModuleRun, ModuleStatus, ModuleOutput, Finding } from "@/types/module";
 import type { AnalysisProgress } from "@/components/ic/modules/ModuleGrid";
 
 import Sidebar from "@/components/ic/layout/Sidebar";
@@ -20,8 +20,112 @@ import StatsRow from "@/components/ic/stats/StatsRow";
 import AlertBanner from "@/components/ic/alerts/AlertBanner";
 import ModuleGrid from "@/components/ic/modules/ModuleGrid";
 import RunAllModal from "@/components/ic/modules/RunAllModal";
-import BssResultsPanel from "@/components/ic/modules/BssResultsPanel";
-import type { BssFinding, BssFunnel } from "@/components/ic/modules/BssResultsPanel";
+// BSS v2 — lightweight types matching BssGetFindings API output (no UI dependency)
+interface BssFinding {
+  candidate_id: string;
+  pass_type: string;
+  failure_mode: string;
+  implied_assumption: string;
+  hypothesis: string;
+  rationale: string | null;
+  adjudicated_verdict: string | null;
+  adjudication_quote: string | null;
+  adjudication_reason: string | null;
+  thesis_hit: boolean | null;
+  latest_memo_hit: boolean | null;
+  gate: string | null;
+  reason: string | null;
+}
+interface BssFunnel {
+  totalCandidates: number;
+  findings: number;
+  droppedCovered: number;
+  droppedNoDependency: number;
+}
+
+/** Convert BSS findings + funnel into the standard ModuleOutput shape used by ModuleCard / ModuleOutput. */
+function bssToModuleOutput(
+  findings: BssFinding[],
+  funnel: BssFunnel,
+  dealId: string,
+): ModuleOutput {
+  const findingsCount = findings.length;
+
+  // Build executive header — mirrors tone of other modules
+  const headerParts = [`Blind Spot Scan — ${funnel.totalCandidates} candidate assumptions evaluated.`];
+  if (findingsCount === 0) {
+    headerParts.push("No material blind spots identified.");
+  } else {
+    headerParts.push(`${findingsCount} blind spot${findingsCount > 1 ? "s" : ""} surfaced for IC attention.`);
+  }
+  headerParts.push(
+    `${funnel.droppedCovered} candidates already covered in diligence; ${funnel.droppedNoDependency} assessed as non-material.`,
+  );
+
+  // Map BSS findings → standard Finding[]
+  const standardFindings: Finding[] = findings.map((f) => {
+    const analysisLines: string[] = [];
+    analysisLines.push(`**Failure mode:** ${f.failure_mode}`);
+    analysisLines.push(`**Hypothesis:** ${f.hypothesis}`);
+    if (f.rationale) analysisLines.push(`**Rationale:** ${f.rationale}`);
+    if (f.adjudicated_verdict) analysisLines.push(`**Adjudication:** ${f.adjudicated_verdict}`);
+    if (f.adjudication_quote) analysisLines.push(`> ${f.adjudication_quote}`);
+    if (f.adjudication_reason) analysisLines.push(`**Reason:** ${f.adjudication_reason}`);
+
+    return {
+      severity: "critical" as const,
+      title: f.implied_assumption,
+      detail: f.adjudicated_verdict
+        ? `${f.adjudicated_verdict}${f.adjudication_quote ? " — " + f.adjudication_quote : ""}`
+        : f.failure_mode,
+      full_analysis: analysisLines.join("\n\n"),
+      source_docs: [],
+    };
+  });
+
+  // Build full-report markdown
+  const reportLines: string[] = [
+    "# Blind Spot Scan Report",
+    "",
+    `**Candidates evaluated:** ${funnel.totalCandidates}`,
+    `**Findings surfaced:** ${findingsCount}`,
+    `**Dropped (already covered):** ${funnel.droppedCovered}`,
+    `**Dropped (non-material):** ${funnel.droppedNoDependency}`,
+    "",
+    "---",
+    "",
+    "> **Caveat — missing adviser workstreams:** This scan did not have access to adviser reports (e.g. EQTR, Hakluyt, Kolayo). Findings that overlap with those workstreams may be flagged here but already addressed in the full diligence package.",
+    "",
+    "> **Caveat — absence-based reasoning:** Some findings are based on the *absence* of discussion in the available materials. Absence does not confirm a gap; the topic may be covered in documents not provided.",
+    "",
+  ];
+  if (findingsCount > 0) {
+    reportLines.push("## Findings", "");
+    findings.forEach((f, i) => {
+      reportLines.push(`### ${i + 1}. ${f.implied_assumption}`);
+      reportLines.push("");
+      reportLines.push(`**Pass type:** ${f.pass_type}`);
+      reportLines.push(`**Failure mode:** ${f.failure_mode}`);
+      reportLines.push(`**Hypothesis:** ${f.hypothesis}`);
+      if (f.rationale) reportLines.push(`**Rationale:** ${f.rationale}`);
+      if (f.adjudicated_verdict) reportLines.push(`**Adjudication:** ${f.adjudicated_verdict}`);
+      if (f.adjudication_quote) reportLines.push(`> ${f.adjudication_quote}`);
+      if (f.adjudication_reason) reportLines.push(`**Reason:** ${f.adjudication_reason}`);
+      reportLines.push("");
+    });
+  } else {
+    reportLines.push("## No Findings", "", "All candidates were either already covered in the diligence materials or assessed as non-material.", "");
+  }
+
+  return {
+    id: `bss-output-${dealId}`,
+    module_run_id: `bss-v2-${dealId}`,
+    executive_header: headerParts.join(" "),
+    findings: standardFindings,
+    full_report_markdown: reportLines.join("\n"),
+    created_at: new Date().toISOString(),
+  };
+}
 
 import RerunSuggestionModal from "@/components/ic/modules/RerunSuggestionModal";
 import RunHistory from "@/components/ic/modules/RunHistory";
@@ -357,11 +461,12 @@ export default function DealDashboardPage() {
     return { findings: bssCachedData.findings as BssFinding[], funnel };
   }, [bssOverride, bssCachedData]);
 
-  // Sync module status when bssResults becomes available
+  // Sync module status when bssResults becomes available — populate standard latestOutput
   useEffect(() => {
     if (!dealId || !bssResults) return;
     setStatuses((prev) => {
       if (prev.blind_spot_scanner?.latestRun?.status === "completed") return prev;
+      const output = bssToModuleOutput(bssResults.findings, bssResults.funnel, dealId);
       return {
         ...prev,
         blind_spot_scanner: {
@@ -377,7 +482,7 @@ export default function DealDashboardPage() {
             findings_count: bssResults.findings.length,
             critical_count: bssResults.findings.length,
           },
-          latestOutput: null,
+          latestOutput: output,
         },
       };
     });
@@ -1965,7 +2070,8 @@ export default function DealDashboardPage() {
             const bssFindings = findingsData.findings as BssFinding[];
             const bssFunnel = findingsData.funnel as BssFunnel;
             setBssOverride({ findings: bssFindings, funnel: bssFunnel });
-            // Update module status to completed
+            // Update module status to completed — populate standard latestOutput
+            const bssOutput = bssToModuleOutput(bssFindings, bssFunnel, dealId);
             setStatuses((prev) => ({
               ...prev,
               blind_spot_scanner: {
@@ -1981,7 +2087,7 @@ export default function DealDashboardPage() {
                   findings_count: bssFindings.length,
                   critical_count: bssFindings.length, // all BSS findings are critical-tier
                 },
-                latestOutput: null, // BSS v2 renders via BssResultsPanel, not ModuleOutput
+                latestOutput: bssOutput,
               },
             }));
             toast.success("Blind Spot Scanner complete!");
@@ -3013,14 +3119,6 @@ export default function DealDashboardPage() {
             onViewHistory={setHistoryModule}
             disableAnalysis={!canRunAnalysis}
             disableReason={runDisabledReason}
-            slotAfter={bssResults ? {
-              blind_spot_scanner: (
-                <BssResultsPanel
-                  findings={bssResults.findings}
-                  funnel={bssResults.funnel}
-                />
-              ),
-            } : undefined}
           />
 
           <QAPanel

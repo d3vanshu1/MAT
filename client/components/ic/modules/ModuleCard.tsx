@@ -182,20 +182,6 @@ export default function ModuleCard({
           </div>
         )}
 
-        {/* Completed state — external renderer (BSS v2 uses BssResultsPanel) */}
-        {isComplete && !hasOutput && (
-          <div className="flex items-center gap-2">
-            <ICButton variant="ghost" size="sm" onClick={onRun} disabled={isRunning || disabled}>
-              {isRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-              {isRunning ? "Running…" : "Re-run"}
-            </ICButton>
-            <ICButton variant="ghost" size="sm" onClick={onViewHistory}>
-              <History className="w-3.5 h-3.5" />
-              History
-            </ICButton>
-          </div>
-        )}
-
         {/* Completed state — with inline output */}
         {isComplete && hasOutput && (
           <div className="space-y-3">
