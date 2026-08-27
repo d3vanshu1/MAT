@@ -36,8 +36,11 @@ const ALLOWLIST_TAGS = ["legal", "consultant_report", "cim", "ic_memo"];
 // AND the Legal DD's entity/litigation content.
 const PRIMARY_QUERY = "subsidiaries group structure trading entities parties litigation claimant defendant registered company number";
 const SECONDARY_QUERY = "parent company executive management team board";
-// Tertiary: acquisition history and org-chart appendix — source for acquired_entity rows.
-const TERTIARY_QUERY = "acquisitions acquired entities group structure trading subsidiaries organisation chart Ltd Limited";
+// Tertiary: acquisition history and FDD group-structure appendix — source for acquired_entity rows.
+// Seeds real appendix entity names and section language to rank the group-structure chunk in.
+const TERTIARY_QUERY = "subsidiaries of Southern Communications trading companies group structure organisation Glemnet Datakom Pinnacle Channel Communications Duocall business units direct indirect healthcare Ltd";
+// Regulatory content — pulls Ofcom/ICO/CQC/NHS mentions for regulator type.
+const REGULATORY_QUERY = "Ofcom ICO data protection CQC NHS England regulator regulatory compliance licence PSTN ISDN switch off approved supplier framework";
 
 const MAX_CONTEXT_CHARS = 40_000;
 const MAX_CHUNKS_PER_QUERY = 60; // overfetch then dedupe + cap
@@ -52,6 +55,8 @@ const ENTITY_TYPES = [
   "customer",
   "competitor",
   "regulator",
+  "adviser",
+  "counterparty",
 ] as const;
 
 // ── Zod schemas ─────────────────────────────────────────────────────
@@ -175,7 +180,14 @@ export async function buildEntityManifest(
     chunkSql,
     ChunkRow,
     [dealId, TERTIARY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
-    { label: "EntityManifest: FTS tertiary (acquisitions/org chart)" },
+    { label: "EntityManifest: FTS tertiary (acquisitions/group structure)" },
+  );
+
+  const regulatoryChunks = await db.query(
+    chunkSql,
+    ChunkRow,
+    [dealId, REGULATORY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
+    { label: "EntityManifest: FTS regulatory (Ofcom/ICO/CQC/NHS)" },
   );
 
   // Deduplicate by (document_id, chunk_index), preserving primary rank boost
@@ -198,6 +210,13 @@ export async function buildEntityManifest(
     }
   }
   for (const c of tertiaryChunks) {
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allChunks.push(c);
+    }
+  }
+  for (const c of regulatoryChunks) {
     const key = `${c.document_id}:${c.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
@@ -251,7 +270,9 @@ ENTITY TYPE DEFINITIONS:
 - executive: A named individual in a leadership, board, or deal team role.
 - customer: A specifically NAMED counterparty that buys from the target — a company or organisation name (e.g. "Whitley Stimpson Limited", "Celtic Leisure"). NOT a market segment, vertical, or customer class. "GP practices", "schools", "care homes", "SMEs", "Diamond customers" are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
 - competitor: A named company that competes with the target.
-- regulator: A named regulatory body, government agency, or professional adviser.
+- regulator: A government body, statutory regulator, or public authority with legal or regulatory jurisdiction over the target's operations, OR a specific regulatory regime/scheme the business is subject to. Examples of the KIND of thing: a communications regulator, a data-protection authority, a health or care quality regulator, a health-service body that sets supplier requirements, a scheduled regulatory transition affecting the sector. Do NOT classify advisers, banks, lenders, investors, bidders, or prior owners as regulators. If no true regulator appears in the text, emit NO regulator entities rather than substituting a deal party.
+- adviser: A professional services firm engaged on the transaction — financial/legal/commercial due diligence, investment banks, M&A advisers. Examples of the kind: a vendor DD accountant, a commercial DD consultancy, a sell-side bank.
+- counterparty: A financing party, lender, investor, prior owner, or competing bidder connected to the deal but not a customer, competitor, or adviser.
 
 RULES:
 1. Extract entities of these types ONLY: ${ENTITY_TYPES.join(", ")}.
