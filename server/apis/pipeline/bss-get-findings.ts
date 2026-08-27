@@ -3,7 +3,7 @@
  *
  * Called once when the orchestrator returns 'done'. Returns:
  * - findings: candidates whose disposition.outcome = 'finding'
- * - funnel: total candidates, findings, dropped_covered, dropped_no_dependency
+ * - funnel: total candidates, findings, dropped_covered, dropped_not_relied_upon
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 
@@ -58,7 +58,7 @@ export default api({
       totalCandidates: z.number(),
       findings: z.number(),
       droppedCovered: z.number(),
-      droppedNoDependency: z.number(),
+      droppedNotReliedUpon: z.number(),
     }),
   }),
 
@@ -128,7 +128,7 @@ export default api({
         totalCandidates,
         findings: funnelMap["finding"] ?? 0,
         droppedCovered: funnelMap["dropped_covered"] ?? 0,
-        droppedNoDependency: funnelMap["dropped_no_dependency"] ?? 0,
+        droppedNotReliedUpon: (funnelMap["dropped_not_relied_upon"] ?? 0) + (funnelMap["dropped_no_dependency"] ?? 0),
       },
     };
   },

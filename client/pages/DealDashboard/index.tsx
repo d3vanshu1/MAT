@@ -40,7 +40,7 @@ interface BssFunnel {
   totalCandidates: number;
   findings: number;
   droppedCovered: number;
-  droppedNoDependency: number;
+  droppedNotReliedUpon: number;
 }
 
 /** Convert BSS findings + funnel into the standard ModuleOutput shape used by ModuleCard / ModuleOutput. */
@@ -59,7 +59,7 @@ function bssToModuleOutput(
     headerParts.push(`${findingsCount} blind spot${findingsCount > 1 ? "s" : ""} surfaced for IC attention.`);
   }
   headerParts.push(
-    `${funnel.droppedCovered} candidates already covered in diligence; ${funnel.droppedNoDependency} assessed as non-material.`,
+    `${funnel.droppedCovered} candidates already covered in diligence; ${funnel.droppedNotReliedUpon} assessed as thesis-independent.`,
   );
 
   // Map BSS findings → standard Finding[]
@@ -90,7 +90,7 @@ function bssToModuleOutput(
     `**Candidates evaluated:** ${funnel.totalCandidates}`,
     `**Findings surfaced:** ${findingsCount}`,
     `**Dropped (already covered):** ${funnel.droppedCovered}`,
-    `**Dropped (non-material):** ${funnel.droppedNoDependency}`,
+    `**Dropped (thesis-independent):** ${funnel.droppedNotReliedUpon}`,
     "",
     "---",
     "",

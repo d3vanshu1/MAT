@@ -42,7 +42,7 @@ export interface BssFunnel {
   totalCandidates: number;
   findings: number;
   droppedCovered: number;
-  droppedNoDependency: number;
+  droppedNotReliedUpon: number;
 }
 
 interface BssResultsPanelProps {
@@ -57,7 +57,7 @@ const SUSPECT_WORKSTREAMS = ["EQTR", "Hakluyt", "Kolayo"];
 export default function BssResultsPanel({ findings, funnel }: BssResultsPanelProps) {
   const [showDrops, setShowDrops] = useState(false);
 
-  const totalDropped = funnel.droppedCovered + funnel.droppedNoDependency;
+  const totalDropped = funnel.droppedCovered + funnel.droppedNotReliedUpon;
 
   return (
     <div className="space-y-5">
@@ -71,7 +71,7 @@ export default function BssResultsPanel({ findings, funnel }: BssResultsPanelPro
           <FunnelCell label="Candidates" value={funnel.totalCandidates} color="text-ic-muted" />
           <FunnelCell label="Findings" value={funnel.findings} color="text-ic-coral" />
           <FunnelCell label="Covered" value={funnel.droppedCovered} color="text-ic-turquoise" />
-          <FunnelCell label="No dependency" value={funnel.droppedNoDependency} color="text-ic-muted" />
+          <FunnelCell label="Thesis-independent" value={funnel.droppedNotReliedUpon} color="text-ic-muted" />
         </div>
 
         {/* Collapsed drops detail */}
@@ -92,9 +92,9 @@ export default function BssResultsPanel({ findings, funnel }: BssResultsPanelPro
                   addressed in the diligence materials.
                 </p>
                 <p>
-                  <strong className="text-ic-muted">{funnel.droppedNoDependency}</strong> dropped as{" "}
-                  <em>no dependency</em> — the thesis does not depend on these assumptions being
-                  true, so their absence is non-material.
+                  <strong className="text-ic-muted">{funnel.droppedNotReliedUpon}</strong> dropped as{" "}
+                  <em>thesis-independent</em> — the thesis does not rely on these assumptions,
+                  so their absence is non-material.
                 </p>
               </div>
             )}
