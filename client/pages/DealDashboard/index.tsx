@@ -340,6 +340,47 @@ export default function DealDashboardPage() {
   const bssOwnerTokenRef = useRef<string | null>(null);
   const [bssResults, setBssResults] = useState<{ findings: BssFinding[]; funnel: BssFunnel } | null>(null);
 
+  // BSS v2 — load findings on mount if pipeline already completed (survives refresh)
+  const bssMountChecked = useRef(false);
+  useEffect(() => {
+    if (!dealId || bssMountChecked.current || bssResults) return;
+    bssMountChecked.current = true;
+    (async () => {
+      try {
+        const result = await bssGetFindingsApi({ dealId });
+        if (!result) return;
+        const findings = result.findings as BssFinding[];
+        const funnel = result.funnel as BssFunnel;
+        // Only populate if there are actual candidates (pipeline ran)
+        if (funnel.totalCandidates > 0) {
+          setBssResults({ findings, funnel });
+          // Also set module status so the card shows completed state
+          setStatuses((prev) => ({
+            ...prev,
+            blind_spot_scanner: {
+              moduleId: "blind_spot_scanner",
+              latestRun: {
+                id: `bss-v2-${dealId}`,
+                deal_id: dealId,
+                module_id: "blind_spot_scanner",
+                status: "completed",
+                triggered_at: new Date().toISOString(),
+                completed_at: new Date().toISOString(),
+                documents_included: [],
+                findings_count: findings.length,
+                critical_count: findings.length,
+              },
+              latestOutput: null,
+            },
+          }));
+        }
+      } catch (err) {
+        // Non-critical — if BSS hasn't run yet, BssGetFindings returns empty
+        console.warn("[BSS] Mount check failed:", err);
+      }
+    })();
+  }, [dealId, bssResults, bssGetFindingsApi, setStatuses]);
+
   const completedModules = useMemo(
     () =>
       Object.entries(statuses)
