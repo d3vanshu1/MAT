@@ -169,6 +169,7 @@ import EroTestEntityManifest from './pipeline/ero-test-entity-manifest.js';
 import EroTestDealProfile from './pipeline/ero-test-deal-profile.js';
 import EroDiagPhase2Export from './pipeline/ero-diag-phase2-export.js';
 import EroPurgeDealState from './pipeline/ero-purge-deal-state.js';
+import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import BssGetFindings from './pipeline/bss-get-findings.js';
 import PromoteClaimsLedger from './pipeline/promote-claims-ledger.js';
 import BuildStructuralProfile from './pipeline/bss-profile.js';
@@ -276,7 +277,7 @@ const apis = {
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
   DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query, DiagSnippetMatchHarness,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, RunMigration030, RunMigration031, RunMigration032, RunMigration033, RunMigration034, RunMigration035, PromoteClaimsLedger, BssRunPipeline, BssGetFindings, BuildStructuralProfile, BssGenerateBlindCandidates, BssAbsenceSweep, BssLlmAdjudication, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate, DiagResumeCcRun, DiagTestResumeQuery, DiagDeleteCheckpointRow, PreserveArtifactSnapshot,
   // ERO v2 pipeline
-  EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState,
+  EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

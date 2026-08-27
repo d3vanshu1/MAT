@@ -17,6 +17,7 @@ import {
 } from "./ero-stage-contract.js";
 import { buildEntityManifest } from "./ero-entity-manifest.js";
 import { buildDealProfile } from "./ero-deal-profile.js";
+import { generateHypotheses } from "./ero-hypotheses.js";
 
 // ── Integration ─────────────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -47,7 +48,7 @@ function makeStub(stage: EroStageName): StageHandler {
 const DISPATCH: Record<EroStageName, StageHandler> = {
   build_entity_manifest: (ctx, runId, dealId) => buildEntityManifest(ctx, runId, dealId),
   build_deal_profile: (ctx, runId, dealId) => buildDealProfile(ctx, runId, dealId),
-  generate_hypotheses: makeStub("generate_hypotheses"),
+  generate_hypotheses: (ctx, runId, dealId) => generateHypotheses(ctx, runId, dealId),
   rank_hypotheses: makeStub("rank_hypotheses"),
   research_execution: makeStub("research_execution"),
   corpus_confrontation: makeStub("corpus_confrontation"),
