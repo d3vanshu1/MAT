@@ -20,6 +20,8 @@ import StatsRow from "@/components/ic/stats/StatsRow";
 import AlertBanner from "@/components/ic/alerts/AlertBanner";
 import ModuleGrid from "@/components/ic/modules/ModuleGrid";
 import RunAllModal from "@/components/ic/modules/RunAllModal";
+import BssResultsPanel from "@/components/ic/modules/BssResultsPanel";
+import type { BssFinding, BssFunnel } from "@/components/ic/modules/BssResultsPanel";
 
 import RerunSuggestionModal from "@/components/ic/modules/RerunSuggestionModal";
 import RunHistory from "@/components/ic/modules/RunHistory";
@@ -313,6 +315,9 @@ export default function DealDashboardPage() {
   const { run: getDocTablesSummaryApi } = useApi("GetDocTablesSummary");
   const { run: runModulePipelineApi } = useApi("RunModulePipeline");
   const { run: getRunnableRunsApi } = useApi("GetRunnableRuns");
+  // BSS v2 orchestrator
+  const { run: bssRunPipelineApi } = useApi("BssRunPipeline");
+  const { run: bssGetFindingsApi } = useApi("BssGetFindings");
 
   // Cancellation tracking — stores run IDs that have been cancelled
   const cancelledRunsRef = useRef<Set<string>>(new Set());
@@ -331,6 +336,9 @@ export default function DealDashboardPage() {
   // Fix 3 — operator-only diagnostic flag, resolved once per tab from the URL.
   // Default false. Not surfaced as a product control.
   const diagnosticOnlyRef = useRef<boolean>(readDiagnosticOnlyFromUrl());
+  // BSS v2 — owner token minted once per run, reused across all poll invocations
+  const bssOwnerTokenRef = useRef<string | null>(null);
+  const [bssResults, setBssResults] = useState<{ findings: BssFinding[]; funnel: BssFunnel } | null>(null);
 
   const completedModules = useMemo(
     () =>
@@ -1792,6 +1800,171 @@ export default function DealDashboardPage() {
   );
 
   // ---------------------------------------------------------------------------
+  // BSS v2 — orchestrator poll loop
+  // ---------------------------------------------------------------------------
+
+  /** Human-readable stage labels for BSS progress display */
+  const BSS_STAGE_LABELS: Record<string, string> = {
+    structural_profile: "Building structural profile",
+    thesis_profile: "Building thesis profile",
+    blind_pass: "Generating blind-pass candidates",
+    informed_pass: "Generating informed-pass candidates",
+    coverage_sweep: "Sweeping coverage",
+    adjudication: "Adjudicating candidates",
+  };
+
+  const runBssPipeline = useCallback(
+    async () => {
+      if (!dealId) return;
+
+      // Mint owner token ONCE per run — held in ref, reused across all poll invocations
+      const ownerToken = crypto.randomUUID();
+      bssOwnerTokenRef.current = ownerToken;
+      setBssResults(null);
+
+      pipelinePollingActive.current.add("blind_spot_scanner");
+
+      const BSS_POLL_INTERVAL_MS = 3_000;
+      const BSS_MAX_POLLS = 200; // 200 × 3s = 10 min ceiling
+      let pollCount = 0;
+      let terminal = false;
+
+      while (!terminal && pollCount < BSS_MAX_POLLS) {
+        // Always use the SAME ownerToken minted at the start — never re-mint
+        const token = bssOwnerTokenRef.current!;
+
+        let result: {
+          status: string;
+          stage: string | null;
+          nextStage: string | null;
+          itemsDone: number | null;
+          itemsTotal: number | null;
+          error: string | null;
+          elapsedMs: number;
+        };
+
+        try {
+          const raw = await bssRunPipelineApi({ dealId, ownerToken: token });
+          if (!raw) throw new Error("BssRunPipeline returned no result");
+          result = raw;
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+          const isNetwork = /failed to fetch|network|timeout|abort/i.test(msg);
+          if (isNetwork && pollCount < BSS_MAX_POLLS - 1) {
+            // Transient network error — retry after interval
+            setModuleProgress("blind_spot_scanner", {
+              message: `Connection interrupted, retrying… (${pollCount + 1})`,
+            });
+            await new Promise(r => setTimeout(r, BSS_POLL_INTERVAL_MS));
+            pollCount++;
+            continue;
+          }
+          throw err;
+        }
+
+        switch (result.status) {
+          case "advanced": {
+            const stageLabel = result.stage ? (BSS_STAGE_LABELS[result.stage] ?? result.stage) : "—";
+            const nextLabel = result.nextStage ? (BSS_STAGE_LABELS[result.nextStage] ?? result.nextStage) : "finishing";
+            setModuleProgress("blind_spot_scanner", {
+              message: `${stageLabel} ✓ — next: ${nextLabel}`,
+              detail: result.itemsDone != null && result.itemsTotal != null
+                ? { current: result.itemsDone, total: result.itemsTotal, phase: "analyzing" }
+                : null,
+            });
+            break;
+          }
+
+          case "stage_partial": {
+            const stageLabel = result.stage ? (BSS_STAGE_LABELS[result.stage] ?? result.stage) : "—";
+            setModuleProgress("blind_spot_scanner", {
+              message: `${stageLabel}… ${result.itemsDone ?? 0}/${result.itemsTotal ?? "?"}`,
+              detail: result.itemsDone != null && result.itemsTotal != null
+                ? { current: result.itemsDone, total: result.itemsTotal, phase: "analyzing" }
+                : null,
+            });
+            break;
+          }
+
+          case "owned_elsewhere": {
+            // Another tab/user owns this run — STOP, do not fight for the claim
+            terminal = true;
+            toast.warning("Blind Spot Scanner is already running in another tab or by another user.");
+            setModuleProgress("blind_spot_scanner", {
+              message: "Run owned by another session — stopped.",
+            });
+            // Mark as not running so the card doesn't show a spinner
+            setRunningModules((prev) => {
+              const next = new Set(prev);
+              next.delete("blind_spot_scanner");
+              return next;
+            });
+            pipelinePollingActive.current.delete("blind_spot_scanner");
+            return; // Exit without throw — this is not an error
+          }
+
+          case "failed": {
+            terminal = true;
+            const stageLabel = result.stage ? (BSS_STAGE_LABELS[result.stage] ?? result.stage) : "unknown";
+            throw new Error(`BSS pipeline failed at ${stageLabel}: ${result.error ?? "unknown error"}`);
+          }
+
+          case "done": {
+            terminal = true;
+            setModuleProgress("blind_spot_scanner", {
+              message: "Loading findings…",
+            });
+            // Fetch findings and funnel
+            const findingsData = await bssGetFindingsApi({ dealId });
+            if (!findingsData) throw new Error("BssGetFindings returned no result");
+            const bssFindings = findingsData.findings as BssFinding[];
+            const bssFunnel = findingsData.funnel as BssFunnel;
+            setBssResults({ findings: bssFindings, funnel: bssFunnel });
+            // Update module status to completed
+            setStatuses((prev) => ({
+              ...prev,
+              blind_spot_scanner: {
+                moduleId: "blind_spot_scanner",
+                latestRun: {
+                  id: `bss-v2-${dealId}`,
+                  deal_id: dealId,
+                  module_id: "blind_spot_scanner",
+                  status: "completed",
+                  triggered_at: new Date().toISOString(),
+                  completed_at: new Date().toISOString(),
+                  documents_included: docs.map((d) => d.file_name),
+                  findings_count: bssFindings.length,
+                  critical_count: bssFindings.length, // all BSS findings are critical-tier
+                },
+                latestOutput: null, // BSS v2 renders via BssResultsPanel, not ModuleOutput
+              },
+            }));
+            toast.success("Blind Spot Scanner complete!");
+            break;
+          }
+
+          default: {
+            console.warn(`[BSS] Unexpected status: ${result.status}`);
+            break;
+          }
+        }
+
+        if (!terminal) {
+          await new Promise(r => setTimeout(r, BSS_POLL_INTERVAL_MS));
+          pollCount++;
+        }
+      }
+
+      if (!terminal) {
+        throw new Error("BSS pipeline timed out after maximum poll attempts");
+      }
+    },
+    [dealId, bssRunPipelineApi, bssGetFindingsApi, setModuleProgress, setStatuses, docs],
+  );
+
+  // ---------------------------------------------------------------------------
   // Run single module
   // ---------------------------------------------------------------------------
 
@@ -1864,6 +2037,9 @@ export default function DealDashboardPage() {
       try {
         if (moduleId === "executive_summary") {
           await runExecutiveSummary();
+        } else if (moduleId === "blind_spot_scanner" && dealId) {
+          // BSS v2 divert — uses BssRunPipeline orchestrator instead of v1
+          await runBssPipeline();
         } else if (dealId) {
           // Server-side pipeline: survives tab closure, checkpointed
           // (web research modules now use the same server pipeline path)
@@ -2023,6 +2199,7 @@ export default function DealDashboardPage() {
       dealId,
       runStandardModule,
       runServerPipeline,
+      runBssPipeline,
       runExecutiveSummary,
       clearModuleProgress,
       getRunProgressApi,
@@ -2794,6 +2971,14 @@ export default function DealDashboardPage() {
             disableAnalysis={!canRunAnalysis}
             disableReason={runDisabledReason}
           />
+
+          {/* BSS v2 findings — shown after orchestrator completes */}
+          {bssResults && (
+            <BssResultsPanel
+              findings={bssResults.findings}
+              funnel={bssResults.funnel}
+            />
+          )}
 
           <QAPanel
             dealId={dealId!}
