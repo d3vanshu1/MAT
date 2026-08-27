@@ -511,10 +511,11 @@ RULES:
 3. source_document_id must be the exact DOC_ID from the marker line.
 4. verbatim_snippet: a short passage from the text near where the name appears (advisory — system will verify).
 5. role: brief description (e.g. "trading subsidiary", "group company", "guarantor entity").
-6. rank_signal: include any stated classification or company number if apparent (e.g. {"company_number": "04236743"} or {"category": "Direct BU"}), else null.
-7. Do not include holding companies, topco/bidco/newco SPVs, or investment vehicles — only trading/operational entities. Indicators of non-trading entities: names containing "Holdings", "Investments", "Topco", "Bidco", "Newco", "EBT", or entities described as dormant/non-trading.
-8. Do not include the parent group name itself.
-9. Do not duplicate — emit each company once even if it appears in multiple places.
+6. registration_number: if a company registration number (typically a 6-8 digit number) appears adjacent to or paired with the entity name in the roster (e.g. in a table column, after a pipe, or in parentheses), capture it exactly. If no registration number is adjacent, set to null.
+7. rank_signal: include any stated classification if apparent (e.g. {"category": "Direct BU"}), else null.
+8. Do not include holding companies, topco/bidco/newco SPVs, or investment vehicles — only trading/operational entities. Indicators of non-trading entities: names containing "Holdings", "Investments", "Topco", "Bidco", "Newco", "EBT", or entities described as dormant/non-trading.
+9. Do not include the parent group name itself.
+10. Do not duplicate — emit each company once even if it appears in multiple places.
 
 Return ONLY a JSON array. No markdown, no explanation.`;
 
@@ -527,7 +528,7 @@ Return ONLY a JSON array. No markdown, no explanation.`;
           path: "/v1/messages",
           body: {
             model: MODEL,
-            max_tokens: 4096,
+            max_tokens: 16384,
             system: rosterSystemPrompt,
             messages: [{ role: "user", content: rosterUserPrompt }],
           },
