@@ -684,7 +684,8 @@ Return ONLY a JSON array. No markdown, no explanation.`;
       `INSERT INTO ero_entities
          (run_id, entity_type, legal_name, registration_number,
           jurisdiction, role, source_document_id, verbatim_snippet, rank_signal)
-       VALUES ${valueClauses2.join(", ")}`,
+       VALUES ${valueClauses2.join(", ")}
+       ON CONFLICT (run_id, entity_type, legal_name) DO NOTHING`,
       params2,
       { label: `EntityManifest: insert ${survivors.length} entities` },
     );
