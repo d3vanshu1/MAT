@@ -346,7 +346,7 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
       continue;
     }
 
-    // Try matching against any chunk from that document
+    // Try matching against any chunk from the cited document first
     let matched = false;
     for (const chunkContent of docChunks) {
       const result = matchSnippet(chunkContent, entity.verbatim_snippet);
@@ -356,17 +356,53 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
       }
     }
 
-    if (!matched) {
-      dropped.push({
-        legal_name: entity.legal_name,
-        entity_type: entity.entity_type,
-        source_document_id: entity.source_document_id,
-        reason: `verbatim_snippet not found in any chunk of cited document`,
-      });
+    if (matched) {
+      // Cited-doc match — keep as-is
+      survivors.push(entity);
       continue;
     }
 
-    survivors.push(entity);
+    // ── Attribution repair: sweep ALL retrieved documents ──────────
+    // The model read the name from retrieved context but cited the
+    // wrong source_document_id. Search every document's chunks.
+    let repairedDocId: string | null = null;
+    for (const [docId, chunks] of chunksByDocId.entries()) {
+      if (docId === entity.source_document_id) continue; // already tried
+      for (const chunkContent of chunks) {
+        const result = matchSnippet(chunkContent, entity.verbatim_snippet);
+        if (result.matched) {
+          repairedDocId = docId;
+          break;
+        }
+      }
+      if (repairedDocId) break;
+    }
+
+    if (repairedDocId) {
+      // Found in a different document — repoint and tag as repaired
+      const originalCitedDoc = entity.source_document_id;
+      entity.source_document_id = repairedDocId;
+      const existingSignal =
+        entity.rank_signal && typeof entity.rank_signal === "object"
+          ? { ...(entity.rank_signal as Record<string, unknown>) }
+          : {};
+      entity.rank_signal = {
+        ...existingSignal,
+        attribution_repaired: true,
+        original_cited_doc: originalCitedDoc,
+      };
+      survivors.push(entity);
+      continue;
+    }
+
+    // Not found anywhere in retrieved context — genuine fabrication
+    dropped.push({
+      legal_name: entity.legal_name,
+      entity_type: entity.entity_type,
+      source_document_id: entity.source_document_id,
+      reason: `verbatim_snippet not found in any chunk of cited document`,
+    });
+    continue;
   }
 
   // ── 7. Insert surviving entities ──────────────────────────────────
