@@ -338,49 +338,50 @@ export default function DealDashboardPage() {
   const diagnosticOnlyRef = useRef<boolean>(readDiagnosticOnlyFromUrl());
   // BSS v2 — owner token minted once per run, reused across all poll invocations
   const bssOwnerTokenRef = useRef<string | null>(null);
-  const [bssResults, setBssResults] = useState<{ findings: BssFinding[]; funnel: BssFunnel } | null>(null);
+  // BSS v2 — mutable override set by the poll loop on completion; cleared on re-run
+  const [bssOverride, setBssOverride] = useState<{ findings: BssFinding[]; funnel: BssFunnel } | null>(null);
 
-  // BSS v2 — load findings on mount if pipeline already completed (survives refresh)
-  const bssLoadingRef = useRef(false);
+  // BSS v2 — load findings from DB on mount (survives refresh, HMR, tab switch)
+  const { data: bssCachedData, refetch: refetchBssFindings } = useApiData(
+    "BssGetFindings",
+    { dealId: dealId ?? "" },
+    { enabled: !!dealId, staleTime: 60_000, retry: 1 },
+  );
+
+  // Derive bssResults: poll-loop override wins, else cached query data
+  const bssResults = useMemo(() => {
+    if (bssOverride) return bssOverride;
+    if (!bssCachedData) return null;
+    const funnel = bssCachedData.funnel as BssFunnel;
+    if (funnel.totalCandidates === 0) return null; // pipeline never ran
+    return { findings: bssCachedData.findings as BssFinding[], funnel };
+  }, [bssOverride, bssCachedData]);
+
+  // Sync module status when bssResults becomes available
   useEffect(() => {
-    if (!dealId || bssResults || bssLoadingRef.current) return;
-    bssLoadingRef.current = true;
-    (async () => {
-      try {
-        const result = await bssGetFindingsApi({ dealId });
-        if (!result) return;
-        const findings = result.findings as BssFinding[];
-        const funnel = result.funnel as BssFunnel;
-        // Only populate if there are actual candidates (pipeline ran)
-        if (funnel.totalCandidates > 0) {
-          setBssResults({ findings, funnel });
-          // Also set module status so the card shows completed state
-          setStatuses((prev) => ({
-            ...prev,
-            blind_spot_scanner: {
-              moduleId: "blind_spot_scanner",
-              latestRun: {
-                id: `bss-v2-${dealId}`,
-                deal_id: dealId,
-                module_id: "blind_spot_scanner",
-                status: "completed",
-                triggered_at: new Date().toISOString(),
-                completed_at: new Date().toISOString(),
-                documents_included: [],
-                findings_count: findings.length,
-                critical_count: findings.length,
-              },
-              latestOutput: null,
-            },
-          }));
-        }
-      } catch (err) {
-        // Non-critical — if BSS hasn't run yet, BssGetFindings returns empty
-        console.warn("[BSS] Mount check failed:", err);
-        bssLoadingRef.current = false; // allow retry on next render
-      }
-    })();
-  }, [dealId, bssResults, bssGetFindingsApi, setStatuses]);
+    if (!dealId || !bssResults) return;
+    setStatuses((prev) => {
+      if (prev.blind_spot_scanner?.latestRun?.status === "completed") return prev;
+      return {
+        ...prev,
+        blind_spot_scanner: {
+          moduleId: "blind_spot_scanner",
+          latestRun: {
+            id: `bss-v2-${dealId}`,
+            deal_id: dealId,
+            module_id: "blind_spot_scanner",
+            status: "completed",
+            triggered_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+            documents_included: [],
+            findings_count: bssResults.findings.length,
+            critical_count: bssResults.findings.length,
+          },
+          latestOutput: null,
+        },
+      };
+    });
+  }, [dealId, bssResults, setStatuses]);
 
   const completedModules = useMemo(
     () =>
@@ -1862,7 +1863,7 @@ export default function DealDashboardPage() {
       // Mint owner token ONCE per run — held in ref, reused across all poll invocations
       const ownerToken = crypto.randomUUID();
       bssOwnerTokenRef.current = ownerToken;
-      setBssResults(null);
+      setBssOverride(null);
 
       pipelinePollingActive.current.add("blind_spot_scanner");
 
@@ -1963,7 +1964,7 @@ export default function DealDashboardPage() {
             if (!findingsData) throw new Error("BssGetFindings returned no result");
             const bssFindings = findingsData.findings as BssFinding[];
             const bssFunnel = findingsData.funnel as BssFunnel;
-            setBssResults({ findings: bssFindings, funnel: bssFunnel });
+            setBssOverride({ findings: bssFindings, funnel: bssFunnel });
             // Update module status to completed
             setStatuses((prev) => ({
               ...prev,
