@@ -20,7 +20,7 @@
  *   - Calls exported core functions from each stage file — no logic duplicated.
  *   - Profile/Generate: `runBuildProfileCore`, `runBssGenerateCore`
  *   - Sweep/Adjudication: `sweepOneCandidate`/`upsertOneCoverageRow`,
- *     `adjudicateAndDisposeOneCandidate` (Stages 2→3a→3b→4)
+ *     `adjudicateOneCandidate` (Stages 2→3a→3b→4)
  *
  * CONCURRENCY:
  *   - `bss_pipeline_state._lock` row with token CAS prevents concurrent runs.
@@ -32,7 +32,7 @@ import { runBuildProfileCore, type ProfileKind } from "./bss-profile.js";
 import { runBssGenerateCore } from "./bss-generate.js";
 import { sweepOneCandidate, upsertOneCoverageRow } from "./bss-absence-sweep.js";
 import {
-  adjudicateAndDisposeOneCandidate,
+  adjudicateOneCandidate,
 } from "./bss-llm-adjudication.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -605,8 +605,8 @@ async function dispatchAdjudication(
     }
 
     // Stages 2→3a→3b→4 for this candidate (retrieve, coverage LLM, dependency LLM, compose)
-    await adjudicateAndDisposeOneCandidate(
-      db, ai, cand, dealId, cand.old_verdict ?? "unknown",
+    await adjudicateOneCandidate(
+      db, ai, cand, dealId,
     );
 
     processed++;

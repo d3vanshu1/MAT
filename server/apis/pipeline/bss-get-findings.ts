@@ -3,7 +3,7 @@
  *
  * Called once when the orchestrator returns 'done'. Returns:
  * - findings: candidates whose disposition.outcome = 'finding'
- * - funnel: total candidates, findings, dropped_covered, dropped_not_relied_upon
+ * - funnel: total candidates, findings, dropped_covered, dropped_no_dependency
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 
