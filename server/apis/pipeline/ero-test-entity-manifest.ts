@@ -72,20 +72,9 @@ export default api({
       { label: "TestEntityManifest: read all entities" },
     );
 
-    // ── 4. Build dropped list from stage message ────────────────────
-    // The stage handler doesn't expose dropped[] via return value —
-    // we need to reconstruct or capture it. Since buildEntityManifest
-    // returns a StageResult (not the dropped list), we capture it by
-    // running the handler in a way that exposes it.
-    //
-    // WORKAROUND: We cannot easily get the dropped list from the handler
-    // since it only returns StageResult. We'll re-derive it from the
-    // stage message which includes the count, and note that a full
-    // dropped list would require modifying the handler signature.
-    //
-    // For now: the dropped list is empty here; the stage message carries
-    // the count. A future refactor can return it via stage metadata.
-    const dropped: DroppedEntity[] = [];
+    // ── 4. Read dropped list from stage result ──────────────────────
+    // buildEntityManifest now returns dropped[] in its result.
+    const dropped: DroppedEntity[] = stageResult?.dropped ?? [];
 
     // ── 5. Independent re-verification (belt & suspenders) ──────────
     // For every inserted entity, independently confirm the snippet is

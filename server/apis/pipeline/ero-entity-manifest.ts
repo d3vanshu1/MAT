@@ -34,6 +34,8 @@ const ALLOWLIST_TAGS = ["legal", "consultant_report", "cim", "ic_memo"];
 // AND the Legal DD's entity/litigation content.
 const PRIMARY_QUERY = "subsidiaries group structure trading entities parties litigation claimant defendant registered company number";
 const SECONDARY_QUERY = "parent company executive management team board";
+// Tertiary: acquisition history and org-chart appendix — source for acquired_entity rows.
+const TERTIARY_QUERY = "acquisitions acquired entities group structure trading subsidiaries organisation chart Ltd Limited";
 
 const MAX_CONTEXT_CHARS = 40_000;
 const MAX_CHUNKS_PER_QUERY = 60; // overfetch then dedupe + cap
@@ -115,7 +117,7 @@ export async function buildEntityManifest(
   ctx: any,
   runId: string,
   dealId: string,
-): Promise<StageResult> {
+): Promise<StageResult & { dropped?: DroppedEntity[] }> {
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
@@ -135,8 +137,8 @@ export async function buildEntityManifest(
   }
 
   // ── 2. Retrieve chunks via FTS ────────────────────────────────────
-  // Two queries: primary (group structure / subsidiaries) gets boosted,
-  // secondary (parent / executives) fills remaining budget.
+  // Three queries: primary (group structure / subsidiaries / legal parties),
+  // secondary (parent / executives), tertiary (acquisitions / org chart).
   const chunkSql = `
     WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
     SELECT dc.document_id,
@@ -167,6 +169,13 @@ export async function buildEntityManifest(
     { label: "EntityManifest: FTS secondary (parent/exec)" },
   );
 
+  const tertiaryChunks = await db.query(
+    chunkSql,
+    ChunkRow,
+    [dealId, TERTIARY_QUERY, ALLOWLIST_TAGS, MAX_CHUNKS_PER_QUERY],
+    { label: "EntityManifest: FTS tertiary (acquisitions/org chart)" },
+  );
+
   // Deduplicate by (document_id, chunk_index), preserving primary rank boost
   const seen = new Set<string>();
   const allChunks: z.infer<typeof ChunkRow>[] = [];
@@ -180,6 +189,13 @@ export async function buildEntityManifest(
     }
   }
   for (const c of secondaryChunks) {
+    const key = `${c.document_id}:${c.chunk_index}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allChunks.push(c);
+    }
+  }
+  for (const c of tertiaryChunks) {
     const key = `${c.document_id}:${c.chunk_index}`;
     if (!seen.has(key)) {
       seen.add(key);
@@ -224,6 +240,16 @@ export async function buildEntityManifest(
 
   // ── 4. LLM call ──────────────────────────────────────────────────
   const systemPrompt = `You are an entity extraction specialist for M&A due diligence. Your task is to extract every named entity from the provided document extracts that a research analyst would need to investigate.
+
+ENTITY TYPE DEFINITIONS:
+- parent: The acquiring fund, sponsor, or holding company that is buying the target.
+- target: The company being acquired (use full registered name).
+- subsidiary: A company currently owned by the target group.
+- acquired_entity: A company the target has acquired or is acquiring, named as a legal entity (typically ending Ltd, Limited). The group-structure appendix and acquisition history are the primary source. Emit EVERY named acquired trading entity individually as its own row. Do NOT summarise them as a count (e.g. do NOT emit "50 acquisitions" as one entity — emit each named entity separately).
+- executive: A named individual in a leadership, board, or deal team role.
+- customer: A specifically NAMED counterparty that buys from the target — a company or organisation name (e.g. "Whitley Stimpson Limited", "Celtic Leisure"). NOT a market segment, vertical, or customer class. "GP practices", "schools", "care homes", "SMEs", "Diamond customers" are END-MARKETS, not customers — do NOT emit these as customer entities. If the source only describes customers by segment or spend tier, emit NO customer entities rather than emitting the segment.
+- competitor: A named company that competes with the target.
+- regulator: A named regulatory body, government agency, or professional adviser.
 
 RULES:
 1. Extract entities of these types ONLY: ${ENTITY_TYPES.join(", ")}.
@@ -420,6 +446,7 @@ Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
     stage: "build_entity_manifest",
     status: "complete",
     message,
+    dropped,
   };
 }
 
