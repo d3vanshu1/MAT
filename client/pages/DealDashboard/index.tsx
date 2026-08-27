@@ -341,10 +341,10 @@ export default function DealDashboardPage() {
   const [bssResults, setBssResults] = useState<{ findings: BssFinding[]; funnel: BssFunnel } | null>(null);
 
   // BSS v2 — load findings on mount if pipeline already completed (survives refresh)
-  const bssMountChecked = useRef(false);
+  const bssLoadingRef = useRef(false);
   useEffect(() => {
-    if (!dealId || bssMountChecked.current || bssResults) return;
-    bssMountChecked.current = true;
+    if (!dealId || bssResults || bssLoadingRef.current) return;
+    bssLoadingRef.current = true;
     (async () => {
       try {
         const result = await bssGetFindingsApi({ dealId });
@@ -377,6 +377,7 @@ export default function DealDashboardPage() {
       } catch (err) {
         // Non-critical — if BSS hasn't run yet, BssGetFindings returns empty
         console.warn("[BSS] Mount check failed:", err);
+        bssLoadingRef.current = false; // allow retry on next render
       }
     })();
   }, [dealId, bssResults, bssGetFindingsApi, setStatuses]);
