@@ -22,15 +22,17 @@ import { matchSnippet } from "./bss-snippet-match.js";
 const MODEL = "claude-sonnet-4-6";
 
 // ── Retrieval config ────────────────────────────────────────────────
-// Real tags from SCG deal (Step 0 query 4).
-// Primary: consultant_report (Legal DD + Vendor FDD with group structure).
-// Secondary: cim, ic_memo.
-// Excluded: financial_model (xlsx, low entity density).
-const ALLOWLIST_TAGS = ["consultant_report", "cim", "ic_memo"];
+// legal: Legal DD — primary source of registered entity names, SPA parties,
+//   and litigation counterparties.
+// consultant_report: Vendor FDD — group-structure appendix, subsidiary names.
+// cim, ic_memo: secondary narrative sources.
+// Excluded: financial_model (xlsx, low entity density — dilutes context
+//   budget with numeric tables, not registered names).
+const ALLOWLIST_TAGS = ["legal", "consultant_report", "cim", "ic_memo"];
 
-// FTS boost queries — the group-structure / subsidiaries appendix is
-// the highest-value source for subsidiary names.
-const PRIMARY_QUERY = "subsidiaries group structure trading entities legal";
+// FTS boost queries — primary pulls both the FDD group-structure appendix
+// AND the Legal DD's entity/litigation content.
+const PRIMARY_QUERY = "subsidiaries group structure trading entities parties litigation claimant defendant registered company number";
 const SECONDARY_QUERY = "parent company executive management team board";
 
 const MAX_CONTEXT_CHARS = 40_000;
@@ -231,8 +233,9 @@ RULES:
 5. registration_number: company registration / incorporation number if stated, else null.
 6. jurisdiction: country or jurisdiction of incorporation if stated, else null.
 7. role: the entity's role in the deal context (e.g. "target parent", "trading subsidiary", "CEO", "key customer", "primary competitor").
-8. Do not invent entities. Every entity must be explicitly named in the text.
-9. Do not duplicate — if the same entity appears in multiple chunks, emit it once with the best snippet.
+8. For parent and target entities, legal_name MUST be the full registered company name as it appears in the source text (e.g. a name ending in Limited, Ltd, Holdings, plc), NOT a trading abbreviation or project shorthand. If only an abbreviation appears in the retrieved context, still copy it verbatim but set needs_registered_name to true in rank_signal (e.g. {"needs_registered_name": true}).
+9. Do not invent entities. Every entity must be explicitly named in the text.
+10. Do not duplicate — if the same entity appears in multiple chunks, emit it once with the best snippet.
 
 Return ONLY a JSON array. No markdown, no explanation, no wrapper object.`;
 
