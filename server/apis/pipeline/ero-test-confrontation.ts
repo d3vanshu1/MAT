@@ -37,6 +37,8 @@ const FindingRow = z.object({
   verdict: z.string(),
 });
 
+const CountRow = z.object({ cnt: z.coerce.number() });
+
 const CorpusCheckRow = z.object({
   check_id: z.string(),
   finding_id: z.string(),
@@ -63,6 +65,7 @@ export default api({
   input: z.object({
     runId: z.string(),
     maxFindings: z.number().optional(),
+    targetFindingId: z.string().optional(),
   }),
 
   output: z.object({
@@ -82,6 +85,7 @@ export default api({
         severity: z.string(),
         classification: z.string(),
         magnitude_downgrade: z.boolean(),
+        boilerplate_downgrade: z.boolean(),
         absence_flag: z.boolean(),
         corpus_quote: z.string().nullable(),
         corpus_quoted_value: z.string().nullable(),
@@ -103,13 +107,14 @@ export default api({
       findingsConfronted: z.number(),
       classificationDistribution: z.record(z.number()),
       understatedDowngradedCount: z.number(),
+      boilerplateDowngradedCount: z.number(),
       unknownWithHighHits: z.number(),
       consistencyPassed: z.boolean(),
       consistencyDetails: z.array(z.string()),
     }),
   }),
 
-  async run(ctx, { runId, maxFindings }) {
+  async run(ctx, { runId, maxFindings, targetFindingId }) {
     const db = ctx.integrations.ic_diligence_db;
     const cap = maxFindings ?? 3;
 
@@ -129,9 +134,7 @@ export default api({
 
     const dealId = stateRows[0].deal_id;
 
-    // ── 2. Cap findings to maxFindings ──────────────────────────────
-    // Delete corpus_checks for findings beyond the cap so the handler
-    // only processes the capped set on re-entry.
+    // ── 2. Load all findings for this run ───────────────────────────
     const allFindings = await db.query(
       `SELECT f.finding_id, f.title, f.severity, f.verdict
        FROM ero_findings f
@@ -145,12 +148,90 @@ export default api({
 
     const totalFindings = allFindings.length;
 
-    // For capping: if there are more findings than cap, we only run
-    // confrontation on the first `cap`. We do this by running the
-    // handler which already has NOT EXISTS resume logic — so if some
-    // findings already have checks, those are skipped.
-    // We limit by cleaning corpus_checks for uncapped findings only
-    // if they exist. The handler's NOT EXISTS guard handles the rest.
+    // ── 2b. Scope findings: targetFindingId or maxFindings cap ──────
+    // Delete corpus_checks for findings OUTSIDE the scope so the
+    // handler's NOT EXISTS resume guard processes only the scoped set.
+    let scopeDeletedCount = 0;
+
+    if (targetFindingId) {
+      // Single-finding mode: delete corpus_checks for every finding
+      // in this run EXCEPT the target, so only it gets processed.
+      const othersIds = allFindings
+        .filter((f) => f.finding_id !== targetFindingId)
+        .map((f) => f.finding_id);
+
+      if (othersIds.length > 0) {
+        // Also delete existing checks for the TARGET so it re-runs
+        await db.execute(
+          `DELETE FROM ero_corpus_checks
+           WHERE finding_id = $1`,
+          [targetFindingId],
+          { label: "TestConfrontation: clear target finding checks for re-run" },
+        );
+      }
+
+      // Insert sentinel corpus_checks for all OTHER findings so the
+      // handler's NOT EXISTS guard skips them.
+      for (const otherId of othersIds) {
+        // Check if this finding already has corpus_checks
+        const existing = await db.query(
+          `SELECT count(*)::int AS cnt FROM ero_corpus_checks WHERE finding_id = $1`,
+          CountRow,
+          [otherId],
+          { label: `TestConfrontation: check existing for ${otherId.slice(0, 8)}` },
+        );
+        if (existing[0].cnt === 0) {
+          // Insert a placeholder so NOT EXISTS skips this finding
+          await db.execute(
+            `INSERT INTO ero_corpus_checks
+               (finding_id, query_text, hit_count, best_hit_snippet,
+                best_hit_document_id, classification)
+             VALUES ($1, '[scoped-out]', 0, NULL, NULL, 'scoped_out')`,
+            [otherId],
+            { label: `TestConfrontation: sentinel for scoped-out ${otherId.slice(0, 8)}` },
+          );
+          scopeDeletedCount++;
+        }
+      }
+    } else if (allFindings.length > cap) {
+      // Cap mode: keep the first `cap` findings, delete corpus_checks
+      // for all findings beyond the cap, and insert sentinels for the
+      // beyond-cap findings so the handler skips them.
+      const keptIds = new Set(
+        allFindings.slice(0, cap).map((f) => f.finding_id),
+      );
+      const beyondCap = allFindings.filter(
+        (f) => !keptIds.has(f.finding_id),
+      );
+
+      for (const f of beyondCap) {
+        // Delete any existing checks for beyond-cap findings
+        await db.execute(
+          `DELETE FROM ero_corpus_checks WHERE finding_id = $1`,
+          [f.finding_id],
+          { label: `TestConfrontation: delete beyond-cap ${f.finding_id.slice(0, 8)}` },
+        );
+        // Insert sentinel so NOT EXISTS skips them
+        await db.execute(
+          `INSERT INTO ero_corpus_checks
+             (finding_id, query_text, hit_count, best_hit_snippet,
+              best_hit_document_id, classification)
+           VALUES ($1, '[capped-out]', 0, NULL, NULL, 'capped_out')`,
+          [f.finding_id],
+          { label: `TestConfrontation: sentinel for capped-out ${f.finding_id.slice(0, 8)}` },
+        );
+        scopeDeletedCount++;
+      }
+
+      // Also clear checks for kept findings so they re-run
+      for (const f of allFindings.slice(0, cap)) {
+        await db.execute(
+          `DELETE FROM ero_corpus_checks WHERE finding_id = $1`,
+          [f.finding_id],
+          { label: `TestConfrontation: clear kept finding ${f.finding_id.slice(0, 8)} for re-run` },
+        );
+      }
+    }
 
     // ── 3. Run confrontation ────────────────────────────────────────
     const result = await corpusConfrontation(ctx, runId, dealId);
@@ -177,6 +258,7 @@ export default api({
       severity: o.severity,
       classification: o.classification,
       magnitude_downgrade: o.magnitude_downgrade,
+      boilerplate_downgrade: o.boilerplate_downgrade ?? false,
       absence_flag: o.absence_flag,
       corpus_quote: o.corpus_quote ?? null,
       corpus_quoted_value: o.corpus_quoted_value ?? null,
@@ -196,6 +278,11 @@ export default api({
     // Understated downgrades
     const understatedDowngradedCount = outcomes.filter(
       (o: any) => o.magnitude_downgrade === true,
+    ).length;
+
+    // Boilerplate downgrades
+    const boilerplateDowngradedCount = outcomes.filter(
+      (o: any) => o.boilerplate_downgrade === true,
     ).length;
 
     // Unknown with high hits — consistency check
@@ -244,6 +331,7 @@ export default api({
         findingsConfronted: outcomes.length,
         classificationDistribution: distribution,
         understatedDowngradedCount,
+        boilerplateDowngradedCount,
         unknownWithHighHits,
         consistencyPassed,
         consistencyDetails,

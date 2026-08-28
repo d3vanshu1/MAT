@@ -586,12 +586,16 @@ async function confrontOneFinding(
 
   if (
     finalClassification === "unknown_to_deal_team" &&
-    totalHits >= UNKNOWN_HIT_THRESHOLD
+    totalHits >= UNKNOWN_HIT_THRESHOLD &&
+    !boilerplateDowngrade
   ) {
     absenceFlag = true;
     // We flag but do NOT override — the model may be correct that
     // the hits are irrelevant to THIS finding. The flag is surfaced
     // in the test harness for human review.
+    // NOTE: boilerplate downgrades are excluded — those are EXPECTED
+    // to have high hit counts (the FTS matched boilerplate text) and
+    // the downgrade itself is the correct resolution.
   }
 
   // ── g. Update classification on all corpus_checks rows for this
