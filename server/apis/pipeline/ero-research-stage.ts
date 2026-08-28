@@ -282,12 +282,19 @@ async function processOneHypothesis(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
 
-    // Mark hypothesis as error so it is not retried on resume
-    await db.execute(
-      `UPDATE ero_hypotheses SET status = 'error' WHERE hypothesis_id = $1`,
-      [hyp.hypothesis_id],
-      { label: `Research: set hyp ${hyp.execution_rank} → error` },
-    );
+    // Budget exhaustion is transient — leave hypothesis as 'pending'
+    // so the next invocation retries it. Only genuine failures get
+    // permanently marked 'error'.
+    const isBudgetExhaustion = /budget exhausted/i.test(msg);
+
+    if (!isBudgetExhaustion) {
+      await db.execute(
+        `UPDATE ero_hypotheses SET status = 'error' WHERE hypothesis_id = $1`,
+        [hyp.hypothesis_id],
+        { label: `Research: set hyp ${hyp.execution_rank} → error` },
+      );
+    }
+    // else: leave as 'pending' — next invocation will pick it up
 
     return {
       hypothesis_id: hyp.hypothesis_id,
@@ -295,7 +302,7 @@ async function processOneHypothesis(
       search_query: searchQuery,
       evidence_written: [],
       dropped: [],
-      status: "error",
+      status: isBudgetExhaustion ? "pending" as any : "error",
       error_message: msg,
       round2_spawned: null,
     };
