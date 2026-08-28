@@ -177,6 +177,8 @@ import EroTestResearch from './pipeline/ero-test-research.js';
 import EroTestAdjudication from './pipeline/ero-test-adjudication.js';
 import EroTestConfrontation from './pipeline/ero-test-confrontation.js';
 import EroTestRender from './pipeline/ero-test-render.js';
+import PublishEroToModuleOutputs from './pipeline/publish-ero-to-module-outputs.js';
+import EroTestPublish from './pipeline/ero-test-publish.js';
 import BssGetFindings from './pipeline/bss-get-findings.js';
 import PromoteClaimsLedger from './pipeline/promote-claims-ledger.js';
 import BuildStructuralProfile from './pipeline/bss-profile.js';
@@ -284,7 +286,7 @@ const apis = {
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
   DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query, DiagSnippetMatchHarness,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, RunMigration030, RunMigration031, RunMigration032,   RunMigration033, RunMigration034, RunMigration035, RunMigration036, PromoteClaimsLedger, BssRunPipeline, BssGetFindings, BuildStructuralProfile, BssGenerateBlindCandidates, BssAbsenceSweep, BssLlmAdjudication, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate, DiagResumeCcRun, DiagTestResumeQuery, DiagDeleteCheckpointRow, PreserveArtifactSnapshot,
   // ERO v2 pipeline
-  EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender,
+  EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
