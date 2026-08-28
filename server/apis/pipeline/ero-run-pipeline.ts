@@ -275,7 +275,29 @@ export default api({
       throw new Error(`No handler registered for stage: ${stageToRun}`);
     }
 
-    const result: StageResult = await handler(ctx, runId, dealId);
+    let result: StageResult;
+    try {
+      result = await handler(ctx, runId, dealId);
+    } catch (stageError: unknown) {
+      // ── Transient failure: reset to 'pending' so the next poll
+      //    retries immediately instead of waiting for the 5-min
+      //    stale-heartbeat timeout. ──────────────────────────────
+      try {
+        await db.execute(
+          `UPDATE ero_pipeline_state
+           SET stage_status = 'pending',
+               updated_at   = now()
+           WHERE run_id = $1`,
+          [runId],
+          { label: `Reset ${stageToRun} to pending after transient error` },
+        );
+      } catch {
+        // If even the reset fails (DB fully down), leave as 'running'
+        // and let stale-heartbeat handle it on recovery.
+      }
+      // Re-throw so the client sees the error and retries via poll loop
+      throw stageError;
+    }
 
     // ── 9. Process result ───────────────────────────────────────────
     if (result.status === "not_implemented" || result.status === "complete") {
