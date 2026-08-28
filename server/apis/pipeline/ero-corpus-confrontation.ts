@@ -88,9 +88,9 @@ const ClassificationResult = z.object({
     "known_and_assessed",
     "known_but_understated",
   ]),
-  corpus_quote: z.string().optional(),
-  corpus_quoted_value: z.string().optional(),
-  external_quoted_value: z.string().optional(),
+  corpus_quote: z.string().nullable().optional(),
+  corpus_quoted_value: z.string().nullable().optional(),
+  external_quoted_value: z.string().nullable().optional(),
   reasoning: z.string(),
 });
 
