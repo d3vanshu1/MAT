@@ -70,6 +70,7 @@ const ChunkRow = z.object({
   file_name: z.string(),
   content: z.string(),
   rank: z.coerce.number(),
+  total_matches: z.coerce.number(),
 });
 
 const CountRow = z.object({ cnt: z.coerce.number() });
@@ -360,18 +361,24 @@ async function confrontOneFinding(
     topChunks: Array<z.infer<typeof ChunkRow>>;
   }> = [];
 
+  // FTS query with @@ match filter: ONLY genuine matches return.
+  // count(*) OVER() gives the TRUE total match count across the
+  // entire corpus, independent of the LIMIT cap. The LIMIT caps
+  // rows retrieved for LLM context; the window count is the receipt.
   const ftsSQL = `
     WITH q AS (SELECT websearch_to_tsquery('english', $2) AS tsq)
     SELECT dc.document_id,
            dc.chunk_index,
            dc.file_name,
            dc.content,
-           ts_rank_cd(dc.tsv, q.tsq) AS rank
+           ts_rank_cd(dc.tsv, q.tsq) AS rank,
+           count(*) OVER() AS total_matches
       FROM document_chunks dc
       JOIN documents d ON d.id = dc.document_id
       CROSS JOIN q
      WHERE dc.deal_id = $1::uuid
        AND d.deal_id = $1::uuid
+       AND dc.tsv @@ q.tsq
      ORDER BY ts_rank_cd(dc.tsv, q.tsq) DESC, dc.chunk_index ASC
      LIMIT $3`;
 
@@ -383,23 +390,23 @@ async function confrontOneFinding(
       { label: `CorpusConfrontation: FTS "${queryText.slice(0, 40)}"` },
     );
 
-    // ts_rank_cd returns 0 for non-matching rows when there's no @@ filter.
-    // Filter to only chunks with rank > 0 (actual FTS matches).
-    const matchingChunks = chunks.filter(
-      (c: z.infer<typeof ChunkRow>) => c.rank > 0,
-    );
-
-    const hitCount = matchingChunks.length;
-    const bestHit = matchingChunks.length > 0 ? matchingChunks[0] : null;
+    // With the @@ filter in SQL, all returned rows are genuine matches.
+    // total_matches (window count) is the TRUE corpus match count,
+    // independent of LIMIT. Use it for the receipt, not chunks.length.
+    const trueHitCount =
+      chunks.length > 0
+        ? (chunks[0] as z.infer<typeof ChunkRow>).total_matches
+        : 0;
+    const bestHit = chunks.length > 0 ? chunks[0] : null;
 
     queryResults.push({
       query_text: queryText,
-      hit_count: hitCount,
+      hit_count: trueHitCount,   // TRUE corpus match count (window count)
       best_hit_snippet: bestHit
         ? bestHit.content.slice(0, 500)
         : null,
       best_hit_document_id: bestHit ? bestHit.document_id : null,
-      topChunks: matchingChunks.slice(0, 3), // keep top 3 for LLM context
+      topChunks: chunks.slice(0, 3), // keep top 3 for LLM context
     });
 
     // ── PERSIST to ero_corpus_checks — the receipt ──────────────
@@ -413,7 +420,7 @@ async function confrontOneFinding(
       [
         finding.finding_id,
         queryText,
-        hitCount,
+        trueHitCount,          // TRUE count, not LIMIT-capped
         bestHit ? bestHit.content.slice(0, 500) : null,
         bestHit ? bestHit.document_id : null,
       ],
