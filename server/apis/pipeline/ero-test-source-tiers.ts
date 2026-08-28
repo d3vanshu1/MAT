@@ -116,12 +116,20 @@ const TIER_FIXTURES: TierFixture[] = [
     expectedReasonContains: "Financial Times",
   },
   {
-    id: "T2-02",
-    category: "Tier 2: Company IR announcement",
+    id: "T2-02a",
+    category: "Tier 2: Company IR with publisher signal",
+    url: "https://www.acme-corp.com/investors/press-releases/q3-results",
+    publisher: "Investor Relations — Acme Corp plc",
+    expectedTier: 2,
+    expectedReasonContains: "corporate/IR source",
+  },
+  {
+    id: "T2-02b",
+    category: "Tier 3: Company IR path WITHOUT publisher signal",
     url: "https://www.acme-corp.com/investors/press-releases/q3-results",
     publisher: null,
-    expectedTier: 2,
-    expectedReasonContains: "IR/press path",
+    expectedTier: 3,
+    expectedReasonContains: "no official/press pattern matched",
   },
   {
     id: "T2-03",
@@ -225,6 +233,40 @@ const TIER_FIXTURES: TierFixture[] = [
     url: "https://assets.publishing.service.gov.uk/media/abc123/document.pdf",
     expectedTier: 1,
     expectedReasonContains: "gov.uk",
+  },
+
+  // ── ADVERSARIAL: Path-heuristic removal (Packet 4.1-fix) ───────
+  {
+    id: "ADV-07",
+    category: "Adversarial: content-farm with /investor-news path",
+    url: "https://businesswire-summary-ai.com/investor-news/acme",
+    publisher: null,
+    expectedTier: 3,
+    expectedReasonContains: "no official/press pattern matched",
+  },
+  {
+    id: "ADV-08",
+    category: "Adversarial: blog with /investors path",
+    url: "https://randomblog.wordpress.com/investors/post",
+    publisher: null,
+    expectedTier: 3,
+    expectedReasonContains: "no official/press pattern matched",
+  },
+  {
+    id: "ADV-09",
+    category: "Adversarial: corporate IR page WITH publisher signal → Tier 2",
+    url: "https://megacorp.com/investor-relations/annual-report",
+    publisher: "Press Release — MegaCorp Investor Relations",
+    expectedTier: 2,
+    expectedReasonContains: "corporate/IR source",
+  },
+  {
+    id: "ADV-10",
+    category: "Adversarial: corporate IR page WITHOUT publisher signal → Tier 3",
+    url: "https://megacorp.com/investor-relations/annual-report",
+    publisher: null,
+    expectedTier: 3,
+    expectedReasonContains: "no official/press pattern matched",
   },
 ];
 

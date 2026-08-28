@@ -199,32 +199,6 @@ function extractHost(url: string): string {
   return s;
 }
 
-/**
- * Extract the pathname from a URL.
- * Uses regex — no URL constructor dependency.
- */
-function extractPath(url: string): string {
-  if (!url || typeof url !== "string") return "";
-
-  let s = url.trim();
-
-  // Strip protocol
-  s = s.replace(/^https?:\/\//i, "");
-
-  // Strip host (everything up to the first /)
-  const slashIdx = s.indexOf("/");
-  if (slashIdx === -1) return "/";
-
-  let path = s.slice(slashIdx);
-
-  // Strip query and fragment
-  const qIdx = path.indexOf("?");
-  if (qIdx !== -1) path = path.slice(0, qIdx);
-  const hIdx = path.indexOf("#");
-  if (hIdx !== -1) path = path.slice(0, hIdx);
-
-  return path.toLowerCase();
-}
 
 /**
  * Check if hostname matches a pattern according to the matchType.
@@ -345,29 +319,13 @@ export function classifyTier(
     }
   }
 
-  // ── Path-based IR heuristic ─────────────────────────────────────
-  // Check if URL path contains investor-relations signals.
-  // Only strong IR-specific paths trigger the upgrade — "/press-release"
-  // is excluded because content farms and wire services use it freely.
-  // The publisher heuristic above handles press-release attribution
-  // when the publisher field indicates a corporate source.
-  const pathLower = extractPath(url);
-  const irPaths = [
-    "/investor",
-    "/investors",
-    "/ir/",
-    "/newsroom",
-    "/media-centre",
-    "/media-center",
-  ];
-  if (irPaths.some((p) => pathLower.includes(p))) {
-    return {
-      tier: 2,
-      reason: `tier2: IR/press path detected (${host}${pathLower})`,
-    };
-  }
-
   // ── Default: Tier 3 ─────────────────────────────────────────────
+  // Path-based IR heuristic intentionally removed (Packet 4.1-fix).
+  // A source earns Tier 2 via a recognized press/corporate domain or
+  // an explicit publisher signal — not via a path substring that
+  // anyone (content farms, blogs, wire services) can put in a URL.
+  // Conservative failure (default Tier 3) is the correct direction
+  // for an admissibility gate.
   return { tier: 3, reason: `tier3: no official/press pattern matched (${host})` };
 }
 
