@@ -2140,7 +2140,7 @@ export default function DealDashboardPage() {
   // ---------------------------------------------------------------------------
 
   const runEroPipeline = useCallback(
-    async () => {
+    async (resumeRunId?: string) => {
       if (!dealId) return;
 
       pipelinePollingActive.current.add("external_risk_overlay");
@@ -2150,22 +2150,29 @@ export default function DealDashboardPage() {
       const ERO_MAX_POLLS = 300;
       let pollCount = 0;
       let consecutiveTimeouts = 0;          // tracks sequential network errors for backoff
-      let eroRunId: string | null = null;
+      let eroRunId: string | null = resumeRunId ?? null;
 
-      // ── 1. Create the run ──────────────────────────────────────────
-      setModuleProgress("external_risk_overlay", {
-        message: "Creating ERO run…",
-      });
+      if (!eroRunId) {
+        // ── 1. Create the run ──────────────────────────────────────
+        setModuleProgress("external_risk_overlay", {
+          message: "Creating ERO run…",
+        });
 
-      try {
-        const createResult = await eroRunPipelineApi({ dealId, runId: null });
-        if (!createResult) throw new Error("EroRunPipeline returned no result");
-        eroRunId = createResult.runId;
-      } catch (err) {
-        const msg = err && typeof err === "object" && "message" in err
-          ? String((err as { message: unknown }).message)
-          : String(err);
-        throw new Error(`ERO: failed to create run — ${msg}`);
+        try {
+          const createResult = await eroRunPipelineApi({ dealId, runId: null });
+          if (!createResult) throw new Error("EroRunPipeline returned no result");
+          eroRunId = createResult.runId;
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+          throw new Error(`ERO: failed to create run — ${msg}`);
+        }
+      } else {
+        // Resuming an existing run — show progress immediately
+        setModuleProgress("external_risk_overlay", {
+          message: "Resuming ERO pipeline…",
+        });
       }
 
       // ── 2. Poll loop ───────────────────────────────────────────────
@@ -2279,6 +2286,59 @@ export default function DealDashboardPage() {
     },
     [dealId, eroRunPipelineApi, publishEroApi, setModuleProgress, refetchModules],
   );
+
+  // ---------------------------------------------------------------------------
+  // Auto-resume ERO polling on mount / HMR
+  // ---------------------------------------------------------------------------
+  // If there's an active (non-terminal) ERO run when the component mounts
+  // (e.g. after HMR, page navigation, or tab reload), automatically start
+  // the poll loop so the UI shows progress without the user re-clicking Run.
+  useEffect(() => {
+    if (!dealId) return;
+    // Guard: if an ERO poll loop is already active, skip
+    if (pipelinePollingActive.current.has("external_risk_overlay")) return;
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+      // Re-check after timeout in case a user-initiated run started
+      if (pipelinePollingActive.current.has("external_risk_overlay")) return;
+
+      try {
+        const result = await executeApi("EroGetActiveRun", { dealId });
+        if (cancelled || !result?.activeRun) return;
+
+        const { runId, stageStatus } = result.activeRun;
+        // Only resume if the run is actively in progress
+        if (stageStatus === "running" || stageStatus === "pending" || stageStatus === "complete") {
+          // Double-check: still no poll loop running?
+          if (pipelinePollingActive.current.has("external_risk_overlay")) return;
+          // Mark as running in the module set so the UI shows the progress card
+          setRunningModules((prev) => new Set(prev).add("external_risk_overlay"));
+          // Launch the poll loop with the existing runId (skips run creation)
+          runEroPipeline(runId).catch((err) => {
+            console.error("[ERO auto-resume] poll loop error:", err);
+          }).finally(() => {
+            if (cancelled) return;
+            setRunningModules((prev) => {
+              const next = new Set(prev);
+              next.delete("external_risk_overlay");
+              return next;
+            });
+            clearModuleProgress("external_risk_overlay");
+            pipelinePollingActive.current.delete("external_risk_overlay");
+          });
+        }
+      } catch {
+        // Silent — don't block page load for a resume check failure
+      }
+    }, 500); // Brief delay to let user-initiated runs claim the slot first
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [dealId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------------------
   // Run single module
