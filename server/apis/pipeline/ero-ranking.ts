@@ -232,6 +232,21 @@ export async function rankHypotheses(
   // statement overwrites whatever execution_rank currently exists
   // (positive, negative, or already-final) in one atomic pass.
 
+  // Two-phase rank assignment to avoid intermediate unique-constraint
+  // violations.  PostgreSQL checks UNIQUE(run_id, execution_rank) row-by-row
+  // within a single UPDATE, so swapping ranks (e.g. A:1→2, B:2→1) can fail
+  // when one row is processed before the other.
+  //
+  // Phase 1: shift all ranks to negative (guaranteed unique, clears the space)
+  // Phase 2: assign final positive ranks 1..N
+  await db.execute(
+    `UPDATE ero_hypotheses
+     SET execution_rank = -execution_rank
+     WHERE run_id = $1 AND execution_rank > 0`,
+    [runId],
+    { label: "Ranking: phase 1 — shift to negative" },
+  );
+
   const valueParts: string[] = [];
   const params: any[] = [runId]; // $1 = runId
   let paramIdx = 2;
@@ -248,7 +263,7 @@ export async function rankHypotheses(
      FROM (VALUES ${valueParts.join(", ")}) AS v(hid, new_rank)
      WHERE h.hypothesis_id = v.hid AND h.run_id = $1`,
     params,
-    { label: `Ranking: atomic assign final ranks 1..${items.length}` },
+    { label: `Ranking: phase 2 — assign final ranks 1..${items.length}` },
   );
 
   // ── 7. Build stageData ────────────────────────────────────────────
