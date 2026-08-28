@@ -429,6 +429,9 @@ export default function DealDashboardPage() {
   // BSS v2 orchestrator
   const { run: bssRunPipelineApi } = useApi("BssRunPipeline");
   const { run: bssGetFindingsApi } = useApi("BssGetFindings");
+  // ERO v2 orchestrator
+  const { run: eroRunPipelineApi } = useApi("EroRunPipeline");
+  const { run: publishEroApi } = useApi("PublishEroToModuleOutputs");
 
   // Cancellation tracking — stores run IDs that have been cancelled
   const cancelledRunsRef = useRef<Set<string>>(new Set());
@@ -1968,6 +1971,18 @@ export default function DealDashboardPage() {
     adjudication: "Adjudicating candidates",
   };
 
+  /** Human-readable stage labels for ERO progress display */
+  const ERO_STAGE_LABELS: Record<string, string> = {
+    build_entity_manifest: "Building entity manifest",
+    build_deal_profile: "Analyzing deal profile",
+    generate_hypotheses: "Generating hypotheses",
+    rank_hypotheses: "Ranking hypotheses",
+    research_execution: "Researching external evidence",
+    adjudicate_findings: "Adjudicating findings",
+    corpus_confrontation: "Corpus confrontation",
+    render: "Rendering report",
+  };
+
   const runBssPipeline = useCallback(
     async () => {
       if (!dealId) return;
@@ -2121,6 +2136,125 @@ export default function DealDashboardPage() {
   );
 
   // ---------------------------------------------------------------------------
+  // ERO v2 — poll-loop orchestrator
+  // ---------------------------------------------------------------------------
+
+  const runEroPipeline = useCallback(
+    async () => {
+      if (!dealId) return;
+
+      pipelinePollingActive.current.add("external_risk_overlay");
+
+      const ERO_POLL_INTERVAL_MS = 3_000;
+      const ERO_MAX_POLLS = 300; // 300 × 3s = 15 min ceiling (ERO has 8 stages, some slow)
+      let pollCount = 0;
+      let eroRunId: string | null = null;
+
+      // ── 1. Create the run ──────────────────────────────────────────
+      setModuleProgress("external_risk_overlay", {
+        message: "Creating ERO run…",
+      });
+
+      try {
+        const createResult = await eroRunPipelineApi({ dealId, runId: null });
+        if (!createResult) throw new Error("EroRunPipeline returned no result");
+        eroRunId = createResult.runId;
+      } catch (err) {
+        const msg = err && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : String(err);
+        throw new Error(`ERO: failed to create run — ${msg}`);
+      }
+
+      // ── 2. Poll loop ───────────────────────────────────────────────
+      let terminal = false;
+      while (!terminal && pollCount < ERO_MAX_POLLS) {
+        let result: {
+          runId: string;
+          stage: string;
+          status: string;
+          invocationCount: number;
+          message: string;
+          stageData: Record<string, unknown> | null;
+        };
+
+        try {
+          const raw = await eroRunPipelineApi({ dealId, runId: eroRunId });
+          if (!raw) throw new Error("EroRunPipeline returned no result");
+          result = raw;
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+          const isNetwork = /failed to fetch|network|timeout|abort/i.test(msg);
+          if (isNetwork && pollCount < ERO_MAX_POLLS - 1) {
+            setModuleProgress("external_risk_overlay", {
+              message: `Connection interrupted, retrying… (${pollCount + 1})`,
+            });
+            await new Promise(r => setTimeout(r, ERO_POLL_INTERVAL_MS));
+            pollCount++;
+            continue;
+          }
+          throw err;
+        }
+
+        const stageLabel = ERO_STAGE_LABELS[result.stage] ?? result.stage;
+
+        switch (result.status) {
+          case "complete": {
+            // Pipeline done — publish to module_outputs then refresh dashboard
+            terminal = true;
+            setModuleProgress("external_risk_overlay", {
+              message: "Publishing ERO results…",
+            });
+            try {
+              await publishEroApi({ runId: eroRunId });
+            } catch (pubErr) {
+              console.error("[ERO] Publish failed:", pubErr);
+              // Still mark as completed — render stage produced stageData
+            }
+            await refetchModules();
+            toast.success("External Risk Overlay complete!");
+            break;
+          }
+
+          case "in_progress":
+          case "pending": {
+            setModuleProgress("external_risk_overlay", {
+              message: `${stageLabel}…`,
+              detail: { current: result.invocationCount, total: 8, phase: "researching" },
+            });
+            break;
+          }
+
+          case "failed": {
+            terminal = true;
+            throw new Error(`ERO pipeline failed at ${stageLabel}: ${result.message}`);
+          }
+
+          default: {
+            // "not_implemented" or any other transitional status — keep polling
+            setModuleProgress("external_risk_overlay", {
+              message: `${stageLabel}… (${result.status})`,
+            });
+            break;
+          }
+        }
+
+        if (!terminal) {
+          await new Promise(r => setTimeout(r, ERO_POLL_INTERVAL_MS));
+          pollCount++;
+        }
+      }
+
+      if (!terminal) {
+        throw new Error("ERO pipeline timed out after maximum poll attempts");
+      }
+    },
+    [dealId, eroRunPipelineApi, publishEroApi, setModuleProgress, refetchModules],
+  );
+
+  // ---------------------------------------------------------------------------
   // Run single module
   // ---------------------------------------------------------------------------
 
@@ -2196,6 +2330,9 @@ export default function DealDashboardPage() {
         } else if (moduleId === "blind_spot_scanner" && dealId) {
           // BSS v2 divert — uses BssRunPipeline orchestrator instead of v1
           await runBssPipeline();
+        } else if (moduleId === "external_risk_overlay" && dealId) {
+          // ERO v2 divert — uses EroRunPipeline orchestrator instead of v1
+          await runEroPipeline();
         } else if (dealId) {
           // Server-side pipeline: survives tab closure, checkpointed
           // (web research modules now use the same server pipeline path)
@@ -2356,6 +2493,7 @@ export default function DealDashboardPage() {
       runStandardModule,
       runServerPipeline,
       runBssPipeline,
+      runEroPipeline,
       runExecutiveSummary,
       clearModuleProgress,
       getRunProgressApi,
