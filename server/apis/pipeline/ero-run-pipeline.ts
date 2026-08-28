@@ -215,15 +215,19 @@ export default api({
       // Fall through to execute the stage
     }
 
-    // ── 4. Increment invocation, set heartbeat ──────────────────────
+    // ── 4. Increment invocation (heartbeat is NOT set here) ────────
+    // CRITICAL: heartbeat_at is updated ONLY inside stage handlers
+    // during per-item progress (research, adjudication, confrontation).
+    // Setting it here at orchestrator entry would defeat the stale-
+    // heartbeat guard: every retry would refresh the heartbeat even
+    // when the stage itself is failing, preventing stale detection.
     await db.execute(
       `UPDATE ero_pipeline_state
        SET invocation_count = invocation_count + 1,
-           heartbeat_at     = now(),
            updated_at       = now()
        WHERE run_id = $1`,
       [runId],
-      { label: "Increment invocation + heartbeat" },
+      { label: "Increment invocation (no heartbeat)" },
     );
     const invocationCount = state.invocation_count + 1;
 

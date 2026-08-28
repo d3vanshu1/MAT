@@ -191,20 +191,15 @@ export async function buildDealProfile(
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
-  // ── 1. Idempotency check ──────────────────────────────────────────
-  const existing = await db.query(
-    `SELECT count(*)::int AS cnt FROM ero_profile WHERE run_id = $1`,
-    CountRow,
+  // ── 1. Clean-slate guard ─────────────────────────────────────────
+  // Two LLM groups (business_shape, thesis_dependency) are inserted
+  // separately. A death between the two would leave partial rows.
+  // DELETE all so we redo the full stage atomically.
+  await db.execute(
+    `DELETE FROM ero_profile WHERE run_id = $1`,
     [runId],
-    { label: "DealProfile: idempotency check" },
+    { label: "DealProfile: clean slate (delete partial rows)" },
   );
-  if (existing[0].cnt > 0) {
-    return {
-      stage: "build_deal_profile",
-      status: "complete",
-      message: `already built, ${existing[0].cnt} profile fields`,
-    };
-  }
 
   // ── 2. Retrieve chunks for business_shape ─────────────────────────
   const shapeRawChunks = await db.query(

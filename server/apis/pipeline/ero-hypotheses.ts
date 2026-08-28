@@ -64,21 +64,16 @@ export async function generateHypotheses(
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
-  // ── 1. Idempotency check ──────────────────────────────────────────
-  const [{ cnt: existingCount }] = await db.query(
-    `SELECT count(*)::int AS cnt FROM ero_hypotheses WHERE run_id = $1`,
-    CountRow,
+  // ── 1. Clean-slate guard ─────────────────────────────────────────
+  // Two LLM groups (entity-sourced, profile-sourced) are inserted
+  // separately. A death between the two would leave partial rows and
+  // the old cnt > 0 guard would falsely declare complete. DELETE all
+  // so we redo the full stage atomically.
+  await db.execute(
+    `DELETE FROM ero_hypotheses WHERE run_id = $1`,
     [runId],
-    { label: "HypothesisGen: idempotency check" },
+    { label: "HypothesisGen: clean slate (delete partial rows)" },
   );
-
-  if (existingCount > 0) {
-    return {
-      stage: "generate_hypotheses",
-      status: "complete",
-      message: `Idempotent — ${existingCount} hypotheses already exist for this run.`,
-    };
-  }
 
   // ── 2. Load entities and profile ──────────────────────────────────
   const entities = await db.query(

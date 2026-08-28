@@ -158,10 +158,38 @@ export async function adjudicateFindings(
       };
     }
 
-    // ── Process one hypothesis ────────────────────────────────────
-    const outcome = await adjudicateOneHypothesis(db, ai, hyp);
-    outcomes.push(outcome);
-    findingsCreated++;
+    // ── Process one hypothesis (fault-isolated per research pattern) ─
+    try {
+      const outcome = await adjudicateOneHypothesis(db, ai, hyp);
+      outcomes.push(outcome);
+      findingsCreated++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // Mark hypothesis so it is skipped on re-entry (status != 'researched')
+      await db.execute(
+        `UPDATE ero_hypotheses SET status = 'adjudication_error' WHERE hypothesis_id = $1`,
+        [hyp.hypothesis_id],
+        { label: `Adjudication: set hyp ${hyp.execution_rank} → adjudication_error` },
+      );
+
+      outcomes.push({
+        hypothesis_id: hyp.hypothesis_id,
+        question: hyp.question,
+        family: hyp.family,
+        execution_rank: hyp.execution_rank,
+        verdict: "error",
+        proposed_severity: "error",
+        final_severity: "error",
+        ceiling_reason: msg,
+        needs_recheck: false,
+        title: `[Adjudication failed] ${hyp.question}`,
+        evidence_count: 0,
+        evidence_tiers: [],
+        is_enforcement_family: ENFORCEMENT_FAMILIES.has(hyp.family),
+      });
+      // Continue to next hypothesis — do not kill the stage
+    }
 
     // ── Heartbeat ─────────────────────────────────────────────────
     await db.execute(

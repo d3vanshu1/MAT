@@ -222,16 +222,6 @@ export async function rankHypotheses(
   });
 
   // ── 6. Assign execution_rank = 1..N ───────────────────────────────
-  //
-  // Single atomic UPDATE via VALUES list.  One statement = one implicit
-  // transaction.  Every row gets a distinct final rank in the same
-  // statement, so UNIQUE(run_id, execution_rank) never sees an
-  // intermediate collision.  No negative-shift phase needed.
-  //
-  // Re-run safe: ranks are computed purely from signals, and this
-  // statement overwrites whatever execution_rank currently exists
-  // (positive, negative, or already-final) in one atomic pass.
-
   // Two-phase rank assignment to avoid intermediate unique-constraint
   // violations.  PostgreSQL checks UNIQUE(run_id, execution_rank) row-by-row
   // within a single UPDATE, so swapping ranks (e.g. A:1→2, B:2→1) can fail

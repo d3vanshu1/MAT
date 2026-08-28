@@ -175,10 +175,42 @@ export async function corpusConfrontation(
       };
     }
 
-    // ── Process one finding ──────────────────────────────────────
-    const outcome = await confrontOneFinding(db, ai, dealId, finding);
-    outcomes.push(outcome);
-    findingsProcessed++;
+    // ── Process one finding (fault-isolated per research pattern) ─
+    try {
+      const outcome = await confrontOneFinding(db, ai, dealId, finding);
+      outcomes.push(outcome);
+      findingsProcessed++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // Insert a sentinel corpus_check so NOT EXISTS skips on re-entry
+      await db.execute(
+        `INSERT INTO ero_corpus_checks
+           (finding_id, classification, reasoning, corpus_quote,
+            corpus_quoted_value, external_quoted_value,
+            magnitude_downgrade, absence_flag)
+         VALUES ($1, 'processing_error', $2, NULL, NULL, NULL, false, false)
+         ON CONFLICT (finding_id) DO NOTHING`,
+        [finding.finding_id, msg],
+        { label: `CorpusConfrontation: set finding ${finding.finding_id} → processing_error` },
+      );
+
+      outcomes.push({
+        finding_id: finding.finding_id,
+        title: finding.title,
+        severity: finding.severity,
+        queries: [],
+        classification: "processing_error",
+        corpus_quote: null,
+        corpus_quoted_value: null,
+        external_quoted_value: null,
+        magnitude_downgrade: false,
+        absence_flag: false,
+        reasoning: msg,
+      });
+      findingsProcessed++;
+      // Continue to next finding — do not kill the stage
+    }
 
     // ── Heartbeat ─────────────────────────────────────────────────
     await db.execute(

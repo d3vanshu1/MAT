@@ -143,20 +143,16 @@ export async function buildEntityManifest(
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
-  // ── 1. Idempotency check ──────────────────────────────────────────
-  const existing = await db.query(
-    `SELECT count(*)::int AS cnt FROM ero_entities WHERE run_id = $1`,
-    EntityCountRow,
+  // ── 1. Clean-slate guard ─────────────────────────────────────────
+  // If prior invocation died mid-insert, partial rows may exist.
+  // DELETE them so we redo the full stage atomically (all-or-nothing).
+  // This is safe because the stage has a single LLM call; the insert
+  // cost is negligible vs. a silent partial-completion bug.
+  await db.execute(
+    `DELETE FROM ero_entities WHERE run_id = $1`,
     [runId],
-    { label: "EntityManifest: idempotency check" },
+    { label: "EntityManifest: clean slate (delete partial rows)" },
   );
-  if (existing[0].cnt > 0) {
-    return {
-      stage: "build_entity_manifest",
-      status: "complete",
-      message: `already built, ${existing[0].cnt} entities`,
-    };
-  }
 
   // ── 2. Retrieve chunks via FTS ────────────────────────────────────
   // Three queries: primary (group structure / subsidiaries / legal parties),
