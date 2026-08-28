@@ -2146,8 +2146,10 @@ export default function DealDashboardPage() {
       pipelinePollingActive.current.add("external_risk_overlay");
 
       const ERO_POLL_INTERVAL_MS = 3_000;
-      const ERO_MAX_POLLS = 300; // 300 × 3s = 15 min ceiling (ERO has 8 stages, some slow)
+      const ERO_BACKOFF_MAX_MS = 30_000;    // max wait between retries on timeout
+      const ERO_MAX_POLLS = 300;
       let pollCount = 0;
+      let consecutiveTimeouts = 0;          // tracks sequential network errors for backoff
       let eroRunId: string | null = null;
 
       // ── 1. Create the run ──────────────────────────────────────────
@@ -2188,15 +2190,25 @@ export default function DealDashboardPage() {
             : String(err);
           const isNetwork = /failed to fetch|network|timeout|abort/i.test(msg);
           if (isNetwork && pollCount < ERO_MAX_POLLS - 1) {
+            consecutiveTimeouts++;
+            // Exponential backoff: 3s → 6s → 12s → 24s → 30s cap
+            // Gives the server time to finish the in-flight stage
+            const backoff = Math.min(
+              ERO_POLL_INTERVAL_MS * Math.pow(2, consecutiveTimeouts - 1),
+              ERO_BACKOFF_MAX_MS,
+            );
             setModuleProgress("external_risk_overlay", {
-              message: `Connection interrupted, retrying… (${pollCount + 1})`,
+              message: `Connection interrupted, retrying in ${Math.round(backoff / 1000)}s… (attempt ${consecutiveTimeouts})`,
             });
-            await new Promise(r => setTimeout(r, ERO_POLL_INTERVAL_MS));
+            await new Promise(r => setTimeout(r, backoff));
             pollCount++;
             continue;
           }
           throw err;
         }
+
+        // Successful response — reset backoff counter
+        consecutiveTimeouts = 0;
 
         const stageLabel = ERO_STAGE_LABELS[result.stage] ?? result.stage;
 

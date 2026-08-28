@@ -584,7 +584,8 @@ async function maybeSpawnFollowUp(
        (run_id, family, entity_id, thesis_link, question,
         confirming_evidence, refuting_evidence, execution_rank,
         status, round)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 2)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 2)
+     ON CONFLICT (run_id, execution_rank) DO NOTHING`,
     [
       runId,
       parentHyp.family,

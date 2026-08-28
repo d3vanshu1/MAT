@@ -29,12 +29,15 @@ const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
 // ── Schemas ─────────────────────────────────────────────────────────
+const STALE_HEARTBEAT_SECS = 300; // 5 minutes — if heartbeat is older, prior execution is dead
+
 const PipelineStateRow = z.object({
   run_id: z.string(),
   deal_id: z.string(),
   current_stage: z.string(),
   stage_status: z.string(),
   invocation_count: z.coerce.number(),
+  heartbeat_age_secs: z.coerce.number().nullable(),
 });
 
 const InsertedRow = z.object({
@@ -89,8 +92,39 @@ export default api({
     const db = ctx.integrations.ic_diligence_db;
     const invocationStart = Date.now();
 
-    // ── 1. Create new run if no runId supplied ──────────────────────
+    // ── 1. Resume or create run ───────────────────────────────────
     if (!runId) {
+      // Check for an existing incomplete run for this deal that can be resumed.
+      // This prevents orphaned runs when the client loses its poll loop
+      // (tab close, network timeout) and re-clicks "Run Analysis".
+      const existingRows = await db.query(
+        `SELECT run_id, current_stage, stage_status
+         FROM ero_pipeline_state
+         WHERE deal_id = $1
+           AND NOT (
+             stage_status = 'complete'
+             AND current_stage = $2
+           )
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        z.object({ run_id: z.string(), current_stage: z.string(), stage_status: z.string() }),
+        [dealId, ERO_STAGES[ERO_STAGES.length - 1]],
+        { label: "Check for resumable ERO run" },
+      );
+
+      if (existingRows.length > 0 && existingRows[0].stage_status !== "failed") {
+        const existing = existingRows[0];
+        return {
+          runId: existing.run_id,
+          stage: existing.current_stage,
+          status: "pending",
+          invocationCount: 0,
+          message: `Resuming existing run at stage ${existing.current_stage}.`,
+          stageData: null,
+        };
+      }
+
+      // No resumable run — create fresh
       const rows = await db.query(
         `INSERT INTO ero_pipeline_state
            (run_id, deal_id, current_stage, stage_status,
@@ -117,7 +151,8 @@ export default api({
 
     // ── 2. Load existing run ────────────────────────────────────────
     const stateRows = await db.query(
-      `SELECT run_id, deal_id, current_stage, stage_status, invocation_count
+      `SELECT run_id, deal_id, current_stage, stage_status, invocation_count,
+              extract(epoch FROM (now() - heartbeat_at))::int AS heartbeat_age_secs
        FROM ero_pipeline_state
        WHERE run_id = $1`,
       PipelineStateRow,
@@ -147,6 +182,37 @@ export default api({
         message: "Pipeline already complete. No further stages to run.",
         stageData: null,
       };
+    }
+
+    // ── 3b. Guard against double-execution / recover stale runs ──
+    // If the stage is 'running', check the heartbeat age:
+    //   - Fresh heartbeat (< 5 min): another invocation is still alive.
+    //     Return 'in_progress' so the poll loop waits.
+    //   - Stale heartbeat (≥ 5 min): prior execution is dead (timeout,
+    //     crash). Reset to 'pending' so this invocation can resume it.
+    if (state.stage_status === "running") {
+      const age = state.heartbeat_age_secs ?? 9999;
+      if (age < STALE_HEARTBEAT_SECS) {
+        // Still alive — back off
+        return {
+          runId,
+          stage: currentStage,
+          status: "in_progress",
+          invocationCount: state.invocation_count,
+          message: `Stage ${currentStage} is still executing (heartbeat ${age}s ago). Waiting…`,
+          stageData: null,
+        };
+      }
+      // Stale — prior execution is dead. Reset to 'pending' to allow resume.
+      await db.execute(
+        `UPDATE ero_pipeline_state
+         SET stage_status = 'pending',
+             updated_at   = now()
+         WHERE run_id = $1`,
+        [runId],
+        { label: `Reset stale stage ${currentStage} (heartbeat ${age}s ago)` },
+      );
+      // Fall through to execute the stage
     }
 
     // ── 4. Increment invocation, set heartbeat ──────────────────────

@@ -262,7 +262,8 @@ export async function generateHypotheses(
        (hypothesis_id, run_id, family, entity_id, thesis_link,
         question, confirming_evidence, refuting_evidence,
         execution_rank, status, round)
-     VALUES ${valueClauses.join(", ")}`,
+     VALUES ${valueClauses.join(", ")}
+     ON CONFLICT (run_id, execution_rank) DO NOTHING`,
     params,
     { label: `HypothesisGen: insert ${allHypotheses.length} hypotheses` },
   );
