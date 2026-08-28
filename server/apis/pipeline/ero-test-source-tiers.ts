@@ -313,7 +313,7 @@ const CEILING_FIXTURES: CeilingFixture[] = [
     ],
     expectedSeverity: "warning",
     expectedNeedsRecheck: false,
-    expectedReasonContains: "best source tier 2",
+    expectedReasonContains: "no dated Tier-1 source, best is dated Tier-2",
     nowMs: FIXED_NOW,
   },
   {
@@ -325,7 +325,7 @@ const CEILING_FIXTURES: CeilingFixture[] = [
     ],
     expectedSeverity: "info",
     expectedNeedsRecheck: false,
-    expectedReasonContains: "best source tier 3",
+    expectedReasonContains: "best dated source is Tier-3",
     nowMs: FIXED_NOW,
   },
   {
@@ -353,14 +353,14 @@ const CEILING_FIXTURES: CeilingFixture[] = [
   },
   {
     id: "C-06",
-    category: "Undated Tier-1 → info cap despite tier 1",
+    category: "Undated-only Tier-1 → info cap (no dated source)",
     proposedSeverity: "critical",
     evidence: [
       { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
     ],
     expectedSeverity: "info",
     expectedNeedsRecheck: false,
-    expectedReasonContains: "undated evidence",
+    expectedReasonContains: "no dated source present",
     nowMs: FIXED_NOW,
   },
   {
@@ -372,7 +372,7 @@ const CEILING_FIXTURES: CeilingFixture[] = [
     ],
     expectedSeverity: "info",
     expectedNeedsRecheck: true,
-    expectedReasonContains: "enforcement/litigation evidence older than 24 months",
+    expectedReasonContains: "stale enforcement/litigation",
     nowMs: FIXED_NOW,
   },
   {
@@ -401,14 +401,14 @@ const CEILING_FIXTURES: CeilingFixture[] = [
   },
   {
     id: "C-10",
-    category: "Undated Tier-2 press → info cap",
+    category: "Undated Tier-2 press → info cap (no dated source)",
     proposedSeverity: "warning",
     evidence: [
       { tier: 2, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
     ],
     expectedSeverity: "info",
     expectedNeedsRecheck: false,
-    expectedReasonContains: "undated evidence",
+    expectedReasonContains: "no dated source present",
     nowMs: FIXED_NOW,
   },
   {
@@ -421,6 +421,89 @@ const CEILING_FIXTURES: CeilingFixture[] = [
     expectedSeverity: "warning",
     expectedNeedsRecheck: false,
     expectedReasonContains: "proposed warning within ceiling",
+    nowMs: FIXED_NOW,
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // R2 REGRESSION CASES — best-source ceiling
+  // ═══════════════════════════════════════════════════════════════
+  {
+    id: "R2-01",
+    category: "PSTN regression: 1 dated T1 + 5 undated T1 → critical (undated never lowers)",
+    proposedSeverity: "critical",
+    evidence: [
+      { tier: 1, isDated: true, publicationDate: "2026-02-01", isEnforcementOrLitigation: false },
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+    ],
+    expectedSeverity: "critical",
+    expectedNeedsRecheck: false,
+    expectedReasonContains: "dated Tier-1 source present",
+    nowMs: FIXED_NOW,
+  },
+  {
+    id: "R2-02",
+    category: "Only undated sources (any tier) → info",
+    proposedSeverity: "critical",
+    evidence: [
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+      { tier: 2, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+      { tier: 3, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+    ],
+    expectedSeverity: "info",
+    expectedNeedsRecheck: false,
+    expectedReasonContains: "no dated source present",
+    nowMs: FIXED_NOW,
+  },
+  {
+    id: "R2-03",
+    category: "1 dated T2 + undated T1 → warning (dated T2 earns warning; undated T1 cannot earn critical)",
+    proposedSeverity: "critical",
+    evidence: [
+      { tier: 2, isDated: true, publicationDate: "2026-04-01", isEnforcementOrLitigation: false },
+      { tier: 1, isDated: false, publicationDate: null, isEnforcementOrLitigation: false },
+    ],
+    expectedSeverity: "warning",
+    expectedNeedsRecheck: false,
+    expectedReasonContains: "no dated Tier-1 source, best is dated Tier-2",
+    nowMs: FIXED_NOW,
+  },
+  {
+    id: "R2-04",
+    category: "1 dated T1 stale enforcement only → info + needs_recheck",
+    proposedSeverity: "critical",
+    evidence: [
+      { tier: 1, isDated: true, publicationDate: "2022-06-01", isEnforcementOrLitigation: true },
+    ],
+    expectedSeverity: "info",
+    expectedNeedsRecheck: true,
+    expectedReasonContains: "stale enforcement/litigation",
+    nowMs: FIXED_NOW,
+  },
+  {
+    id: "R2-05",
+    category: "1 stale enforcement T1 + 1 fresh non-enforcement T1 → critical (fresh wins)",
+    proposedSeverity: "critical",
+    evidence: [
+      { tier: 1, isDated: true, publicationDate: "2022-06-01", isEnforcementOrLitigation: true },
+      { tier: 1, isDated: true, publicationDate: "2026-05-01", isEnforcementOrLitigation: false },
+    ],
+    expectedSeverity: "critical",
+    expectedNeedsRecheck: false,
+    expectedReasonContains: "dated Tier-1 source present",
+    nowMs: FIXED_NOW,
+  },
+  {
+    id: "R2-06",
+    category: "Empty evidence → fail closed (info, no recheck)",
+    proposedSeverity: "critical",
+    evidence: [],
+    expectedSeverity: "info",
+    expectedNeedsRecheck: false,
+    expectedReasonContains: "no admissible evidence",
     nowMs: FIXED_NOW,
   },
 ];

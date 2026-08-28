@@ -482,7 +482,22 @@ const SEVERITY_RANK: Record<string, number> = {
 
 /**
  * Apply admissibility ceilings to a proposed severity based on the
- * evidence set.
+ * BEST qualifying source in the evidence set.
+ *
+ * Best-source semantics (R2 fix):
+ *   critical  → requires ≥1 source that is BOTH Tier-1 AND dated
+ *   warning   → requires ≥1 source that is (Tier-1 or Tier-2) AND dated
+ *   info      → floor: only undated sources, or only Tier-3 sources
+ *
+ * Extra undated or lower-tier evidence NEVER lowers a ceiling that a
+ * qualifying source already earned. Additional corroboration can only
+ * help, never hurt.
+ *
+ * Stale-enforcement recheck is scoped to the qualifying source relied
+ * on for the ceiling: if the BEST dated Tier-1 source is stale
+ * enforcement (>24 months) AND no fresher qualifying source exists,
+ * flag needs_recheck and cap at info. If a fresher qualifying source
+ * exists, use it instead.
  *
  * Fail closed: empty evidence → info, "no admissible evidence".
  *
@@ -507,52 +522,93 @@ export function applyCeiling(
   const now = nowMs ?? Date.now();
   const TWENTY_FOUR_MONTHS_MS = 24 * 30.44 * 24 * 60 * 60 * 1000; // ~730.5 days
 
-  // ── Compute best tier ───────────────────────────────────────────
-  const bestTier = Math.min(...evidence.map((e) => e.tier)) as 1 | 2 | 3;
+  // ── Helper: is this enforcement source stale (>24 months)? ──────
+  function isStaleEnforcement(e: EvidenceForCeiling): boolean {
+    if (!e.isEnforcementOrLitigation || !e.publicationDate) return false;
+    const pubDate = new Date(e.publicationDate).getTime();
+    return !isNaN(pubDate) && (now - pubDate) > TWENTY_FOUR_MONTHS_MS;
+  }
 
-  // ── Check for undated evidence ──────────────────────────────────
-  const hasUndated = evidence.some((e) => !e.isDated);
+  // ── Determine what the evidence set can SUPPORT ─────────────────
+  // A source qualifies for a ceiling level only if it is DATED.
+  // Undated sources contribute nothing to the ceiling — they are
+  // simply ignored for ceiling computation (never penalised).
+  //
+  // Among dated qualifying sources, if the source is enforcement/
+  // litigation AND stale (>24mo), it only qualifies if no fresher
+  // qualifying source exists at the same or higher tier.
 
-  // ── Check for stale enforcement/litigation evidence ─────────────
-  // If any enforcement/litigation evidence is older than 24 months,
-  // flag needs_recheck and cap at info until rechecked.
-  let needsRecheck = false;
-  let hasStaleEnforcement = false;
+  // Collect dated sources by tier
+  const datedTier1: EvidenceForCeiling[] = [];
+  const datedTier2: EvidenceForCeiling[] = [];
 
   for (const e of evidence) {
-    if (e.isEnforcementOrLitigation && e.publicationDate) {
-      const pubDate = new Date(e.publicationDate).getTime();
-      if (!isNaN(pubDate) && (now - pubDate) > TWENTY_FOUR_MONTHS_MS) {
-        hasStaleEnforcement = true;
+    if (!e.isDated) continue; // undated → ignored for ceiling (never penalised)
+    if (e.tier === 1) datedTier1.push(e);
+    else if (e.tier === 2) datedTier2.push(e);
+    // Tier-3 dated sources can only support info — no need to collect
+  }
+
+  // ── Evaluate ceiling from best qualifying source ────────────────
+  let ceiling: "critical" | "warning" | "info";
+  let ceilingReason: string;
+  let needsRecheck = false;
+
+  if (datedTier1.length > 0) {
+    // We have dated Tier-1 sources. Check if any are non-stale.
+    const freshTier1 = datedTier1.filter((e) => !isStaleEnforcement(e));
+
+    if (freshTier1.length > 0) {
+      // Fresh dated Tier-1 source exists → critical allowed
+      ceiling = "critical";
+      ceilingReason = "critical: dated Tier-1 source present";
+    } else {
+      // ALL dated Tier-1 sources are stale enforcement →
+      // Check if a fresh dated Tier-2 can earn warning instead
+      const freshTier2 = datedTier2.filter((e) => !isStaleEnforcement(e));
+      if (freshTier2.length > 0) {
+        ceiling = "warning";
+        ceilingReason =
+          "capped at warning: dated Tier-1 sources are stale enforcement (>24mo), best fresh source is dated Tier-2";
+        needsRecheck = true; // stale enforcement was present
+      } else {
+        // No fresh qualifying source at any tier
+        ceiling = "info";
+        ceilingReason =
+          "capped at info: only qualifying sources are stale enforcement/litigation (>24 months, needs recheck)";
         needsRecheck = true;
       }
     }
-  }
+  } else if (datedTier2.length > 0) {
+    // No dated Tier-1 at all. Check dated Tier-2.
+    const freshTier2 = datedTier2.filter((e) => !isStaleEnforcement(e));
 
-  // ── Apply ceiling rules in priority order ───────────────────────
-  let ceiling: "critical" | "warning" | "info" = "critical";
-  let ceilingReason = "";
-
-  // Rule 1: Undated evidence → cap at info regardless of tier
-  if (hasUndated) {
-    ceiling = "info";
-    ceilingReason = "capped at info: undated evidence present";
-  }
-  // Rule 2: Stale enforcement → cap at info, flag recheck
-  else if (hasStaleEnforcement) {
-    ceiling = "info";
-    ceilingReason = "capped at info: enforcement/litigation evidence older than 24 months (needs recheck)";
-  }
-  // Rule 3: Best tier determines ceiling
-  else if (bestTier === 1) {
-    ceiling = "critical";
-    ceilingReason = "critical: tier-1 source present, dated";
-  } else if (bestTier === 2) {
-    ceiling = "warning";
-    ceilingReason = "capped at warning: best source tier 2";
+    if (freshTier2.length > 0) {
+      ceiling = "warning";
+      ceilingReason = "capped at warning: no dated Tier-1 source, best is dated Tier-2";
+    } else {
+      // All dated Tier-2 are stale enforcement
+      ceiling = "info";
+      ceilingReason =
+        "capped at info: only qualifying sources are stale enforcement/litigation (>24 months, needs recheck)";
+      needsRecheck = true;
+    }
   } else {
-    ceiling = "info";
-    ceilingReason = "capped at info: best source tier 3";
+    // No dated Tier-1 or Tier-2 sources at all.
+    // Check why: all undated, or only Tier-3?
+    const hasDatedTier3 = evidence.some((e) => e.isDated && e.tier === 3);
+    const hasAnyDated = evidence.some((e) => e.isDated);
+
+    if (!hasAnyDated) {
+      ceiling = "info";
+      ceilingReason = "capped at info: no dated source present";
+    } else if (hasDatedTier3) {
+      ceiling = "info";
+      ceilingReason = "capped at info: best dated source is Tier-3";
+    } else {
+      ceiling = "info";
+      ceilingReason = "capped at info: no dated source above Tier-3";
+    }
   }
 
   // ── Apply ceiling to proposed severity ──────────────────────────
@@ -564,7 +620,6 @@ export function applyCeiling(
       ? proposedSeverity
       : ceiling;
 
-  // If the proposed was already within the ceiling, note that
   const finalReason =
     proposedRank <= ceilingRank
       ? `${ceilingReason} (proposed ${proposedSeverity} within ceiling)`
