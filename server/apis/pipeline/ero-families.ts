@@ -42,6 +42,12 @@ export interface CheckFamily {
   source: FamilySource;
   /** Prompt guidance: what does a good hypothesis in this family look like? */
   guidance: string;
+  /**
+   * Deterministic ranking weight (1–10). Higher = researched earlier.
+   * Used by rank_hypotheses as signal 2 (family importance).
+   * NOT deal-specific — general config.
+   */
+  family_weight: number;
 }
 
 // ── The nine families ───────────────────────────────────────────────
@@ -49,6 +55,7 @@ export const ERO_FAMILIES: CheckFamily[] = [
   {
     id: "corporate_record",
     name: "Corporate Record",
+    family_weight: 9,
     source: {
       kind: "entity",
       entityTypes: ["target", "subsidiary", "acquired_entity"],
@@ -63,6 +70,7 @@ Each hypothesis should name the specific entity and target a verifiable public r
   {
     id: "litigation_enforcement",
     name: "Litigation & Enforcement",
+    family_weight: 7,
     source: {
       kind: "entity",
       entityTypes: ["target", "subsidiary", "acquired_entity", "executive"],
@@ -77,6 +85,7 @@ Each hypothesis should name the specific entity or person and specify a verifiab
   {
     id: "regulatory",
     name: "Regulatory",
+    family_weight: 9,
     source: {
       kind: "profile",
       profileFields: [
@@ -95,6 +104,7 @@ Each hypothesis must name a specific regulator or regulatory regime, not generic
   {
     id: "customer_counterparty",
     name: "Customer & Counterparty",
+    family_weight: 8,
     source: {
       kind: "entity",
       entityTypes: ["counterparty", "customer"],
@@ -109,6 +119,7 @@ Each hypothesis should name the specific counterparty or customer.`,
   {
     id: "competitive",
     name: "Competitive",
+    family_weight: 6,
     source: {
       kind: "entity",
       entityTypes: ["competitor"],
@@ -123,6 +134,7 @@ Each hypothesis should name the specific competitor.`,
   {
     id: "technology_platform",
     name: "Technology & Platform",
+    family_weight: 5,
     source: {
       kind: "entity",
       entityTypes: ["acquired_entity"],
@@ -137,6 +149,7 @@ Each hypothesis should name the specific acquired entity and its product/platfor
   {
     id: "management_record",
     name: "Management Record",
+    family_weight: 5,
     source: {
       kind: "entity",
       entityTypes: ["executive"],
@@ -151,6 +164,7 @@ Each hypothesis should name the specific executive.`,
   {
     id: "macro",
     name: "Macro & Sector",
+    family_weight: 2,
     source: {
       kind: "profile",
       profileFields: [
@@ -169,6 +183,7 @@ Keep this family narrow — 2-4 hypotheses maximum, each tied to a specific thes
   {
     id: "valuation",
     name: "Valuation & Acquisition Programme",
+    family_weight: 10,
     source: {
       kind: "entity_and_profile",
       entityTypes: ["acquired_entity"],
