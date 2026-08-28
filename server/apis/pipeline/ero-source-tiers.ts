@@ -162,7 +162,7 @@ const TIER_2_PATTERNS: Array<{
  * Uses regex-based parsing (not the URL constructor) because the
  * Superblocks SDK runtime may not expose the URL global.
  */
-function extractHost(url: string): string {
+export function extractHost(url: string): string {
   if (!url || typeof url !== "string") return "";
 
   let s = url.trim().toLowerCase();
