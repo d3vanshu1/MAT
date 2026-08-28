@@ -105,9 +105,33 @@ export async function generateHypotheses(
     };
   }
 
+  // ── 2b. Alias guard (belt-and-suspenders) ──────────────────────────
+  // Build a set of all legal_names that appear as merged aliases of
+  // another surviving entity.  If the semantic dedup's non-fatal catch
+  // fell back to the pre-dedup set, aliases could be present as rows.
+  // Excluding them here prevents duplicate/shadow hypotheses.
+  const aliasNames = new Set<string>();
+  for (const e of entities) {
+    if (e.rank_signal && typeof e.rank_signal === "object") {
+      const sig = e.rank_signal as Record<string, unknown>;
+      const aliases = sig.merged_aliases;
+      if (Array.isArray(aliases)) {
+        for (const a of aliases) {
+          if (typeof a === "string") aliasNames.add(a.toLowerCase());
+        }
+      }
+    }
+  }
+
+  const filteredEntities = aliasNames.size > 0
+    ? entities.filter(
+        (e: z.infer<typeof EntityRow>) => !aliasNames.has(e.legal_name.toLowerCase()),
+      )
+    : entities;
+
   // ── 3. Index entities by type, profile by field ───────────────────
   const entitiesByType = new Map<string, z.infer<typeof EntityRow>[]>();
-  for (const e of entities) {
+  for (const e of filteredEntities) {
     const arr = entitiesByType.get(e.entity_type) ?? [];
     arr.push(e);
     entitiesByType.set(e.entity_type, arr);

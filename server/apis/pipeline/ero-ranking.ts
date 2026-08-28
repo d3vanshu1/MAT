@@ -31,7 +31,9 @@ const HypothesisRow = z.object({
   entity_id: z.string().nullable(),
   thesis_link: z.string().nullable(),
   question: z.string(),
-  execution_rank: z.coerce.number(),
+  // execution_rank deliberately NOT loaded — ranking is a pure function
+  // of signals (thesis exposure, family weight, entity materiality),
+  // never of prior rank.  Safe to re-run from any starting state.
 });
 
 const ProfileFieldRow = z.object({
@@ -63,7 +65,7 @@ export async function rankHypotheses(
 
   // ── 1. Load hypotheses ────────────────────────────────────────────
   const hypotheses = await db.query(
-    `SELECT hypothesis_id, family, entity_id, thesis_link, question, execution_rank
+    `SELECT hypothesis_id, family, entity_id, thesis_link, question
      FROM ero_hypotheses WHERE run_id = $1`,
     HypothesisRow,
     [runId],
@@ -220,23 +222,16 @@ export async function rankHypotheses(
   });
 
   // ── 6. Assign execution_rank = 1..N ───────────────────────────────
+  //
+  // Single atomic UPDATE via VALUES list.  One statement = one implicit
+  // transaction.  Every row gets a distinct final rank in the same
+  // statement, so UNIQUE(run_id, execution_rank) never sees an
+  // intermediate collision.  No negative-shift phase needed.
+  //
+  // Re-run safe: ranks are computed purely from signals, and this
+  // statement overwrites whatever execution_rank currently exists
+  // (positive, negative, or already-final) in one atomic pass.
 
-  // UNIQUE(run_id, execution_rank) collision handling:
-  // Cannot update one-by-one since intermediate states may collide.
-  // Strategy: first set ALL to negative offsets, then to final values.
-  // This ensures no two rows ever share a rank mid-update.
-
-  // Step 6a: shift all ranks to negative (avoids any collision with final 1..N)
-  await db.execute(
-    `UPDATE ero_hypotheses
-     SET execution_rank = -(execution_rank + 100000)
-     WHERE run_id = $1`,
-    [runId],
-    { label: "Ranking: shift ranks to negative (collision avoidance)" },
-  );
-
-  // Step 6b: update each hypothesis to its final rank
-  // Batch in a single statement using a VALUES list + UPDATE FROM
   const valueParts: string[] = [];
   const params: any[] = [runId]; // $1 = runId
   let paramIdx = 2;
@@ -253,7 +248,7 @@ export async function rankHypotheses(
      FROM (VALUES ${valueParts.join(", ")}) AS v(hid, new_rank)
      WHERE h.hypothesis_id = v.hid AND h.run_id = $1`,
     params,
-    { label: `Ranking: assign final ranks 1..${items.length}` },
+    { label: `Ranking: atomic assign final ranks 1..${items.length}` },
   );
 
   // ── 7. Build stageData ────────────────────────────────────────────
@@ -287,21 +282,38 @@ export async function rankHypotheses(
     .filter((r) => r.family === "macro")
     .map((r) => r.execution_rank);
 
-  const macroLowest = macroRanks.length > 0
-    ? macroRanks.every((r) => r > Math.floor(items.length * 0.5))
-    : true; // no macro = vacuously true
+  // Macro invariant (absolute, not percentile):
+  // No macro hypothesis may outrank any thesis-linked hypothesis.
+  // Compute max rank among thesis-linked hypotheses (thesisExposure >= 1),
+  // and assert min(macroRanks) > max(thesisLinkedRanks).
+  const thesisLinkedRanks = items
+    .map((item, idx) => ({ rank: idx + 1, thesisExposure: item.thesisExposure }))
+    .filter((r) => r.thesisExposure >= 1)
+    .map((r) => r.rank);
+
+  const maxThesisLinkedRank =
+    thesisLinkedRanks.length > 0 ? Math.max(...thesisLinkedRanks) : 0;
+  const minMacroRank =
+    macroRanks.length > 0 ? Math.min(...macroRanks) : items.length + 1;
+
+  const macroBelowAllThesisLinked =
+    macroRanks.length > 0 && thesisLinkedRanks.length > 0
+      ? minMacroRank > maxThesisLinkedRank
+      : true; // vacuously true if either set is empty
 
   return {
     stage: "rank_hypotheses",
     status: "complete",
-    message: `${items.length} hypotheses ranked | programme_in_top_tier: ${programmeInTopTier} | regulatory_in_top_tier: ${regulatoryInTopTier} | macro_in_bottom_half: ${macroLowest}`,
+    message: `${items.length} hypotheses ranked | programme_in_top_tier: ${programmeInTopTier} | regulatory_in_top_tier: ${regulatoryInTopTier} | macro_below_all_thesis_linked: ${macroBelowAllThesisLinked} (min_macro=${minMacroRank} > max_thesis=${maxThesisLinkedRank})`,
     stageData: {
       totalRanked: items.length,
       rankedList,
       top5,
       programmeInTopTier,
       regulatoryInTopTier,
-      macroInBottomHalf: macroLowest,
+      macroBelowAllThesisLinked,
+      minMacroRank,
+      maxThesisLinkedRank,
       macroRanks,
     },
   };

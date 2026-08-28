@@ -61,7 +61,9 @@ export default api({
       })),
       programmeInTopTier: z.boolean(),
       regulatoryInTopTier: z.boolean(),
-      macroInBottomHalf: z.boolean(),
+      macroBelowAllThesisLinked: z.boolean(),
+      minMacroRank: z.number(),
+      maxThesisLinkedRank: z.number(),
       determinismCheck: z.object({
         ranksAre1toN: z.boolean(),
         noGaps: z.boolean(),
@@ -165,7 +167,9 @@ export default api({
         top5,
         programmeInTopTier: (sd.programmeInTopTier as boolean) ?? false,
         regulatoryInTopTier: (sd.regulatoryInTopTier as boolean) ?? false,
-        macroInBottomHalf: (sd.macroInBottomHalf as boolean) ?? false,
+        macroBelowAllThesisLinked: (sd.macroBelowAllThesisLinked as boolean) ?? false,
+        minMacroRank: (sd.minMacroRank as number) ?? 0,
+        maxThesisLinkedRank: (sd.maxThesisLinkedRank as number) ?? 0,
         determinismCheck,
       },
     };
