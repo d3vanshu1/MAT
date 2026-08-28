@@ -167,10 +167,12 @@ export async function adjudicateFindings(
       const msg = err instanceof Error ? err.message : String(err);
 
       // Mark hypothesis so it is skipped on re-entry (status != 'researched')
+      // Uses 'error' which is schema-legal per ero_hypotheses_status_chk:
+      //   CHECK (status IN ('pending', 'researched', 'no_evidence_found', 'error'))
       await db.execute(
-        `UPDATE ero_hypotheses SET status = 'adjudication_error' WHERE hypothesis_id = $1`,
+        `UPDATE ero_hypotheses SET status = 'error' WHERE hypothesis_id = $1`,
         [hyp.hypothesis_id],
-        { label: `Adjudication: set hyp ${hyp.execution_rank} → adjudication_error` },
+        { label: `Adjudication: set hyp ${hyp.execution_rank} → error` },
       );
 
       outcomes.push({

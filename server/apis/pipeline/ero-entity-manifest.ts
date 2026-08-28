@@ -143,15 +143,41 @@ export async function buildEntityManifest(
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
-  // ── 1. Clean-slate guard ─────────────────────────────────────────
-  // If prior invocation died mid-insert, partial rows may exist.
-  // DELETE them so we redo the full stage atomically (all-or-nothing).
-  // This is safe because the stage has a single LLM call; the insert
-  // cost is negligible vs. a silent partial-completion bug.
+  // ── 1. Idempotency: marker-gated guard ──────────────────────────
+  // A completion marker in ero_pipeline_state.stages_completed[] is written
+  // ONLY after ALL inserts for this stage succeed. If the marker is present,
+  // the stage is truly complete — skip immediately. If absent, partial rows
+  // may exist (prior invocation died mid-insert); delete and redo.
+  //
+  // DELETE safety analysis for ero_entities:
+  //   - ero_hypotheses.entity_id references ero_entities with ON DELETE SET NULL
+  //     (not CASCADE). Deleting ero_entities rows does NOT cascade to
+  //     ero_hypotheses, ero_evidence, or ero_findings.
+  //   - This stage (1) runs before stage 3 (generate_hypotheses). Even if the
+  //     orchestrator re-enters stage 1 after a stale-heartbeat reset, stage 3
+  //     has not yet produced hypotheses, so no evidence/findings exist that
+  //     could be orphaned. The SET NULL ref is harmless at that point.
+  //   CONCLUSION: DELETE FROM ero_entities is safe — no CASCADE dependents.
+  const MarkerRow = z.object({ completed: z.boolean() });
+  const [markerCheck] = await db.query(
+    `SELECT ($2 = ANY(stages_completed)) AS completed
+     FROM ero_pipeline_state WHERE run_id = $1`,
+    MarkerRow,
+    [runId, "build_entity_manifest"],
+    { label: "EntityManifest: check completion marker" },
+  );
+  if (markerCheck?.completed) {
+    return {
+      stage: "build_entity_manifest",
+      status: "complete",
+      message: "Completion marker present — stage already finished. Skipping.",
+    };
+  }
+  // Marker absent: partial rows may exist — delete own rows and redo.
   await db.execute(
     `DELETE FROM ero_entities WHERE run_id = $1`,
     [runId],
-    { label: "EntityManifest: clean slate (delete partial rows)" },
+    { label: "EntityManifest: delete partial rows (marker absent, safe — no CASCADE)" },
   );
 
   // ── 2. Retrieve chunks via FTS ────────────────────────────────────
@@ -1029,6 +1055,20 @@ Return ONLY a JSON array of arrays. No markdown, no explanation.`;
       (s) => s.entity_type === "acquired_entity",
     ).length,
   };
+
+  // ── Write completion marker ───────────────────────────────────────
+  // Written ONLY after ALL inserts above have succeeded. This is the
+  // durable signal that stage 1 is truly complete. A re-entry with the
+  // marker present will short-circuit at step 1 above without re-running
+  // any LLM calls or inserts.
+  await db.execute(
+    `UPDATE ero_pipeline_state
+     SET stages_completed = array_append(stages_completed, $2),
+         updated_at       = now()
+     WHERE run_id = $1`,
+    [runId, "build_entity_manifest"],
+    { label: "EntityManifest: write completion marker" },
+  );
 
   return {
     stage: "build_entity_manifest",

@@ -183,24 +183,30 @@ export async function corpusConfrontation(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
 
-      // Insert a sentinel corpus_check so NOT EXISTS skips on re-entry
+      // Insert a sentinel corpus_check so the NOT EXISTS guard at stage
+      // entry skips this finding on re-entry. No ON CONFLICT clause:
+      // ero_corpus_checks has no unique constraint on finding_id (PK is
+      // check_id; finding_id has only a plain index). ON CONFLICT with a
+      // non-unique index throws a PG error inside the catch, defeating
+      // fault isolation. A bare INSERT is safe — multiple rows per
+      // finding_id are schema-legal (check_id is the PK), and one sentinel
+      // row is sufficient for the NOT EXISTS skip.
+      // Schema constraints satisfied: query_text NOT NULL ✓, hit_count NOT NULL ✓,
+      // classification NULL ✓ (CHECK allows NULL).
       await db.execute(
         `INSERT INTO ero_corpus_checks
-           (finding_id, classification, reasoning, corpus_quote,
-            corpus_quoted_value, external_quoted_value,
-            magnitude_downgrade, absence_flag)
-         VALUES ($1, 'processing_error', $2, NULL, NULL, NULL, false, false)
-         ON CONFLICT (finding_id) DO NOTHING`,
-        [finding.finding_id, msg],
-        { label: `CorpusConfrontation: set finding ${finding.finding_id} → processing_error` },
+           (finding_id, query_text, hit_count, classification, best_hit_snippet)
+         VALUES ($1, '[error]', 0, NULL, $2)`,
+        [finding.finding_id, msg.slice(0, 500)],
+        { label: `CorpusConfrontation: sentinel for finding ${finding.finding_id}` },
       );
 
       outcomes.push({
         finding_id: finding.finding_id,
         title: finding.title,
         severity: finding.severity,
-        queries: [],
-        classification: "processing_error",
+        queries: [{ query_text: "[error]", hit_count: 0, best_hit_snippet: msg, best_hit_document_id: null }],
+        classification: "error",
         corpus_quote: null,
         corpus_quoted_value: null,
         external_quoted_value: null,

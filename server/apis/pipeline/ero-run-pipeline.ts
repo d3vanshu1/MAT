@@ -92,6 +92,17 @@ export default api({
     const db = ctx.integrations.ic_diligence_db;
     const invocationStart = Date.now();
 
+    // ── 0. Ensure stages_completed column exists ──────────────────
+    // Added inline (no migration file) — idempotent. This column carries
+    // per-stage completion markers for stages 1-3 so they can detect a
+    // true full completion vs. a partial-row state.
+    await db.execute(
+      `ALTER TABLE ero_pipeline_state
+         ADD COLUMN IF NOT EXISTS stages_completed TEXT[] NOT NULL DEFAULT '{}'`,
+      [],
+      { label: "EroRunPipeline: ensure stages_completed column" },
+    );
+
     // ── 1. Resume or create run ───────────────────────────────────
     if (!runId) {
       // Check for an existing incomplete run for this deal that can be resumed.

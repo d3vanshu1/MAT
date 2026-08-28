@@ -191,14 +191,40 @@ export async function buildDealProfile(
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
-  // ── 1. Clean-slate guard ─────────────────────────────────────────
-  // Two LLM groups (business_shape, thesis_dependency) are inserted
-  // separately. A death between the two would leave partial rows.
-  // DELETE all so we redo the full stage atomically.
+  // ── 1. Idempotency: marker-gated guard ──────────────────────────
+  // A completion marker in ero_pipeline_state.stages_completed[] is written
+  // ONLY after BOTH LLM groups (business_shape, thesis_dependency) are
+  // fully inserted. If the marker is present, skip immediately.
+  // If absent, partial rows may exist (died between groups) — delete own
+  // rows and redo both groups.
+  //
+  // DELETE safety analysis for ero_profile:
+  //   - ero_profile has no FK children. No other table has an ON DELETE
+  //     CASCADE from ero_profile. Deleting ero_profile rows does NOT
+  //     cascade to ero_hypotheses, ero_evidence, or ero_findings.
+  //   - Stage 2 runs before stage 3 (generate_hypotheses). Even under
+  //     stale-heartbeat re-entry, stage 3 has not yet produced rows.
+  //   CONCLUSION: DELETE FROM ero_profile is safe — no CASCADE dependents.
+  const MarkerRow = z.object({ completed: z.boolean() });
+  const [markerCheck] = await db.query(
+    `SELECT ($2 = ANY(stages_completed)) AS completed
+     FROM ero_pipeline_state WHERE run_id = $1`,
+    MarkerRow,
+    [runId, "build_deal_profile"],
+    { label: "DealProfile: check completion marker" },
+  );
+  if (markerCheck?.completed) {
+    return {
+      stage: "build_deal_profile",
+      status: "complete",
+      message: "Completion marker present — stage already finished. Skipping.",
+    };
+  }
+  // Marker absent: partial rows may exist — delete own rows and redo.
   await db.execute(
     `DELETE FROM ero_profile WHERE run_id = $1`,
     [runId],
-    { label: "DealProfile: clean slate (delete partial rows)" },
+    { label: "DealProfile: delete partial rows (marker absent, safe — no CASCADE)" },
   );
 
   // ── 2. Retrieve chunks for business_shape ─────────────────────────
@@ -635,6 +661,19 @@ Return ONLY a JSON array of objects with keys: field_name, field_value, anchor_t
     `context: shape=${shapeChunks.length}chunks thesis=${thesisChunks.length}chunks (${thesisReserved.length} reserved)`,
     `tokens: in=${totalIn} out=${totalOut}`,
   ].join(" | ");
+
+  // ── Write completion marker ───────────────────────────────────────
+  // Written ONLY after BOTH groups' inserts have succeeded above.
+  // A re-entry with the marker present short-circuits at step 1
+  // without re-running any LLM calls.
+  await db.execute(
+    `UPDATE ero_pipeline_state
+     SET stages_completed = array_append(stages_completed, $2),
+         updated_at       = now()
+     WHERE run_id = $1`,
+    [runId, "build_deal_profile"],
+    { label: "DealProfile: write completion marker" },
+  );
 
   return {
     stage: "build_deal_profile",

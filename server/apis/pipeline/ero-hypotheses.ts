@@ -64,16 +64,43 @@ export async function generateHypotheses(
   const db = ctx.integrations.ic_diligence_db;
   const claude = ctx.integrations.claude;
 
-  // ── 1. Clean-slate guard ─────────────────────────────────────────
-  // Two LLM groups (entity-sourced, profile-sourced) are inserted
-  // separately. A death between the two would leave partial rows and
-  // the old cnt > 0 guard would falsely declare complete. DELETE all
-  // so we redo the full stage atomically.
-  await db.execute(
-    `DELETE FROM ero_hypotheses WHERE run_id = $1`,
-    [runId],
-    { label: "HypothesisGen: clean slate (delete partial rows)" },
+  // ── 1. Idempotency: marker-gated guard ──────────────────────────
+  // A completion marker in ero_pipeline_state.stages_completed[] is written
+  // ONLY after ALL hypothesis inserts for this stage succeed. If the marker
+  // is present, the stage is truly complete — skip immediately.
+  //
+  // NO DELETE on ero_hypotheses. This is a hard rule:
+  //   - ero_evidence and ero_findings have ON DELETE CASCADE from ero_hypotheses.
+  //     Deleting hypotheses cascades to ALL downstream research data.
+  //   - While the orchestrator is forward-only (stage 3 runs before 5-7),
+  //     we cannot safely DELETE hypotheses even in a partial state without
+  //     risking destroying evidence/findings if re-entry happens late.
+  //
+  // Partial-row resume strategy:
+  //   - Each family's hypotheses are inserted with ON CONFLICT (run_id,
+  //     execution_rank) DO NOTHING. If partial rows exist (some families
+  //     inserted, stage died before the marker was written), re-running
+  //     iterates all families; existing rows are skipped, missing ones added.
+  //   - The provisional execution_rank assigned here is sequential per run_id.
+  //     Duplicate keys on re-entry are silently skipped. This is safe: partial
+  //     rows from prior execution retain their ranks and are not duplicated.
+  //   CONCLUSION: marker-gated + ON CONFLICT resume, NO DELETE.
+  const MarkerRow = z.object({ completed: z.boolean() });
+  const [markerCheck] = await db.query(
+    `SELECT ($2 = ANY(stages_completed)) AS completed
+     FROM ero_pipeline_state WHERE run_id = $1`,
+    MarkerRow,
+    [runId, "generate_hypotheses"],
+    { label: "HypothesisGen: check completion marker" },
   );
+  if (markerCheck?.completed) {
+    return {
+      stage: "generate_hypotheses",
+      status: "complete",
+      message: "Completion marker present — stage already finished. Skipping.",
+    };
+  }
+  // Marker absent: run (or re-run) all families. ON CONFLICT skips existing rows.
 
   // ── 2. Load entities and profile ──────────────────────────────────
   const entities = await db.query(
@@ -271,6 +298,20 @@ export async function generateHypotheses(
     .filter(([, v]) => v > 0)
     .map(([k, v]) => `${k}:${v}`)
     .join(", ");
+
+  // ── Write completion marker ───────────────────────────────────────
+  // Written ONLY after the insert above has committed. A re-entry with
+  // the marker present short-circuits at step 1. Because no DELETE is
+  // performed on ero_hypotheses, downstream evidence/findings from any
+  // prior partial run that were written by stages 5-7 are never touched.
+  await db.execute(
+    `UPDATE ero_pipeline_state
+     SET stages_completed = array_append(stages_completed, $2),
+         updated_at       = now()
+     WHERE run_id = $1`,
+    [runId, "generate_hypotheses"],
+    { label: "HypothesisGen: write completion marker" },
+  );
 
   return {
     stage: "generate_hypotheses",
