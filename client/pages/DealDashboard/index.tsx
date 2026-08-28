@@ -2202,19 +2202,33 @@ export default function DealDashboardPage() {
 
         switch (result.status) {
           case "complete": {
-            // Pipeline done — publish to module_outputs then refresh dashboard
-            terminal = true;
-            setModuleProgress("external_risk_overlay", {
-              message: "Publishing ERO results…",
-            });
-            try {
-              await publishEroApi({ runId: eroRunId });
-            } catch (pubErr) {
-              console.error("[ERO] Publish failed:", pubErr);
-              // Still mark as completed — render stage produced stageData
+            // "complete" means the CURRENT STAGE finished. The pipeline is only
+            // truly done when the last stage ("render") returns complete.
+            if (result.stage === "render") {
+              // Pipeline fully done — publish to module_outputs then refresh dashboard
+              terminal = true;
+              setModuleProgress("external_risk_overlay", {
+                message: "Publishing ERO results…",
+              });
+              try {
+                await publishEroApi({ runId: eroRunId });
+              } catch (pubErr) {
+                console.error("[ERO] Publish failed:", pubErr);
+              }
+              await refetchModules();
+              toast.success("External Risk Overlay complete!");
+            } else {
+              // Intermediate stage completed — show progress, keep polling
+              const stageIdx = [
+                "build_entity_manifest", "build_deal_profile", "generate_hypotheses",
+                "rank_hypotheses", "research_execution", "adjudicate_findings",
+                "corpus_confrontation", "render",
+              ].indexOf(result.stage);
+              setModuleProgress("external_risk_overlay", {
+                message: `${stageLabel} ✓`,
+                detail: { current: stageIdx + 1, total: 8, phase: "researching" },
+              });
             }
-            await refetchModules();
-            toast.success("External Risk Overlay complete!");
             break;
           }
 
