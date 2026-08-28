@@ -31,6 +31,7 @@ const EntityRow = z.object({
   registration_number: z.string().nullable(),
   jurisdiction: z.string().nullable(),
   role: z.string().nullable(),
+  rank_signal: z.any().nullable(),
 });
 
 const ProfileRow = z.object({
@@ -81,7 +82,7 @@ export async function generateHypotheses(
 
   // ── 2. Load entities and profile ──────────────────────────────────
   const entities = await db.query(
-    `SELECT entity_id, entity_type, legal_name, registration_number, jurisdiction, role
+    `SELECT entity_id, entity_type, legal_name, registration_number, jurisdiction, role, rank_signal
      FROM ero_entities WHERE run_id = $1`,
     EntityRow,
     [runId],
@@ -255,6 +256,13 @@ export async function generateHypotheses(
     stage: "generate_hypotheses",
     status: "complete",
     message: `${allHypotheses.length} hypotheses generated | breakdown: ${breakdownStr} | regulatory_present: ${regulatoryPresent} | acquisition_programme_present: ${acquisitionProgrammePresent} | tokens: in=${totalTokensIn} out=${totalTokensOut}`,
+    stageData: {
+      familyBreakdown,
+      totalTokensIn,
+      totalTokensOut,
+      regulatoryPresent,
+      acquisitionProgrammePresent,
+    },
   };
 }
 
@@ -282,6 +290,13 @@ function assembleFamilyInputs(
           if (e.registration_number) parts.push(`  reg: ${e.registration_number}`);
           if (e.jurisdiction) parts.push(`  jurisdiction: ${e.jurisdiction}`);
           if (e.role) parts.push(`  role: ${e.role}`);
+          if (e.rank_signal && typeof e.rank_signal === "object") {
+            const sig = e.rank_signal as Record<string, unknown>;
+            const sigParts = Object.entries(sig)
+              .filter(([, v]) => v != null)
+              .map(([k, v]) => `${k}: ${v}`);
+            if (sigParts.length > 0) parts.push(`  rank_signal: ${sigParts.join(", ")}`);
+          }
           return parts.join("\n");
         })
         .join("\n");

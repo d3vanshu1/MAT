@@ -47,6 +47,7 @@ export default api({
       stage: z.string(),
       status: z.string(),
       message: z.string(),
+      stageData: z.record(z.unknown()).nullable().optional(),
     }),
     hypothesesByFamily: z.record(z.string(), z.array(z.object({
       hypothesis_id: z.string(),
