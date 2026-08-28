@@ -46,6 +46,40 @@ const MAX_CHUNKS_PER_QUERY = 8;
  */
 const UNKNOWN_HIT_THRESHOLD = 3;
 
+/**
+ * BOILERPLATE DENYLIST — phrases that can NEVER constitute substantive risk
+ * assessment. If the LLM returns known_and_assessed but the corpus_quote
+ * contains any of these phrases, downgrade to unknown_to_deal_team.
+ *
+ * These are legal/procedural boilerplate patterns found in CIMs, NDAs,
+ * and deal documents that match FTS keywords but do not address any
+ * specific risk.
+ */
+const BOILERPLATE_DENYLIST: string[] = [
+  "confidentiality agreement",
+  "governed by",
+  "each recipient of this memorandum",
+  "each recipient of this document",
+  "non-disclosure agreement",
+  "duty of confidentiality",
+  "not to be reproduced",
+  "without the prior written consent",
+  "this memorandum is confidential",
+  "this document is confidential",
+  "for the sole use of",
+  "may not be disclosed",
+  "may not be distributed",
+  "does not constitute an offer",
+  "no representation or warranty",
+  "forward-looking statements",
+  "safe harbor",
+  "past performance is not indicative",
+  "subject to change without notice",
+  "for informational purposes only",
+  "not intended as legal advice",
+  "not intended as investment advice",
+];
+
 // ── DB row schemas ──────────────────────────────────────────────────
 const FindingWithContext = z.object({
   finding_id: z.string(),
@@ -110,6 +144,7 @@ interface CorpusCheckOutcome {
   corpus_quoted_value: string | null;
   external_quoted_value: string | null;
   magnitude_downgrade: boolean;
+  boilerplate_downgrade: boolean;
   absence_flag: boolean;
   reasoning: string;
 }
@@ -211,6 +246,7 @@ export async function corpusConfrontation(
         corpus_quoted_value: null,
         external_quoted_value: null,
         magnitude_downgrade: false,
+        boilerplate_downgrade: false,
         absence_flag: false,
         reasoning: msg,
       });
@@ -500,6 +536,7 @@ async function confrontOneFinding(
   //    known_and_assessed. An adjective is not sufficient for understated.
   let finalClassification = llmResult.classification;
   let magnitudeDowngrade = false;
+  let boilerplateDowngrade = false;
 
   if (finalClassification === "known_but_understated") {
     const hasCorpusValue =
@@ -512,6 +549,32 @@ async function confrontOneFinding(
     if (!hasCorpusValue || !hasExternalValue) {
       finalClassification = "known_and_assessed";
       magnitudeDowngrade = true;
+    }
+  }
+
+  // ── e2. CODE ENFORCEMENT: boilerplate denylist ──────────────────
+  //    If the LLM classified as known_and_assessed (or known_but_understated)
+  //    but the corpus_quote contains boilerplate phrasing, downgrade to
+  //    unknown_to_deal_team. A boilerplate/disclaimer quote can never
+  //    constitute substantive risk assessment.
+  if (
+    (finalClassification === "known_and_assessed" ||
+      finalClassification === "known_but_understated") &&
+    llmResult.corpus_quote != null
+  ) {
+    const quoteLower = llmResult.corpus_quote.toLowerCase();
+    const matchedBoilerplate = BOILERPLATE_DENYLIST.find((phrase) =>
+      quoteLower.includes(phrase),
+    );
+    if (matchedBoilerplate) {
+      finalClassification = "unknown_to_deal_team";
+      boilerplateDowngrade = true;
+      // Amend reasoning to explain the downgrade
+      llmResult.reasoning =
+        `[BOILERPLATE DOWNGRADE] LLM classified as ${llmResult.classification} ` +
+        `but corpus_quote matched boilerplate denylist phrase "${matchedBoilerplate}". ` +
+        `Boilerplate/disclaimer text does not constitute risk assessment. ` +
+        `Downgraded to unknown_to_deal_team. Original reasoning: ${llmResult.reasoning}`;
     }
   }
 
@@ -556,6 +619,7 @@ async function confrontOneFinding(
     corpus_quoted_value: llmResult.corpus_quoted_value ?? null,
     external_quoted_value: llmResult.external_quoted_value ?? null,
     magnitude_downgrade: magnitudeDowngrade,
+    boilerplate_downgrade: boilerplateDowngrade,
     absence_flag: absenceFlag,
     reasoning: llmResult.reasoning,
   };
@@ -569,31 +633,46 @@ const CONFRONTATION_SYSTEM_PROMPT = `You are a diligence analyst cross-referenci
 
 You will receive:
 1. An EXTERNAL FINDING — a risk discovered through web research about the deal.
-2. CORPUS EXCERPTS — snippets from the deal team's own documents found by searching for the finding's key terms.
+2. CORPUS EXCERPTS — snippets from the deal team's own documents found by keyword-searching for the finding's key terms.
+
+IMPORTANT: The corpus excerpts were found by full-text keyword search. A keyword match is NECESSARY but NOT SUFFICIENT for classification. The excerpts may contain text that shares vocabulary with the finding but is completely unrelated to the specific risk. You must judge whether each excerpt SUBSTANTIVELY DISCUSSES OR ASSESSES the specific risk described in the finding.
 
 Your job is to classify the finding into one of three categories:
 
-- "unknown_to_deal_team": The corpus excerpts do NOT address this finding's subject. The deal team's documents are silent on this matter. Choose this ONLY when the search genuinely returned nothing relevant — if the snippets discuss the same topic, do NOT call it unknown.
+- "unknown_to_deal_team": The corpus excerpts do NOT substantively discuss or assess the specific risk in this finding. The deal team's documents are silent on this specific matter. This includes cases where:
+  • The excerpts share keywords with the finding but discuss a different topic
+  • The excerpts are legal/contractual boilerplate (confidentiality clauses, disclaimers, NDA language, safe harbor statements, forward-looking statement disclaimers)
+  • The excerpts are generic company history or M&A narrative that mentions an entity but does not discuss the specific risk
+  • The excerpts mention a relevant word incidentally but do not analyze, assess, or address the risk itself
 
-- "known_and_assessed": The corpus excerpts address this finding's subject. The deal team is aware of and has assessed this risk. Provide a direct quote from the corpus.
+- "known_and_assessed": The corpus excerpts SUBSTANTIVELY discuss or assess the SPECIFIC RISK described in the finding. The deal team is demonstrably aware of and has addressed this particular risk — not merely used the same words in a different context. The corpus text must be ABOUT the risk, not just contain overlapping vocabulary. Provide a direct quote from the corpus that shows substantive engagement with the risk.
 
-- "known_but_understated": The corpus excerpts mention this matter, BUT the external evidence shows a LARGER magnitude than what the deal team stated. You MUST provide BOTH:
+- "known_but_understated": The corpus excerpts substantively discuss this risk, BUT the external evidence shows a LARGER magnitude than what the deal team stated. You MUST provide BOTH:
   - corpus_quoted_value: the exact figure/number the deal team stated (quoted from the corpus)
   - external_quoted_value: the exact figure/number from the external finding that is larger
   BOTH must be specific numbers or quantified values. An adjective like "significant" or "material" is NOT a value. If you cannot provide both specific quoted values, classify as "known_and_assessed" instead.
 
 CRITICAL RULES:
-- Be rigorously honest about absence. Do NOT claim "unknown_to_deal_team" if the corpus snippets discuss the same entity, topic, or risk — even if the coverage is superficial.
+- A keyword match is NOT evidence that the deal team assessed a risk. The corpus excerpt must SUBSTANTIVELY DISCUSS the specific risk for "known_and_assessed" to apply.
+- The following types of corpus text are NEVER evidence of risk assessment, regardless of keyword overlap:
+  • Confidentiality agreement boilerplate (e.g. "governed by a confidentiality agreement", "each recipient of this Memorandum")
+  • Legal disclaimers and safe harbor language
+  • Forward-looking statement warnings
+  • Generic company history or M&A chronology that mentions an entity but not the risk
+  • "No representation or warranty" clauses
+  • "For informational purposes only" disclaimers
+  If the ONLY corpus excerpts matching the finding are these types of text, classify as "unknown_to_deal_team".
 - "known_but_understated" is the highest-consequence classification. It means the deal team actively misrepresented or underestimated a figure. Require hard numbers.
-- When uncertain between "unknown" and "known_and_assessed", prefer "known_and_assessed" — false "unknown" (claiming the deal team missed something they actually covered) is the most damaging error.
+- Be rigorously honest about absence. If the corpus excerpts genuinely discuss the same specific risk (not just the same entity or keywords), then DO classify as "known_and_assessed". But if the discussion is about a different aspect of the entity, or is boilerplate, classify as "unknown_to_deal_team".
+- When the corpus excerpt discusses the same entity or general topic but NOT the specific risk, classify as "unknown_to_deal_team" — topical proximity is not risk assessment.
 
 Respond with ONLY a JSON object (no markdown fences, no commentary):
 {
   "classification": "unknown_to_deal_team" | "known_and_assessed" | "known_but_understated",
-  "corpus_quote": "Direct quote from corpus if known (null if unknown)",
+  "corpus_quote": "Direct quote from corpus showing substantive risk discussion (null if unknown)",
   "corpus_quoted_value": "The deal team's stated figure (REQUIRED for understated)",
   "external_quoted_value": "The external finding's larger figure (REQUIRED for understated)",
-  "reasoning": "Brief explanation of why this classification was chosen"
+  "reasoning": "Brief explanation: if known, explain HOW the corpus addresses this specific risk. If unknown, explain why the keyword matches are not substantive risk assessment."
 }`;
 
 async function callClassificationLlm(
