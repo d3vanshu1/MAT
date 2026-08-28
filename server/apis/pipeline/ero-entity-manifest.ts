@@ -951,6 +951,169 @@ Return ONLY a JSON array of arrays. No markdown, no explanation.`;
     }
   }
 
+  // ── 6e. Deterministic final consolidation (Layer 3) ─────────────────
+  // Guaranteed-correct pass over survivors AFTER all LLM-based dedup.
+  // Three phases: reg consolidation, name consolidation, cross-type flagging.
+  const layer3InputCount = survivors.length;
+  let layer3RegCollapsed = 0;
+  let layer3NameCollapsed = 0;
+  let layer3NameConflictsKept = 0;
+  let layer3MultiRoleFlagged = 0;
+
+  {
+    // ── Phase A: Registration-number consolidation ──────────────────
+    // Group by (entity_type, registration_number) for non-null reg rows.
+    // Collapse each group to one canonical row.
+    const withReg: z.infer<typeof LlmEntity>[] = [];
+    const withoutReg: z.infer<typeof LlmEntity>[] = [];
+
+    for (const e of survivors) {
+      if (e.registration_number != null && e.registration_number.trim() !== "") {
+        withReg.push(e);
+      } else {
+        withoutReg.push(e);
+      }
+    }
+
+    const regGroups = new Map<string, z.infer<typeof LlmEntity>[]>();
+    for (const e of withReg) {
+      const key = `${e.entity_type}::${e.registration_number}`;
+      const arr = regGroups.get(key);
+      if (arr) arr.push(e);
+      else regGroups.set(key, [e]);
+    }
+
+    const afterRegPhase: z.infer<typeof LlmEntity>[] = [...withoutReg];
+    for (const [, group] of regGroups) {
+      if (group.length === 1) {
+        afterRegPhase.push(group[0]);
+      } else {
+        // Collapse: prefer longest legal_name
+        const sorted = [...group].sort(
+          (a, b) => b.legal_name.length - a.legal_name.length,
+        );
+        const canonical = sorted[0];
+        // Shallow-merge rank_signal from all members
+        for (let i = 1; i < sorted.length; i++) {
+          if (sorted[i].rank_signal && typeof sorted[i].rank_signal === "object") {
+            const existing =
+              canonical.rank_signal && typeof canonical.rank_signal === "object"
+                ? { ...(canonical.rank_signal as Record<string, unknown>) }
+                : {};
+            canonical.rank_signal = {
+              ...existing,
+              ...(sorted[i].rank_signal as Record<string, unknown>),
+            };
+          }
+        }
+        afterRegPhase.push(canonical);
+        layer3RegCollapsed += group.length - 1;
+      }
+    }
+
+    // ── Phase B: Name consolidation ─────────────────────────────────
+    // Group by (entity_type, normalizeCompanyName(legal_name)).
+    // Collapse if at most one distinct non-null reg in group.
+    const nameGroups = new Map<string, z.infer<typeof LlmEntity>[]>();
+    for (const e of afterRegPhase) {
+      const key = `${e.entity_type}::${normalizeCompanyName(e.legal_name)}`;
+      const arr = nameGroups.get(key);
+      if (arr) arr.push(e);
+      else nameGroups.set(key, [e]);
+    }
+
+    const afterNamePhase: z.infer<typeof LlmEntity>[] = [];
+    for (const [, group] of nameGroups) {
+      if (group.length === 1) {
+        afterNamePhase.push(group[0]);
+        continue;
+      }
+
+      // Distinct non-null regs in this group
+      const distinctRegs = new Set(
+        group
+          .map((e) => e.registration_number)
+          .filter((r): r is string => r != null && r.trim() !== ""),
+      );
+
+      if (distinctRegs.size <= 1) {
+        // Collapse: prefer non-null reg first, then longest legal_name
+        const sorted = [...group].sort((a, b) => {
+          const aHasReg = a.registration_number ? 1 : 0;
+          const bHasReg = b.registration_number ? 1 : 0;
+          if (bHasReg !== aHasReg) return bHasReg - aHasReg;
+          return b.legal_name.length - a.legal_name.length;
+        });
+        const canonical = sorted[0];
+        // Inherit non-null reg from any member
+        if (!canonical.registration_number) {
+          for (const m of sorted) {
+            if (m.registration_number) {
+              canonical.registration_number = m.registration_number;
+              break;
+            }
+          }
+        }
+        // Shallow-merge rank_signal
+        for (let i = 1; i < sorted.length; i++) {
+          if (sorted[i].rank_signal && typeof sorted[i].rank_signal === "object") {
+            const existing =
+              canonical.rank_signal && typeof canonical.rank_signal === "object"
+                ? { ...(canonical.rank_signal as Record<string, unknown>) }
+                : {};
+            canonical.rank_signal = {
+              ...existing,
+              ...(sorted[i].rank_signal as Record<string, unknown>),
+            };
+          }
+        }
+        afterNamePhase.push(canonical);
+        layer3NameCollapsed += group.length - 1;
+      } else {
+        // Multiple distinct regs — keep all, flag
+        layer3NameConflictsKept++;
+        for (const e of group) {
+          const sig =
+            e.rank_signal && typeof e.rank_signal === "object"
+              ? { ...(e.rank_signal as Record<string, unknown>) }
+              : {};
+          e.rank_signal = { ...sig, name_reg_conflict: true };
+          afterNamePhase.push(e);
+        }
+      }
+    }
+
+    // ── Phase C: Cross-type multi-role flag ──────────────────────────
+    // Group ALL survivors by normalizeCompanyName ignoring entity_type.
+    // Flag rows that appear under multiple entity_types.
+    const crossTypeGroups = new Map<string, z.infer<typeof LlmEntity>[]>();
+    for (const e of afterNamePhase) {
+      const key = normalizeCompanyName(e.legal_name);
+      const arr = crossTypeGroups.get(key);
+      if (arr) arr.push(e);
+      else crossTypeGroups.set(key, [e]);
+    }
+
+    for (const [, group] of crossTypeGroups) {
+      if (group.length < 2) continue;
+      const distinctTypes = [...new Set(group.map((e) => e.entity_type))];
+      if (distinctTypes.length < 2) continue;
+      // Multiple entity_types for same name — flag each
+      for (const e of group) {
+        const sig =
+          e.rank_signal && typeof e.rank_signal === "object"
+            ? { ...(e.rank_signal as Record<string, unknown>) }
+            : {};
+        e.rank_signal = { ...sig, multi_role: distinctTypes };
+      }
+      layer3MultiRoleFlagged += group.length;
+    }
+
+    // Replace survivors
+    survivors.length = 0;
+    survivors.push(...afterNamePhase);
+  }
+
   // ── 7. Insert surviving entities ──────────────────────────────────
   if (survivors.length > 0) {
     // Build batch INSERT
@@ -1042,6 +1205,11 @@ Return ONLY a JSON array of arrays. No markdown, no explanation.`;
       `semantic: ${acquiredBefore.length}->${acquiredAfter} (${semanticMerges} merged, ${semanticVetoes} reg-vetoed, tokens: in=${semanticTokensIn} out=${semanticTokensOut})`,
     );
   }
+  if (layer3RegCollapsed > 0 || layer3NameCollapsed > 0 || layer3MultiRoleFlagged > 0) {
+    messageParts.push(
+      `layer3: ${layer3InputCount}->${survivors.length} (reg:${layer3RegCollapsed} name:${layer3NameCollapsed} conflicts:${layer3NameConflictsKept} multi_role:${layer3MultiRoleFlagged})`,
+    );
+  }
   const message = messageParts.join(" | ");
 
   const semanticDedup = {
@@ -1077,6 +1245,21 @@ Return ONLY a JSON array of arrays. No markdown, no explanation.`;
     stageData: {
       dropped,
       semanticDedup,
+      dedup: {
+        layer2: {
+          beforeNormCount,
+          normCollapses,
+          normConflictPairs,
+        },
+        layer3: {
+          inputCount: layer3InputCount,
+          regCollapsed: layer3RegCollapsed,
+          nameCollapsed: layer3NameCollapsed,
+          nameConflictsKept: layer3NameConflictsKept,
+          multiRoleFlagged: layer3MultiRoleFlagged,
+          finalCount: survivors.length,
+        },
+      },
     },
   };
 }
