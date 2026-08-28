@@ -332,6 +332,13 @@ export default function DealDashboardPage() {
             // Exception: if DB also says "running", allow the update (keeps run ID in sync).
             if (status.latestRun?.status !== "running") continue;
           }
+          // BSS v2 uses its own data path (bss_* tables → BssGetFindings → bssResults).
+          // LoadModuleResults returns BSS with latestOutput=null because BSS doesn't
+          // publish to module_outputs. If we already have BSS results client-side,
+          // don't overwrite them with the empty DB row on refetch.
+          if (id === "blind_spot_scanner" && prev.blind_spot_scanner?.latestOutput != null) {
+            continue;
+          }
           merged[id] = status;
         }
         return merged;
