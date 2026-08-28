@@ -12,6 +12,7 @@ export const ERO_STAGES = [
   "generate_hypotheses",
   "rank_hypotheses",
   "research_execution",
+  "adjudicate_findings",
   "corpus_confrontation",
   "render",
 ] as const;

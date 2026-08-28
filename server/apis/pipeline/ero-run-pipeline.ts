@@ -20,6 +20,7 @@ import { buildDealProfile } from "./ero-deal-profile.js";
 import { generateHypotheses } from "./ero-hypotheses.js";
 import { rankHypotheses } from "./ero-ranking.js";
 import { researchExecution } from "./ero-research-stage.js";
+import { adjudicateFindings } from "./ero-adjudication.js";
 
 // ── Integration ─────────────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -53,6 +54,7 @@ const DISPATCH: Record<EroStageName, StageHandler> = {
   generate_hypotheses: (ctx, runId, dealId) => generateHypotheses(ctx, runId, dealId),
   rank_hypotheses: (ctx, runId, dealId) => rankHypotheses(ctx, runId, dealId),
   research_execution: (ctx, runId, dealId) => researchExecution(ctx, runId, dealId),
+  adjudicate_findings: (ctx, runId, dealId) => adjudicateFindings(ctx, runId, dealId),
   corpus_confrontation: makeStub("corpus_confrontation"),
   render: makeStub("render"),
 };
