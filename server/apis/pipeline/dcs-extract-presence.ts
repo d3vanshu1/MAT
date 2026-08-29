@@ -72,7 +72,7 @@ Your task: identify which of the 10 standard PE diligence dimensions THIS CHUNK 
 The 10 dimensions and their topic anchors:
 ${DCS_DIMENSIONS.map((d, i) => `${i + 1}. ${d.id}: ${d.description}`).join("\n")}
 
-Return ONLY a JSON array. Each item must have exactly these fields:
+Return ONLY one raw JSON array. Do not use Markdown. Do not use code fences. Do not add introductory or concluding prose. Each item must have exactly these fields:
 - "dimension_id": one of the 10 dimension IDs listed above (snake_case)
 - "snippet": a VERBATIM excerpt from the chunk text that demonstrates coverage (copy-paste exactly, do not paraphrase or edit)
 - "is_substantive": true if the snippet contains data, analysis, a finding, a contract term, or a stated metric; false if it is only a heading, table of contents entry, boilerplate, passing mention, or forward reference
@@ -549,15 +549,70 @@ async function processOneChunk(
   // ── Parse response ───────────────────────────────────────────
   const rawText = llmResponse.content[0]?.text ?? "";
 
-  // Strict whole-response JSON parsing: no regex extraction, no markdown
-  // fence support, no prose tolerance. The model must return a valid JSON
-  // array as the complete response.
+  // Strict whole-response JSON parsing with exact fence normalization.
+  // Accepts: (1) a raw JSON array, (2) one complete Markdown code fence
+  // (``` or ```json, case-insensitive) wrapping a JSON array, occupying the
+  // entire response. Rejects prose before/after fences, non-json language
+  // tags, multiple fenced blocks, internal fences, and malformed JSON.
+  // Does NOT search for brackets inside arbitrary text.
+  let jsonToParse: string;
+  const trimmed = rawText.trim();
+
+  if (trimmed.startsWith("[")) {
+    // Raw JSON array — accept directly
+    jsonToParse = trimmed;
+  } else if (trimmed.startsWith("```")) {
+    // Potential single full-response Markdown fence
+    const closingIdx = trimmed.lastIndexOf("```");
+    if (closingIdx <= 3) {
+      // No separate closing fence found
+      throw new Error(
+        `Invalid response for chunk ${chunk.chunk_id}: opening fence without closing fence. Raw: ${trimmed.slice(0, 200)}`,
+      );
+    }
+    // Extract opening fence line
+    const firstNewline = trimmed.indexOf("\n");
+    if (firstNewline === -1) {
+      throw new Error(
+        `Invalid response for chunk ${chunk.chunk_id}: fence on single line. Raw: ${trimmed.slice(0, 200)}`,
+      );
+    }
+    const openingLine = trimmed.slice(3, firstNewline).trim().toLowerCase();
+    // Accept no language tag or "json" only
+    if (openingLine !== "" && openingLine !== "json") {
+      throw new Error(
+        `Invalid response for chunk ${chunk.chunk_id}: unsupported fence language tag '${openingLine}'. Raw: ${trimmed.slice(0, 200)}`,
+      );
+    }
+    // Closing fence must be at the very end
+    const afterClose = trimmed.slice(closingIdx + 3).trim();
+    if (afterClose !== "") {
+      throw new Error(
+        `Invalid response for chunk ${chunk.chunk_id}: content after closing fence. Raw: ${trimmed.slice(0, 200)}`,
+      );
+    }
+    // Extract content between fences
+    const enclosed = trimmed.slice(firstNewline + 1, closingIdx);
+    // Check for internal fences (multiple blocks)
+    if (enclosed.includes("```")) {
+      throw new Error(
+        `Invalid response for chunk ${chunk.chunk_id}: multiple fence blocks detected. Raw: ${trimmed.slice(0, 200)}`,
+      );
+    }
+    jsonToParse = enclosed.trim();
+  } else {
+    // Neither raw JSON array nor fenced — reject
+    throw new Error(
+      `Invalid response for chunk ${chunk.chunk_id}: response is not a JSON array or single fenced block. Raw: ${trimmed.slice(0, 200)}`,
+    );
+  }
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(rawText.trim());
+    parsed = JSON.parse(jsonToParse);
   } catch {
     throw new Error(
-      `Invalid JSON response for chunk ${chunk.chunk_id}: ${rawText.slice(0, 200)}`,
+      `Invalid JSON in response for chunk ${chunk.chunk_id}: ${jsonToParse.slice(0, 200)}`,
     );
   }
 
