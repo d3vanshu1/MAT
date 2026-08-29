@@ -183,6 +183,7 @@ import EroTestRender from './pipeline/ero-test-render.js';
 import EroTestDedup from './pipeline/ero-test-dedup.js';
 import DcsExtractPresence from './pipeline/dcs-extract-presence.js';
 import DcsComputeVerdicts from './pipeline/dcs-compute-verdicts.js';
+import DcsComputeSummary from './pipeline/dcs-compute-summary.js';
 import PublishEroToModuleOutputs from './pipeline/publish-ero-to-module-outputs.js';
 import EroTestPublish from './pipeline/ero-test-publish.js';
 import BssGetFindings from './pipeline/bss-get-findings.js';
@@ -294,7 +295,7 @@ const apis = {
   // ERO v2 pipeline
   EroGetActiveRun, EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish, EroTestDedup,
   // DCS rebuild
-  DcsExtractPresence, DcsComputeVerdicts,
+  DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
