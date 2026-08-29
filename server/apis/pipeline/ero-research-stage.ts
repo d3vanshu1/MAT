@@ -55,6 +55,7 @@ const HypothesisRow = z.object({
   round: z.coerce.number(),
   entity_id: z.string().nullable(),
   thesis_link: z.string().nullable(),
+  target_reg: z.string().nullable(),
 });
 
 const CountRow = z.object({ cnt: z.coerce.number() });
@@ -139,11 +140,13 @@ export async function researchExecution(
 
   // ── Load pending hypotheses in execution_rank order ───────────────
   const pendingHypotheses = await db.query(
-    `SELECT hypothesis_id, family, question, confirming_evidence,
-            refuting_evidence, execution_rank, round, entity_id, thesis_link
-     FROM ero_hypotheses
-     WHERE run_id = $1 AND status = 'pending'
-     ORDER BY execution_rank ASC`,
+    `SELECT h.hypothesis_id, h.family, h.question, h.confirming_evidence,
+            h.refuting_evidence, h.execution_rank, h.round, h.entity_id, h.thesis_link,
+            e.registration_number AS target_reg
+     FROM ero_hypotheses h
+     LEFT JOIN ero_entities e ON e.entity_id = h.entity_id
+     WHERE h.run_id = $1 AND h.status = 'pending'
+     ORDER BY h.execution_rank ASC`,
     HypothesisRow,
     [runId],
     { label: "Research: load pending hypotheses" },
@@ -242,7 +245,7 @@ async function processOneHypothesis(
     );
 
     // ── 2. Extract evidence from response ─────────────────────────
-    const { items, dropped } = extractEvidenceFromResponse(response);
+    const { items, dropped } = extractEvidenceFromResponse(response, hyp.target_reg);
 
     // ── 3. Write evidence rows ────────────────────────────────────
     const writtenItems: EvidenceItem[] = [];
@@ -473,6 +476,7 @@ async function runWebSearch(
  */
 function extractEvidenceFromResponse(
   response: z.infer<typeof WebSearchResponseSchema>,
+  targetReg: string | null = null,
 ): { items: EvidenceItem[]; dropped: DroppedItem[] } {
   const items: EvidenceItem[] = [];
   const dropped: DroppedItem[] = [];
@@ -536,6 +540,19 @@ function extractEvidenceFromResponse(
       continue;
     }
 
+    // ── Wrong-entity admission filter (Companies House only) ────
+    if (targetReg && host === "find-and-update.company-information.service.gov.uk") {
+      const chMatch = url.match(/\/company\/([A-Za-z0-9]+)/);
+      if (!chMatch) {
+        dropped.push({ url, reason: "CH non-entity page (no company number)" });
+        continue;
+      }
+      if (chMatch[1].trim().toLowerCase() !== targetReg.trim().toLowerCase()) {
+        dropped.push({ url, reason: `wrong-entity: CH company ${chMatch[1]} != target ${targetReg}` });
+        continue;
+      }
+    }
+
     // Classify via the verified 4.1 classifier
     const tierResult = classifyTier(url, null);
 
@@ -572,6 +589,19 @@ function extractEvidenceFromResponse(
     if (!host) {
       dropped.push({ url, reason: "extractHost returned empty — unparseable URL (citation)" });
       continue;
+    }
+
+    // ── Wrong-entity admission filter (Companies House only) ────
+    if (targetReg && host === "find-and-update.company-information.service.gov.uk") {
+      const chMatch = url.match(/\/company\/([A-Za-z0-9]+)/);
+      if (!chMatch) {
+        dropped.push({ url, reason: "CH non-entity page (no company number) (citation)" });
+        continue;
+      }
+      if (chMatch[1].trim().toLowerCase() !== targetReg.trim().toLowerCase()) {
+        dropped.push({ url, reason: `wrong-entity: CH company ${chMatch[1]} != target ${targetReg} (citation)` });
+        continue;
+      }
     }
 
     const tierResult = classifyTier(url, null);
