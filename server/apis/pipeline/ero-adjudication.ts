@@ -84,6 +84,7 @@ const AdjudicationResult = z.object({
   title: z.string(),
   detail: z.string(),
   materiality_rationale: z.string(),
+  supporting_evidence_ids: z.array(z.string()),
 });
 
 // ── Per-hypothesis result for stageData ──────────────────────────────
@@ -101,6 +102,9 @@ interface AdjudicationOutcome {
   evidence_count: number;
   evidence_tiers: number[];
   is_enforcement_family: boolean;
+  finding_class: string;
+  supporting_evidence_count: number;
+  supporting_evidence_ids: string[];
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -189,6 +193,9 @@ export async function adjudicateFindings(
         evidence_count: 0,
         evidence_tiers: [],
         is_enforcement_family: ENFORCEMENT_FAMILIES.has(hyp.family),
+        finding_class: "error",
+        supporting_evidence_count: 0,
+        supporting_evidence_ids: [],
       });
       // Continue to next hypothesis — do not kill the stage
     }
@@ -246,14 +253,25 @@ async function adjudicateOneHypothesis(
   // ── 2. LLM adjudication call ────────────────────────────────────
   const llmResult = await callAdjudicationLlm(ai, hyp, evidenceRows);
 
-  // ── 3. Build evidence array for applyCeiling ────────────────────
-  // isEnforcementOrLitigation is derived from the HYPOTHESIS FAMILY,
-  // not from evidence content. litigation_enforcement and regulatory
-  // families investigate enforcement/litigation matters, so their
-  // evidence items carry the enforcement/litigation signal.
+  // ── 3. Credibility gate — intersect model's cited evidence ──────
+  // The model returns supporting_evidence_ids: the evidence items that
+  // substantively discuss THIS finding's subject and support the verdict.
+  // We intersect with actual evidence_ids to guard against hallucinated
+  // IDs, then pass ONLY the intersected subset to applyCeiling.
+  // Consequence: off-subject Tier-1 no longer inflates severity.
+  const actualEvidenceIds = new Set(evidenceRows.map((e: z.infer<typeof EvidenceRow>) => e.evidence_id));
+  const validSupportingIds = llmResult.supporting_evidence_ids.filter(
+    (id) => actualEvidenceIds.has(id),
+  );
+  const supportingEvidenceSet = new Set(validSupportingIds);
+
   const isEnforcementFamily = ENFORCEMENT_FAMILIES.has(hyp.family);
 
-  const evidenceForCeiling: EvidenceForCeiling[] = evidenceRows.map(
+  // Build evidenceForCeiling from ONLY the supporting subset
+  const supportingEvidenceRows = evidenceRows.filter(
+    (e: z.infer<typeof EvidenceRow>) => supportingEvidenceSet.has(e.evidence_id),
+  );
+  const evidenceForCeiling: EvidenceForCeiling[] = supportingEvidenceRows.map(
     (e: z.infer<typeof EvidenceRow>) => ({
       tier: e.source_tier as 1 | 2 | 3,
       isDated: e.publication_date != null,
@@ -261,6 +279,8 @@ async function adjudicateOneHypothesis(
       isEnforcementOrLitigation: isEnforcementFamily,
     }),
   );
+  // If supportingEvidenceRows is empty, applyCeiling returns 'info'
+  // with "no admissible evidence" — desired fail-closed behavior.
 
   // ════════════════════════════════════════════════════════════════
   // THE GATE — this is the module's spine.
@@ -279,16 +299,32 @@ async function adjudicateOneHypothesis(
   // NOT written to the severity column.
   // ════════════════════════════════════════════════════════════════
 
+  // ── 4. Materiality classification (deterministic) ───────────────
+  let findingClass: string;
+  if (llmResult.verdict === "refuted") {
+    findingClass = "cleared";
+  } else if (supportingEvidenceSet.size === 0) {
+    findingClass = "unsupported";
+  } else if (
+    hyp.thesis_link != null &&
+    (finalSeverity === "critical" || finalSeverity === "warning")
+  ) {
+    findingClass = "risk";
+  } else {
+    findingClass = "context";
+  }
+
   // ── 5. Write ero_findings row ───────────────────────────────────
   // severity = applyCeiling's RETURNED value (finalSeverity)
   // ceiling_reason = applyCeiling's ceilingReason
-  // The model's proposed_severity is NOT stored in this table
-  // (no column for it) — it is captured in stageData for audit.
+  // finding_class = materiality classification
+  // supporting_evidence_count = size of intersected supporting set
   await db.execute(
     `INSERT INTO ero_findings
        (hypothesis_id, verdict, severity, ceiling_reason,
-        title, detail, materiality_rationale)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        title, detail, materiality_rationale,
+        finding_class, supporting_evidence_count)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
       hyp.hypothesis_id,
       llmResult.verdict,
@@ -297,6 +333,8 @@ async function adjudicateOneHypothesis(
       llmResult.title,
       llmResult.detail,
       llmResult.materiality_rationale,
+      findingClass,
+      supportingEvidenceSet.size,
     ],
     { label: `Adjudication: write finding for hyp ${hyp.execution_rank}` },
   );
@@ -315,6 +353,9 @@ async function adjudicateOneHypothesis(
     evidence_count: evidenceRows.length,
     evidence_tiers: evidenceRows.map((e: z.infer<typeof EvidenceRow>) => e.source_tier),
     is_enforcement_family: isEnforcementFamily,
+    finding_class: findingClass,
+    supporting_evidence_count: supportingEvidenceSet.size,
+    supporting_evidence_ids: validSupportingIds,
   };
 }
 
@@ -329,6 +370,7 @@ Your job is to:
 2. Propose a severity level for the finding: critical, warning, or info.
 3. Write a concise title and detailed explanation.
 4. Explain why this finding matters (or doesn't) to the investment thesis.
+5. Cite the specific evidence items that substantively support your verdict.
 
 IMPORTANT RULES:
 - Your proposed_severity is a PROPOSAL. It will be checked against source quality by code. Propose based on the SUBSTANCE of the finding — how material is this to the investment? Do NOT inflate severity to be "safe".
@@ -337,13 +379,26 @@ IMPORTANT RULES:
 - If evidence is mixed, lean toward the weight of evidence. If genuinely ambiguous, choose "confirmed" with lower severity rather than "refuted" — err toward surfacing risk.
 - The materiality_rationale should explain how this finding connects to the deal thesis and why it matters (or doesn't) for the investment decision.
 
+CLAIM-LANGUAGE DISCIPLINE:
+- NEVER state a claim stronger than the sources support.
+- A recommendation is NOT a remedy. Proposed/provisional is NOT final/imposed. Alleged/reported is NOT confirmed. A consultation is NOT a decision.
+- If the evidence supports only a weaker claim, state the weaker claim in title, detail, AND materiality_rationale. Do not upgrade language for impact.
+
+SUPPORTING-EVIDENCE CITATION:
+- Each evidence item is labeled with an evidence_id (UUID). Populate supporting_evidence_ids with ONLY the evidence items that BOTH:
+  (a) substantively discuss THIS finding's specific subject/entity, AND
+  (b) support the stated verdict.
+- Do NOT cite items that merely share a broad topic or come from an authoritative domain but concern a different subject (e.g. a regulator page about a different market segment, a government filing for a different company).
+- If NO evidence substantively supports the stated verdict on-subject, return supporting_evidence_ids as an empty array and set the claim to the most that the evidence genuinely supports.
+
 Respond with ONLY a JSON object (no markdown fences, no commentary):
 {
   "verdict": "confirmed" | "refuted",
   "proposed_severity": "critical" | "warning" | "info",
   "title": "Short descriptive title for the finding",
   "detail": "Detailed explanation of what the evidence shows, citing specific sources",
-  "materiality_rationale": "Why this matters to the investment thesis"
+  "materiality_rationale": "Why this matters to the investment thesis",
+  "supporting_evidence_ids": ["<evidence_id>", ...]
 }`;
 
 async function callAdjudicationLlm(
@@ -355,7 +410,7 @@ async function callAdjudicationLlm(
   const evidenceBlock = evidenceRows
     .map((e, i) => {
       const parts = [
-        `Evidence ${i + 1}:`,
+        `Evidence ${i + 1} [evidence_id: ${e.evidence_id}]:`,
         `  URL: ${e.url}`,
         `  Domain: ${e.domain ?? "unknown"}`,
         e.publisher ? `  Publisher: ${e.publisher}` : null,
