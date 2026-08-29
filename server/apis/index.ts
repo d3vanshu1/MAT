@@ -181,6 +181,7 @@ import EroTestAdjudication from './pipeline/ero-test-adjudication.js';
 import EroTestConfrontation from './pipeline/ero-test-confrontation.js';
 import EroTestRender from './pipeline/ero-test-render.js';
 import EroTestDedup from './pipeline/ero-test-dedup.js';
+import DcsExtractPresence from './pipeline/dcs-extract-presence.js';
 import PublishEroToModuleOutputs from './pipeline/publish-ero-to-module-outputs.js';
 import EroTestPublish from './pipeline/ero-test-publish.js';
 import BssGetFindings from './pipeline/bss-get-findings.js';
@@ -291,6 +292,8 @@ const apis = {
   DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query, DiagSnippetMatchHarness,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, RunMigration030, RunMigration031, RunMigration032,   RunMigration033, RunMigration034, RunMigration035, RunMigration036, RunMigration037, RunMigration038, PromoteClaimsLedger, BssRunPipeline, BssGetFindings, BuildStructuralProfile, BssGenerateBlindCandidates, BssAbsenceSweep, BssLlmAdjudication, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate, DiagResumeCcRun, DiagTestResumeQuery, DiagDeleteCheckpointRow, PreserveArtifactSnapshot,
   // ERO v2 pipeline
   EroGetActiveRun, EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish, EroTestDedup,
+  // DCS rebuild
+  DcsExtractPresence,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
