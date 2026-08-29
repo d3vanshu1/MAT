@@ -395,7 +395,31 @@ export default api({
           input.debug,
         );
 
-        // Update tracking
+        // Build next-cumulative without mutating current cumulative
+        const nextCumulative: CumulativeDetail = {
+          ...cumulative,
+          processed_count: cumulative.processed_count + 1,
+          evidence_rows_written: cumulative.evidence_rows_written + result.rowsWritten,
+          empty_chunk_count: cumulative.empty_chunk_count + (result.rowsWritten === 0 ? 1 : 0),
+          fabrication_rejected: cumulative.fabrication_rejected + result.fabricationRejected,
+          invalid_dimension_rejected: cumulative.invalid_dimension_rejected + result.invalidDimensionRejected,
+          duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + result.duplicateDimensionRejected,
+          last_chunk_id: chunk.chunk_id,
+        };
+        const nextCursor = chunk.chunk_id;
+
+        // Persist checkpoint atomically — cursor and cumulative together
+        await db.execute(
+          `UPDATE dcs_pipeline_state
+           SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
+           WHERE id = $3::uuid`,
+          [nextCursor, JSON.stringify(nextCumulative), stateId],
+          { label: `DcsExtract: advance cursor to ${chunk.chunk_id.slice(0, 8)}` },
+        );
+
+        // Only after successful checkpoint: commit to in-memory state
+        cumulative = nextCumulative;
+        cursorValue = nextCursor;
         processedThisCall++;
         rowsWrittenThisCall += result.rowsWritten;
         if (result.rowsWritten === 0) emptyChunksThisCall++;
@@ -403,25 +427,6 @@ export default api({
         invalidDimensionRejectedThisCall += result.invalidDimensionRejected;
         duplicateDimensionRejectedThisCall += result.duplicateDimensionRejected;
         if (result.traceEntry) trace.push(result.traceEntry);
-
-        // Update cumulative
-        cumulative.processed_count++;
-        cumulative.evidence_rows_written += result.rowsWritten;
-        if (result.rowsWritten === 0) cumulative.empty_chunk_count++;
-        cumulative.fabrication_rejected += result.fabricationRejected;
-        cumulative.invalid_dimension_rejected += result.invalidDimensionRejected;
-        cumulative.duplicate_dimension_rejected += result.duplicateDimensionRejected;
-        cumulative.last_chunk_id = chunk.chunk_id;
-
-        // Advance cursor
-        cursorValue = chunk.chunk_id;
-        await db.execute(
-          `UPDATE dcs_pipeline_state
-           SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
-           WHERE id = $3::uuid`,
-          [cursorValue, JSON.stringify(cumulative), stateId],
-          { label: `DcsExtract: advance cursor to ${chunk.chunk_id.slice(0, 8)}` },
-        );
       } catch (err) {
         // On error: set stage to failed, do NOT advance cursor
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -465,6 +470,10 @@ export default api({
         [JSON.stringify(cumulative), stateId],
         { label: "DcsExtract: mark extract done" },
       );
+    }
+
+    if (mode !== "verification") {
+      console.log(`[DcsExtract] run=${input.runId.slice(0, 8)} processed=${processedThisCall} written=${rowsWrittenThisCall} fabricationRejected=${fabricationRejectedThisCall} cursor=${cursorValue ?? "null"} remaining=${remainingChunks} status=${finalStatus}`);
     }
 
     return {
@@ -611,9 +620,68 @@ async function processOneChunk(
   try {
     parsed = JSON.parse(jsonToParse);
   } catch {
-    throw new Error(
-      `Invalid JSON in response for chunk ${chunk.chunk_id}: ${jsonToParse.slice(0, 200)}`,
-    );
+    // Fallback: attempt to repair unescaped quotes inside JSON string values.
+    // The model sometimes embeds CSV-quoted numbers (e.g. "47,014") inside
+    // snippet strings without escaping the inner quotes.
+    // Strategy: replace inner unescaped quotes that are not at structural
+    // positions (after : or , or at array/object boundaries) with escaped quotes.
+    try {
+      // Character-by-character scanner for snippet values: finds each
+      // "snippet":"..." and escapes inner quotes that are not structural
+      // (i.e. not followed by , or } which would mark the value boundary).
+      let fixed = "";
+      let i = 0;
+      while (i < jsonToParse.length) {
+        const snippetKey = '"snippet"';
+        const keyIdx = jsonToParse.indexOf(snippetKey, i);
+        if (keyIdx === -1) {
+          fixed += jsonToParse.slice(i);
+          break;
+        }
+        fixed += jsonToParse.slice(i, keyIdx + snippetKey.length);
+        i = keyIdx + snippetKey.length;
+        // Skip whitespace and colon
+        while (i < jsonToParse.length && (jsonToParse[i] === ' ' || jsonToParse[i] === ':')) {
+          fixed += jsonToParse[i];
+          i++;
+        }
+        if (i >= jsonToParse.length || jsonToParse[i] !== '"') continue;
+        // Opening quote of snippet value
+        fixed += '"';
+        i++;
+        // Scan to find the real closing quote: it must be followed by , or } (after optional whitespace)
+        let value = "";
+        while (i < jsonToParse.length) {
+          if (jsonToParse[i] === '\\') {
+            value += jsonToParse[i] + (jsonToParse[i + 1] ?? "");
+            i += 2;
+            continue;
+          }
+          if (jsonToParse[i] === '"') {
+            // Check if this quote is the structural close: next non-whitespace must be , or }
+            let peek = i + 1;
+            while (peek < jsonToParse.length && jsonToParse[peek] === ' ') peek++;
+            if (peek >= jsonToParse.length || jsonToParse[peek] === ',' || jsonToParse[peek] === '}') {
+              // This is the real closing quote
+              break;
+            }
+            // Inner unescaped quote — escape it
+            value += '\\"';
+            i++;
+            continue;
+          }
+          value += jsonToParse[i];
+          i++;
+        }
+        fixed += value + '"';
+        if (i < jsonToParse.length) i++; // skip the closing quote
+      }
+      parsed = JSON.parse(fixed);
+    } catch {
+      throw new Error(
+        `Invalid JSON in response for chunk ${chunk.chunk_id}: ${jsonToParse.slice(0, 200)}`,
+      );
+    }
   }
 
   // Validate the entire response as an array of PresenceItem in one pass.
