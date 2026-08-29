@@ -537,16 +537,39 @@ export default api({
       );
     }
 
-    // Verify coverage_basis matches
-    const rbBasis = typeof rb.coverage_basis === "string"
+    // Verify coverage_basis matches (semantic, order-independent)
+    const rbBasisRaw = typeof rb.coverage_basis === "string"
       ? JSON.parse(rb.coverage_basis)
       : rb.coverage_basis;
-    const computedBasisStr = JSON.stringify(coverageBasis);
-    const rbBasisStr = JSON.stringify(rbBasis);
-    if (computedBasisStr !== rbBasisStr) {
+    const rbBasisParsed = CoverageBasisSchema.safeParse(rbBasisRaw);
+    if (!rbBasisParsed.success) {
       throw new Error(
-        `Readback coverage_basis mismatch.\nExpected: ${computedBasisStr}\nGot: ${rbBasisStr}`,
+        `Persisted coverage_basis failed schema validation: ${rbBasisParsed.error.message.slice(0, 300)}`,
       );
+    }
+    const rbBasis = rbBasisParsed.data;
+
+    // Field-by-field semantic comparison
+    const basisFields: Array<{ field: string; expected: unknown; actual: unknown }> = [
+      { field: "extraction_status", expected: coverageBasis.extraction_status, actual: rbBasis.extraction_status },
+      { field: "processed_chunks", expected: coverageBasis.processed_chunks, actual: rbBasis.processed_chunks },
+      { field: "total_chunks", expected: coverageBasis.total_chunks, actual: rbBasis.total_chunks },
+      { field: "coverage_complete", expected: coverageBasis.coverage_complete, actual: rbBasis.coverage_complete },
+      { field: "evidence_rows", expected: coverageBasis.evidence_rows, actual: rbBasis.evidence_rows },
+      { field: "verdict_stage_status", expected: coverageBasis.verdict_stage_status, actual: rbBasis.verdict_stage_status },
+      { field: "verdict_dimension_count", expected: coverageBasis.verdict_dimension_count, actual: rbBasis.verdict_dimension_count },
+      { field: "scoring_method", expected: coverageBasis.scoring_method, actual: rbBasis.scoring_method },
+      { field: "provisional", expected: coverageBasis.provisional, actual: rbBasis.provisional },
+      { field: "score_scale.absent", expected: coverageBasis.score_scale.absent, actual: rbBasis.score_scale.absent },
+      { field: "score_scale.asserted", expected: coverageBasis.score_scale.asserted, actual: rbBasis.score_scale.asserted },
+      { field: "score_scale.evidenced", expected: coverageBasis.score_scale.evidenced, actual: rbBasis.score_scale.evidenced },
+    ];
+    for (const { field, expected, actual } of basisFields) {
+      if (actual !== expected) {
+        throw new Error(
+          `Readback coverage_basis.${field} mismatch: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}.`,
+        );
+      }
     }
 
     return {
