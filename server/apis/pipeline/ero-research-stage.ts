@@ -35,7 +35,7 @@ import {
 // ── Constants ───────────────────────────────────────────────────────
 const RESEARCH_MODEL = "claude-sonnet-4-6";
 const RESEARCH_MAX_TOKENS = 4096;
-const WEB_SEARCH_MAX_USES = 10;
+const WEB_SEARCH_MAX_USES = 4;
 
 /** Per-call timeout for the Anthropic web_search request (ms). */
 const PER_CALL_TIMEOUT_MS = 90_000;
@@ -58,6 +58,11 @@ const HypothesisRow = z.object({
 });
 
 const CountRow = z.object({ cnt: z.coerce.number() });
+
+const EntityRow = z.object({
+  legal_name: z.string(),
+  registration_number: z.string().nullable(),
+});
 
 const MaxRankRow = z.object({ max_rank: z.coerce.number().nullable() });
 
@@ -210,7 +215,20 @@ async function processOneHypothesis(
   hyp: z.infer<typeof HypothesisRow>,
   stageStart: number,
 ): Promise<HypothesisResult> {
-  const searchQuery = buildSearchQuery(hyp);
+  // ── 0. Resolve entity identity for disambiguation ────────────
+  let entity: z.infer<typeof EntityRow> | null = null;
+  if (hyp.entity_id) {
+    const rows = await db.query(
+      `SELECT legal_name, registration_number
+       FROM ero_entities WHERE entity_id = $1`,
+      EntityRow,
+      [hyp.entity_id],
+      { label: `Research: resolve entity for hyp ${hyp.execution_rank}` },
+    );
+    entity = rows.length > 0 ? rows[0] : null;
+  }
+
+  const searchQuery = buildSearchQuery(hyp, entity);
 
   try {
     // ── 1. Run web search ─────────────────────────────────────────
@@ -315,23 +333,42 @@ async function processOneHypothesis(
 
 function buildSearchQuery(
   hyp: z.infer<typeof HypothesisRow>,
+  entity: { legal_name: string; registration_number: string | null } | null,
 ): string {
   // Combine the hypothesis question with its confirming/refuting framing
-  // to give Claude a focused research mandate.
-  return [
-    hyp.question,
+  // and the entity's resolved identity to give Claude a focused research mandate.
+  const parts: string[] = [hyp.question];
+
+  // Entity identity block — gives the model the exact legal name and
+  // registration number so it can disambiguate from similarly-named entities.
+  if (entity) {
+    const regLine = entity.registration_number
+      ? ` (registration number: ${entity.registration_number})`
+      : "";
+    parts.push(
+      `Target entity: ${entity.legal_name}${regLine}. Research ONLY this specific entity — reject results about any other company even if the name is similar.`,
+    );
+  }
+
+  parts.push(
     `Confirming evidence would include: ${hyp.confirming_evidence}`,
     `Refuting evidence would include: ${hyp.refuting_evidence}`,
-  ].join("\n");
+  );
+  return parts.join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // WEB SEARCH VIA ANTHROPIC
 // ═══════════════════════════════════════════════════════════════════
 
-const RESEARCH_SYSTEM_PROMPT = `You are a due-diligence research agent. You will receive a specific risk hypothesis to investigate.
+const RESEARCH_SYSTEM_PROMPT = `You are a due-diligence research agent. You will investigate ONE specific hypothesis about ONE specific named entity. You have a SMALL search budget (about four searches). Spend them in priority order and STOP as soon as you have authoritative evidence that confirms or refutes the hypothesis. Do not use remaining searches on redundant rephrasings or tangential angles.
 
-Use the web_search tool to find evidence that either confirms or refutes the hypothesis. Search thoroughly — try multiple angles if the first search is inconclusive.
+Search order of priority:
+1. The most targeted, authoritative query first — use the entity's exact legal name AND its company registration number to find official records (Companies House filings, regulator registers, official filings).
+2. Reputable secondary sources (trade press, financial databases) only if official records are insufficient.
+3. General web last, and only if needed.
+
+Entity discipline (critical): research ONLY the exact named legal entity and its registration number. Do NOT accept results about a differently-registered company that merely shares part of the name — a similarly-named US-listed or foreign company is NOT the target. If you cannot confirm a result refers to the specific entity by name and registration number, treat it as no evidence rather than including it.
 
 CRITICAL RULES:
 1. Report ONLY what you actually find in search results. Do NOT invent or fabricate findings.
