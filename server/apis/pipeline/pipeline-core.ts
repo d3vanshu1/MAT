@@ -2338,6 +2338,9 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
       // Another driver owns this run (different token) or the run
       // left 'running' status between the read and this update.
       // Yield — two drivers over one run is exactly what B2 prevents.
+      console.warn(
+        `[pipeline] Resume claim rejected for run ${runId} — owned by another driver (token mismatch). Yielding.`
+      );
       return {
         status: "in_progress",
         runId,

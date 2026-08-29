@@ -7,7 +7,6 @@
  * deterministic doc_class from classifyDocClass (never from the model).
  *
  * Cursor-based resumable. Replay-safe via delete-before-insert per chunk.
- * UUID casts added for Superblocks SDK parameter binding compatibility.
  * Zero-evidence responses are normal and advance the cursor.
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
@@ -292,14 +291,17 @@ export default api({
       cursorValue = state.cursor_value;
 
       if (state.status === "done") {
+        const doneDetail: CumulativeDetail = state.detail
+          ? JSON.parse(state.detail)
+          : emptyDetail(totalChunks);
         return {
           runId: input.runId,
           mode,
           status: "done",
           processedThisCall: 0,
-          cumulativeProcessed: 0,
+          cumulativeProcessed: doneDetail.processed_count,
           rowsWrittenThisCall: 0,
-          cumulativeRowsWritten: 0,
+          cumulativeRowsWritten: doneDetail.evidence_rows_written,
           emptyChunksThisCall: 0,
           fabricationRejectedThisCall: 0,
           invalidDimensionRejectedThisCall: 0,
@@ -416,7 +418,7 @@ export default api({
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
-           WHERE id = $3`,
+           WHERE id = $3::uuid`,
           [cursorValue, JSON.stringify(cumulative), stateId],
           { label: `DcsExtract: advance cursor to ${chunk.chunk_id.slice(0, 8)}` },
         );
@@ -424,12 +426,11 @@ export default api({
         // On error: set stage to failed, do NOT advance cursor
         const errMsg = err instanceof Error ? err.message : String(err);
         const bounded = errMsg.slice(0, 500);
-        cumulative.last_chunk_id = chunk.chunk_id;
 
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET status = 'failed', detail = $1, updated_at = now()
-           WHERE id = $2`,
+           WHERE id = $2::uuid`,
           [JSON.stringify({ ...cumulative, error: bounded, failed_chunk: chunk.chunk_id }), stateId],
           { label: "DcsExtract: mark extract failed" },
         );
@@ -460,7 +461,7 @@ export default api({
       await db.execute(
         `UPDATE dcs_pipeline_state
          SET status = 'done', detail = $1, updated_at = now()
-         WHERE id = $2`,
+         WHERE id = $2::uuid`,
         [JSON.stringify(cumulative), stateId],
         { label: "DcsExtract: mark extract done" },
       );
@@ -548,47 +549,37 @@ async function processOneChunk(
   // ── Parse response ───────────────────────────────────────────
   const rawText = llmResponse.content[0]?.text ?? "";
 
-  // Extract JSON array from response (may be wrapped in markdown fences)
-  const jsonMatch = rawText.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    // If the response is empty or just whitespace, treat as empty array
-    if (rawText.trim() === "" || rawText.trim() === "[]") {
-      return buildResult(db, runId, chunk, storedTag, docClass, [], rawText, debug);
-    }
-    throw new Error(
-      `Invalid JSON response for chunk ${chunk.chunk_id}: no array found. Raw: ${rawText.slice(0, 200)}`,
-    );
-  }
-
+  // Strict whole-response JSON parsing: no regex extraction, no markdown
+  // fence support, no prose tolerance. The model must return a valid JSON
+  // array as the complete response.
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonMatch[0]);
+    parsed = JSON.parse(rawText.trim());
   } catch {
     throw new Error(
-      `Invalid JSON in response for chunk ${chunk.chunk_id}: ${rawText.slice(0, 200)}`,
+      `Invalid JSON response for chunk ${chunk.chunk_id}: ${rawText.slice(0, 200)}`,
     );
   }
 
-  if (!Array.isArray(parsed)) {
+  // Validate the entire response as an array of PresenceItem in one pass.
+  // Any item with a missing field or wrong type fails the whole chunk.
+  const arrayResult = z.array(PresenceItem).safeParse(parsed);
+  if (!arrayResult.success) {
     throw new Error(
-      `Response is not an array for chunk ${chunk.chunk_id}: ${rawText.slice(0, 200)}`,
+      `Schema validation failed for chunk ${chunk.chunk_id}: ${arrayResult.error.message.slice(0, 300)}`,
     );
   }
 
-  // Validate each item against schema
+  const items = arrayResult.data;
+
+  // Post-schema validation: dimension IDs, literal anchoring, dedup
   const validItems: PresenceItem[] = [];
   const rejected: Array<{ item: unknown; reason: string }> = [];
   let fabricationRejected = 0;
   let invalidDimensionRejected = 0;
   let duplicateDimensionRejected = 0;
 
-  for (const raw of parsed) {
-    const parseResult = PresenceItem.safeParse(raw);
-    if (!parseResult.success) {
-      rejected.push({ item: raw, reason: `schema_invalid: ${parseResult.error.message.slice(0, 200)}` });
-      continue;
-    }
-    const item = parseResult.data;
+  for (const item of items) {
 
     // Validate dimension_id
     if (!VALID_DIMENSION_IDS.has(item.dimension_id)) {
