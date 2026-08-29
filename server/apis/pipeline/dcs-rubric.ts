@@ -111,7 +111,7 @@ export const DCS_DIMENSIONS: readonly DcsDimension[] = [
 
 export type DocClass = "narrative" | "workproduct";
 
-const DOC_CLASS_BY_TAG: Record<string, DocClass> = {
+export const DOC_CLASS_BY_TAG: Record<string, DocClass> = {
   ic_memo: "narrative",
   cim: "narrative",
   consultant_report: "workproduct",
