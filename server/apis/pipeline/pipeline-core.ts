@@ -2196,53 +2196,25 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
   }
 
   // --- Step 0: Create or resume run ---
-  // B2 FIX — Detect whether owner_token column exists on module_runs.
-  // Migration 034 adds it, but the app's DB user may lack ALTER permission,
-  // so the column may be absent. If missing, fall back to v1 behavior (no CAS).
-  let hasOwnerTokenCol = false;
-  try {
-    const colCheck = await ctx.integrations.db.query(
-      `SELECT 1 AS ok FROM information_schema.columns
-       WHERE table_name = 'module_runs' AND column_name = 'owner_token' LIMIT 1`,
-      z.object({ ok: z.number() }),
-      [],
-      { label: "Check owner_token column existence" }
-    );
-    hasOwnerTokenCol = colCheck.length > 0;
-  } catch {
-    hasOwnerTokenCol = false;
-  }
-
   let runId: string = input.runId ?? "";
   if (!runId) {
     // Guard: prevent concurrent runs of the same module for the same deal.
     // Uses a CTE with an existence check so the INSERT only fires when no
     // running row exists. This is the app-level equivalent of a partial
     // unique index (deal_id, module_id) WHERE status = 'running'.
-    const insertSQL = hasOwnerTokenCol
-      ? `WITH guard AS (
-           SELECT 1 FROM module_runs
-           WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
-           LIMIT 1
-         )
-         INSERT INTO module_runs (deal_id, module_id, status, owner_token)
-         SELECT $1, $2, 'running'::module_status, $3::uuid
-         WHERE NOT EXISTS (SELECT 1 FROM guard)
-         RETURNING id AS run_id`
-      : `WITH guard AS (
-           SELECT 1 FROM module_runs
-           WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
-           LIMIT 1
-         )
-         INSERT INTO module_runs (deal_id, module_id, status)
-         SELECT $1, $2, 'running'::module_status
-         WHERE NOT EXISTS (SELECT 1 FROM guard)
-         RETURNING id AS run_id`;
     const newRunRows = await ctx.integrations.db.query(
-      insertSQL,
+      `WITH guard AS (
+         SELECT 1 FROM module_runs
+         WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
+         LIMIT 1
+       )
+       INSERT INTO module_runs (deal_id, module_id, status, owner_token)
+       SELECT $1, $2, 'running'::module_status, $3::uuid
+       WHERE NOT EXISTS (SELECT 1 FROM guard)
+       RETURNING id AS run_id`,
       RunIdSchema,
-      hasOwnerTokenCol ? [dealId, moduleId, ownerToken] : [dealId, moduleId],
-      { label: "Create pipeline run (guarded)" }
+      [dealId, moduleId, ownerToken],
+      { label: "Create pipeline run (guarded, with owner token)" }
     );
 
     if (newRunRows.length === 0) {
@@ -2261,18 +2233,13 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
       } else {
         // Race: the other run just completed between our check and this query.
         // Retry with a plain insert (no guard needed anymore).
-        const retrySQL = hasOwnerTokenCol
-          ? `INSERT INTO module_runs (deal_id, module_id, status, owner_token)
-             VALUES ($1, $2, 'running'::module_status, $3::uuid)
-             RETURNING id AS run_id`
-          : `INSERT INTO module_runs (deal_id, module_id, status)
-             VALUES ($1, $2, 'running'::module_status)
-             RETURNING id AS run_id`;
         const retryRows = await ctx.integrations.db.query(
-          retrySQL,
+          `INSERT INTO module_runs (deal_id, module_id, status, owner_token)
+           VALUES ($1, $2, 'running'::module_status, $3::uuid)
+           RETURNING id AS run_id`,
           RunIdSchema,
-          hasOwnerTokenCol ? [dealId, moduleId, ownerToken] : [dealId, moduleId],
-          { label: "Create pipeline run (retry after guard race)" }
+          [dealId, moduleId, ownerToken],
+          { label: "Create pipeline run (retry after guard race, with owner token)" }
         );
         runId = retryRows[0].run_id;
       }
@@ -2298,14 +2265,9 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
     // the round-trip into the compare-and-swap below. A Date round-trip
     // truncates to milliseconds and the CAS would then never match.
     const currentStatus = await ctx.integrations.db.query(
-      hasOwnerTokenCol
-        ? `SELECT status, triggered_at::text AS triggered_at, owner_token
-           FROM module_runs WHERE id = $1 LIMIT 1`
-        : `SELECT status, triggered_at::text AS triggered_at
-           FROM module_runs WHERE id = $1 LIMIT 1`,
-      hasOwnerTokenCol
-        ? z.object({ status: z.string(), triggered_at: z.string().nullable(), owner_token: z.string().nullable() })
-        : z.object({ status: z.string(), triggered_at: z.string().nullable() }),
+      `SELECT status, triggered_at::text AS triggered_at, owner_token
+       FROM module_runs WHERE id = $1 LIMIT 1`,
+      z.object({ status: z.string(), triggered_at: z.string().nullable(), owner_token: z.string().nullable() }),
       [runId],
       { label: "Check run status before resume" }
     );
@@ -2360,36 +2322,22 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
     // triggered_at stays as a heartbeat signal only (updated on claim
     // and periodically during processing). It is no longer part of the
     // ownership decision.
-    const claimed = hasOwnerTokenCol
-      ? await ctx.integrations.db.query(
-          `UPDATE module_runs
-           SET triggered_at = now(), owner_token = $3::uuid
-           WHERE id = $1
-             AND status = 'running'::module_status
-             AND (owner_token IS NULL OR owner_token = $3::uuid)
-           RETURNING id`,
-          z.object({ id: z.string() }),
-          [runId, observedTriggeredAt, ownerToken],
-          { label: "Resume run — claim ownership (token CAS)" }
-        )
-      : await ctx.integrations.db.query(
-          `UPDATE module_runs
-           SET triggered_at = now()
-           WHERE id = $1
-             AND status = 'running'::module_status
-           RETURNING id`,
-          z.object({ id: z.string() }),
-          [runId],
-          { label: "Resume run — refresh triggered_at (v1, no CAS)" }
-        );
+    const claimed = await ctx.integrations.db.query(
+      `UPDATE module_runs
+       SET triggered_at = now(), owner_token = $3::uuid
+       WHERE id = $1
+         AND status = 'running'::module_status
+         AND (owner_token IS NULL OR owner_token = $3::uuid)
+       RETURNING id`,
+      z.object({ id: z.string() }),
+      [runId, observedTriggeredAt, ownerToken],
+      { label: "Resume run — claim ownership (token CAS)" }
+    );
 
     if (claimed.length === 0) {
-      // Without owner_token (v1): run left 'running' status between read and update.
-      // With owner_token (B2): another driver owns this run or status changed.
-      // Either way, yield.
-      console.warn(
-        `[pipeline] Resume claim rejected for run ${runId} — owned by another driver (token mismatch). Yielding.`
-      );
+      // Another driver owns this run (different token) or the run
+      // left 'running' status between the read and this update.
+      // Yield — two drivers over one run is exactly what B2 prevents.
       return {
         status: "in_progress",
         runId,
