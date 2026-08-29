@@ -7,6 +7,7 @@
  * deterministic doc_class from classifyDocClass (never from the model).
  *
  * Cursor-based resumable. Replay-safe via delete-before-insert per chunk.
+ * UUID casts added for Superblocks SDK parameter binding compatibility.
  * Zero-evidence responses are normal and advance the cursor.
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
@@ -164,7 +165,7 @@ export default api({
     // ── 1. Run validation ──────────────────────────────────────
     const runCheck = await db.query(
       `SELECT id FROM module_runs
-       WHERE id = $1 AND deal_id = $2 AND module_id = 'diligence_completeness'
+       WHERE id = $1::uuid AND deal_id = $2::uuid AND module_id = 'diligence_completeness'
        LIMIT 1`,
       z.object({ id: z.string() }),
       [input.runId, input.dealId],
@@ -181,7 +182,7 @@ export default api({
       `SELECT COUNT(*)::int AS cnt
        FROM document_chunks dc
        JOIN documents d ON d.id = dc.document_id
-       WHERE dc.deal_id = $1 AND d.deal_id = $1`,
+       WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid`,
       z.object({ cnt: z.number() }),
       [input.dealId],
       { label: "DcsExtract: count total chunks" },
@@ -211,7 +212,7 @@ export default api({
                 dc.file_name AS source_file, d.document_tag
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
-         WHERE dc.deal_id = $1 AND d.deal_id = $1 AND dc.id = $2::text
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid AND dc.id = $2::uuid
          LIMIT 1`,
         z.object({
           chunk_id: z.string(),
@@ -269,7 +270,7 @@ export default api({
     const stateRows = await db.query(
       `SELECT id, status, cursor_value, detail
        FROM dcs_pipeline_state
-       WHERE run_id = $1 AND stage = 'extract'
+       WHERE run_id = $1::uuid AND stage = 'extract'
        LIMIT 1`,
       z.object({
         id: z.string(),
@@ -327,7 +328,7 @@ export default api({
 
       const inserted = await db.query(
         `INSERT INTO dcs_pipeline_state (run_id, stage, status, cursor_value, detail)
-         VALUES ($1, 'extract', 'running', NULL, $2)
+         VALUES ($1::uuid, 'extract', 'running', NULL, $2)
          RETURNING id`,
         z.object({ id: z.string() }),
         [input.runId, JSON.stringify(emptyDetail(totalChunks))],
@@ -344,14 +345,14 @@ export default api({
                 dc.file_name AS source_file, d.document_tag
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
-         WHERE dc.deal_id = $1 AND d.deal_id = $1 AND dc.id > $2
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid AND dc.id > $2::uuid
          ORDER BY dc.id ASC
          LIMIT $3`
       : `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
                 dc.file_name AS source_file, d.document_tag
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
-         WHERE dc.deal_id = $1 AND d.deal_id = $1
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
          ORDER BY dc.id ASC
          LIMIT $2`;
 
@@ -443,11 +444,11 @@ export default api({
         ? `SELECT COUNT(*)::int AS cnt
            FROM document_chunks dc
            JOIN documents d ON d.id = dc.document_id
-           WHERE dc.deal_id = $1 AND d.deal_id = $1 AND dc.id > $2`
+           WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid AND dc.id > $2::uuid`
         : `SELECT COUNT(*)::int AS cnt
            FROM document_chunks dc
            JOIN documents d ON d.id = dc.document_id
-           WHERE dc.deal_id = $1 AND d.deal_id = $1`,
+           WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid`,
       z.object({ cnt: z.number() }),
       cursorValue ? [input.dealId, cursorValue] : [input.dealId],
       { label: "DcsExtract: count remaining chunks" },
@@ -673,7 +674,7 @@ async function buildResult(
 ): Promise<ChunkResult> {
   // ── Replay safety: delete existing rows for this run+chunk ───
   await db.execute(
-    `DELETE FROM dcs_evidence WHERE run_id = $1 AND chunk_id = $2`,
+    `DELETE FROM dcs_evidence WHERE run_id = $1::uuid AND chunk_id = $2`,
     [runId, chunk.chunk_id],
     { label: `DcsExtract: replay-delete chunk ${chunk.chunk_id.slice(0, 8)}` },
   );
@@ -683,7 +684,7 @@ async function buildResult(
     await db.execute(
       `INSERT INTO dcs_evidence
          (run_id, dimension_id, chunk_id, source_file, document_tag, doc_class, is_substantive, snippet)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)`,
       [
         runId,
         item.dimension_id,
