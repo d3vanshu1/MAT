@@ -50,6 +50,9 @@ const PresenceItem = z.object({
 type PresenceItem = z.infer<typeof PresenceItem>;
 
 // ── Cumulative detail stored in dcs_pipeline_state.detail ────────
+// NOTE: processed_count and total_chunks count WORK UNITS, not physical chunks.
+// A work unit is one LLM extraction call: either one non-Excel chunk or one
+// logical Excel window (which may span many physical chunks).
 interface CumulativeDetail {
   processed_count: number;
   empty_chunk_count: number;
@@ -392,17 +395,10 @@ export default api({
       );
     }
 
-    // ── 2. Count total chunks ──────────────────────────────────
-    const totalChunksResult = await db.query(
-      `SELECT COUNT(*)::int AS cnt
-       FROM document_chunks dc
-       JOIN documents d ON d.id = dc.document_id
-       WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid`,
-      z.object({ cnt: z.number() }),
-      [input.dealId],
-      { label: "DcsExtract: count total chunks" },
-    );
-    const totalChunks = totalChunksResult[0]?.cnt ?? 0;
+    // ── 2. Count total physical chunks (used only for gRPC sizing estimates) ──
+    // totalWorkUnits is computed later after building the work-unit plan.
+    // For now, set a placeholder that will be replaced on the first call.
+    let totalWorkUnits: number;
 
     // ── Tracking ───────────────────────────────────────────────
     let processedThisCall = 0;
@@ -795,10 +791,23 @@ export default api({
       stateId = state.id;
       cursorValue = state.cursor_value;
 
-      // D2: Parse detail and apply compatibility check BEFORE any early return
-      const parsedDetail: CumulativeDetail = hydrateRecoveryCounters(
-        state.detail ? JSON.parse(state.detail) : emptyDetail(totalChunks),
-      );
+      // D2: Parse detail and apply compatibility check BEFORE any early return.
+      // Guard: DcsRunPipeline's catch block may store a raw error string
+      // in `detail` (not valid JSON). Treat any parse failure as empty.
+      let rawDetail: CumulativeDetail;
+      if (state.detail) {
+        try {
+          rawDetail = JSON.parse(state.detail);
+        } catch {
+          console.warn(
+            `[DcsExtract] state ${stateId} has non-JSON detail (${state.detail.slice(0, 80)}…) — treating as empty`,
+          );
+          rawDetail = emptyDetail(0);
+        }
+      } else {
+        rawDetail = emptyDetail(0);
+      }
+      const parsedDetail: CumulativeDetail = hydrateRecoveryCounters(rawDetail);
       const stateEmpty = isStateEmpty(parsedDetail, cursorValue);
 
       // D2: Compatibility check — applies even for done/failed states
@@ -881,12 +890,12 @@ export default api({
          VALUES ($1::uuid, 'extract', 'running', NULL, $2)
          RETURNING id`,
         z.object({ id: z.string() }),
-        [input.runId, JSON.stringify(emptyDetail(totalChunks))],
+        [input.runId, JSON.stringify(emptyDetail(0))],
         { label: "DcsExtract: create pipeline state" },
       );
       stateId = inserted[0].id;
       cursorValue = null;
-      cumulative = emptyDetail(totalChunks);
+      cumulative = emptyDetail(0);
     }
 
     // ── 4b. D3: Corpus order invariant — require unique (document_id, chunk_index)
@@ -1113,6 +1122,53 @@ export default api({
       if (estimatedPhysicalChunks >= fetchBudget) break;
     }
 
+    // §3e: Compute totalWorkUnits — the denominator for progress tracking.
+    // On the FIRST call (no prior progress), we compute from the full metadata:
+    //   non-Excel docs = 1 work unit per chunk, Excel docs = window count.
+    // On subsequent calls, use the stored total_chunks (already work-unit-based).
+    if (cumulative.total_chunks > 0 && cumulative.processed_count > 0) {
+      // Subsequent call: trust stored total
+      totalWorkUnits = cumulative.total_chunks;
+    } else {
+      // First call or empty state: compute from scratch.
+      // We have metadata for ALL remaining chunks (allRemainingMeta).
+      // Non-Excel: 1 work unit per chunk. Excel: count via buildLogicalWindows.
+      let computedTotal = 0;
+      for (const docId of docMetaMap.keys()) {
+        const meta = docMetaMap.get(docId)!;
+        const firstM = meta[0];
+        const isExcel = isExcelDocument(firstM.document_tag, firstM.source_file);
+
+        if (isExcel) {
+          // Fetch full doc content to count windows (only done once per run)
+          const fullDoc = await fetchDocChunks(docId, input.dealId, true);
+          const pChunks: PhysicalChunk[] = fullDoc.map(c => ({
+            chunk_id: c.chunk_id,
+            chunk_index: c.chunk_index,
+            content: c.chunk_text,
+            document_id: c.document_id,
+            source_file: c.source_file,
+            document_tag: c.document_tag ?? "other",
+          }));
+          const windowCount = buildLogicalWindows(pChunks).length;
+          computedTotal += windowCount;
+        } else {
+          computedTotal += meta.length;
+        }
+      }
+      totalWorkUnits = computedTotal;
+
+      // Persist the computed total into the pipeline state
+      cumulative = { ...cumulative, total_chunks: totalWorkUnits };
+      await db.execute(
+        `UPDATE dcs_pipeline_state
+         SET detail = $1, updated_at = now()
+         WHERE id = $2::uuid`,
+        [JSON.stringify(cumulative), stateId],
+        { label: "DcsExtract: set total_chunks to work unit count" },
+      );
+    }
+
     // §4: Apply batchSize — counts owned physical chunks, not work units
     let physicalChunkBudget = input.batchSize;
     const batchWorkUnits: WorkUnit[] = [];
@@ -1246,7 +1302,7 @@ export default api({
     // For each work unit, persist evidence to EACH owned physical chunk.
     // For Excel: use mapSnippetToPhysicalChunk to route evidence items.
     // Cursor advances to lastOwnedChunkId of each work unit.
-    // processed_count increments by ownedChunkIds.length (physical chunks).
+    // processed_count increments by 1 per WORK UNIT (not per physical chunk).
 
     // §10 telemetry accumulators
     let excelWindowsProcessedThisCall = 0;
@@ -1359,10 +1415,12 @@ export default api({
           wuRowsWritten += rowsWritten;
           if (rowsWritten === 0) wuEmptyChunks++;
 
-          // Advance cumulative per physical chunk
+          // Advance cumulative per physical chunk (cursor + evidence counters)
+          // NOTE: processed_count is NOT incremented here — it advances
+          // once per WORK UNIT after the inner loop completes.
           const nextCumulative: CumulativeDetail = {
             ...cumulative,
-            processed_count: cumulative.processed_count + 1,
+            processed_count: cumulative.processed_count,
             evidence_rows_written: cumulative.evidence_rows_written + rowsWritten,
             empty_chunk_count: cumulative.empty_chunk_count + (rowsWritten === 0 ? 1 : 0),
             fabrication_rejected: cumulative.fabrication_rejected,
@@ -1420,9 +1478,11 @@ export default api({
         if (analysisResult.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
         if (analysisResult.traceEntry) trace.push(analysisResult.traceEntry);
 
-        // Update cumulative rejection counters (only at work-unit boundary)
+        // Increment processed_count once for the entire Excel work unit,
+        // and update cumulative rejection counters (only at work-unit boundary).
         cumulative = {
           ...cumulative,
+          processed_count: cumulative.processed_count + 1,
           fabrication_rejected: cumulative.fabrication_rejected + analysisResult.fabricationRejected,
           invalid_dimension_rejected: cumulative.invalid_dimension_rejected + analysisResult.invalidDimensionRejected,
           duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + analysisResult.duplicateDimensionRejected,
@@ -1431,6 +1491,20 @@ export default api({
           semantic_retry_recovered: cumulative.semantic_retry_recovered + (analysisResult.semanticRetryRecovered ? 1 : 0),
           physical_mapping_rejected: cumulative.physical_mapping_rejected + wuMappingRejected,
         };
+
+        // Persist the work-unit-level processed_count checkpoint
+        try {
+          await db.execute(
+            `UPDATE dcs_pipeline_state
+             SET detail = $1, updated_at = now()
+             WHERE id = $2::uuid`,
+            [JSON.stringify(cumulative), stateId],
+            { label: `DcsExtract: checkpoint processed_count after Excel WU` },
+          );
+        } catch (wuCpErr) {
+          const wuCpMsg = wuCpErr instanceof Error ? wuCpErr.message : String(wuCpErr);
+          throw new Error(`DcsExtract work-unit checkpoint failed: ${wuCpMsg.slice(0, 400)}`);
+        }
 
         physicalMappingRejectedThisCall += wuMappingRejected;
 
@@ -1528,45 +1602,9 @@ export default api({
     // ═════════════════════════════════════════════════════════════
     // §9: Remaining count & completion (5C.2E)
     // ═════════════════════════════════════════════════════════════
-    // Remaining always counts physical chunks (not work units).
-    let remainingChunks: number;
-    if (cursorValue) {
-      const curAnchor = await db.query(
-        `SELECT dc.document_id, dc.chunk_index
-         FROM document_chunks dc
-         JOIN documents d ON d.id = dc.document_id
-         WHERE dc.id = $1::uuid AND dc.deal_id = $2::uuid AND d.deal_id = $2::uuid
-         LIMIT 1`,
-        z.object({ document_id: z.string(), chunk_index: z.number() }),
-        [cursorValue, input.dealId],
-        { label: "DcsExtract: resolve cursor for remaining count" },
-      );
-      if (curAnchor.length === 0) {
-        throw new Error(`Cursor ${cursorValue} lost after checkpoint — data integrity error`);
-      }
-      const remResult = await db.query(
-        `SELECT COUNT(*)::int AS cnt
-         FROM document_chunks dc
-         JOIN documents d ON d.id = dc.document_id
-         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
-           AND (dc.document_id::text, dc.chunk_index) > ($2::text, $3::int)`,
-        z.object({ cnt: z.number() }),
-        [input.dealId, curAnchor[0].document_id, curAnchor[0].chunk_index],
-        { label: "DcsExtract: count remaining chunks (composite)" },
-      );
-      remainingChunks = remResult[0]?.cnt ?? 0;
-    } else {
-      const remResult = await db.query(
-        `SELECT COUNT(*)::int AS cnt
-         FROM document_chunks dc
-         JOIN documents d ON d.id = dc.document_id
-         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid`,
-        z.object({ cnt: z.number() }),
-        [input.dealId],
-        { label: "DcsExtract: count remaining chunks (no cursor)" },
-      );
-      remainingChunks = remResult[0]?.cnt ?? 0;
-    }
+    // Remaining counts work units (not physical chunks).
+    // totalWorkUnits was computed/loaded in §3e and is authoritative.
+    const remainingChunks = Math.max(0, totalWorkUnits - cumulative.processed_count);
 
     // Completion check with authoritative last physical chunk
     if (remainingChunks === 0) {
@@ -1585,14 +1623,14 @@ export default api({
       if (lastChunkRows.length > 0) {
         const authLastChunkId = lastChunkRows[0].chunk_id;
         const completionValid =
-          cumulative.processed_count === totalChunks &&
+          cumulative.processed_count === totalWorkUnits &&
           cursorValue === authLastChunkId &&
           cumulative.last_chunk_id === authLastChunkId;
 
         if (!completionValid) {
           const errMsg =
             `Completion invariant violated: processed_count=${cumulative.processed_count} ` +
-            `totalChunks=${totalChunks} cursorValue=${cursorValue} ` +
+            `totalWorkUnits=${totalWorkUnits} cursorValue=${cursorValue} ` +
             `last_chunk_id=${cumulative.last_chunk_id} authLastChunkId=${authLastChunkId}`;
           await db.execute(
             `UPDATE dcs_pipeline_state
