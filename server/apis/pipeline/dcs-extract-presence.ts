@@ -44,6 +44,10 @@ interface CumulativeDetail {
   duplicate_dimension_rejected: number;
   total_chunks: number;
   last_chunk_id: string | null;
+  // Recovery counters (D5)
+  json_repair_applied: number;
+  semantic_retry_attempted: number;
+  semantic_retry_recovered: number;
 }
 
 function emptyDetail(totalChunks: number): CumulativeDetail {
@@ -56,12 +60,122 @@ function emptyDetail(totalChunks: number): CumulativeDetail {
     duplicate_dimension_rejected: 0,
     total_chunks: totalChunks,
     last_chunk_id: null,
+    json_repair_applied: 0,
+    semantic_retry_attempted: 0,
+    semantic_retry_recovered: 0,
+  };
+}
+
+/** Hydrate recovery counters for older state rows that lack them. */
+function hydrateRecoveryCounters(detail: CumulativeDetail): CumulativeDetail {
+  return {
+    ...detail,
+    json_repair_applied: detail.json_repair_applied ?? 0,
+    semantic_retry_attempted: detail.semantic_retry_attempted ?? 0,
+    semantic_retry_recovered: detail.semantic_retry_recovered ?? 0,
   };
 }
 
 // ── Whitespace normalizer for literal anchoring ──────────────────
 function normalizeWs(s: string): string {
   return s.replace(/\s+/g, " ").trim();
+}
+
+// ── Targeted snippet-quote repair (D2) ───────────────────────────
+/**
+ * Repairs unescaped quotation marks inside "snippet" JSON string values.
+ *
+ * Operates on the full JSON payload after fence normalization.
+ * Recognizes only the exact ordered object shape:
+ *   { "dimension_id": "...", "snippet": "...", "is_substantive": true/false }
+ *
+ * For each snippet value, locates the structural end by finding the
+ * subsequent `"is_substantive"` key rather than relying on quote+comma
+ * heuristics that fail on CSV-quoted text.
+ *
+ * Returns null if any snippet key cannot be matched exactly once, or if
+ * the repaired payload still fails JSON.parse.
+ */
+function repairSnippetQuotes(payload: string): unknown | null {
+  // Pattern: locate each "snippet" : "..." , "is_substantive" boundary
+  // We find the opening quote of the snippet value and the closing quote
+  // by anchoring on the is_substantive key that must follow.
+  const snippetKeyPattern = /"snippet"\s*:\s*"/g;
+  const isSubKeyLiteral = '"is_substantive"';
+
+  let repaired = "";
+  let lastEnd = 0;
+  let matchCount = 0;
+
+  let match: RegExpExecArray | null;
+  while ((match = snippetKeyPattern.exec(payload)) !== null) {
+    matchCount++;
+    const valueStart = match.index + match[0].length; // index after opening quote
+
+    // Find the is_substantive key that follows this snippet value.
+    // The structural boundary is: ","is_substantive"  (with optional whitespace)
+    // We search for the pattern:  ","is_substantive" or ", "is_substantive"
+    // starting from valueStart.
+    const isSubIdx = payload.indexOf(isSubKeyLiteral, valueStart);
+    if (isSubIdx === -1) {
+      return null; // Cannot find structural boundary — bail
+    }
+
+    // Walk backwards from isSubIdx to find the closing quote + comma separator.
+    // Expected pattern before is_substantive key: ...CLOSING_QUOTE , SPACE*
+    // So we look backwards: optional whitespace, comma, optional whitespace, closing quote
+    let backIdx = isSubIdx - 1;
+    while (backIdx >= valueStart && (payload[backIdx] === ' ' || payload[backIdx] === '\n' || payload[backIdx] === '\r' || payload[backIdx] === '\t')) backIdx--;
+    if (backIdx < valueStart || payload[backIdx] !== ',') return null; // no comma before is_substantive
+    backIdx--; // skip comma
+    while (backIdx >= valueStart && (payload[backIdx] === ' ' || payload[backIdx] === '\n' || payload[backIdx] === '\r' || payload[backIdx] === '\t')) backIdx--;
+    if (backIdx < valueStart || payload[backIdx] !== '"') return null; // no closing quote
+
+    const closingQuoteIdx = backIdx;
+
+    // Extract the raw snippet value content (between opening quote and closing quote)
+    const rawSnippetContent = payload.slice(valueStart, closingQuoteIdx);
+
+    // Escape unescaped quotes within the snippet value.
+    // Preserve already-escaped quotes (\" should stay as \").
+    let escapedContent = "";
+    for (let i = 0; i < rawSnippetContent.length; i++) {
+      const ch = rawSnippetContent[i];
+      if (ch === '\\') {
+        // Already an escape sequence — preserve as-is
+        escapedContent += ch + (rawSnippetContent[i + 1] ?? "");
+        i++;
+      } else if (ch === '"') {
+        // Unescaped quote inside snippet — escape it
+        escapedContent += '\\"';
+      } else {
+        escapedContent += ch;
+      }
+    }
+
+    // Append everything from lastEnd up to and including the opening quote
+    repaired += payload.slice(lastEnd, valueStart);
+    // Append the escaped snippet content + closing quote
+    repaired += escapedContent + '"';
+    lastEnd = closingQuoteIdx + 1; // continue after the original closing quote
+  }
+
+  if (matchCount === 0) return null; // No snippet keys found
+
+  // Append the remainder of the payload
+  repaired += payload.slice(lastEnd);
+
+  // Verify every "snippet" key was matched (check for unmatched ones)
+  // Count total "snippet" keys in the original payload
+  const totalSnippetKeys = (payload.match(/"snippet"\s*:\s*"/g) || []).length;
+  if (totalSnippetKeys !== matchCount) return null;
+
+  // Attempt to parse the repaired payload
+  try {
+    return JSON.parse(repaired);
+  } catch {
+    return null;
+  }
 }
 
 // ── System prompt ────────────────────────────────────────────────
@@ -92,7 +206,17 @@ Rules:
 - Do NOT score or grade any dimension.
 - Do NOT classify the document type.
 - Do NOT consider anything outside the supplied chunk.
-- The snippet MUST be copied verbatim from the chunk text. Do not edit, shorten, or rephrase.`;
+- The snippet MUST be copied verbatim from the chunk text. Do not edit, shorten, or rephrase.
+
+FORMATTING REQUIREMENTS (critical for valid JSON):
+- Each object's keys MUST appear in this exact order: dimension_id, snippet, is_substantive
+- Every quotation mark inside a snippet value MUST be escaped as \\"
+- Every backslash inside a snippet value MUST be escaped as \\\\
+- CSV-quoted cells (e.g. "1,121,037","1,653,036") MUST use escaped quotes inside snippet
+- Check your response for valid JSON before submitting
+
+Example with adjacent quoted financial values:
+[{"dimension_id":"financial_qoe","snippet":"Revenue was \\"1,121,037\\",\\"1,653,036\\",\\"2,115,151\\" for Q1-Q3","is_substantive":true}]`;
 
 // ── Trace entry for verification mode ────────────────────────────
 interface TraceEntry {
@@ -159,6 +283,10 @@ export default api({
     maxObservedConcurrency: z.number(),
     llmCallsStartedThisCall: z.number(),
     staggerMs: z.number(),
+    // Recovery telemetry (D5)
+    jsonRepairsAppliedThisCall: z.number(),
+    semanticRetriesThisCall: z.number(),
+    semanticRetryRecoveriesThisCall: z.number(),
   }),
 
   async run(ctx, input) {
@@ -201,6 +329,9 @@ export default api({
     let fabricationRejectedThisCall = 0;
     let invalidDimensionRejectedThisCall = 0;
     let duplicateDimensionRejectedThisCall = 0;
+    let jsonRepairsAppliedThisCall = 0;
+    let semanticRetriesThisCall = 0;
+    let semanticRetryRecoveriesThisCall = 0;
     const trace: TraceEntry[] = [];
 
     // ── 3. Verification mode (single chunk, no pipeline state) ─
@@ -272,6 +403,9 @@ export default api({
         maxObservedConcurrency: 1,
         llmCallsStartedThisCall: 1,
         staggerMs: 50,
+        jsonRepairsAppliedThisCall: result.jsonRepairApplied ? 1 : 0,
+        semanticRetriesThisCall: result.semanticRetryAttempted ? 1 : 0,
+        semanticRetryRecoveriesThisCall: result.semanticRetryRecovered ? 1 : 0,
       };
     }
 
@@ -325,6 +459,9 @@ export default api({
           maxObservedConcurrency: 0,
           llmCallsStartedThisCall: 0,
           staggerMs: 50,
+          jsonRepairsAppliedThisCall: 0,
+          semanticRetriesThisCall: 0,
+          semanticRetryRecoveriesThisCall: 0,
         };
       }
 
@@ -335,7 +472,9 @@ export default api({
         );
       }
 
-      cumulative = state.detail ? JSON.parse(state.detail) : emptyDetail(totalChunks);
+      cumulative = hydrateRecoveryCounters(
+        state.detail ? JSON.parse(state.detail) : emptyDetail(totalChunks),
+      );
     } else {
       // First invocation — create state
       if (input.resumeCursor) {
@@ -529,6 +668,10 @@ export default api({
         invalid_dimension_rejected: cumulative.invalid_dimension_rejected + result.invalidDimensionRejected,
         duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + result.duplicateDimensionRejected,
         last_chunk_id: chunks[i].chunk_id,
+        // Recovery counters (D5): increment only after checkpoint succeeds
+        json_repair_applied: cumulative.json_repair_applied + (result.jsonRepairApplied ? 1 : 0),
+        semantic_retry_attempted: cumulative.semantic_retry_attempted + (result.semanticRetryAttempted ? 1 : 0),
+        semantic_retry_recovered: cumulative.semantic_retry_recovered + (result.semanticRetryRecovered ? 1 : 0),
       };
       const nextCursor = chunks[i].chunk_id;
 
@@ -570,6 +713,9 @@ export default api({
       fabricationRejectedThisCall += result.fabricationRejected;
       invalidDimensionRejectedThisCall += result.invalidDimensionRejected;
       duplicateDimensionRejectedThisCall += result.duplicateDimensionRejected;
+      if (result.jsonRepairApplied) jsonRepairsAppliedThisCall++;
+      if (result.semanticRetryAttempted) semanticRetriesThisCall++;
+      if (result.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
       if (result.traceEntry) trace.push(result.traceEntry); // Cursor-order trace (D7)
     }
 
@@ -626,6 +772,9 @@ export default api({
       maxObservedConcurrency,
       llmCallsStartedThisCall,
       staggerMs: STAGGER_MS,
+      jsonRepairsAppliedThisCall,
+      semanticRetriesThisCall,
+      semanticRetryRecoveriesThisCall,
     };
   },
 });
@@ -646,6 +795,10 @@ interface ChunkResult {
   invalidDimensionRejected: number;
   duplicateDimensionRejected: number;
   traceEntry: TraceEntry | null;
+  // Recovery flags (D5)
+  jsonRepairApplied: boolean;
+  semanticRetryAttempted: boolean;
+  semanticRetryRecovered: boolean;
 }
 
 async function processOneChunk(
@@ -749,84 +902,137 @@ async function processOneChunk(
     );
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonToParse);
-  } catch {
-    // Fallback: attempt to repair unescaped quotes inside JSON string values.
-    // The model sometimes embeds CSV-quoted numbers (e.g. "47,014") inside
-    // snippet strings without escaping the inner quotes.
-    // Strategy: replace inner unescaped quotes that are not at structural
-    // positions (after : or , or at array/object boundaries) with escaped quotes.
+  // ── Validation pipeline (D4 order) ────────────────────────────
+  // 1. fence normalization (done above)
+  // 2. direct JSON.parse
+  // 3. targeted snippet-quote repair (D2) — only if direct parse failed
+  // 4. JSON.parse of repaired payload
+  // 5. whole-array PresenceItem schema validation
+  // If both fail → one semantic retry (D3), then same pipeline again
+
+  let jsonRepairApplied = false;
+  let semanticRetryAttempted = false;
+  let semanticRetryRecovered = false;
+
+  function attemptParseAndValidate(payload: string): { items: PresenceItem[] } | { error: string; phase: "parse" | "schema" } {
+    // Step 2: direct JSON.parse
+    let parsed: unknown;
     try {
-      // Character-by-character scanner for snippet values: finds each
-      // "snippet":"..." and escapes inner quotes that are not structural
-      // (i.e. not followed by , or } which would mark the value boundary).
-      let fixed = "";
-      let i = 0;
-      while (i < jsonToParse.length) {
-        const snippetKey = '"snippet"';
-        const keyIdx = jsonToParse.indexOf(snippetKey, i);
-        if (keyIdx === -1) {
-          fixed += jsonToParse.slice(i);
-          break;
-        }
-        fixed += jsonToParse.slice(i, keyIdx + snippetKey.length);
-        i = keyIdx + snippetKey.length;
-        // Skip whitespace and colon
-        while (i < jsonToParse.length && (jsonToParse[i] === ' ' || jsonToParse[i] === ':')) {
-          fixed += jsonToParse[i];
-          i++;
-        }
-        if (i >= jsonToParse.length || jsonToParse[i] !== '"') continue;
-        // Opening quote of snippet value
-        fixed += '"';
-        i++;
-        // Scan to find the real closing quote: it must be followed by , or } (after optional whitespace)
-        let value = "";
-        while (i < jsonToParse.length) {
-          if (jsonToParse[i] === '\\') {
-            value += jsonToParse[i] + (jsonToParse[i + 1] ?? "");
-            i += 2;
-            continue;
-          }
-          if (jsonToParse[i] === '"') {
-            // Check if this quote is the structural close: next non-whitespace must be , or }
-            let peek = i + 1;
-            while (peek < jsonToParse.length && jsonToParse[peek] === ' ') peek++;
-            if (peek >= jsonToParse.length || jsonToParse[peek] === ',' || jsonToParse[peek] === '}') {
-              // This is the real closing quote
-              break;
-            }
-            // Inner unescaped quote — escape it
-            value += '\\"';
-            i++;
-            continue;
-          }
-          value += jsonToParse[i];
-          i++;
-        }
-        fixed += value + '"';
-        if (i < jsonToParse.length) i++; // skip the closing quote
-      }
-      parsed = JSON.parse(fixed);
+      parsed = JSON.parse(payload);
     } catch {
-      throw new Error(
-        `Invalid JSON in response for chunk ${chunk.chunk_id}: ${jsonToParse.slice(0, 200)}`,
-      );
+      // Step 3–4: targeted snippet-quote repair
+      const repaired = repairSnippetQuotes(payload);
+      if (repaired != null) {
+        jsonRepairApplied = true;
+        parsed = repaired;
+      } else {
+        return { error: `Invalid JSON in response for chunk ${chunk.chunk_id}: ${payload.slice(0, 200)}`, phase: "parse" };
+      }
     }
+
+    // Step 5: whole-array schema validation
+    const arrayResult = z.array(PresenceItem).safeParse(parsed);
+    if (!arrayResult.success) {
+      return { error: `Schema validation failed for chunk ${chunk.chunk_id}: ${arrayResult.error.message.slice(0, 300)}`, phase: "schema" };
+    }
+
+    return { items: arrayResult.data };
   }
 
-  // Validate the entire response as an array of PresenceItem in one pass.
-  // Any item with a missing field or wrong type fails the whole chunk.
-  const arrayResult = z.array(PresenceItem).safeParse(parsed);
-  if (!arrayResult.success) {
-    throw new Error(
-      `Schema validation failed for chunk ${chunk.chunk_id}: ${arrayResult.error.message.slice(0, 300)}`,
-    );
-  }
+  let firstResult = attemptParseAndValidate(jsonToParse);
+  let items: PresenceItem[];
 
-  const items = arrayResult.data;
+  if ("error" in firstResult) {
+    // ── Semantic retry (D3): one correction attempt ──────────
+    semanticRetryAttempted = true;
+
+    const retryElapsed = Date.now() - invocationStartTime;
+    const retryRemaining = INVOCATION_BUDGET_MS - retryElapsed;
+    const retryTimeout = Math.min(MAX_PER_CALL_MS, retryRemaining - 15_000);
+
+    if (retryTimeout < MIN_CALL_HEADROOM_MS) {
+      throw new Error(firstResult.error);
+    }
+
+    let retryResponse;
+    try {
+      retryResponse = await callLLMWithHeadroom(
+        pipelineCtx,
+        {
+          model,
+          max_tokens: 4096,
+          system: [{ type: "text", text: SYSTEM_PROMPT }],
+          messages: [
+            {
+              role: "user",
+              content: `CHUNK TEXT:\n\n${chunk.chunk_text}`,
+            },
+            {
+              role: "assistant",
+              content: "I will analyze this chunk.",
+            },
+            {
+              role: "user",
+              content: `Your prior response was invalid (${firstResult.phase === "parse" ? "malformed JSON" : "schema validation failed"}). Please try again.
+
+CRITICAL REMINDERS:
+- Return ONLY a raw JSON array, no Markdown fences, no prose
+- Keys in exact order: dimension_id, snippet, is_substantive
+- Escape all quotation marks inside snippet values as \\"
+- CSV-quoted cells like "1,121,037" must be escaped as \\"1,121,037\\"
+- Return [] if no dimensions are covered`,
+            },
+          ],
+        },
+        `DcsExtract: RETRY chunk ${chunk.chunk_id.slice(0, 8)} (${chunk.source_file})`,
+        {
+          pipelineStartTime: invocationStartTime,
+          maxPerCallTimeout: retryTimeout,
+          retries: 1,
+          minBudget: MIN_CALL_HEADROOM_MS,
+        },
+      );
+    } catch {
+      throw new Error(firstResult.error);
+    }
+
+    const retryRaw = retryResponse.content[0]?.text ?? "";
+    const retryTrimmed = retryRaw.trim();
+
+    // Apply same fence normalization to retry response
+    let retryPayload: string;
+    if (retryTrimmed.startsWith("[")) {
+      retryPayload = retryTrimmed;
+    } else if (retryTrimmed.startsWith("```")) {
+      const closingIdx = retryTrimmed.lastIndexOf("```");
+      if (closingIdx <= 3) throw new Error(firstResult.error);
+      const firstNewline = retryTrimmed.indexOf("\n");
+      if (firstNewline === -1) throw new Error(firstResult.error);
+      const openingLine = retryTrimmed.slice(3, firstNewline).trim().toLowerCase();
+      if (openingLine !== "" && openingLine !== "json") throw new Error(firstResult.error);
+      const afterClose = retryTrimmed.slice(closingIdx + 3).trim();
+      if (afterClose !== "") throw new Error(firstResult.error);
+      const enclosed = retryTrimmed.slice(firstNewline + 1, closingIdx);
+      if (enclosed.includes("```")) throw new Error(firstResult.error);
+      retryPayload = enclosed.trim();
+    } else {
+      throw new Error(firstResult.error);
+    }
+
+    // Reset repair flag for retry attempt
+    jsonRepairApplied = false;
+    const retryResult = attemptParseAndValidate(retryPayload);
+
+    if ("error" in retryResult) {
+      // Correction response also failed — fail the chunk
+      throw new Error(firstResult.error);
+    }
+
+    semanticRetryRecovered = true;
+    items = retryResult.items;
+  } else {
+    items = firstResult.items;
+  }
 
   // Post-schema validation: dimension IDs, literal anchoring, dedup
   const validItems: PresenceItem[] = [];
@@ -901,6 +1107,9 @@ async function processOneChunk(
     fabricationRejected,
     invalidDimensionRejected,
     duplicateDimensionRejected,
+    jsonRepairApplied,
+    semanticRetryAttempted,
+    semanticRetryRecovered,
   );
 }
 
@@ -918,6 +1127,9 @@ async function buildResult(
   fabricationRejected = 0,
   invalidDimensionRejected = 0,
   duplicateDimensionRejected = 0,
+  jsonRepairApplied = false,
+  semanticRetryAttempted = false,
+  semanticRetryRecovered = false,
 ): Promise<ChunkResult> {
   // ── Replay safety: delete existing rows for this run+chunk ───
   await db.execute(
@@ -985,5 +1197,8 @@ async function buildResult(
     invalidDimensionRejected,
     duplicateDimensionRejected,
     traceEntry,
+    jsonRepairApplied,
+    semanticRetryAttempted,
+    semanticRetryRecovered,
   };
 }
