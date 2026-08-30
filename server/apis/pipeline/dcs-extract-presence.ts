@@ -935,11 +935,20 @@ export default api({
     // §3: Build work-unit list (5C.2E)
     // ═════════════════════════════════════════════════════════════
 
-    // §3a: Fetch ALL physical chunks after cursor in composite order.
-    // We need the full set per document to build logical windows for Excel docs.
-    // batchSize is enforced later by counting owned physical chunks.
-    const allChunksQuery = cursorAnchor
-      ? `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
+    // §3a: Phase 1 — fetch METADATA ONLY (no content) for all remaining chunks.
+    // This avoids the gRPC 4MB payload limit that occurs when fetching content
+    // for thousands of chunks (e.g. 3,878 chunks × ~2KB ≈ 8MB > 4MB limit).
+    // Content is fetched per-document in Phase 2 only for documents in the batch.
+    type ChunkMeta = {
+      chunk_id: string;
+      source_file: string;
+      document_tag: string | null;
+      document_id: string;
+      chunk_index: number;
+    };
+
+    const metaQuery = cursorAnchor
+      ? `SELECT dc.id AS chunk_id,
                 dc.file_name AS source_file, d.document_tag,
                 dc.document_id, dc.chunk_index
          FROM document_chunks dc
@@ -947,7 +956,7 @@ export default api({
          WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
            AND (dc.document_id::text, dc.chunk_index) > ($2::text, $3::int)
          ORDER BY dc.document_id::text ASC, dc.chunk_index ASC`
-      : `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
+      : `SELECT dc.id AS chunk_id,
                 dc.file_name AS source_file, d.document_tag,
                 dc.document_id, dc.chunk_index
          FROM document_chunks dc
@@ -955,98 +964,91 @@ export default api({
          WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
          ORDER BY dc.document_id::text ASC, dc.chunk_index ASC`;
 
-    const allChunksParams = cursorAnchor
+    const metaParams = cursorAnchor
       ? [input.dealId, cursorAnchor.document_id, cursorAnchor.chunk_index]
       : [input.dealId];
 
-    const allRemainingChunks: ChunkRow[] = await db.query(
-      allChunksQuery,
+    const allRemainingMeta: ChunkMeta[] = await db.query(
+      metaQuery,
       z.object({
         chunk_id: z.string(),
-        chunk_text: z.string(),
         source_file: z.string(),
         document_tag: z.string().nullable(),
         document_id: z.string(),
         chunk_index: z.number(),
       }),
-      allChunksParams,
-      { label: "DcsExtract: fetch all remaining chunks" },
+      metaParams,
+      { label: "DcsExtract: fetch remaining chunk metadata" },
     );
 
-    // §3b: Group chunks by document_id (preserving composite order)
-    const docChunkMap = new Map<string, ChunkRow[]>();
+    // Build a set of remaining chunk IDs for fast lookup
+    const allRemainingChunkIds = new Set(allRemainingMeta.map(m => m.chunk_id));
+
+    // §3b: Group metadata by document_id (preserving composite order)
+    const docMetaMap = new Map<string, ChunkMeta[]>();
     const docOrder: string[] = [];
-    for (const chunk of allRemainingChunks) {
-      let arr = docChunkMap.get(chunk.document_id);
+    for (const meta of allRemainingMeta) {
+      let arr = docMetaMap.get(meta.document_id);
       if (!arr) {
         arr = [];
-        docChunkMap.set(chunk.document_id, arr);
-        docOrder.push(chunk.document_id);
+        docMetaMap.set(meta.document_id, arr);
+        docOrder.push(meta.document_id);
       }
-      arr.push(chunk);
+      arr.push(meta);
     }
 
-    // §3c: For Excel docs, we need ALL chunks (not just remaining) to build windows.
-    // If cursor is mid-document for an Excel doc, we must fetch prior chunks too.
-    // However, since cursor is always at the END of a work unit's last owned chunk,
-    // and Excel work units own contiguous chunk ranges, the cursor always sits at
-    // the boundary between documents (or between windows within a document).
+    // §3c: Phase 2 — fetch content per-document, only for docs we need.
+    // We iterate documents in composite order and build work units until
+    // we have enough to satisfy the batchSize budget. Content is loaded
+    // lazily per-document to stay under the gRPC payload limit.
     //
-    // For a partial Excel document (cursor was inside it), we need the FULL
-    // document's chunks to build windows, then skip windows already processed.
-    // But with work_unit_version="logical-excel-v1", the cursor for Excel docs
-    // always points to the lastOwnedChunkId of a window, meaning the remaining
-    // chunks start at the next window's first chunk.
-    //
-    // For documents where we have all chunks after cursor, we can detect if
-    // the first document is partial by checking if chunk_index > 0.
-    // If partial AND Excel: fetch the full document's chunks for window building.
-
-    // Check if first document in remaining set is a partial Excel document
-    if (docOrder.length > 0) {
-      const firstDocId = docOrder[0];
-      const firstDocChunks = docChunkMap.get(firstDocId)!;
-      const firstChunk = firstDocChunks[0];
-      const isExcel = isExcelDocument(firstChunk.document_tag, firstChunk.source_file);
-
-      if (isExcel && firstChunk.chunk_index > 0) {
-        // Partial Excel document — need ALL chunks for this doc to build windows
-        const fullDocChunks = await db.query(
-          `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
-                  dc.file_name AS source_file, d.document_tag,
-                  dc.document_id, dc.chunk_index
-           FROM document_chunks dc
-           JOIN documents d ON d.id = dc.document_id
-           WHERE dc.document_id = $1::uuid AND dc.deal_id = $2::uuid AND d.deal_id = $2::uuid
-           ORDER BY dc.chunk_index ASC`,
-          z.object({
-            chunk_id: z.string(),
-            chunk_text: z.string(),
-            source_file: z.string(),
-            document_tag: z.string().nullable(),
-            document_id: z.string(),
-            chunk_index: z.number(),
-          }),
-          [firstDocId, input.dealId],
-          { label: "DcsExtract: fetch full Excel doc for window building" },
-        );
-
-        // Replace the partial set with the full document
-        docChunkMap.set(firstDocId, fullDocChunks);
-      }
+    // Helper to fetch full content for a single document.
+    async function fetchDocChunks(docId: string, dealId: string, isFullDoc: boolean): Promise<ChunkRow[]> {
+      return db.query(
+        `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
+                dc.file_name AS source_file, d.document_tag,
+                dc.document_id, dc.chunk_index
+         FROM document_chunks dc
+         JOIN documents d ON d.id = dc.document_id
+         WHERE dc.document_id = $1::uuid AND dc.deal_id = $2::uuid AND d.deal_id = $2::uuid
+         ORDER BY dc.chunk_index ASC`,
+        z.object({
+          chunk_id: z.string(),
+          chunk_text: z.string(),
+          source_file: z.string(),
+          document_tag: z.string().nullable(),
+          document_id: z.string(),
+          chunk_index: z.number(),
+        }),
+        [docId, dealId],
+        { label: isFullDoc
+            ? "DcsExtract: fetch full Excel doc for window building"
+            : "DcsExtract: fetch doc content for batch" },
+      );
     }
 
-    // §3d: Build WorkUnit list from documents in composite order
+    // §3d: Build WorkUnit list from documents in composite order.
+    // Fetch content lazily per-document. Stop once we have enough work units
+    // to fill the batchSize budget (with one extra document to account for
+    // partial windows at the boundary).
     const workUnits: WorkUnit[] = [];
+    let estimatedPhysicalChunks = 0;
+    // Over-fetch by 2× batchSize to ensure we have enough work units after
+    // window building trims some. This keeps the number of per-doc queries small.
+    const fetchBudget = input.batchSize * 2;
 
     for (const docId of docOrder) {
-      const docChunks = docChunkMap.get(docId)!;
-      const firstChunk = docChunks[0];
-      const isExcel = isExcelDocument(firstChunk.document_tag, firstChunk.source_file);
+      const docMeta = docMetaMap.get(docId)!;
+      const firstMeta = docMeta[0];
+      const isExcel = isExcelDocument(firstMeta.document_tag, firstMeta.source_file);
 
       if (isExcel) {
-        // Build logical windows from ALL chunks of this document
-        const physicalChunks: PhysicalChunk[] = docChunks.map(c => ({
+        // Excel documents: always fetch ALL chunks for the document
+        // (needed for window building). Individual Excel docs are 2-3MB,
+        // within the gRPC limit.
+        const fullDocChunks = await fetchDocChunks(docId, input.dealId, true);
+
+        const physicalChunks: PhysicalChunk[] = fullDocChunks.map(c => ({
           chunk_id: c.chunk_id,
           chunk_index: c.chunk_index,
           content: c.chunk_text,
@@ -1057,20 +1059,12 @@ export default api({
 
         const windows = buildLogicalWindows(physicalChunks);
 
-        // Skip windows whose lastOwnedChunkId is at or before cursor.
-        // The cursor points to a physical chunk ID. A window is fully processed
-        // if its lastOwnedChunkId has already been committed.
-        // Since chunks are in composite order and cursor is a physical chunk ID,
-        // we can check: skip windows where lastOwnedChunkId is NOT in allRemainingChunks.
-        const remainingChunkIds = new Set(allRemainingChunks.map(c => c.chunk_id));
-
+        // Skip windows fully processed (no owned chunks in remaining set)
         for (const win of windows) {
-          // Window is unprocessed if ANY of its owned chunks are in remaining set
-          const hasRemainingChunks = win.ownedChunkIds.some(id => remainingChunkIds.has(id));
-          if (!hasRemainingChunks) continue; // Fully processed, skip
+          const hasRemainingChunks = win.ownedChunkIds.some(id => allRemainingChunkIds.has(id));
+          if (!hasRemainingChunks) continue;
 
-          // Collect the owned ChunkRow objects for this window
-          const chunkById = new Map(docChunks.map(c => [c.chunk_id, c]));
+          const chunkById = new Map(fullDocChunks.map(c => [c.chunk_id, c]));
           const ownedChunks = win.ownedChunkIds
             .map(id => chunkById.get(id))
             .filter((c): c is ChunkRow => c !== undefined);
@@ -1085,16 +1079,18 @@ export default api({
             analysisText: win.windowText,
             charCount: win.totalChars,
             sourceFile: win.sourceFile,
-            documentTag: firstChunk.document_tag,
+            documentTag: firstMeta.document_tag,
             documentId: win.documentId,
           });
         }
+
+        estimatedPhysicalChunks += docMeta.length;
       } else {
-        // Non-Excel: one PhysicalWorkUnit per chunk
-        // Only include chunks that are in the remaining set (after cursor)
-        const remainingChunkIds = new Set(allRemainingChunks.map(c => c.chunk_id));
+        // Non-Excel: fetch content only for this document's remaining chunks
+        const docChunks = await fetchDocChunks(docId, input.dealId, false);
+
         for (const chunk of docChunks) {
-          if (!remainingChunkIds.has(chunk.chunk_id)) continue;
+          if (!allRemainingChunkIds.has(chunk.chunk_id)) continue;
           workUnits.push({
             kind: "physical",
             chunk,
@@ -1108,7 +1104,13 @@ export default api({
             documentId: chunk.document_id,
           });
         }
+
+        estimatedPhysicalChunks += docMeta.length;
       }
+
+      // Stop fetching more documents once we have enough work units.
+      // We need at least batchSize physical chunks worth of work units.
+      if (estimatedPhysicalChunks >= fetchBudget) break;
     }
 
     // §4: Apply batchSize — counts owned physical chunks, not work units
