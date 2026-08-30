@@ -46,6 +46,7 @@ export interface ScorecardInput {
   assertedCount: number;
   absentCount: number;
   dimensions: DimensionRecord[];
+  materialityOverlay: string | null;
 }
 
 export interface ScorecardOutput {
@@ -53,6 +54,7 @@ export interface ScorecardOutput {
   fullReportMarkdown: string;
   dimensions: DimensionRecord[];
   reportHash: string;
+  materialityOverlayIncluded: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -179,6 +181,19 @@ function renderMethodology(): string {
   return lines.join("\n");
 }
 
+function renderMaterialityOverlay(overlay: string | null): string | null {
+  if (overlay === null) {
+    return null;
+  }
+  const lines: string[] = [];
+  lines.push(`## Materiality Overlay`);
+  lines.push(``);
+  lines.push(`This qualitative commentary is generated separately and cannot alter the deterministic results above.`);
+  lines.push(``);
+  lines.push(overlay);
+  return lines.join("\n");
+}
+
 function renderCoverageLimitation(provisional: boolean): string {
   const lines: string[] = [];
   lines.push(`## Coverage Limitation`);
@@ -224,6 +239,9 @@ export function renderDcsScorecard(input: ScorecardInput): ScorecardOutput {
     renderDimensionTable(input.dimensions),
     ``,
     renderEvidenceBasis(input.dimensions),
+    ...(renderMaterialityOverlay(input.materialityOverlay) !== null
+      ? [``, renderMaterialityOverlay(input.materialityOverlay)!]
+      : []),
     ``,
     renderMethodology(),
     ``,
@@ -239,5 +257,6 @@ export function renderDcsScorecard(input: ScorecardInput): ScorecardOutput {
     fullReportMarkdown,
     dimensions: input.dimensions,
     reportHash,
+    materialityOverlayIncluded: input.materialityOverlay !== null,
   };
 }

@@ -22,6 +22,7 @@ import {
 import type { DimensionState } from "./dcs-rubric.js";
 import { renderDcsScorecard } from "./dcs-report-renderer.js";
 import type { DimensionRecord } from "./dcs-report-renderer.js";
+import { validateMaterialityOverlay } from "./dcs-materiality-overlay-validator.js";
 
 // ── Integration ID ───────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -114,6 +115,7 @@ export default api({
     verificationMode: z.boolean().default(false),
     verificationVerdicts: z.array(VerificationVerdictSchema).optional().nullable(),
     verificationSummary: VerificationSummarySchema.optional().nullable(),
+    verificationMaterialityOverlay: z.string().optional().nullable(),
   }),
 
   output: z.object({
@@ -132,6 +134,8 @@ export default api({
     dimensions: z.array(DimensionRecordSchema),
     persistedRenderState: z.boolean(),
     renderStageStatus: z.string(),
+    materialityOverlay: z.string().nullable(),
+    materialityOverlayIncluded: z.boolean(),
   }),
 
   async run(ctx, input) {
@@ -157,6 +161,11 @@ export default api({
       if (input.verificationSummary) {
         throw new Error(
           "Normal mode must not receive verificationSummary. Remove verificationSummary or set verificationMode=true.",
+        );
+      }
+      if (input.verificationMaterialityOverlay !== undefined && input.verificationMaterialityOverlay !== null) {
+        throw new Error(
+          "Normal mode must not receive verificationMaterialityOverlay. Remove it or set verificationMode=true.",
         );
       }
     }
@@ -243,6 +252,7 @@ export default api({
     let evidencedCount: number;
     let assertedCount: number;
     let absentCount: number;
+    let materialityOverlay: string | null = null;
 
     if (isVerification) {
       // ─── Verification mode: use supplied payloads ──────────────
@@ -401,6 +411,17 @@ export default api({
       evidencedCount = summary.evidencedCount;
       assertedCount = summary.assertedCount;
       absentCount = summary.absentCount;
+
+      // Verification overlay resolution
+      if (input.verificationMaterialityOverlay !== undefined && input.verificationMaterialityOverlay !== null) {
+        const overlayValidation = validateMaterialityOverlay(input.verificationMaterialityOverlay);
+        if (!overlayValidation.accepted) {
+          throw new Error(
+            `Verification materiality overlay validation failed: ${overlayValidation.rejectionCode}`,
+          );
+        }
+        materialityOverlay = overlayValidation.overlay;
+      }
     } else {
       // ─── Normal mode: read from database ────────────────────────
 
@@ -522,7 +543,8 @@ export default api({
       // 6f. Summary preconditions
       const summaryRows = await db.query(
         `SELECT headline_score, evidenced_count, asserted_count, absent_count,
-                dimension_count, coverage_basis, computed_in_code
+                dimension_count, coverage_basis, computed_in_code,
+                materiality_overlay
          FROM dcs_run_summary
          WHERE run_id = $1::uuid
          LIMIT 1`,
@@ -534,6 +556,7 @@ export default api({
           dimension_count: z.number(),
           coverage_basis: z.any(),
           computed_in_code: z.boolean(),
+          materiality_overlay: z.string().nullable(),
         }),
         [input.runId],
         { label: "DcsRender: read dcs_run_summary" },
@@ -595,6 +618,19 @@ export default api({
       evidencedCount = summary.evidenced_count;
       assertedCount = summary.asserted_count;
       absentCount = summary.absent_count;
+
+      // Normal-mode overlay resolution
+      const rawOverlay = summary.materiality_overlay;
+      if (rawOverlay !== null) {
+        const overlayValidation = validateMaterialityOverlay(rawOverlay);
+        if (!overlayValidation.accepted) {
+          throw new Error(
+            `Stored materiality overlay validation failed: ${overlayValidation.rejectionCode}. ` +
+            `Cannot render report with invalid overlay.`,
+          );
+        }
+        materialityOverlay = overlayValidation.overlay;
+      }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -757,6 +793,7 @@ export default api({
       assertedCount,
       absentCount,
       dimensions: dimensionRecords,
+      materialityOverlay,
     });
 
     // ═══════════════════════════════════════════════════════════════
@@ -779,6 +816,8 @@ export default api({
         dimensions: scorecardResult.dimensions,
         persistedRenderState: false,
         renderStageStatus: "verification",
+        materialityOverlay: scorecardResult.materialityOverlayIncluded ? materialityOverlay : null,
+        materialityOverlayIncluded: scorecardResult.materialityOverlayIncluded,
       };
     }
 
@@ -817,6 +856,7 @@ export default api({
         evidence_rows: actualEvidenceCount,
         provisional: false,
         computed_in_code: true,
+        materiality_overlay_included: scorecardResult.materialityOverlayIncluded,
       };
 
       await db.execute(
@@ -878,6 +918,9 @@ export default api({
       if (rbDetail.computed_in_code !== true) {
         throw new Error("Render-stage readback computed_in_code mismatch.");
       }
+      if (rbDetail.materiality_overlay_included !== expectedDetail.materiality_overlay_included) {
+        throw new Error("Render-stage readback materiality_overlay_included mismatch.");
+      }
 
       return {
         runId: input.runId,
@@ -893,6 +936,8 @@ export default api({
         fullReportMarkdown: scorecardResult.fullReportMarkdown,
         reportHash: scorecardResult.reportHash,
         dimensions: scorecardResult.dimensions,
+        materialityOverlay: scorecardResult.materialityOverlayIncluded ? materialityOverlay : null,
+        materialityOverlayIncluded: scorecardResult.materialityOverlayIncluded,
         persistedRenderState: true,
         renderStageStatus: "done",
       };

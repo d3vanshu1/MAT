@@ -21,6 +21,10 @@ import { DCS_DIMENSIONS, type DimensionState } from "./dcs-rubric.js";
 import { getModuleModel } from "./model-config.js";
 import { callLLMWithHeadroom, MessageResponseSchema } from "./call-llm.js";
 import type { PipelineContext } from "./pipeline-config.js";
+import {
+  validateMaterialityOverlay,
+  OVERLAY_FORBIDDEN_TERMS,
+} from "./dcs-materiality-overlay-validator.js";
 
 // ── Integration IDs ──────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -43,22 +47,6 @@ const GAP_BASIS: Record<DimensionState, string> = {
     "The topic appears in narrative material, but no substantive workproduct evidence qualifies.",
   absent: "No accepted evidence references this topic.",
 };
-
-// ── Forbidden vocabulary for prompt audit and output validation ─
-const FORBIDDEN_TERMS = [
-  "score", "scores", "scored", "scoring",
-  "grade", "grades", "graded",
-  "rating", "ratings",
-  "percent", "percentage",
-  "out of ten",
-];
-
-const RECOMMENDATION_PATTERNS = [
-  /\brecommend(?:s|ed|ing)?\s+(?:that\s+)?(?:the\s+)?(?:investment|deal|transaction)\s+(?:be\s+)?(?:approved|rejected|declined|proceed)/i,
-  /\bshould\s+(?:not\s+)?(?:approve|reject|decline|proceed\s+with)/i,
-  /\bapprove\s+(?:the\s+)?(?:investment|deal|transaction)/i,
-  /\breject\s+(?:the\s+)?(?:investment|deal|transaction)/i,
-];
 
 // ── Schemas ─────────────────────────────────────────────────────
 
@@ -140,69 +128,6 @@ const CountSchema = z.object({
 });
 
 // ═════════════════════════════════════════════════════════════════
-// PURE VALIDATION FUNCTION — used for both live model output
-// and verification candidates
-// ═════════════════════════════════════════════════════════════════
-
-interface ValidationResult {
-  accepted: boolean;
-  rejectionCode: string | null;
-}
-
-function validateOverlayCandidate(candidate: string): ValidationResult {
-  const trimmed = candidate.trim();
-
-  // 1. Empty
-  if (trimmed.length === 0) {
-    return { accepted: false, rejectionCode: "EMPTY" };
-  }
-
-  // 2. Exceeds 2000 chars
-  if (trimmed.length > 2000) {
-    return { accepted: false, rejectionCode: "EXCEEDS_LENGTH" };
-  }
-
-  // 3. Contains ASCII digit
-  if (/[0-9]/.test(trimmed)) {
-    return { accepted: false, rejectionCode: "CONTAINS_DIGIT" };
-  }
-
-  // 4. Forbidden vocabulary (case-insensitive word boundary)
-  for (const term of FORBIDDEN_TERMS) {
-    // Use word-boundary matching for multi-word phrases and single words
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`\\b${escaped}\\b`, "i");
-    if (re.test(trimmed)) {
-      return { accepted: false, rejectionCode: `FORBIDDEN_TERM:${term}` };
-    }
-  }
-
-  // 5. Markdown heading
-  if (/^#{1,6}\s/m.test(trimmed)) {
-    return { accepted: false, rejectionCode: "MARKDOWN_HEADING" };
-  }
-
-  // 6. Markdown bullet or numbered list
-  if (/^[\s]*[-*+]\s/m.test(trimmed) || /^[\s]*\d+\.\s/m.test(trimmed)) {
-    return { accepted: false, rejectionCode: "MARKDOWN_LIST" };
-  }
-
-  // 7. Markdown table separator
-  if (/\|[\s]*[-:]+[\s]*\|/.test(trimmed)) {
-    return { accepted: false, rejectionCode: "MARKDOWN_TABLE" };
-  }
-
-  // 8. Approval or rejection recommendation
-  for (const pattern of RECOMMENDATION_PATTERNS) {
-    if (pattern.test(trimmed)) {
-      return { accepted: false, rejectionCode: "RECOMMENDATION" };
-    }
-  }
-
-  return { accepted: true, rejectionCode: null };
-}
-
-// ═════════════════════════════════════════════════════════════════
 // PROMPT AUDIT — code-side check of assembled model payload
 // ═════════════════════════════════════════════════════════════════
 
@@ -212,7 +137,7 @@ function auditPromptPayload(payload: string): {
 } {
   const containsDigit = /[0-9]/.test(payload);
   let containsForbiddenQuantitativeTerm = false;
-  for (const term of FORBIDDEN_TERMS) {
+  for (const term of OVERLAY_FORBIDDEN_TERMS) {
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`\\b${escaped}\\b`, "i");
     if (re.test(payload)) {
@@ -325,14 +250,14 @@ export default api({
 
       // ── Candidate-only verification path ──────────────────────
       if (input.verificationOverlayCandidate !== undefined) {
-        const validation = validateOverlayCandidate(input.verificationOverlayCandidate);
+        const validation = validateMaterialityOverlay(input.verificationOverlayCandidate);
         return {
           runId,
           mode: "verification" as const,
           provisional: true,
           modelCalled: false,
           overlayAccepted: validation.accepted,
-          overlay: validation.accepted ? input.verificationOverlayCandidate.trim() : null,
+          overlay: validation.overlay,
           rejectionCode: validation.rejectionCode,
           persistedOverlay: false,
           modelInputAudit: {
@@ -374,7 +299,7 @@ export default api({
       );
 
       const rawText = (llmResponse.content[0]?.text ?? "").trim();
-      const validation = validateOverlayCandidate(rawText);
+      const validation = validateMaterialityOverlay(rawText);
 
       return {
         runId,
@@ -382,7 +307,7 @@ export default api({
         provisional: true,
         modelCalled: true,
         overlayAccepted: validation.accepted,
-        overlay: validation.accepted ? rawText : null,
+        overlay: validation.overlay,
         rejectionCode: validation.rejectionCode,
         persistedOverlay: false,
         modelInputAudit: {
@@ -552,14 +477,14 @@ export default api({
     );
 
     const rawText = (llmResponse.content[0]?.text ?? "").trim();
-    const validation = validateOverlayCandidate(rawText);
+    const validation = validateMaterialityOverlay(rawText);
 
     // ── Persistence ─────────────────────────────────────────────
     if (validation.accepted) {
       await ctx.integrations.db.execute(
         `UPDATE dcs_run_summary SET materiality_overlay = $1
          WHERE run_id = $2`,
-        [rawText, runId],
+        [validation.overlay, runId],
         { label: "Persist accepted overlay" },
       );
     } else {
@@ -579,7 +504,7 @@ export default api({
       { label: "Readback overlay" },
     );
     const storedValue = readback[0]?.materiality_overlay ?? null;
-    const expectedValue = validation.accepted ? rawText : null;
+    const expectedValue = validation.overlay;
     if (storedValue !== expectedValue) {
       throw new Error(
         `Readback mismatch: stored=${storedValue?.slice(0, 50) ?? "NULL"}, expected=${expectedValue?.slice(0, 50) ?? "NULL"}`,
@@ -604,7 +529,7 @@ export default api({
       provisional: false,
       modelCalled: true,
       overlayAccepted: validation.accepted,
-      overlay: validation.accepted ? rawText : null,
+      overlay: validation.overlay,
       rejectionCode: validation.rejectionCode,
       persistedOverlay: true,
       modelInputAudit: {
