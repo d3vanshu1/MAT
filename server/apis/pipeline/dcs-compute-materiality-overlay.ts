@@ -340,7 +340,7 @@ export default api({
     const stageStates = await ctx.integrations.db.query(
       `SELECT stage, status, cursor_value, detail
        FROM dcs_pipeline_state
-       WHERE run_id = $1::uuid AND stage IN ('extract', 'verdict')
+       WHERE run_id = $1::uuid AND stage IN ('extract', 'verdicts')
        LIMIT 2`,
       StageStateRowSchema,
       [runId],
@@ -381,7 +381,7 @@ export default api({
     }
 
     // Precondition 4: verdict stage done
-    const verdictStage = stageStates.find((s) => s.stage === "verdict");
+    const verdictStage = stageStates.find((s) => s.stage === "verdicts");
     if (!verdictStage || verdictStage.status !== "done") {
       throw new Error(
         `Precondition failed: verdict stage not done (status=${verdictStage?.status ?? "missing"})`,
