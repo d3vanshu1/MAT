@@ -425,7 +425,7 @@ export default function DealDashboardPage() {
   const { run: backfillDocTablesApi } = useApi("BackfillDocTablesFromText");
   const { run: getDocTablesSummaryApi } = useApi("GetDocTablesSummary");
   const { run: runModulePipelineApi } = useApi("RunModulePipeline");
-  const { run: getRunnableRunsApi } = useApi("GetRunnableRuns");
+  // GetRunnableRuns removed — the watchdog now uses GetRunProgress exclusively
   // BSS v2 orchestrator
   const { run: bssRunPipelineApi } = useApi("BssRunPipeline");
   const { run: bssGetFindingsApi } = useApi("BssGetFindings");
@@ -2920,103 +2920,36 @@ export default function DealDashboardPage() {
   // is a Superblocks Workflow (server-side cron) — this is complementary UX.
   // ---------------------------------------------------------------------------
   const resumingModulesRef = useRef<Set<string>>(new Set());
-  // B2 FIX — per-module resume attempt counter (cap at 10 to survive frequent
-  // build-finalize cycles during development without exhausting the counter)
-  const resumeAttemptCountRef = useRef<Record<string, number>>({});
-  const MAX_RESUME_ATTEMPTS = 10;
 
-  // Stall detector — tracks last observed DCS evidence count & timestamp.
-  // If evidence count hasn't changed for STALL_THRESHOLD_MS while the module
-  // is DB-running, force a page reload to reset all refs and let auto-resume
-  // reconnect to the orphaned run.
-  const STALL_THRESHOLD_MS = 7 * 60 * 1000; // 7 minutes
-  const lastDcsEvidenceRef = useRef<{ count: number; at: number }>({ count: -1, at: Date.now() });
+  // ── Progress-aware resume tracking ────────────────────────────────────────
+  // Instead of a blind attempt counter, we track the last-known "progress
+  // fingerprint" (evidence count for DCS, checkpoint sum for other modules).
+  // When progress advances → counter resets → resume is always allowed.
+  // When progress is flat → counter increments → after N flat attempts, kill.
+  // This means build-finalize cycles are harmless (evidence keeps growing,
+  // counter keeps resetting) and genuine stalls are caught in ~5 minutes.
+  const resumeAttemptCountRef = useRef<Record<string, number>>({});
+  const lastKnownProgressRef = useRef<Record<string, number>>({});
+  const MAX_FLAT_RESUME_ATTEMPTS = 5;
+
+  // ---------------------------------------------------------------------------
+  // Visibility-based resume: when the tab regains focus after sleep/switch,
+  // immediately trigger the watchdog (which handles all resume logic).
+  // The separate 30s heartbeat is removed — the watchdog interval (60s) plus
+  // this visibility handler cover all scenarios.
+  // ---------------------------------------------------------------------------
+  const watchdogTriggerRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
-    if (!dealId) return;
-
-    const attemptResume = async () => {
-      // Query the DB for ALL running runs (including diagnostic) via dedicated unfiltered API
-      let dbRunningIds: Array<{ moduleId: string; runId: string }> = [];
-      try {
-        const result = await getRunnableRunsApi({ dealId });
-        dbRunningIds = (result?.runs ?? []).map((r: { module_id: string; run_id: string }) => ({
-          moduleId: r.module_id,
-          runId: r.run_id,
-        }));
-      } catch (err) {
-        console.error("[auto-resume] GetRunnableRuns failed:", err);
-        return;
-      }
-
-      const orphanedModules = dbRunningIds.filter(
-        ({ moduleId }) =>
-          !pipelinePollingActive.current.has(moduleId) &&
-          !resumingModulesRef.current.has(moduleId) &&
-          !killedModulesRef.current.has(moduleId)
-      );
-
-      if (orphanedModules.length === 0) return;
-
-      // Gate: Do NOT resume until docs are loaded and selectedSubjectIds is populated.
-      // Without this, the auto-resume can fire before the useEffect sets subjectIds,
-      // sending an empty array that kills the run via the server's subject guard.
-      if (!docsInitialized.current) {
-        console.log("[auto-resume] Skipping — docs not yet loaded (selectedSubjectIds would be empty)");
-        return;
-      }
-
-      // Small delay to let browser connections stabilize after wake
-      await new Promise((r) => setTimeout(r, 1_000));
-
-      for (const { moduleId, runId } of orphanedModules) {
-        if (moduleId === "executive_summary") continue;
-        // Re-check guards after the delay (another resume may have started)
-        if (pipelinePollingActive.current.has(moduleId)) continue;
-        if (resumingModulesRef.current.has(moduleId)) continue;
-
-        // B2 FIX — cap resume attempts at 3 per module
-        const attempts = resumeAttemptCountRef.current[moduleId] ?? 0;
-        if (attempts >= MAX_RESUME_ATTEMPTS) {
-          console.warn(`[auto-resume] ${moduleId}: ${MAX_RESUME_ATTEMPTS} resume attempts exhausted — marking not-resumable`);
-          killedModulesRef.current.add(moduleId);
-          setRunningModules((prev) => { const next = new Set(prev); next.delete(moduleId); return next; });
-          toast.error(`[${MODULE_MAP[moduleId]?.displayName ?? moduleId}] Auto-resume failed after ${MAX_RESUME_ATTEMPTS} attempts. Refresh the page to retry.`);
-          continue;
-        }
-        resumeAttemptCountRef.current[moduleId] = attempts + 1;
-
-        resumingModulesRef.current.add(moduleId);
-        console.log(`[auto-resume] Re-invoking orphaned pipeline: ${moduleId} (run ${runId}) [attempt ${attempts + 1}/${MAX_RESUME_ATTEMPTS}]`);
-        // Fire-and-forget: handleRunModule manages its own state
-        handleRunModule(moduleId, runId).finally(() => {
-          resumingModulesRef.current.delete(moduleId);
-        });
-      }
-    };
-
-    // Visibility change: covers tab switch + most sleep/wake scenarios
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        attemptResume();
+      if (document.visibilityState === "visible" && watchdogTriggerRef.current) {
+        // Small delay to let browser connections stabilize after wake
+        setTimeout(() => watchdogTriggerRef.current?.(), 1_000);
       }
     };
-
-    // Heartbeat: catches the edge case where the tab stays foreground but
-    // the polling loop died (e.g., laptop sleep without visibility change,
-    // or a silent network disconnect that killed the API call)
-    const heartbeatInterval = setInterval(() => {
-      if (document.visibilityState === "visible") {
-        attemptResume();
-      }
-    }, 30_000);
-
     document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-      clearInterval(heartbeatInterval);
-    };
-  }, [dealId, handleRunModule, getRunnableRunsApi]);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Progress polling for DB-running modules
@@ -3126,11 +3059,25 @@ export default function DealDashboardPage() {
   }, [dealId, statuses, getRunProgressApi, refetchModules]);
 
   // ---------------------------------------------------------------------------
-  // Watchdog: self-healing invariant for stuck modules
-  // Improvement over the heartbeat: queries DB directly (GetRunProgress) rather
-  // than relying on `statuses` React state, which may be stale between refetches.
-  // Guarantee: recovers within ~60-90s of the tab being open and visible.
-  // Does NOT survive a closed tab or fully backgrounded/throttled one.
+  // Watchdog: single progress-aware resume driver
+  //
+  // Every 60s (+ on tab focus via watchdogTriggerRef), queries GetRunProgress
+  // for DB-running modules. For each orphaned module (DB-running, no client
+  // polling loop):
+  //
+  //   1. Compute a "progress fingerprint":
+  //      - DCS: dcsEvidenceCount
+  //      - Other modules: analysisCheckpointCount + mergeCheckpointCount + stageCheckpointCount
+  //
+  //   2. Compare to lastKnownProgressRef:
+  //      - If fingerprint advanced → server is working. Reset attempt counter
+  //        to 0 and resume (reconnect the client driver).
+  //      - If fingerprint unchanged → server may be stuck. Increment attempt
+  //        counter. After MAX_FLAT_RESUME_ATTEMPTS flat attempts, kill the
+  //        module and notify.
+  //
+  // This replaces the old triple-mechanism approach (auto-resume heartbeat,
+  // watchdog, stall-detector reload) with one clean loop.
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!dealId) return;
@@ -3140,66 +3087,113 @@ export default function DealDashboardPage() {
     const watchdog = async () => {
       if (document.visibilityState !== "visible") return;
 
+      // Gate: Do NOT resume until docs are loaded and selectedSubjectIds is populated.
+      if (!docsInitialized.current) {
+        console.log("[watchdog] Skipping — docs not yet loaded");
+        return;
+      }
+
       try {
         const progress = await getRunProgressApi({ dealId });
-        const dbRunning = (progress?.runs ?? []).filter(
+        const runs = progress?.runs ?? [];
+        const dcsEvidenceCount = progress?.dcsEvidenceCount ?? 0;
+        const dbRunning = runs.filter(
           (r: { status: string }) => r.status === "running"
         );
 
-        // ── Stall detector: auto-reload if DCS evidence stalls ──────────
-        const dcsRun = dbRunning.find(
-          (r: { moduleId: string }) => r.moduleId === "diligence_completeness"
-        );
-        if (dcsRun) {
-          const currentEvidence = progress?.dcsEvidenceCount ?? 0;
-          const prev = lastDcsEvidenceRef.current;
-
-          if (currentEvidence !== prev.count) {
-            // Progress is advancing — reset the clock
-            lastDcsEvidenceRef.current = { count: currentEvidence, at: Date.now() };
-          } else if (Date.now() - prev.at >= STALL_THRESHOLD_MS) {
-            // Evidence count unchanged for 7+ minutes — stalled
-            console.warn(
-              `[watchdog] DCS stall detected: evidence stuck at ${currentEvidence} for ${Math.round((Date.now() - prev.at) / 60_000)}min — reloading page`
-            );
-            window.location.reload();
-            return; // reload is async — stop executing
+        // Clean up progress tracking for modules that are no longer running
+        for (const moduleId of Object.keys(lastKnownProgressRef.current)) {
+          if (!dbRunning.some((r: { moduleId: string }) => r.moduleId === moduleId)) {
+            delete lastKnownProgressRef.current[moduleId];
+            delete resumeAttemptCountRef.current[moduleId];
           }
-        } else {
-          // No active DCS run — reset tracker
-          lastDcsEvidenceRef.current = { count: -1, at: Date.now() };
         }
 
         for (const run of dbRunning) {
-          const { moduleId, runId } = run as { moduleId: string; runId: string };
+          const { moduleId, runId } = run as {
+            moduleId: string;
+            runId: string;
+            analysisCheckpointCount?: number;
+            mergeCheckpointCount?: number;
+            stageCheckpointCount?: number;
+          };
           if (moduleId === "executive_summary") continue;
           if (killedModulesRef.current.has(moduleId)) continue;
 
+          // Skip modules that already have an active client driver
           const hasActivePolling = pipelinePollingActive.current.has(moduleId);
           const isResuming = resumingModulesRef.current.has(moduleId);
+          if (hasActivePolling || isResuming) continue;
 
-          if (!hasActivePolling && !isResuming) {
-            // B2 FIX — watchdog shares the same per-module attempt cap
-            const attempts = resumeAttemptCountRef.current[moduleId] ?? 0;
-            if (attempts >= MAX_RESUME_ATTEMPTS) {
-              console.warn(`[watchdog] ${moduleId}: resume attempts exhausted — skipping`);
+          // ── Compute progress fingerprint ────────────────────────────────
+          let currentProgress: number;
+          if (moduleId === "diligence_completeness") {
+            currentProgress = dcsEvidenceCount;
+          } else {
+            currentProgress =
+              (run.analysisCheckpointCount ?? 0) +
+              (run.mergeCheckpointCount ?? 0) +
+              (run.stageCheckpointCount ?? 0);
+          }
+
+          const lastKnown = lastKnownProgressRef.current[moduleId] ?? -1;
+
+          if (currentProgress > lastKnown) {
+            // Progress is advancing — reset flat-attempt counter
+            lastKnownProgressRef.current[moduleId] = currentProgress;
+            resumeAttemptCountRef.current[moduleId] = 0;
+            console.log(
+              `[watchdog] ${moduleId}: progress advancing (${lastKnown} → ${currentProgress}) — resuming (run ${runId})`
+            );
+          } else {
+            // Progress flat — increment counter
+            const flatAttempts = (resumeAttemptCountRef.current[moduleId] ?? 0) + 1;
+            resumeAttemptCountRef.current[moduleId] = flatAttempts;
+            lastKnownProgressRef.current[moduleId] = currentProgress;
+
+            if (flatAttempts > MAX_FLAT_RESUME_ATTEMPTS) {
+              console.warn(
+                `[watchdog] ${moduleId}: ${flatAttempts} flat-progress attempts — pipeline appears genuinely stalled. Stopping.`
+              );
+              killedModulesRef.current.add(moduleId);
+              setRunningModules((prev) => {
+                const next = new Set(prev);
+                next.delete(moduleId);
+                return next;
+              });
+              toast.error(
+                `[${MODULE_MAP[moduleId]?.displayName ?? moduleId}] Pipeline stalled (no progress for ~${flatAttempts} minutes). Refresh to retry.`
+              );
               continue;
             }
-            resumeAttemptCountRef.current[moduleId] = attempts + 1;
 
             console.log(
-              `[watchdog] Module ${moduleId} is DB-running with no client driver — forcing resume (run ${runId}) [attempt ${attempts + 1}/${MAX_RESUME_ATTEMPTS}]`
+              `[watchdog] ${moduleId}: progress flat at ${currentProgress} — attempt ${flatAttempts}/${MAX_FLAT_RESUME_ATTEMPTS} (run ${runId})`
             );
-            handleRunModule(moduleId, runId);
           }
+
+          // Resume: fire handleRunModule to reconnect the client driver
+          resumingModulesRef.current.add(moduleId);
+          handleRunModule(moduleId, runId).finally(() => {
+            resumingModulesRef.current.delete(moduleId);
+          });
         }
       } catch {
         // Watchdog failure is non-fatal — next interval will retry
       }
     };
 
+    // Expose watchdog for visibility-change trigger
+    watchdogTriggerRef.current = watchdog;
+
+    // Run immediately on mount (catches orphaned runs after build finalize)
+    watchdog();
+
     const interval = setInterval(watchdog, WATCHDOG_INTERVAL_MS);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      watchdogTriggerRef.current = null;
+    };
   }, [dealId, handleRunModule, getRunProgressApi]);
 
   // ---------------------------------------------------------------------------
