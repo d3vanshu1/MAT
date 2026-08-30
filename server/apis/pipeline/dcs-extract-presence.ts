@@ -18,6 +18,15 @@ import { getModuleModel } from "./model-config.js";
 import { callLLMWithHeadroom } from "./call-llm.js";
 import { DCS_DIMENSIONS, classifyDocClass } from "./dcs-rubric.js";
 import type { PipelineContext } from "./pipeline-config.js";
+import {
+  type PhysicalChunk,
+  type LogicalWindow,
+  type SnippetMapping,
+  reconstructDocument,
+  buildLogicalWindows,
+  mapSnippetToPhysicalChunk,
+  isExcelDocument,
+} from "./dcs-logical-excel-windows.js";
 
 // ── Integration IDs ──────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -278,6 +287,8 @@ export default api({
     concurrency: z.number().int().min(1).max(8).default(4),
     resumeCursor: z.string().uuid().optional(),
     verificationChunkId: z.string().uuid().optional(),
+    verificationDocumentId: z.string().uuid().optional(),
+    verificationWindowIndex: z.number().int().min(0).optional(),
     debug: z.boolean().default(false),
   }),
 
@@ -312,8 +323,41 @@ export default api({
   async run(ctx, input) {
     const startTime = Date.now();
     const db = ctx.integrations.ic_diligence_db;
-    const isVerification = !!input.verificationChunkId;
+    const hasLogicalFields = input.verificationDocumentId !== undefined || input.verificationWindowIndex !== undefined;
+    const isLogicalVerification = input.verificationDocumentId !== undefined && input.verificationWindowIndex !== undefined;
+    const isPhysicalVerification = !!input.verificationChunkId;
+    const isVerification = isPhysicalVerification || isLogicalVerification;
     const mode = isVerification ? "verification" : "normal";
+
+    // ── 0. Input-mode validation ───────────────────────────────
+    // Reject ambiguous/partial logical fields
+    if (hasLogicalFields && !isLogicalVerification) {
+      throw new Error(
+        "verificationDocumentId and verificationWindowIndex must both be supplied together.",
+      );
+    }
+    if (isLogicalVerification && isPhysicalVerification) {
+      throw new Error(
+        "Cannot combine verificationDocumentId/verificationWindowIndex with verificationChunkId.",
+      );
+    }
+    if (isLogicalVerification && input.resumeCursor) {
+      throw new Error("Logical verification mode does not accept resumeCursor.");
+    }
+    if (isLogicalVerification && !input.debug) {
+      throw new Error("Logical verification mode requires debug=true.");
+    }
+    if (isLogicalVerification && input.batchSize !== 1) {
+      throw new Error("Logical verification mode requires batchSize=1.");
+    }
+    if (isLogicalVerification && input.concurrency !== 1) {
+      throw new Error("Logical verification mode requires concurrency=1.");
+    }
+    if (!isLogicalVerification && !isPhysicalVerification && hasLogicalFields) {
+      throw new Error(
+        "verificationDocumentId/verificationWindowIndex are verification-only inputs.",
+      );
+    }
 
     // ── 1. Run validation ──────────────────────────────────────
     const runCheck = await db.query(
@@ -354,8 +398,283 @@ export default api({
     let semanticRetryRecoveriesThisCall = 0;
     const trace: TraceEntry[] = [];
 
-    // ── 3. Verification mode (single chunk, no pipeline state) ─
-    if (isVerification) {
+    // ── 3a. Logical Excel verification mode (read-only) ────────
+    if (isLogicalVerification) {
+      // D2: Document validation
+      const docRows = await db.query(
+        `SELECT d.id, d.document_tag, d.deal_id
+         FROM documents d
+         WHERE d.id = $1::uuid
+         LIMIT 1`,
+        z.object({ id: z.string(), document_tag: z.string().nullable(), deal_id: z.string() }),
+        [input.verificationDocumentId],
+        { label: "DcsExtract: validate verification document" },
+      );
+      if (docRows.length === 0) {
+        throw new Error(`Document ${input.verificationDocumentId} not found.`);
+      }
+      const doc = docRows[0];
+      if (doc.deal_id !== input.dealId) {
+        throw new Error(
+          `Document ${input.verificationDocumentId} belongs to deal ${doc.deal_id}, not ${input.dealId}.`,
+        );
+      }
+
+      // Fetch all physical chunks for this document
+      const physChunkRows = await db.query(
+        `SELECT dc.id AS chunk_id, dc.chunk_index, dc.content,
+                dc.document_id, dc.file_name AS source_file, dc.deal_id
+         FROM document_chunks dc
+         WHERE dc.document_id = $1::uuid AND dc.deal_id = $2::uuid
+         ORDER BY dc.chunk_index ASC`,
+        z.object({
+          chunk_id: z.string(),
+          chunk_index: z.number(),
+          content: z.string(),
+          document_id: z.string(),
+          source_file: z.string(),
+          deal_id: z.string(),
+        }),
+        [input.verificationDocumentId, input.dealId],
+        { label: "DcsExtract: fetch document chunks for logical verification" },
+      );
+      if (physChunkRows.length === 0) {
+        throw new Error(`No physical chunks found for document ${input.verificationDocumentId}.`);
+      }
+
+      const sourceFile = physChunkRows[0].source_file;
+      const documentTag = doc.document_tag;
+
+      // Require Excel document (tag + extension)
+      if (!isExcelDocument(documentTag, sourceFile)) {
+        throw new Error(
+          `Document is not Excel: tag="${documentTag}", file="${sourceFile}". ` +
+          `Logical verification requires financial_model or customer_data tag and .xlsx/.xls/.xlsm/.csv extension.`,
+        );
+      }
+
+      // Verify all chunks belong to same deal
+      for (const pc of physChunkRows) {
+        if (pc.deal_id !== input.dealId) {
+          throw new Error(
+            `Chunk ${pc.chunk_id} (index ${pc.chunk_index}) has deal_id=${pc.deal_id}, expected ${input.dealId}.`,
+          );
+        }
+      }
+
+      // Build PhysicalChunk array for planner
+      const physicalChunks: PhysicalChunk[] = physChunkRows.map(pc => ({
+        chunk_id: pc.chunk_id,
+        chunk_index: pc.chunk_index,
+        content: pc.content,
+        document_id: pc.document_id,
+        source_file: sourceFile,
+        document_tag: documentTag ?? "other",
+      }));
+
+      // Run approved planner
+      const windows = buildLogicalWindows(physicalChunks);
+
+      // Validate window index exists
+      const windowIndex = input.verificationWindowIndex!;
+      const selectedWindow = windows.find(w => w.windowIndex === windowIndex);
+      if (!selectedWindow) {
+        throw new Error(
+          `Window index ${windowIndex} not found. Document has ${windows.length} windows (0–${windows.length - 1}).`,
+        );
+      }
+
+      // D3: Window safety checks
+      if (selectedWindow.ownedChunkIds.length === 0) {
+        throw new Error(`Window ${windowIndex} owns zero physical chunks.`);
+      }
+      // All owned chunks belong to requested document
+      const docChunkIds = new Set(physChunkRows.map(pc => pc.chunk_id));
+      for (const oid of selectedWindow.ownedChunkIds) {
+        if (!docChunkIds.has(oid)) {
+          throw new Error(`Window ${windowIndex} owns chunk ${oid} not in document ${input.verificationDocumentId}.`);
+        }
+      }
+      // No duplicate owned chunk IDs
+      if (new Set(selectedWindow.ownedChunkIds).size !== selectedWindow.ownedChunkIds.length) {
+        throw new Error(`Window ${windowIndex} has duplicate owned chunk IDs.`);
+      }
+      // Complete ownership metadata
+      if (!selectedWindow.firstOwnedChunkId || !selectedWindow.lastOwnedChunkId) {
+        throw new Error(`Window ${windowIndex} missing first/last owned chunk ID metadata.`);
+      }
+
+      // Classify window type
+      let windowClassification: "normal" | "repaired" | "cross_sheet";
+      if (selectedWindow.totalChars > 12_000) {
+        throw new Error(
+          `Window ${windowIndex} exceeds 12,000 characters (${selectedWindow.totalChars}). Cannot process.`,
+        );
+      } else if (selectedWindow.totalChars > 10_000 && selectedWindow.totalChars <= 12_000) {
+        windowClassification = "repaired";
+      } else {
+        windowClassification = "normal";
+      }
+
+      // Cross-sheet detection: check if window text contains multiple sheet markers
+      const sheetMarkerRe = /^--- Sheet: .+ ---$/gm;
+      const sheetMarkers = selectedWindow.windowText.match(sheetMarkerRe) || [];
+      if (sheetMarkers.length > 1) {
+        windowClassification = "cross_sheet";
+        // Verify each sheet marker is present and distinguishable
+        for (const marker of sheetMarkers) {
+          if (!selectedWindow.windowText.includes(marker)) {
+            throw new Error(`Cross-sheet window ${windowIndex}: sheet marker "${marker}" not properly embedded.`);
+          }
+        }
+      }
+
+      // Size bounds
+      if (windowClassification === "repaired") {
+        if (selectedWindow.totalChars > 12_000) {
+          throw new Error(`Repair window ${windowIndex} exceeds 12,000 char limit.`);
+        }
+      } else if (windowClassification === "normal" || windowClassification === "cross_sheet") {
+        if (selectedWindow.totalChars > 10_000) {
+          // Allow normal windows up to 10k, cross-sheet might be slightly larger via repair
+          if (windowClassification !== "cross_sheet" || selectedWindow.totalChars > 12_000) {
+            throw new Error(`Normal window ${windowIndex} exceeds 10,000 char limit (${selectedWindow.totalChars}).`);
+          }
+        }
+      }
+
+      // D4: Real in-memory model analysis using a synthetic ChunkRow
+      const syntheticChunk: ChunkRow = {
+        chunk_id: `logical-window-${windowIndex}`,
+        chunk_text: selectedWindow.windowText,
+        source_file: sourceFile,
+        document_tag: documentTag,
+        document_id: selectedWindow.documentId,
+        chunk_index: windowIndex,
+      };
+
+      const outcome = await analyzeChunk(
+        ctx as unknown as PipelineContext,
+        syntheticChunk,
+        startTime,
+        true, // debug
+      );
+
+      // D5: Physical mapping for every accepted item
+      interface MappedItem {
+        dimension_id: string;
+        snippet: string;
+        is_substantive: boolean;
+        mapping: SnippetMapping;
+        mappedChunkId: string | null;
+        sourceOffset: number | null;
+        fullyContained: boolean;
+        sheetName: string;
+      }
+
+      const mappedItems: MappedItem[] = [];
+      const mappingRejections: Array<{ dimension_id: string; snippet: string; reason: string }> = [];
+
+      for (const item of outcome.accepted) {
+        const mapping = mapSnippetToPhysicalChunk(selectedWindow, item.snippet);
+
+        if (mapping.foundInPrimary && mapping.mappedChunkId) {
+          // Verify mapped chunk is owned by the window
+          if (!selectedWindow.ownedChunkIds.includes(mapping.mappedChunkId)) {
+            mappingRejections.push({
+              dimension_id: item.dimension_id,
+              snippet: item.snippet,
+              reason: `mapped_chunk_not_owned: ${mapping.mappedChunkId}`,
+            });
+            continue;
+          }
+          // Verify mapped chunk exists in document_chunks and same deal
+          if (!docChunkIds.has(mapping.mappedChunkId)) {
+            mappingRejections.push({
+              dimension_id: item.dimension_id,
+              snippet: item.snippet,
+              reason: `mapped_chunk_not_in_document: ${mapping.mappedChunkId}`,
+            });
+            continue;
+          }
+
+          mappedItems.push({
+            dimension_id: item.dimension_id,
+            snippet: item.snippet,
+            is_substantive: item.is_substantive,
+            mapping,
+            mappedChunkId: mapping.mappedChunkId,
+            sourceOffset: mapping.sourceOffset,
+            fullyContained: true, // simplified — chunk contains the snippet
+            sheetName: selectedWindow.sheetName,
+          });
+        } else {
+          // Rejected: context-only or not found
+          mappingRejections.push({
+            dimension_id: item.dimension_id,
+            snippet: item.snippet,
+            reason: mapping.rejectionReason ?? "unknown",
+          });
+        }
+      }
+
+      // D6: Build logical verification trace
+      const logicalTrace = {
+        mode: "logical_excel_verification",
+        document_id: input.verificationDocumentId,
+        source_file: sourceFile,
+        document_tag: documentTag,
+        window_index: windowIndex,
+        classification: windowClassification,
+        totalChars: selectedWindow.totalChars,
+        primaryChars: selectedWindow.primaryChars,
+        contextChars: selectedWindow.contextChars,
+        sheetName: selectedWindow.sheetName,
+        owned_chunk_ids: selectedWindow.ownedChunkIds,
+        first_owned_chunk_id: selectedWindow.firstOwnedChunkId,
+        last_owned_chunk_id: selectedWindow.lastOwnedChunkId,
+        raw_model_response: outcome.traceEntry?.raw_model_response ?? null,
+        model_accepted_items: outcome.accepted,
+        mapped_items: mappedItems,
+        mapping_rejections: mappingRejections,
+        fabrication_rejected: outcome.fabricationRejected,
+        invalid_dimension_rejected: outcome.invalidDimensionRejected,
+        duplicate_dimension_rejected: outcome.duplicateDimensionRejected,
+        json_repair_applied: outcome.jsonRepairApplied ? 1 : 0,
+        semantic_retry_attempted: outcome.semanticRetryAttempted ? 1 : 0,
+        semantic_retry_recovered: outcome.semanticRetryRecovered ? 1 : 0,
+      };
+      trace.push(logicalTrace as unknown as TraceEntry);
+
+      return {
+        runId: input.runId,
+        mode,
+        status: "done",
+        processedThisCall: 0,
+        cumulativeProcessed: 0,
+        rowsWrittenThisCall: 0,
+        cumulativeRowsWritten: 0,
+        emptyChunksThisCall: 0,
+        fabricationRejectedThisCall: outcome.fabricationRejected,
+        invalidDimensionRejectedThisCall: outcome.invalidDimensionRejected,
+        duplicateDimensionRejectedThisCall: outcome.duplicateDimensionRejected,
+        savedCursor: null,
+        remainingChunks: 0,
+        resumeRequired: false,
+        elapsedMs: Date.now() - startTime,
+        trace,
+        configuredConcurrency: 1,
+        maxObservedConcurrency: 0,
+        llmCallsStartedThisCall: 1,
+        staggerMs: 0,
+        jsonRepairsAppliedThisCall: outcome.jsonRepairApplied ? 1 : 0,
+        semanticRetriesThisCall: outcome.semanticRetryAttempted ? 1 : 0,
+        semanticRetryRecoveriesThisCall: outcome.semanticRetryRecovered ? 1 : 0,
+      };
+    }
+
+    // ── 3b. Physical verification mode (single chunk, no pipeline state) ─
+    if (isPhysicalVerification) {
       if (input.batchSize !== 1) {
         throw new Error("Verification mode requires batchSize=1");
       }
