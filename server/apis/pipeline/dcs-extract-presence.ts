@@ -6,6 +6,10 @@
  * coverage is substantive. Results are written to dcs_evidence with
  * deterministic doc_class from classifyDocClass (never from the model).
  *
+ * Architecture: concurrent workers perform model analysis entirely in memory.
+ * Only the ordered commit walk may delete/insert evidence, advance the cursor,
+ * update pipeline state, or mutate counters.
+ *
  * Cursor-based resumable. Replay-safe via delete-before-insert per chunk.
  * Zero-evidence responses are normal and advance the cursor.
  */
@@ -365,22 +369,23 @@ export default api({
       }
 
       const chunk = chunks[0];
-      const result = await processOneChunk(
+
+      // D7: Verification uses the same in-memory analysis + explicit persistence
+      const outcome = await analyzeChunk(
         ctx as unknown as PipelineContext,
-        db,
-        input.runId,
         chunk,
         startTime,
         true,
       );
+      const written = await persistChunkEvidence(db, input.runId, chunk, outcome);
 
       processedThisCall = 1;
-      rowsWrittenThisCall = result.rowsWritten;
-      emptyChunksThisCall = result.rowsWritten === 0 ? 1 : 0;
-      fabricationRejectedThisCall = result.fabricationRejected;
-      invalidDimensionRejectedThisCall = result.invalidDimensionRejected;
-      duplicateDimensionRejectedThisCall = result.duplicateDimensionRejected;
-      if (result.traceEntry) trace.push(result.traceEntry);
+      rowsWrittenThisCall = written;
+      emptyChunksThisCall = written === 0 ? 1 : 0;
+      fabricationRejectedThisCall = outcome.fabricationRejected;
+      invalidDimensionRejectedThisCall = outcome.invalidDimensionRejected;
+      duplicateDimensionRejectedThisCall = outcome.duplicateDimensionRejected;
+      if (outcome.traceEntry) trace.push(outcome.traceEntry);
 
       return {
         runId: input.runId,
@@ -403,9 +408,9 @@ export default api({
         maxObservedConcurrency: 1,
         llmCallsStartedThisCall: 1,
         staggerMs: 50,
-        jsonRepairsAppliedThisCall: result.jsonRepairApplied ? 1 : 0,
-        semanticRetriesThisCall: result.semanticRetryAttempted ? 1 : 0,
-        semanticRetryRecoveriesThisCall: result.semanticRetryRecovered ? 1 : 0,
+        jsonRepairsAppliedThisCall: outcome.jsonRepairApplied ? 1 : 0,
+        semanticRetriesThisCall: outcome.semanticRetryAttempted ? 1 : 0,
+        semanticRetryRecoveriesThisCall: outcome.semanticRetryRecovered ? 1 : 0,
       };
     }
 
@@ -527,7 +532,7 @@ export default api({
       { label: "DcsExtract: select chunk batch" },
     );
 
-    // ── 6. Concurrent processing with bounded worker pool ──────
+    // ── 6. Concurrent IN-MEMORY analysis with bounded worker pool ──
     let finalStatus = "running";
 
     // Effective concurrency (D1): verification mode forces 1
@@ -550,10 +555,10 @@ export default api({
     let maxObservedConcurrency = 0;
     let llmCallsStartedThisCall = 0;
 
-    // Wrap processOneChunk with stagger gate + concurrency tracking
-    async function processOneChunkWithStagger(
+    // D3: Workers call ONLY analyzeChunk (in-memory). No database writes.
+    async function analyzeChunkWithStagger(
       chunk: ChunkRow,
-    ): Promise<ChunkResult> {
+    ): Promise<AnalysisOutcome> {
       activeWorkers++;
       if (activeWorkers > maxObservedConcurrency) {
         maxObservedConcurrency = activeWorkers;
@@ -561,10 +566,8 @@ export default api({
       try {
         await acquireLaunchSlot();
         llmCallsStartedThisCall++;
-        return await processOneChunk(
+        return await analyzeChunk(
           ctx as unknown as PipelineContext,
-          db,
-          input.runId,
           chunk,
           startTime,
           input.debug,
@@ -575,7 +578,7 @@ export default api({
     }
 
     // ── Bounded worker pool (D3): at most effectiveConcurrency active tasks
-    type TaskOutcome = { index: number; result?: ChunkResult; error?: string };
+    type TaskOutcome = { index: number; result?: AnalysisOutcome; error?: string };
     const outcomes: TaskOutcome[] = new Array(chunks.length);
     let stopScheduling = false;
 
@@ -597,7 +600,8 @@ export default api({
       const idx = nextToSchedule++;
       const chunk = chunks[idx];
 
-      const task = processOneChunkWithStagger(chunk)
+      // D3: worker calls ONLY analyzeChunk — zero database writes
+      const task = analyzeChunkWithStagger(chunk)
         .then((result) => {
           outcomes[idx] = { index: idx, result };
         })
@@ -627,8 +631,10 @@ export default api({
       }
     }
 
-    // ── 6b. Ordered checkpoint commit (D4) ─────────────────────
-    // Walk outcomes in fetched UUID order. Commit contiguous success prefix.
+    // ── 6b. Ordered commit walk (D4) ───────────────────────────
+    // After ALL workers settle, walk outcomes in fetched UUID order.
+    // Only this walk may write to the database.
+    // Commit contiguous success prefix; stop at first failure.
     for (let i = 0; i < chunks.length; i++) {
       const outcome = outcomes[i];
 
@@ -637,9 +643,10 @@ export default api({
         break; // Leave extract running, resumable from last committed cursor
       }
 
-      // FAILURE: stop at first failed chunk in UUID order (D4, D5)
+      // D5: FAILURE — stop at first failed chunk in UUID order
       if (outcome.error != null) {
         const bounded = outcome.error;
+        // Do not persist the failed chunk or later speculative successes
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET status = 'failed', detail = $1, updated_at = now()
@@ -657,25 +664,51 @@ export default api({
         throw new Error(`DcsExtract failed on chunk ${chunks[i].chunk_id}: ${bounded}`);
       }
 
-      // SUCCESS: checkpoint this chunk
-      const result = outcome.result!;
+      // SUCCESS: persist evidence then checkpoint
+      const analysisResult = outcome.result!;
+
+      // D2: Persist evidence through the explicit persistence function
+      let rowsWritten: number;
+      try {
+        rowsWritten = await persistChunkEvidence(db, input.runId, chunks[i], analysisResult);
+      } catch (persistErr) {
+        // D6: Persistence failure — do not advance cursor or cumulative
+        const pMsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
+        await db.execute(
+          `UPDATE dcs_pipeline_state
+           SET status = 'failed', detail = $1, updated_at = now()
+           WHERE id = $2::uuid`,
+          [
+            JSON.stringify({
+              ...cumulative,
+              error: `Evidence persistence failed: ${pMsg.slice(0, 400)}`,
+              failed_chunk: chunks[i].chunk_id,
+            }),
+            stateId,
+          ],
+          { label: "DcsExtract: mark failed on persistence error" },
+        );
+        throw new Error(`DcsExtract persistence failed on chunk ${chunks[i].chunk_id}: ${pMsg.slice(0, 400)}`);
+      }
+
+      // D4: Construct nextCumulative immutably (do NOT mutate cumulative)
       const nextCumulative: CumulativeDetail = {
         ...cumulative,
         processed_count: cumulative.processed_count + 1,
-        evidence_rows_written: cumulative.evidence_rows_written + result.rowsWritten,
-        empty_chunk_count: cumulative.empty_chunk_count + (result.rowsWritten === 0 ? 1 : 0),
-        fabrication_rejected: cumulative.fabrication_rejected + result.fabricationRejected,
-        invalid_dimension_rejected: cumulative.invalid_dimension_rejected + result.invalidDimensionRejected,
-        duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + result.duplicateDimensionRejected,
+        evidence_rows_written: cumulative.evidence_rows_written + rowsWritten,
+        empty_chunk_count: cumulative.empty_chunk_count + (rowsWritten === 0 ? 1 : 0),
+        fabrication_rejected: cumulative.fabrication_rejected + analysisResult.fabricationRejected,
+        invalid_dimension_rejected: cumulative.invalid_dimension_rejected + analysisResult.invalidDimensionRejected,
+        duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + analysisResult.duplicateDimensionRejected,
         last_chunk_id: chunks[i].chunk_id,
-        // Recovery counters (D5): increment only after checkpoint succeeds
-        json_repair_applied: cumulative.json_repair_applied + (result.jsonRepairApplied ? 1 : 0),
-        semantic_retry_attempted: cumulative.semantic_retry_attempted + (result.semanticRetryAttempted ? 1 : 0),
-        semantic_retry_recovered: cumulative.semantic_retry_recovered + (result.semanticRetryRecovered ? 1 : 0),
+        // Recovery counters: applied only after checkpoint succeeds
+        json_repair_applied: cumulative.json_repair_applied + (analysisResult.jsonRepairApplied ? 1 : 0),
+        semantic_retry_attempted: cumulative.semantic_retry_attempted + (analysisResult.semanticRetryAttempted ? 1 : 0),
+        semantic_retry_recovered: cumulative.semantic_retry_recovered + (analysisResult.semanticRetryRecovered ? 1 : 0),
       };
       const nextCursor = chunks[i].chunk_id;
 
-      // Persist checkpoint atomically — cursor and cumulative together
+      // D4: Checkpoint UPDATE — persist cursor and cumulative together
       try {
         await db.execute(
           `UPDATE dcs_pipeline_state
@@ -685,7 +718,7 @@ export default api({
           { label: `DcsExtract: advance cursor to ${chunks[i].chunk_id.slice(0, 8)}` },
         );
       } catch (cpErr) {
-        // Checkpoint UPDATE failure: record as failed at this chunk (D4)
+        // D6: Checkpoint UPDATE failure — do not advance in-memory cursor or cumulative
         const cpMsg = cpErr instanceof Error ? cpErr.message : String(cpErr);
         await db.execute(
           `UPDATE dcs_pipeline_state
@@ -704,19 +737,19 @@ export default api({
         throw new Error(`DcsExtract checkpoint failed on chunk ${chunks[i].chunk_id}: ${cpMsg.slice(0, 400)}`);
       }
 
-      // Only after successful checkpoint: commit to in-memory state (D7)
+      // D4: Only after successful checkpoint — assign in-memory state
       cumulative = nextCumulative;
       cursorValue = nextCursor;
       processedThisCall++;
-      rowsWrittenThisCall += result.rowsWritten;
-      if (result.rowsWritten === 0) emptyChunksThisCall++;
-      fabricationRejectedThisCall += result.fabricationRejected;
-      invalidDimensionRejectedThisCall += result.invalidDimensionRejected;
-      duplicateDimensionRejectedThisCall += result.duplicateDimensionRejected;
-      if (result.jsonRepairApplied) jsonRepairsAppliedThisCall++;
-      if (result.semanticRetryAttempted) semanticRetriesThisCall++;
-      if (result.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
-      if (result.traceEntry) trace.push(result.traceEntry); // Cursor-order trace (D7)
+      rowsWrittenThisCall += rowsWritten;
+      if (rowsWritten === 0) emptyChunksThisCall++;
+      fabricationRejectedThisCall += analysisResult.fabricationRejected;
+      invalidDimensionRejectedThisCall += analysisResult.invalidDimensionRejected;
+      duplicateDimensionRejectedThisCall += analysisResult.duplicateDimensionRejected;
+      if (analysisResult.jsonRepairApplied) jsonRepairsAppliedThisCall++;
+      if (analysisResult.semanticRetryAttempted) semanticRetriesThisCall++;
+      if (analysisResult.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
+      if (analysisResult.traceEntry) trace.push(analysisResult.traceEntry); // Cursor-order trace
     }
 
     // ── 7. Check remaining ─────────────────────────────────────
@@ -780,8 +813,9 @@ export default api({
 });
 
 // ═════════════════════════════════════════════════════════════════
-// Chunk processor
+// Types
 // ═════════════════════════════════════════════════════════════════
+
 interface ChunkRow {
   chunk_id: string;
   chunk_text: string;
@@ -789,26 +823,59 @@ interface ChunkRow {
   document_tag: string | null;
 }
 
-interface ChunkResult {
-  rowsWritten: number;
+// ═════════════════════════════════════════════════════════════════
+// D1: In-memory analysis outcome
+// ═════════════════════════════════════════════════════════════════
+
+/** In-memory analysis result. Contains NO database references. */
+interface AnalysisOutcome {
+  /** Physical chunk identity */
+  chunkId: string;
+  sourceFile: string;
+  documentTag: string;
+  docClass: string;
+  /** Accepted evidence items ready for persistence */
+  accepted: PresenceItem[];
+  /** Rejection counters */
   fabricationRejected: number;
   invalidDimensionRejected: number;
   duplicateDimensionRejected: number;
-  traceEntry: TraceEntry | null;
-  // Recovery flags (D5)
+  /** Recovery flags */
   jsonRepairApplied: boolean;
   semanticRetryAttempted: boolean;
   semanticRetryRecovered: boolean;
+  /** Optional debug trace entry */
+  traceEntry: TraceEntry | null;
 }
 
-async function processOneChunk(
+// ═════════════════════════════════════════════════════════════════
+// D1: In-memory analysis function — NO database access
+// ═════════════════════════════════════════════════════════════════
+
+/**
+ * Analyze a single chunk through the model. Returns an in-memory outcome.
+ *
+ * This function MAY:
+ *   - call the configured model via callLLMWithHeadroom
+ *   - normalize fences, parse JSON, apply repair, perform semantic retry
+ *   - validate dimensions, anchor snippets, deduplicate
+ *   - build debug trace data
+ *   - return an outcome or throw
+ *
+ * This function MUST NOT:
+ *   - call db.execute or db.query
+ *   - replay-delete evidence
+ *   - insert evidence
+ *   - update dcs_pipeline_state
+ *   - advance cursorValue
+ *   - mutate cumulative or call-local counters
+ */
+async function analyzeChunk(
   pipelineCtx: PipelineContext,
-  db: any,
-  runId: string,
   chunk: ChunkRow,
   invocationStartTime: number,
   debug: boolean,
-): Promise<ChunkResult> {
+): Promise<AnalysisOutcome> {
   const storedTag = chunk.document_tag ?? "other";
   const docClass = classifyDocClass(storedTag);
 
@@ -1094,71 +1161,7 @@ CRITICAL REMINDERS:
 
   const accepted = Array.from(seen.values());
 
-  return buildResult(
-    db,
-    runId,
-    chunk,
-    storedTag,
-    docClass,
-    accepted,
-    rawText,
-    debug,
-    rejected,
-    fabricationRejected,
-    invalidDimensionRejected,
-    duplicateDimensionRejected,
-    jsonRepairApplied,
-    semanticRetryAttempted,
-    semanticRetryRecovered,
-  );
-}
-
-// ── Build result: delete-before-insert, return stats ────────────
-async function buildResult(
-  db: any,
-  runId: string,
-  chunk: ChunkRow,
-  storedTag: string,
-  docClass: string,
-  accepted: PresenceItem[],
-  rawResponse: string,
-  debug: boolean,
-  rejected: Array<{ item: unknown; reason: string }> = [],
-  fabricationRejected = 0,
-  invalidDimensionRejected = 0,
-  duplicateDimensionRejected = 0,
-  jsonRepairApplied = false,
-  semanticRetryAttempted = false,
-  semanticRetryRecovered = false,
-): Promise<ChunkResult> {
-  // ── Replay safety: delete existing rows for this run+chunk ───
-  await db.execute(
-    `DELETE FROM dcs_evidence WHERE run_id = $1::uuid AND chunk_id = $2`,
-    [runId, chunk.chunk_id],
-    { label: `DcsExtract: replay-delete chunk ${chunk.chunk_id.slice(0, 8)}` },
-  );
-
-  // ── Insert accepted rows ─────────────────────────────────────
-  for (const item of accepted) {
-    await db.execute(
-      `INSERT INTO dcs_evidence
-         (run_id, dimension_id, chunk_id, source_file, document_tag, doc_class, is_substantive, snippet)
-       VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)`,
-      [
-        runId,
-        item.dimension_id,
-        chunk.chunk_id,
-        chunk.source_file,
-        storedTag,
-        docClass,
-        item.is_substantive,
-        item.snippet,
-      ],
-      { label: `DcsExtract: insert evidence ${item.dimension_id} for chunk ${chunk.chunk_id.slice(0, 8)}` },
-    );
-  }
-
-  // ── Build trace entry ────────────────────────────────────────
+  // ── Build trace entry (in-memory only) ────────────────────────
   let traceEntry: TraceEntry | null = null;
   if (debug) {
     traceEntry = {
@@ -1166,7 +1169,7 @@ async function buildResult(
       source_file: chunk.source_file,
       document_tag: storedTag,
       doc_class: docClass,
-      raw_model_response: rawResponse,
+      raw_model_response: rawText,
       accepted: accepted.map((a) => ({
         dimension_id: a.dimension_id,
         snippet: a.snippet,
@@ -1192,13 +1195,73 @@ async function buildResult(
   }
 
   return {
-    rowsWritten: accepted.length,
+    chunkId: chunk.chunk_id,
+    sourceFile: chunk.source_file,
+    documentTag: storedTag,
+    docClass,
+    accepted,
     fabricationRejected,
     invalidDimensionRejected,
     duplicateDimensionRejected,
-    traceEntry,
     jsonRepairApplied,
     semanticRetryAttempted,
     semanticRetryRecovered,
+    traceEntry,
   };
+}
+
+// ═════════════════════════════════════════════════════════════════
+// D2: Explicit persistence function — ONLY called from ordered commit
+// ═════════════════════════════════════════════════════════════════
+
+/**
+ * Persist evidence for a single physical chunk.
+ *
+ * Called ONLY by the ordered commit walk or verification mode.
+ *
+ * This function MUST:
+ *   1. Replay-delete dcs_evidence for run_id + chunk_id
+ *   2. Insert accepted evidence rows for that physical chunk
+ *   3. Return the number of rows successfully written
+ *
+ * This function MUST NOT:
+ *   - update pipeline state
+ *   - mutate cumulative
+ *   - advance the cursor
+ *   - increment call-local counters
+ */
+async function persistChunkEvidence(
+  db: any,
+  runId: string,
+  chunk: ChunkRow,
+  outcome: AnalysisOutcome,
+): Promise<number> {
+  // ── Replay safety: delete existing rows for this run+chunk ───
+  await db.execute(
+    `DELETE FROM dcs_evidence WHERE run_id = $1::uuid AND chunk_id = $2`,
+    [runId, chunk.chunk_id],
+    { label: `DcsExtract: replay-delete chunk ${chunk.chunk_id.slice(0, 8)}` },
+  );
+
+  // ── Insert accepted rows ─────────────────────────────────────
+  for (const item of outcome.accepted) {
+    await db.execute(
+      `INSERT INTO dcs_evidence
+         (run_id, dimension_id, chunk_id, source_file, document_tag, doc_class, is_substantive, snippet)
+       VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        runId,
+        item.dimension_id,
+        chunk.chunk_id,
+        chunk.source_file,
+        outcome.documentTag,
+        outcome.docClass,
+        item.is_substantive,
+        item.snippet,
+      ],
+      { label: `DcsExtract: insert evidence ${item.dimension_id} for chunk ${chunk.chunk_id.slice(0, 8)}` },
+    );
+  }
+
+  return outcome.accepted.length;
 }
