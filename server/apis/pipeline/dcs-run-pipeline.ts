@@ -445,21 +445,14 @@ export default api({
           });
 
           if (extractResult.resumeRequired) {
-            // Partial — save cursor, stay in extract
+            // Partial — update cursor only; DcsExtractPresence already
+            // checkpoints the full detail (including ordering_version,
+            // work_unit_version, etc.) on every work unit.
             await db.execute(
               `UPDATE dcs_pipeline_state
-               SET cursor_value = $2, detail = $3, updated_at = now()
+               SET cursor_value = $2, updated_at = now()
                WHERE run_id = $1::uuid AND stage = 'extract'`,
-              [
-                runId,
-                extractResult.savedCursor,
-                JSON.stringify({
-                  processed_count: extractResult.cumulativeProcessed,
-                  evidence_rows_written: extractResult.cumulativeRowsWritten,
-                  total_chunks: extractResult.remainingChunks + extractResult.cumulativeProcessed,
-                  last_chunk_id: extractResult.savedCursor,
-                }),
-              ],
+              [runId, extractResult.savedCursor],
               { label: "Save extract cursor" },
             );
 
@@ -477,25 +470,15 @@ export default api({
             });
           }
 
-          // Extract complete
-          const totalChunks = extractResult.cumulativeProcessed;
+          // Extract complete — update status and cursor only;
+          // DcsExtractPresence already checkpointed the full detail.
           await db.execute(
             `UPDATE dcs_pipeline_state
              SET status = 'done',
                  cursor_value = $2,
-                 detail = $3,
                  updated_at = now()
              WHERE run_id = $1::uuid AND stage = 'extract'`,
-            [
-              runId,
-              extractResult.savedCursor,
-              JSON.stringify({
-                processed_count: totalChunks,
-                evidence_rows_written: extractResult.cumulativeRowsWritten,
-                total_chunks: totalChunks,
-                last_chunk_id: extractResult.savedCursor,
-              }),
-            ],
+            [runId, extractResult.savedCursor],
             { label: "Mark extract done" },
           );
 
@@ -803,13 +786,15 @@ export default api({
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`${LOG_PREFIX} Stage ${currentStage} FAILED: ${msg}`);
 
-      // Mark the physical stage as failed if applicable
+      // Mark the physical stage as failed if applicable.
+      // IMPORTANT: Store error as JSON so DcsExtractPresence can
+      // JSON.parse(detail) without crashing on resume.
       if (currentStage && PHYSICAL_STAGES.has(currentStage)) {
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET status = 'failed', detail = $3, updated_at = now()
            WHERE run_id = $1::uuid AND stage = $2`,
-          [runId, currentStage, msg.slice(0, 2000)],
+          [runId, currentStage, JSON.stringify({ error: msg.slice(0, 2000) })],
           { label: `Mark failed: ${currentStage}` },
         ).catch(() => { /* best-effort */ });
       }
