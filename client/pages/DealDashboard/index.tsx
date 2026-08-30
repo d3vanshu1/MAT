@@ -3041,6 +3041,7 @@ export default function DealDashboardPage() {
         pollFailureCountRef.current = 0; // reset on success
         const runs = progress?.runs ?? [];
         const extractionCount = progress?.extractionCount ?? 0;
+        const dcsEvidenceCount = progress?.dcsEvidenceCount ?? 0;
 
         for (const moduleId of dbRunningIds) {
           // Skip if the pipeline polling loop is now providing real-time progress
@@ -3070,6 +3071,8 @@ export default function DealDashboardPage() {
             message = `Merge phase: ${run.mergeCheckpointCount} nodes merged (server-side)…`;
           } else if (run.analysisCheckpointCount && run.analysisCheckpointCount > 0) {
             message = `Analysis phase: ${run.analysisCheckpointCount} chunks completed (server-side)…`;
+          } else if (moduleId === "diligence_completeness" && dcsEvidenceCount > 0) {
+            message = `DCS extraction: ${dcsEvidenceCount} evidence rows written…`;
           } else if (extractionCount > 0) {
             message = `Preparing analysis: ${extractionCount} extractions available (server-side)…`;
           } else {

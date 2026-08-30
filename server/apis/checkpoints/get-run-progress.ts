@@ -35,6 +35,7 @@ export default api({
 
   output: z.object({
     extractionCount: z.number(),
+    dcsEvidenceCount: z.number(),
     runs: z.array(
       z.object({
         runId: z.string(),
@@ -60,14 +61,26 @@ export default api({
   }),
 
   async run(ctx, { dealId }) {
-    // Count universal extractions for this deal
+    // Count legacy universal extractions for this deal
     const extRows = await ctx.integrations.db.query(
       `SELECT COUNT(*) AS total FROM universal_extractions WHERE deal_id = $1`,
       ExtractionCountSchema,
       [dealId],
-      { label: "Count extractions" }
+      { label: "Count legacy extractions" }
     );
     const extractionCount = extRows[0]?.total ?? 0;
+
+    // Count DCS evidence rows (the new pipeline) — join through module_runs
+    const dcsRows = await ctx.integrations.db.query(
+      `SELECT COUNT(*) AS total
+       FROM dcs_evidence de
+       JOIN module_runs mr ON mr.id = de.run_id
+       WHERE mr.deal_id = $1 AND mr.module_id = 'diligence_completeness'`,
+      ExtractionCountSchema,
+      [dealId],
+      { label: "Count DCS evidence" }
+    );
+    const dcsEvidenceCount = dcsRows[0]?.total ?? 0;
 
     // Get in-progress / recent runs (only existing enum values)
     const runs = await ctx.integrations.db.query(
@@ -157,6 +170,6 @@ export default api({
       });
     }
 
-    return { extractionCount, runs: result };
+    return { extractionCount, dcsEvidenceCount, runs: result };
   },
 });
