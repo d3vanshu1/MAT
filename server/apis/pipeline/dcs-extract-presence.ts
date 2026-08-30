@@ -27,6 +27,7 @@ const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 const INVOCATION_BUDGET_MS = 240_000;
 const MIN_CALL_HEADROOM_MS = 30_000;
 const MAX_PER_CALL_MS = 60_000;
+const ORDERING_VERSION = "document-index-v1";
 
 const VALID_DIMENSION_IDS = new Set(DCS_DIMENSIONS.map((d) => d.id));
 
@@ -48,10 +49,12 @@ interface CumulativeDetail {
   duplicate_dimension_rejected: number;
   total_chunks: number;
   last_chunk_id: string | null;
-  // Recovery counters (D5)
+  // Recovery counters
   json_repair_applied: number;
   semantic_retry_attempted: number;
   semantic_retry_recovered: number;
+  // Ordering version (5C.2C)
+  ordering_version: string;
 }
 
 function emptyDetail(totalChunks: number): CumulativeDetail {
@@ -67,6 +70,7 @@ function emptyDetail(totalChunks: number): CumulativeDetail {
     json_repair_applied: 0,
     semantic_retry_attempted: 0,
     semantic_retry_recovered: 0,
+    ordering_version: ORDERING_VERSION,
   };
 }
 
@@ -77,7 +81,19 @@ function hydrateRecoveryCounters(detail: CumulativeDetail): CumulativeDetail {
     json_repair_applied: detail.json_repair_applied ?? 0,
     semantic_retry_attempted: detail.semantic_retry_attempted ?? 0,
     semantic_retry_recovered: detail.semantic_retry_recovered ?? 0,
+    ordering_version: detail.ordering_version ?? "",
   };
+}
+
+/** Classify state as empty: cursor null, all counters zero, no last_chunk_id */
+function isStateEmpty(detail: CumulativeDetail, cursorValue: string | null): boolean {
+  return (
+    cursorValue === null &&
+    detail.processed_count === 0 &&
+    detail.evidence_rows_written === 0 &&
+    detail.empty_chunk_count === 0 &&
+    (!detail.last_chunk_id || detail.last_chunk_id === null)
+  );
 }
 
 // ── Whitespace normalizer for literal anchoring ──────────────────
@@ -349,7 +365,8 @@ export default api({
 
       const chunks = await db.query(
         `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
-                dc.file_name AS source_file, d.document_tag
+                dc.file_name AS source_file, d.document_tag,
+                dc.document_id, dc.chunk_index
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
          WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid AND dc.id = $2::uuid
@@ -359,6 +376,8 @@ export default api({
           chunk_text: z.string(),
           source_file: z.string(),
           document_tag: z.string().nullable(),
+          document_id: z.string(),
+          chunk_index: z.number(),
         }),
         [input.dealId, input.verificationChunkId],
         { label: "DcsExtract: fetch verification chunk" },
@@ -439,18 +458,35 @@ export default api({
       stateId = state.id;
       cursorValue = state.cursor_value;
 
+      // D2: Parse detail and apply compatibility check BEFORE any early return
+      const parsedDetail: CumulativeDetail = hydrateRecoveryCounters(
+        state.detail ? JSON.parse(state.detail) : emptyDetail(totalChunks),
+      );
+      const stateEmpty = isStateEmpty(parsedDetail, cursorValue);
+
+      // D2: Compatibility check — applies even for done/failed states
+      if (stateEmpty) {
+        // Empty state: initialize ordering_version in memory, persist on next checkpoint
+        parsedDetail.ordering_version = ORDERING_VERSION;
+      } else {
+        // Non-empty state: require exact ordering_version match
+        if (parsedDetail.ordering_version !== ORDERING_VERSION) {
+          throw new Error(
+            `Incompatible ordering: state has ordering_version="${parsedDetail.ordering_version || "(missing)"}" ` +
+            `but this build requires "${ORDERING_VERSION}". Create a fresh DCS run to use the new ordering.`,
+          );
+        }
+      }
+
       if (state.status === "done") {
-        const doneDetail: CumulativeDetail = state.detail
-          ? JSON.parse(state.detail)
-          : emptyDetail(totalChunks);
         return {
           runId: input.runId,
           mode,
           status: "done",
           processedThisCall: 0,
-          cumulativeProcessed: doneDetail.processed_count,
+          cumulativeProcessed: parsedDetail.processed_count,
           rowsWrittenThisCall: 0,
-          cumulativeRowsWritten: doneDetail.evidence_rows_written,
+          cumulativeRowsWritten: parsedDetail.evidence_rows_written,
           emptyChunksThisCall: 0,
           fabricationRejectedThisCall: 0,
           invalidDimensionRejectedThisCall: 0,
@@ -470,16 +506,25 @@ export default api({
         };
       }
 
-      // Validate resumeCursor consistency
-      if (input.resumeCursor && input.resumeCursor !== cursorValue) {
-        throw new Error(
-          `resumeCursor mismatch: supplied=${input.resumeCursor} stored=${cursorValue}`,
-        );
+      // Validate resumeCursor consistency (D4)
+      if (cursorValue) {
+        // State has progress: resumeCursor must match if supplied
+        if (input.resumeCursor && input.resumeCursor !== cursorValue) {
+          throw new Error(
+            `resumeCursor mismatch: supplied=${input.resumeCursor} stored=${cursorValue}`,
+          );
+        }
+      } else {
+        // No state progress: reject externally supplied cursor
+        if (input.resumeCursor) {
+          throw new Error(
+            "resumeCursor supplied but extract state has no progress (cursor_value is null). " +
+            "Omit resumeCursor to start from the beginning.",
+          );
+        }
       }
 
-      cumulative = hydrateRecoveryCounters(
-        state.detail ? JSON.parse(state.detail) : emptyDetail(totalChunks),
-      );
+      cumulative = parsedDetail;
     } else {
       // First invocation — create state
       if (input.resumeCursor) {
@@ -499,25 +544,70 @@ export default api({
       cumulative = emptyDetail(totalChunks);
     }
 
-    // ── 5. Select chunk batch ──────────────────────────────────
-    const chunkQuery = cursorValue
-      ? `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
-                dc.file_name AS source_file, d.document_tag
+    // ── 4b. D3: Corpus order invariant — require unique (document_id, chunk_index)
+    const dupCheck = await db.query(
+      `SELECT dc.document_id, dc.chunk_index, COUNT(*)::int AS cnt
+       FROM document_chunks dc
+       JOIN documents d ON d.id = dc.document_id
+       WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
+       GROUP BY dc.document_id, dc.chunk_index
+       HAVING COUNT(*) > 1
+       LIMIT 1`,
+      z.object({ document_id: z.string(), chunk_index: z.number(), cnt: z.number() }),
+      [input.dealId],
+      { label: "DcsExtract: check corpus uniqueness" },
+    );
+    if (dupCheck.length > 0) {
+      throw new Error(
+        `Corpus order invariant violated: document_id=${dupCheck[0].document_id} ` +
+        `chunk_index=${dupCheck[0].chunk_index} appears ${dupCheck[0].cnt} times. ` +
+        `Fix duplicate chunks before running DCS extract.`,
+      );
+    }
+
+    // ── 4c. D4: Cursor resolution — resolve UUID to composite position
+    let cursorAnchor: { document_id: string; chunk_index: number } | null = null;
+    if (cursorValue) {
+      const anchorRows = await db.query(
+        `SELECT dc.id AS chunk_id, dc.document_id, dc.chunk_index
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
-         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid AND dc.id > $2::uuid
-         ORDER BY dc.id ASC
-         LIMIT $3`
-      : `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
-                dc.file_name AS source_file, d.document_tag
+         WHERE dc.id = $1::uuid AND dc.deal_id = $2::uuid AND d.deal_id = $2::uuid
+         LIMIT 1`,
+        z.object({ chunk_id: z.string(), document_id: z.string(), chunk_index: z.number() }),
+        [cursorValue, input.dealId],
+        { label: "DcsExtract: resolve cursor anchor" },
+      );
+      if (anchorRows.length === 0) {
+        throw new Error(
+          `Unknown or cross-deal cursor: chunk_id=${cursorValue} not found in deal ${input.dealId}`,
+        );
+      }
+      cursorAnchor = { document_id: anchorRows[0].document_id, chunk_index: anchorRows[0].chunk_index };
+    }
+
+    // ── 5. D5: Select chunk batch in composite document/chunk-index order
+    const chunkQuery = cursorAnchor
+      ? `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
+                dc.file_name AS source_file, d.document_tag,
+                dc.document_id, dc.chunk_index
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
          WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
-         ORDER BY dc.id ASC
+           AND (dc.document_id::text, dc.chunk_index) > ($2::text, $3::int)
+         ORDER BY dc.document_id::text ASC, dc.chunk_index ASC
+         LIMIT $4`
+      : `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
+                dc.file_name AS source_file, d.document_tag,
+                dc.document_id, dc.chunk_index
+         FROM document_chunks dc
+         JOIN documents d ON d.id = dc.document_id
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
+         ORDER BY dc.document_id::text ASC, dc.chunk_index ASC
          LIMIT $2`;
 
-    const chunkParams = cursorValue
-      ? [input.dealId, cursorValue, input.batchSize]
+    const chunkParams = cursorAnchor
+      ? [input.dealId, cursorAnchor.document_id, cursorAnchor.chunk_index, input.batchSize]
       : [input.dealId, input.batchSize];
 
     const chunks = await db.query(
@@ -527,6 +617,8 @@ export default api({
         chunk_text: z.string(),
         source_file: z.string(),
         document_tag: z.string().nullable(),
+        document_id: z.string(),
+        chunk_index: z.number(),
       }),
       chunkParams,
       { label: "DcsExtract: select chunk batch" },
@@ -632,7 +724,7 @@ export default api({
     }
 
     // ── 6b. Ordered commit walk (D4) ───────────────────────────
-    // After ALL workers settle, walk outcomes in fetched UUID order.
+    // After ALL workers settle, walk outcomes in fetched composite order.
     // Only this walk may write to the database.
     // Commit contiguous success prefix; stop at first failure.
     for (let i = 0; i < chunks.length; i++) {
@@ -752,24 +844,95 @@ export default api({
       if (analysisResult.traceEntry) trace.push(analysisResult.traceEntry); // Cursor-order trace
     }
 
-    // ── 7. Check remaining ─────────────────────────────────────
-    const remainingResult = await db.query(
-      cursorValue
-        ? `SELECT COUNT(*)::int AS cnt
-           FROM document_chunks dc
-           JOIN documents d ON d.id = dc.document_id
-           WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid AND dc.id > $2::uuid`
-        : `SELECT COUNT(*)::int AS cnt
-           FROM document_chunks dc
-           JOIN documents d ON d.id = dc.document_id
-           WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid`,
-      z.object({ cnt: z.number() }),
-      cursorValue ? [input.dealId, cursorValue] : [input.dealId],
-      { label: "DcsExtract: count remaining chunks" },
-    );
-    const remainingChunks = remainingResult[0]?.cnt ?? 0;
+    // ── 7. D6: Check remaining using composite cursor ─────────
+    // Resolve current cursor to composite position for remaining count
+    let remainingChunks: number;
+    if (cursorValue) {
+      // Re-resolve cursor to get current composite anchor
+      const curAnchor = await db.query(
+        `SELECT dc.document_id, dc.chunk_index
+         FROM document_chunks dc
+         JOIN documents d ON d.id = dc.document_id
+         WHERE dc.id = $1::uuid AND dc.deal_id = $2::uuid AND d.deal_id = $2::uuid
+         LIMIT 1`,
+        z.object({ document_id: z.string(), chunk_index: z.number() }),
+        [cursorValue, input.dealId],
+        { label: "DcsExtract: resolve cursor for remaining count" },
+      );
+      if (curAnchor.length === 0) {
+        // Should not happen — cursor was just checkpointed
+        throw new Error(`Cursor ${cursorValue} lost after checkpoint — data integrity error`);
+      }
+      const remResult = await db.query(
+        `SELECT COUNT(*)::int AS cnt
+         FROM document_chunks dc
+         JOIN documents d ON d.id = dc.document_id
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
+           AND (dc.document_id::text, dc.chunk_index) > ($2::text, $3::int)`,
+        z.object({ cnt: z.number() }),
+        [input.dealId, curAnchor[0].document_id, curAnchor[0].chunk_index],
+        { label: "DcsExtract: count remaining chunks (composite)" },
+      );
+      remainingChunks = remResult[0]?.cnt ?? 0;
+    } else {
+      const remResult = await db.query(
+        `SELECT COUNT(*)::int AS cnt
+         FROM document_chunks dc
+         JOIN documents d ON d.id = dc.document_id
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid`,
+        z.object({ cnt: z.number() }),
+        [input.dealId],
+        { label: "DcsExtract: count remaining chunks (no cursor)" },
+      );
+      remainingChunks = remResult[0]?.cnt ?? 0;
+    }
 
+    // ── D7: Completion check with authoritative last chunk ─────
     if (remainingChunks === 0) {
+      // Determine the authoritative last physical chunk
+      const lastChunkRows = await db.query(
+        `SELECT dc.id AS chunk_id
+         FROM document_chunks dc
+         JOIN documents d ON d.id = dc.document_id
+         WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
+         ORDER BY dc.document_id::text DESC, dc.chunk_index DESC
+         LIMIT 1`,
+        z.object({ chunk_id: z.string() }),
+        [input.dealId],
+        { label: "DcsExtract: find authoritative last chunk" },
+      );
+
+      if (lastChunkRows.length > 0) {
+        const authLastChunkId = lastChunkRows[0].chunk_id;
+        const completionValid =
+          cumulative.processed_count === totalChunks &&
+          cursorValue === authLastChunkId &&
+          cumulative.last_chunk_id === authLastChunkId;
+
+        if (!completionValid) {
+          // Completion precondition failed
+          const errMsg =
+            `Completion invariant violated: processed_count=${cumulative.processed_count} ` +
+            `totalChunks=${totalChunks} cursorValue=${cursorValue} ` +
+            `last_chunk_id=${cumulative.last_chunk_id} authLastChunkId=${authLastChunkId}`;
+          await db.execute(
+            `UPDATE dcs_pipeline_state
+             SET status = 'failed', detail = $1, updated_at = now()
+             WHERE id = $2::uuid`,
+            [
+              JSON.stringify({
+                ...cumulative,
+                error: errMsg,
+              }),
+              stateId,
+            ],
+            { label: "DcsExtract: mark failed on completion invariant" },
+          );
+          throw new Error(`DcsExtract: ${errMsg}`);
+        }
+      }
+      // else: empty corpus — no authoritative last chunk, safe to mark done
+
       finalStatus = "done";
       await db.execute(
         `UPDATE dcs_pipeline_state
@@ -821,6 +984,8 @@ interface ChunkRow {
   chunk_text: string;
   source_file: string;
   document_tag: string | null;
+  document_id: string;
+  chunk_index: number;
 }
 
 // ═════════════════════════════════════════════════════════════════
