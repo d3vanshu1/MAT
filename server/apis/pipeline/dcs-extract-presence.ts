@@ -130,7 +130,8 @@ export default api({
   input: z.object({
     runId: z.string().uuid(),
     dealId: z.string().uuid(),
-    batchSize: z.number().int().min(1).max(8).default(8),
+    batchSize: z.number().int().min(1).max(32).default(16),
+    concurrency: z.number().int().min(1).max(8).default(4),
     resumeCursor: z.string().uuid().optional(),
     verificationChunkId: z.string().uuid().optional(),
     debug: z.boolean().default(false),
@@ -153,6 +154,11 @@ export default api({
     resumeRequired: z.boolean(),
     elapsedMs: z.number(),
     trace: z.array(z.any()),
+    // Concurrency telemetry (D8)
+    configuredConcurrency: z.number(),
+    maxObservedConcurrency: z.number(),
+    llmCallsStartedThisCall: z.number(),
+    staggerMs: z.number(),
   }),
 
   async run(ctx, input) {
@@ -262,6 +268,10 @@ export default api({
         resumeRequired: false,
         elapsedMs: Date.now() - startTime,
         trace,
+        configuredConcurrency: 1,
+        maxObservedConcurrency: 1,
+        llmCallsStartedThisCall: 1,
+        staggerMs: 50,
       };
     }
 
@@ -311,6 +321,10 @@ export default api({
           resumeRequired: false,
           elapsedMs: Date.now() - startTime,
           trace,
+          configuredConcurrency: input.concurrency,
+          maxObservedConcurrency: 0,
+          llmCallsStartedThisCall: 0,
+          staggerMs: 50,
         };
       }
 
@@ -374,19 +388,41 @@ export default api({
       { label: "DcsExtract: select chunk batch" },
     );
 
-    // ── 6. Process chunks ──────────────────────────────────────
+    // ── 6. Concurrent processing with bounded worker pool ──────
     let finalStatus = "running";
 
-    for (const chunk of chunks) {
-      // Time budget check
-      const elapsed = Date.now() - startTime;
-      const remaining = INVOCATION_BUDGET_MS - elapsed;
-      if (remaining < MIN_CALL_HEADROOM_MS) {
-        break; // Stop cleanly — cursor is already saved for last completed chunk
-      }
+    // Effective concurrency (D1): verification mode forces 1
+    const effectiveConcurrency = Math.min(input.concurrency, chunks.length);
 
+    // Launch stagger gate (D2): 50ms between successive initial LLM calls
+    const STAGGER_MS = 50;
+    let lastLaunchTime = 0;
+    async function acquireLaunchSlot(): Promise<void> {
+      const now = Date.now();
+      const gap = lastLaunchTime + STAGGER_MS - now;
+      if (gap > 0) {
+        await new Promise<void>((r) => setTimeout(r, gap));
+      }
+      lastLaunchTime = Date.now();
+    }
+
+    // Concurrency telemetry (D8)
+    let activeWorkers = 0;
+    let maxObservedConcurrency = 0;
+    let llmCallsStartedThisCall = 0;
+
+    // Wrap processOneChunk with stagger gate + concurrency tracking
+    async function processOneChunkWithStagger(
+      chunk: ChunkRow,
+    ): Promise<ChunkResult> {
+      activeWorkers++;
+      if (activeWorkers > maxObservedConcurrency) {
+        maxObservedConcurrency = activeWorkers;
+      }
       try {
-        const result = await processOneChunk(
+        await acquireLaunchSlot();
+        llmCallsStartedThisCall++;
+        return await processOneChunk(
           ctx as unknown as PipelineContext,
           db,
           input.runId,
@@ -394,54 +430,147 @@ export default api({
           startTime,
           input.debug,
         );
+      } finally {
+        activeWorkers--;
+      }
+    }
 
-        // Build next-cumulative without mutating current cumulative
-        const nextCumulative: CumulativeDetail = {
-          ...cumulative,
-          processed_count: cumulative.processed_count + 1,
-          evidence_rows_written: cumulative.evidence_rows_written + result.rowsWritten,
-          empty_chunk_count: cumulative.empty_chunk_count + (result.rowsWritten === 0 ? 1 : 0),
-          fabrication_rejected: cumulative.fabrication_rejected + result.fabricationRejected,
-          invalid_dimension_rejected: cumulative.invalid_dimension_rejected + result.invalidDimensionRejected,
-          duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + result.duplicateDimensionRejected,
-          last_chunk_id: chunk.chunk_id,
-        };
-        const nextCursor = chunk.chunk_id;
+    // ── Bounded worker pool (D3): at most effectiveConcurrency active tasks
+    type TaskOutcome = { index: number; result?: ChunkResult; error?: string };
+    const outcomes: TaskOutcome[] = new Array(chunks.length);
+    let stopScheduling = false;
 
-        // Persist checkpoint atomically — cursor and cumulative together
+    // Process in waves using a pool approach
+    let nextToSchedule = 0;
+    const inFlight = new Map<number, Promise<void>>(); // index → settlement promise
+
+    function canLaunchMore(): boolean {
+      if (stopScheduling) return false;
+      if (nextToSchedule >= chunks.length) return false;
+      if (inFlight.size >= effectiveConcurrency) return false;
+      // Headroom check (D6): need enough time for one max call + checkpoint writes
+      const remaining = INVOCATION_BUDGET_MS - (Date.now() - startTime);
+      if (remaining < MIN_CALL_HEADROOM_MS + MAX_PER_CALL_MS) return false;
+      return true;
+    }
+
+    function scheduleOne(): void {
+      const idx = nextToSchedule++;
+      const chunk = chunks[idx];
+
+      const task = processOneChunkWithStagger(chunk)
+        .then((result) => {
+          outcomes[idx] = { index: idx, result };
+        })
+        .catch((err) => {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          outcomes[idx] = { index: idx, error: errMsg.slice(0, 500) };
+          stopScheduling = true; // D3: stop scheduling on first failure
+        })
+        .finally(() => {
+          inFlight.delete(idx);
+        });
+
+      inFlight.set(idx, task);
+    }
+
+    // Fill initial slots
+    while (canLaunchMore()) {
+      scheduleOne();
+    }
+
+    // Pump: when a slot frees up, schedule next if allowed
+    while (inFlight.size > 0) {
+      await Promise.race(inFlight.values());
+      // After a settlement, try to schedule more
+      while (canLaunchMore()) {
+        scheduleOne();
+      }
+    }
+
+    // ── 6b. Ordered checkpoint commit (D4) ─────────────────────
+    // Walk outcomes in fetched UUID order. Commit contiguous success prefix.
+    for (let i = 0; i < chunks.length; i++) {
+      const outcome = outcomes[i];
+
+      // NOT STARTED: budget ran out before this chunk was scheduled
+      if (!outcome) {
+        break; // Leave extract running, resumable from last committed cursor
+      }
+
+      // FAILURE: stop at first failed chunk in UUID order (D4, D5)
+      if (outcome.error != null) {
+        const bounded = outcome.error;
+        await db.execute(
+          `UPDATE dcs_pipeline_state
+           SET status = 'failed', detail = $1, updated_at = now()
+           WHERE id = $2::uuid`,
+          [
+            JSON.stringify({
+              ...cumulative,
+              error: bounded,
+              failed_chunk: chunks[i].chunk_id,
+            }),
+            stateId,
+          ],
+          { label: "DcsExtract: mark extract failed" },
+        );
+        throw new Error(`DcsExtract failed on chunk ${chunks[i].chunk_id}: ${bounded}`);
+      }
+
+      // SUCCESS: checkpoint this chunk
+      const result = outcome.result!;
+      const nextCumulative: CumulativeDetail = {
+        ...cumulative,
+        processed_count: cumulative.processed_count + 1,
+        evidence_rows_written: cumulative.evidence_rows_written + result.rowsWritten,
+        empty_chunk_count: cumulative.empty_chunk_count + (result.rowsWritten === 0 ? 1 : 0),
+        fabrication_rejected: cumulative.fabrication_rejected + result.fabricationRejected,
+        invalid_dimension_rejected: cumulative.invalid_dimension_rejected + result.invalidDimensionRejected,
+        duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + result.duplicateDimensionRejected,
+        last_chunk_id: chunks[i].chunk_id,
+      };
+      const nextCursor = chunks[i].chunk_id;
+
+      // Persist checkpoint atomically — cursor and cumulative together
+      try {
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
            WHERE id = $3::uuid`,
           [nextCursor, JSON.stringify(nextCumulative), stateId],
-          { label: `DcsExtract: advance cursor to ${chunk.chunk_id.slice(0, 8)}` },
+          { label: `DcsExtract: advance cursor to ${chunks[i].chunk_id.slice(0, 8)}` },
         );
-
-        // Only after successful checkpoint: commit to in-memory state
-        cumulative = nextCumulative;
-        cursorValue = nextCursor;
-        processedThisCall++;
-        rowsWrittenThisCall += result.rowsWritten;
-        if (result.rowsWritten === 0) emptyChunksThisCall++;
-        fabricationRejectedThisCall += result.fabricationRejected;
-        invalidDimensionRejectedThisCall += result.invalidDimensionRejected;
-        duplicateDimensionRejectedThisCall += result.duplicateDimensionRejected;
-        if (result.traceEntry) trace.push(result.traceEntry);
-      } catch (err) {
-        // On error: set stage to failed, do NOT advance cursor
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const bounded = errMsg.slice(0, 500);
-
+      } catch (cpErr) {
+        // Checkpoint UPDATE failure: record as failed at this chunk (D4)
+        const cpMsg = cpErr instanceof Error ? cpErr.message : String(cpErr);
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET status = 'failed', detail = $1, updated_at = now()
            WHERE id = $2::uuid`,
-          [JSON.stringify({ ...cumulative, error: bounded, failed_chunk: chunk.chunk_id }), stateId],
-          { label: "DcsExtract: mark extract failed" },
+          [
+            JSON.stringify({
+              ...cumulative,
+              error: `Checkpoint failed: ${cpMsg.slice(0, 400)}`,
+              failed_chunk: chunks[i].chunk_id,
+            }),
+            stateId,
+          ],
+          { label: "DcsExtract: mark failed on checkpoint error" },
         );
-
-        throw new Error(`DcsExtract failed on chunk ${chunk.chunk_id}: ${bounded}`);
+        throw new Error(`DcsExtract checkpoint failed on chunk ${chunks[i].chunk_id}: ${cpMsg.slice(0, 400)}`);
       }
+
+      // Only after successful checkpoint: commit to in-memory state (D7)
+      cumulative = nextCumulative;
+      cursorValue = nextCursor;
+      processedThisCall++;
+      rowsWrittenThisCall += result.rowsWritten;
+      if (result.rowsWritten === 0) emptyChunksThisCall++;
+      fabricationRejectedThisCall += result.fabricationRejected;
+      invalidDimensionRejectedThisCall += result.invalidDimensionRejected;
+      duplicateDimensionRejectedThisCall += result.duplicateDimensionRejected;
+      if (result.traceEntry) trace.push(result.traceEntry); // Cursor-order trace (D7)
     }
 
     // ── 7. Check remaining ─────────────────────────────────────
@@ -493,6 +622,10 @@ export default api({
       resumeRequired: remainingChunks > 0,
       elapsedMs: Date.now() - startTime,
       trace: input.debug ? trace : [],
+      configuredConcurrency: effectiveConcurrency,
+      maxObservedConcurrency,
+      llmCallsStartedThisCall,
+      staggerMs: STAGGER_MS,
     };
   },
 });

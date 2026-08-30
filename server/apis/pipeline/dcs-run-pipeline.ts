@@ -139,7 +139,8 @@ export default api({
     dealId: z.string().uuid(),
     runId: z.string().uuid().optional().nullable(),
     ownerToken: z.string().uuid().optional().nullable(),
-    batchSize: z.number().int().min(1).max(8).default(8),
+    batchSize: z.number().int().min(1).max(32).default(16),
+    concurrency: z.number().int().min(1).max(8).default(4),
   }),
 
   output: z.object({
@@ -170,7 +171,7 @@ export default api({
   async run(ctx, input) {
     const startTime = Date.now();
     const db = ctx.integrations.ic_diligence_db;
-    const { dealId, batchSize } = input;
+    const { dealId, batchSize, concurrency } = input;
 
     // ── Helper: elapsed ──────────────────────────────────────────
     const elapsed = () => Date.now() - startTime;
@@ -435,6 +436,7 @@ export default api({
             runId,
             dealId,
             batchSize,
+            concurrency,
             resumeCursor: resumeCursor || undefined,
             verificationChunkId: undefined,
             debug: false,

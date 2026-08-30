@@ -2402,7 +2402,8 @@ export default function DealDashboardPage() {
             dealId,
             runId: dcsRunId,
             ownerToken: token,
-            batchSize: 8,
+            batchSize: 16,
+            concurrency: 4,
           });
           if (!raw) throw new Error("DcsRunPipeline returned no result");
           result = raw;
