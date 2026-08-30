@@ -207,11 +207,9 @@ export const DUMMY_MODULE_STATUSES: Record<string, Record<string, ModuleStatus>>
     ),
     diligence_completeness: makeModuleStatus(
       "diligence_completeness", "deal-001",
-      [
-        makeFinding("warning", "Score: 6.5/10", "Below target. Gaps in customer diligence and management assessment.", []),
-      ],
-      "Score: 6.5/10. Strong in financial/legal, weak in customer/management.",
-      "# Diligence Completeness\n\n| Dimension | Score |\n|-----------|-------|\n| Financial | 8/10 |\n| Commercial | 5/10 |\n| Customer | 4/10 |\n| Legal | 7/10 |\n| Management | 3/10 |\n| Technology | 6/10 |\n\n## Overall: **6.5 / 10**",
+      [],
+      "Powered by DCS rebuild pipeline. Run the module to generate a full 10-dimension completeness scorecard with materiality overlay.",
+      "# Diligence Completeness Score\n\n*This module now runs through the DCS rebuild pipeline (DcsRunPipeline).*\n\nThe new pipeline produces:\n- Evidence extraction across all data-room documents\n- Per-dimension verdicts (evidenced / asserted / absent)\n- Headline score (0–100%)\n- Materiality overlay with evidence-gap analysis\n- Full formatted report with scorecard and recommendations\n\nClick **Run** to begin analysis.",
     ),
     executive_summary: makeModuleStatus(
       "executive_summary", "deal-001",

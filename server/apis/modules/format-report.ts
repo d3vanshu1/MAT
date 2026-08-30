@@ -254,51 +254,7 @@ Structure your report as:
 ### Recommended IC Questions
 [Numbered list drawn from findings above]`,
 
-  diligence_completeness: `${REPORT_PREAMBLE}
-
-CRITICAL COVERAGE CAVEAT: Your scores must reflect ONLY the documents that were actually ingested and analyzed. If the "Data Room Coverage" section indicates that some documents were excluded (unsupported type, parse failure, or superseded), you MUST:
-1. State explicitly which document categories MAY be underrepresented due to exclusions.
-2. Note that the completeness score applies ONLY to the ingested subset, NOT to the full data room.
-3. If excluded documents likely contained material for a dimension (e.g. a legal PDF that failed to parse), score that dimension lower and explain why.
-Never claim or imply completeness over documents you did not ingest.
-
-Structure your report as:
-
-## Diligence Completeness Scorecard
-
-### Coverage Basis
-[State exactly how many documents were ingested vs. total in the data room. If any were excluded, list them here with reasons. This section is MANDATORY.]
-
-### Overall Grade: [Letter] ([Average]/5.0)
-*Note: This grade reflects coverage of ingested documents only.*
-
-| Dimension | Score | Coverage Summary |
-|-----------|-------|-----------------|
-| Commercial | X/5 | ... |
-| Financial/QoE | X/5 | ... |
-| Management | X/5 | ... |
-| Technology/Product | X/5 | ... |
-| Legal/Regulatory | X/5 | ... |
-| Competitive | X/5 | ... |
-| Customer | X/5 | ... |
-| Operational | X/5 | ... |
-| Exit | X/5 | ... |
-| ESG/Reputational | X/5 | ... |
-
-### Critical Gaps (Score 1-2)
-[Detailed analysis of each poorly-covered dimension — include whether excluded documents might have improved coverage]
-
-### Adequate Coverage (Score 3-4)
-[For each dimension scoring 3-4: heading, what evidence exists, what gaps remain]
-
-### Strong Coverage (Score 5)
-[For each dimension scoring 5: heading, what evidence confirms full coverage]
-
-### What IC Is Approving Without Adequate Information
-[Numbered list of blind spots — include gaps that may exist due to excluded documents]
-
-### Recommended Pre-IC Actions
-[Numbered list]`,
+  // diligence_completeness: REMOVED — DCS rebuild (Packet 5B) uses DcsRunPipeline.
 
   executive_summary: `${REPORT_PREAMBLE}
 

@@ -432,6 +432,8 @@ export default function DealDashboardPage() {
   // ERO v2 orchestrator
   const { run: eroRunPipelineApi } = useApi("EroRunPipeline");
   const { run: publishEroApi } = useApi("PublishEroToModuleOutputs");
+  // DCS rebuild orchestrator
+  const { run: dcsRunPipelineApi } = useApi("DcsRunPipeline");
 
   // Cancellation tracking — stores run IDs that have been cancelled
   const cancelledRunsRef = useRef<Set<string>>(new Set());
@@ -452,6 +454,8 @@ export default function DealDashboardPage() {
   const diagnosticOnlyRef = useRef<boolean>(readDiagnosticOnlyFromUrl());
   // BSS v2 — owner token minted once per run, reused across all poll invocations
   const bssOwnerTokenRef = useRef<string | null>(null);
+  // DCS rebuild — stable owner token for CAS across poll invocations
+  const dcsOwnerTokenRef = useRef<string | null>(null);
   // BSS v2 — mutable override set by the poll loop on completion; cleared on re-run
   const [bssOverride, setBssOverride] = useState<{ findings: BssFinding[]; funnel: BssFunnel } | null>(null);
 
@@ -1983,6 +1987,16 @@ export default function DealDashboardPage() {
     render: "Rendering report",
   };
 
+  /** Human-readable stage labels for DCS progress display */
+  const DCS_STAGE_LABELS: Record<string, string> = {
+    extract: "Extracting evidence",
+    verdicts: "Computing dimension verdicts",
+    summary: "Computing headline score",
+    overlay: "Analyzing materiality overlay",
+    render: "Rendering report",
+    complete: "Publishing results",
+  };
+
   const runBssPipeline = useCallback(
     async () => {
       if (!dealId) return;
@@ -2341,6 +2355,183 @@ export default function DealDashboardPage() {
   }, [dealId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------------------------------------------------------------------------
+  // DCS rebuild — orchestrator poll loop
+  // ---------------------------------------------------------------------------
+
+  const runDcsPipeline = useCallback(
+    async () => {
+      if (!dealId) return;
+
+      // Mint owner token ONCE per run — held in ref, reused across all poll invocations
+      const ownerToken = crypto.randomUUID();
+      dcsOwnerTokenRef.current = ownerToken;
+
+      pipelinePollingActive.current.add("diligence_completeness");
+
+      const DCS_POLL_INTERVAL_MS = 3_000;
+      const DCS_BACKOFF_MAX_MS = 30_000;
+      // No fixed poll ceiling — DCS corpus runs can take hours (extract stage iterates
+      // over thousands of chunks). The poll loop runs until a terminal status.
+      let pollCount = 0;
+      let consecutiveTimeouts = 0;
+      let terminal = false;
+      let dcsRunId: string | null = null;
+
+      while (!terminal) {
+        const token = dcsOwnerTokenRef.current!;
+
+        let result: {
+          runId: string;
+          ownerToken: string;
+          status: string;
+          stage: string | null;
+          nextStage: string | null;
+          resumeRequired: boolean;
+          savedCursor: string | null;
+          remainingChunks: number | null;
+          elapsedMs: number;
+          error: string | null;
+          reportOverride: string | null;
+          headerOverride: string | null;
+          reportHash: string | null;
+          headlineScore: number | null;
+        };
+
+        try {
+          const raw = await dcsRunPipelineApi({
+            dealId,
+            runId: dcsRunId,
+            ownerToken: token,
+            batchSize: 8,
+          });
+          if (!raw) throw new Error("DcsRunPipeline returned no result");
+          result = raw;
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+          const isNetwork = /failed to fetch|network|timeout|abort/i.test(msg);
+          if (isNetwork) {
+            consecutiveTimeouts++;
+            const backoff = Math.min(
+              DCS_POLL_INTERVAL_MS * Math.pow(2, consecutiveTimeouts - 1),
+              DCS_BACKOFF_MAX_MS,
+            );
+            setModuleProgress("diligence_completeness", {
+              message: `Connection interrupted, retrying in ${Math.round(backoff / 1000)}s… (attempt ${consecutiveTimeouts})`,
+            });
+            await new Promise(r => setTimeout(r, backoff));
+            pollCount++;
+            continue;
+          }
+          throw err;
+        }
+
+        // Successful response — reset backoff counter
+        consecutiveTimeouts = 0;
+
+        // Capture runId from first response
+        if (!dcsRunId && result.runId) {
+          dcsRunId = result.runId;
+        }
+
+        const stageLabel = result.stage ? (DCS_STAGE_LABELS[result.stage] ?? result.stage) : "—";
+
+        switch (result.status) {
+          case "created": {
+            // Run just created — save runId, continue polling
+            dcsRunId = result.runId;
+            setModuleProgress("diligence_completeness", {
+              message: "Pipeline created — starting extraction…",
+            });
+            break;
+          }
+
+          case "advanced": {
+            const nextLabel = result.nextStage
+              ? (DCS_STAGE_LABELS[result.nextStage] ?? result.nextStage)
+              : "finishing";
+            setModuleProgress("diligence_completeness", {
+              message: `${stageLabel} ✓ — next: ${nextLabel}`,
+            detail: result.headlineScore != null
+              ? { current: Math.round(result.headlineScore), total: 100, phase: "analyzing" }
+              : null,
+            });
+            break;
+          }
+
+          case "stage_partial": {
+            // Extract stage partial — show chunk progress
+            const remaining = result.remainingChunks ?? 0;
+            setModuleProgress("diligence_completeness", {
+              message: `${stageLabel}… ${remaining > 0 ? `${remaining} chunks remaining` : "processing"}`,
+            detail: remaining > 0
+              ? { current: 0, total: remaining, phase: "analyzing" }
+              : null,
+            });
+            break;
+          }
+
+          case "in_progress": {
+            // Another invocation is already working — wait and retry
+            setModuleProgress("diligence_completeness", {
+              message: `${stageLabel}… waiting for in-flight invocation`,
+            });
+            break;
+          }
+
+          case "owned_elsewhere": {
+            terminal = true;
+            toast.warning("Diligence Completeness is already running in another tab or by another user.");
+            setModuleProgress("diligence_completeness", {
+              message: "Run owned by another session — stopped.",
+            });
+            setRunningModules((prev) => {
+              const next = new Set(prev);
+              next.delete("diligence_completeness");
+              return next;
+            });
+            pipelinePollingActive.current.delete("diligence_completeness");
+            dcsOwnerTokenRef.current = null;
+            return; // Non-error exit
+          }
+
+          case "failed": {
+            terminal = true;
+            dcsOwnerTokenRef.current = null;
+            throw new Error(
+              `DCS pipeline failed at ${stageLabel}: ${result.error ?? "unknown error"}`,
+            );
+          }
+
+          case "done": {
+            terminal = true;
+            dcsOwnerTokenRef.current = null;
+            setModuleProgress("diligence_completeness", {
+              message: "Refreshing results…",
+            });
+            // Refresh module results from DB — module_outputs was published server-side
+            await refetchModules();
+            toast.success("Diligence Completeness Score complete!");
+            break;
+          }
+
+          default: {
+            console.warn(`[DCS] Unexpected status: ${result.status}`);
+            break;
+          }
+        }
+
+        if (!terminal) {
+          await new Promise(r => setTimeout(r, DCS_POLL_INTERVAL_MS));
+          pollCount++;
+        }
+      }
+    },
+    [dealId, dcsRunPipelineApi, setModuleProgress, refetchModules],
+  );
+
+  // ---------------------------------------------------------------------------
   // Run single module
   // ---------------------------------------------------------------------------
 
@@ -2419,6 +2610,9 @@ export default function DealDashboardPage() {
         } else if (moduleId === "external_risk_overlay" && dealId) {
           // ERO v2 divert — uses EroRunPipeline orchestrator instead of v1
           await runEroPipeline();
+        } else if (moduleId === "diligence_completeness" && dealId) {
+          // DCS rebuild — uses DcsRunPipeline orchestrator instead of v1
+          await runDcsPipeline();
         } else if (dealId) {
           // Server-side pipeline: survives tab closure, checkpointed
           // (web research modules now use the same server pipeline path)

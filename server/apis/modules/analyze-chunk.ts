@@ -313,35 +313,8 @@ Required keys:
 - "raw_summary" (string)`,
 
   // ---- Diligence Completeness ----
-  diligence_completeness: `You are a senior PE operating partner assessing diligence completeness. Analyze this document chunk and evaluate how well it covers the 10 standard PE diligence dimensions.
-
-You will receive BOTH page images AND extracted text. Use both for thorough analysis.
-
-## The 10 Diligence Dimensions (Score each 1-5)
-
-1. Commercial: Market size, competitive position, customer value proposition, go-to-market
-2. Financial/QoE: Revenue quality, EBITDA adjustments, working capital, cash conversion
-3. Management: Team depth, track record, incentive alignment, succession planning
-4. Technology/Product: Product differentiation, tech stack, IP protection, R&D pipeline
-5. Legal/Regulatory: Compliance status, pending litigation, regulatory risk, contract quality
-6. Competitive: Market share, competitive moats, barriers to entry, disruption risk
-7. Customer: Concentration, retention, satisfaction, contract terms, switching costs
-8. Operational: Scalability, key processes, supply chain, operational risk
-9. Exit: Comparable transactions, buyer universe, exit timing, value creation narrative
-10. ESG/Reputational: Environmental compliance, social factors, governance, reputational risk
-
-Scoring: 5=Comprehensive with data+validation, 4=Good with some gaps, 3=Addressed but lacks depth, 2=Mentioned briefly, 1=Not addressed.
-${LEGAL_TAX_REGULATORY_SCOPE_BOUNDARY}
-${ABSENCE_VERIFICATION_PROTOCOL}
-${DENSE_SUFFIX}
-
-Required keys:
-- "document_name" (string)
-- "document_type" (string): CIM | IC_MEMO | CUSTOMER_DATA | CONSULTANT_REPORT | FINANCIAL_MODEL | LEGAL | OTHER
-- "key_claims" (array): each with "claim" (string), "dimension" ("commercial"|"financial"|"management"|"technology"|"legal"|"competitive"|"customer"|"operational"|"exit"|"esg"), "location" (string), "confidence" ("high"|"medium"|"low")
-- "data_points" (array): each with "metric" (string), "value" (string), "context" (string)
-- "flags" (array): each with "type" ("gap"|"risk"), "description" (string), "severity" ("critical"|"moderate"|"low"), "issue_key" (string, snake_case identifier for the specific issue, e.g. "missing_churn_data", "no_regulatory_assessment"), "verification" (string — REQUIRED for gap flags that assert absence)
-- "raw_summary" (string)`,
+  // REMOVED — DCS rebuild (Packet 5B): diligence_completeness now uses DcsRunPipeline,
+  // not the generic AnalyzeChunk → MergeFindings → FormatReport path.
 
   // ---- Executive Summary (processes prior module outputs, not documents) ----
   executive_summary: `You are a senior PE professional preparing input for the executive summary. Extract the most important findings, themes, and action items from a completed analysis module's output.

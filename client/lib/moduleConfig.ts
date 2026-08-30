@@ -67,7 +67,7 @@ export const MODULES: ModuleDefinition[] = [
     id: "diligence_completeness",
     displayName: "Diligence Completeness Score",
     description:
-      "Scores the data room across 10 standard PE diligence dimensions.",
+      "Extracts evidence across all documents, computes per-dimension verdicts, headline score, materiality overlay, and a full formatted report via the DCS rebuild pipeline.",
     iconName: "ClipboardCheck",
     requiresPriorModules: false,
   },

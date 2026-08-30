@@ -323,33 +323,7 @@ ${MERGE_OUTPUT_STRUCTURE}`,
 6. **Consolidate**: Combine overlapping observations into single, stronger findings.
 ${MERGE_OUTPUT_STRUCTURE}`,
 
-  diligence_completeness: `You are a senior PE operating partner conducting a final diligence completeness review. You are synthesizing analyst findings that evaluated documents against the 10 standard PE diligence dimensions.
-
-## Multi-Version Memo Handling (union-subject model)
-
-When the subject comprises multiple IC memo versions (chronological record):
-- **(a) Supersession rule**: When memo versions state different values for the same metric or claim, the LATEST memo governs. Do NOT flag superseded figures as contradictions of the current thesis. You MAY note a revision if the magnitude is material at severity "info".
-- **(b) Thesis drift**: A risk, topic, or commitment discussed in an EARLIER memo that is ABSENT from the LATEST memo is a reportable finding. Classify this as thesis drift — the team quietly dropped or de-emphasized something. This is distinct from a missing diligence dimension.
-
-## Your Task
-
-1. **Aggregate Scores**: Across all documents, determine the overall score (1-5) for each of the 10 dimensions.
-2. **Identify Gaps**: Highlight any dimension scoring 2 or below.
-3. **Justify Each Score**: Explain what evidence supports the score and what's missing.
-4. **Calculate Overall Rating**: Average across all 10 dimensions and provide a letter grade (A/B/C/D/F).
-5. **State What IC Is Approving Blind**: Explicitly list areas where information is insufficient.
-6. **Consolidate**: Combine overlapping observations into single, stronger findings.
-
-## CRITICAL: Adversarial Re-Verification of Absence Claims
-
-When scoring a dimension low (1-2) due to "missing" information:
-
-1. **Cross-check all analyst inputs**: Did ANY extraction mention coverage of this dimension, even partially? If yes, the score cannot be 1.
-2. **Require verification evidence**: For dimensions scored ≤2, the finding MUST cite specific verification (search terms tried, alternate terminology checked). If no verification, cap at score 2 with "unverified gap" note.
-3. **Distinguish partial vs. absent**: Score 2 = mentioned briefly (some content exists). Score 1 = truly not addressed (verified across all reviewed chunks).
-4. **Add "absence_confidence"** to every gap finding: "verified_absent" | "likely_absent" | "unverified"
-${LEGAL_TAX_REGULATORY_SCOPE_BOUNDARY}
-${MERGE_OUTPUT_STRUCTURE}`,
+  // diligence_completeness: REMOVED — DCS rebuild (Packet 5B) uses DcsRunPipeline.
 
   executive_summary: `You are the senior-most investment professional preparing the final IC briefing document. You are synthesizing all module outputs into a cohesive executive summary.
 

@@ -97,7 +97,7 @@ Click **"Run All Modules"** (top right). This:
 | **Social & Reputation Intelligence** | Researches Glassdoor, LinkedIn, X/Twitter, review platforms for reputation signals | After identifying the target company |
 | **IC Questions** | Generates the hard questions IC members are likely to ask | Final IC prep — ensures the deal team is ready |
 | **Model Assumptions Stress Test** | Tests whether financial model assumptions hold up against available data | After the financial model is in the data room |
-| **Diligence Completeness Score** | Scores the data room across 10 standard PE dimensions (0–100%) | Throughout diligence — tracks progress |
+| **Diligence Completeness Score** | Extracts evidence, computes per-dimension verdicts & headline score (0–100%), materiality overlay, and a full formatted report via the DCS rebuild pipeline | Throughout diligence — tracks progress |
 | **Executive Summary** | Synthesizes all module outputs into one IC-ready brief | After all other modules complete |
 
 ---
@@ -139,7 +139,7 @@ Once a module completes, its card shows:
 Click **"View Full Report"** within the Details panel to see the complete markdown report. Each module's report follows a tailored structure. For example:
 
 - **Omission Audit:** Critical Omissions → Elevated Omissions → Watch Items → Recommended Actions
-- **Diligence Completeness:** Scores across 10 PE dimensions with specific gaps per dimension
+- **Diligence Completeness:** 10-dimension scorecard with evidence verdicts (evidenced/asserted/absent), headline score, materiality overlay, and recommended pre-IC actions
 - **External Risk:** Dynamic categories driven by findings, cross-reference table, source URLs
 
 ---

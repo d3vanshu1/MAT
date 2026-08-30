@@ -42,7 +42,7 @@ The IC Diligence Assistant is an AI-powered due diligence platform for private e
 | 5 | `social_reputation` | Social & Reputation Intelligence | Web research across Glassdoor, LinkedIn, X/Twitter, review platforms. Cross-references deal team claims against public signals |
 | 6 | `ic_challenge_mode` | IC Questions | Generates the hard questions an IC member is likely to ask |
 | 7 | `model_assumptions_stress` | Model Assumptions Stress Test | Stress-tests financial model assumptions against data and benchmarks |
-| 8 | `diligence_completeness` | Diligence Completeness Score | Scores the data room across 10 standard PE diligence dimensions |
+| 8 | `diligence_completeness` | Diligence Completeness Score | DCS rebuild pipeline: evidence extraction → dimension verdicts → headline score → materiality overlay → formatted report. Runs via `DcsRunPipeline` (not the generic v1 path) |
 | 9 | `executive_summary` | Executive Summary | Synthesizes all module outputs into a single IC-ready executive brief |
 
 ### 2.2 Business Rules
@@ -51,7 +51,8 @@ The IC Diligence Assistant is an AI-powered due diligence platform for private e
 - Every uploaded document is tagged: `cim`, `ic_memo`, `customer_data`, `consultant_report`, `financial_model`, `legal`, or `other`
 - Documents tagged `other` are routed to ALL modules (safe default)
 - Each module has a defined relevance set (see `chunkRouting.ts`). For example, `model_assumptions_stress` receives `ic_memo`, `financial_model`, `cim`, `consultant_report`, and `other` — but not `legal` or `customer_data`
-- Omission Audit, Contradiction Check, and Diligence Completeness receive ALL document types (they assess completeness/consistency across the entire data room)
+- Omission Audit and Contradiction Check receive ALL document types (they assess completeness/consistency across the entire data room)
+- Diligence Completeness now runs through `DcsRunPipeline` with its own extraction pipeline (`DcsExtractPresence`), bypassing the generic chunk routing
 
 **Extraction & analysis:**
 - All documents are processed through a single **Universal Extraction** pass — one API call per chunk extracts data points across ALL module dimensions simultaneously
@@ -192,7 +193,7 @@ The server-side pipeline checks for cancellation at 6 discrete gates:
 **File:** `client/lib/chunkRouting.ts`
 
 After universal extraction, each extraction carries a `documentTag`. The routing table maps tags to modules:
-- **All tags → all modules:** `omission_audit`, `contradiction_check`, `diligence_completeness`
+- **All tags → all modules:** `omission_audit`, `contradiction_check` (note: `diligence_completeness` now uses its own DCS pipeline and does not go through chunk routing)
 - **Selective routing:** e.g., `model_assumptions_stress` skips `legal` and `customer_data`
 - **Safe default:** `other` tag goes to every module
 

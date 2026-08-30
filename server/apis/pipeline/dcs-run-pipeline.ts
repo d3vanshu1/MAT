@@ -104,6 +104,14 @@ const ClaimedRow = z.object({ id: z.string() });
 
 const CountRow = z.object({ cnt: z.coerce.number() });
 
+const ModuleOutputRow = z.object({
+  id: z.string(),
+  executive_header: z.string().nullable(),
+  full_report_markdown: z.string().nullable(),
+});
+
+const OutputIdRow = z.object({ id: z.string() });
+
 /**
  * Verdicts detail JSON — tracks logical sub-stages that
  * don't have physical dcs_pipeline_state rows.
@@ -224,18 +232,49 @@ export default api({
       runId = input.runId;
       ownerToken = input.ownerToken ?? crypto.randomUUID();
 
-      // Validate the run exists
+      // Validate the run exists and check if already completed
       const runCheck = await db.query(
-        `SELECT id FROM module_runs
+        `SELECT id, status FROM module_runs
          WHERE id = $1::uuid AND deal_id = $2::uuid AND module_id = $3
          LIMIT 1`,
-        RunIdRow,
+        ModuleRunRow,
         [runId, dealId, MODULE_ID],
         { label: "Validate module_runs row" },
       );
       if (runCheck.length === 0) {
         throw new Error(
           `No module_runs row for runId=${runId} deal=${dealId} module=${MODULE_ID}`,
+        );
+      }
+
+      // ── Completed-run readback ────────────────────────────────
+      if (runCheck[0].status === "completed") {
+        const existingOutput = await db.query(
+          `SELECT id, executive_header, full_report_markdown
+           FROM module_outputs
+           WHERE module_run_id = $1::uuid
+           LIMIT 1`,
+          ModuleOutputRow,
+          [runId],
+          { label: "Readback: check module_outputs for completed run" },
+        );
+        if (existingOutput.length > 0) {
+          console.log(`${LOG_PREFIX} Run ${runId} already completed with published output ${existingOutput[0].id}.`);
+          return mkResult({
+            runId,
+            ownerToken,
+            status: "done",
+            stage: "complete",
+            nextStage: null,
+            resumeRequired: false,
+            reportOverride: existingOutput[0].full_report_markdown,
+            headerOverride: existingOutput[0].executive_header,
+          });
+        }
+        // Completed but no module_outputs — integrity error
+        throw new Error(
+          `Integrity error: module_runs ${runId} is completed but no module_outputs row exists. ` +
+          `Manual investigation required.`,
         );
       }
     } else {
@@ -635,9 +674,84 @@ export default api({
           });
         }
 
-        // ── F. Complete ────────────────────────────────────────
+        // ── F. Complete (publish → verify → mark done) ──────────
         case "complete": {
-          // Mark module_runs as completed
+          // Check if module_outputs already exists (publication recovery)
+          const existingPub = await db.query(
+            `SELECT id FROM module_outputs
+             WHERE module_run_id = $1::uuid
+             LIMIT 1`,
+            OutputIdRow,
+            [runId],
+            { label: "Complete: check existing module_outputs" },
+          );
+
+          let publishedHeader: string | null = null;
+          let publishedReport: string | null = null;
+
+          if (existingPub.length === 0) {
+            // ── Publish to module_outputs ────────────────────────
+            // Need the render output — re-call DcsRenderReport to reconstruct.
+            // This is the publication-recovery path: render stage is done but
+            // module_outputs was never written (crash between render and complete).
+            console.log(`${LOG_PREFIX} No module_outputs for ${runId} — rendering for publication.`);
+
+            const renderResult = await DcsRenderReport.run(ctx, {
+              runId,
+              dealId,
+              verificationMode: false,
+              verificationVerdicts: undefined,
+              verificationSummary: undefined,
+              verificationMaterialityOverlay: undefined,
+            });
+
+            publishedHeader = renderResult.executiveHeader;
+            publishedReport = renderResult.fullReportMarkdown;
+
+            // DELETE + INSERT (matches ERO pattern)
+            await db.execute(
+              `DELETE FROM module_outputs WHERE module_run_id = $1::uuid`,
+              [runId],
+              { label: "Publish: clear existing module_outputs" },
+            );
+
+            await db.query(
+              `INSERT INTO module_outputs
+                 (module_run_id, executive_header, findings, full_report_markdown)
+               VALUES ($1::uuid, $2, $3::jsonb, $4)
+               RETURNING id`,
+              OutputIdRow,
+              [runId, renderResult.executiveHeader, JSON.stringify([]), renderResult.fullReportMarkdown],
+              { label: "Publish: insert module_outputs row" },
+            );
+
+            console.log(`${LOG_PREFIX} Published module_outputs for run ${runId}.`);
+          } else {
+            console.log(`${LOG_PREFIX} module_outputs already exists for ${runId} (id=${existingPub[0].id}).`);
+          }
+
+          // ── Readback verification ──────────────────────────────
+          const readback = await db.query(
+            `SELECT id, executive_header, full_report_markdown
+             FROM module_outputs
+             WHERE module_run_id = $1::uuid
+             LIMIT 1`,
+            ModuleOutputRow,
+            [runId],
+            { label: "Publish: readback verification" },
+          );
+
+          if (readback.length === 0) {
+            throw new Error(
+              `Publication verification failed: module_outputs row not found after insert for run ${runId}`,
+            );
+          }
+
+          // Use readback values if we didn't just publish (pre-existing)
+          if (!publishedHeader) publishedHeader = readback[0].executive_header;
+          if (!publishedReport) publishedReport = readback[0].full_report_markdown;
+
+          // ── Mark module_runs completed ─────────────────────────
           await db.execute(
             `UPDATE module_runs
              SET status = 'completed'::module_status,
@@ -647,7 +761,14 @@ export default api({
             { label: "Mark module_runs completed" },
           );
 
-          // Release CAS lock on dcs_pipeline_state.extract
+          // ── Bump deals.updated_at ─────────────────────────────
+          await db.execute(
+            `UPDATE deals SET updated_at = NOW() WHERE id = $1::uuid`,
+            [dealId],
+            { label: "Publish: bump deal updated_at" },
+          );
+
+          // ── Release CAS lock ──────────────────────────────────
           await db.execute(
             `UPDATE dcs_pipeline_state
              SET owner_token = NULL, updated_at = now()
@@ -665,6 +786,8 @@ export default api({
             stage: "complete",
             nextStage: null,
             resumeRequired: false,
+            reportOverride: publishedReport,
+            headerOverride: publishedHeader,
           });
         }
 
