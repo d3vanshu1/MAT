@@ -2924,6 +2924,13 @@ export default function DealDashboardPage() {
   const resumeAttemptCountRef = useRef<Record<string, number>>({});
   const MAX_RESUME_ATTEMPTS = 3;
 
+  // Stall detector — tracks last observed DCS evidence count & timestamp.
+  // If evidence count hasn't changed for STALL_THRESHOLD_MS while the module
+  // is DB-running, force a page reload to reset all refs and let auto-resume
+  // reconnect to the orphaned run.
+  const STALL_THRESHOLD_MS = 7 * 60 * 1000; // 7 minutes
+  const lastDcsEvidenceRef = useRef<{ count: number; at: number }>({ count: -1, at: Date.now() });
+
   useEffect(() => {
     if (!dealId) return;
 
@@ -3137,6 +3144,30 @@ export default function DealDashboardPage() {
         const dbRunning = (progress?.runs ?? []).filter(
           (r: { status: string }) => r.status === "running"
         );
+
+        // ── Stall detector: auto-reload if DCS evidence stalls ──────────
+        const dcsRun = dbRunning.find(
+          (r: { moduleId: string }) => r.moduleId === "diligence_completeness"
+        );
+        if (dcsRun) {
+          const currentEvidence = progress?.dcsEvidenceCount ?? 0;
+          const prev = lastDcsEvidenceRef.current;
+
+          if (currentEvidence !== prev.count) {
+            // Progress is advancing — reset the clock
+            lastDcsEvidenceRef.current = { count: currentEvidence, at: Date.now() };
+          } else if (Date.now() - prev.at >= STALL_THRESHOLD_MS) {
+            // Evidence count unchanged for 7+ minutes — stalled
+            console.warn(
+              `[watchdog] DCS stall detected: evidence stuck at ${currentEvidence} for ${Math.round((Date.now() - prev.at) / 60_000)}min — reloading page`
+            );
+            window.location.reload();
+            return; // reload is async — stop executing
+          }
+        } else {
+          // No active DCS run — reset tracker
+          lastDcsEvidenceRef.current = { count: -1, at: Date.now() };
+        }
 
         for (const run of dbRunning) {
           const { moduleId, runId } = run as { moduleId: string; runId: string };
