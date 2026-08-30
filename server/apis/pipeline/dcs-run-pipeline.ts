@@ -439,6 +439,8 @@ export default api({
             concurrency,
             resumeCursor: resumeCursor || undefined,
             verificationChunkId: undefined,
+            verificationDocumentId: undefined,
+            verificationWindowIndex: undefined,
             debug: false,
           });
 

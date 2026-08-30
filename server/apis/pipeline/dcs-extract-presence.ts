@@ -37,6 +37,7 @@ const INVOCATION_BUDGET_MS = 240_000;
 const MIN_CALL_HEADROOM_MS = 30_000;
 const MAX_PER_CALL_MS = 60_000;
 const ORDERING_VERSION = "document-index-v1";
+const WORK_UNIT_VERSION = "logical-excel-v1";
 
 const VALID_DIMENSION_IDS = new Set(DCS_DIMENSIONS.map((d) => d.id));
 
@@ -64,6 +65,10 @@ interface CumulativeDetail {
   semantic_retry_recovered: number;
   // Ordering version (5C.2C)
   ordering_version: string;
+  // Work-unit version (5C.2E)
+  work_unit_version: string;
+  // Physical mapping rejections (5C.2E)
+  physical_mapping_rejected: number;
 }
 
 function emptyDetail(totalChunks: number): CumulativeDetail {
@@ -80,6 +85,8 @@ function emptyDetail(totalChunks: number): CumulativeDetail {
     semantic_retry_attempted: 0,
     semantic_retry_recovered: 0,
     ordering_version: ORDERING_VERSION,
+    work_unit_version: WORK_UNIT_VERSION,
+    physical_mapping_rejected: 0,
   };
 }
 
@@ -91,6 +98,8 @@ function hydrateRecoveryCounters(detail: CumulativeDetail): CumulativeDetail {
     semantic_retry_attempted: detail.semantic_retry_attempted ?? 0,
     semantic_retry_recovered: detail.semantic_retry_recovered ?? 0,
     ordering_version: detail.ordering_version ?? "",
+    work_unit_version: detail.work_unit_version ?? "",
+    physical_mapping_rejected: detail.physical_mapping_rejected ?? 0,
   };
 }
 
@@ -318,6 +327,15 @@ export default api({
     jsonRepairsAppliedThisCall: z.number(),
     semanticRetriesThisCall: z.number(),
     semanticRetryRecoveriesThisCall: z.number(),
+    // Work-unit telemetry (5C.2E)
+    logicalWindowsProcessedThisCall: z.number().optional(),
+    excelWindowsProcessedThisCall: z.number().optional(),
+    pdfWindowsProcessedThisCall: z.number().optional(),
+    physicalChunksCoveredThisCall: z.number().optional(),
+    averageExcelWindowChars: z.number().optional(),
+    largestExcelWindowChars: z.number().optional(),
+    physicalMappingRejectedThisCall: z.number().optional(),
+    effectiveWorkUnitVersion: z.string().optional(),
   }),
 
   async run(ctx, input) {
@@ -785,14 +803,22 @@ export default api({
 
       // D2: Compatibility check — applies even for done/failed states
       if (stateEmpty) {
-        // Empty state: initialize ordering_version in memory, persist on next checkpoint
+        // Empty state: initialize versions in memory, persist on next checkpoint
         parsedDetail.ordering_version = ORDERING_VERSION;
+        parsedDetail.work_unit_version = WORK_UNIT_VERSION;
       } else {
         // Non-empty state: require exact ordering_version match
         if (parsedDetail.ordering_version !== ORDERING_VERSION) {
           throw new Error(
             `Incompatible ordering: state has ordering_version="${parsedDetail.ordering_version || "(missing)"}" ` +
             `but this build requires "${ORDERING_VERSION}". Create a fresh DCS run to use the new ordering.`,
+          );
+        }
+        // Non-empty state: require exact work_unit_version match
+        if (parsedDetail.work_unit_version !== WORK_UNIT_VERSION) {
+          throw new Error(
+            `Incompatible work_unit_version: state has "${parsedDetail.work_unit_version || "(missing)"}" ` +
+            `but this build requires "${WORK_UNIT_VERSION}". Create a fresh DCS run.`,
           );
         }
       }
@@ -905,8 +931,14 @@ export default api({
       cursorAnchor = { document_id: anchorRows[0].document_id, chunk_index: anchorRows[0].chunk_index };
     }
 
-    // ── 5. D5: Select chunk batch in composite document/chunk-index order
-    const chunkQuery = cursorAnchor
+    // ═════════════════════════════════════════════════════════════
+    // §3: Build work-unit list (5C.2E)
+    // ═════════════════════════════════════════════════════════════
+
+    // §3a: Fetch ALL physical chunks after cursor in composite order.
+    // We need the full set per document to build logical windows for Excel docs.
+    // batchSize is enforced later by counting owned physical chunks.
+    const allChunksQuery = cursorAnchor
       ? `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
                 dc.file_name AS source_file, d.document_tag,
                 dc.document_id, dc.chunk_index
@@ -914,23 +946,21 @@ export default api({
          JOIN documents d ON d.id = dc.document_id
          WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
            AND (dc.document_id::text, dc.chunk_index) > ($2::text, $3::int)
-         ORDER BY dc.document_id::text ASC, dc.chunk_index ASC
-         LIMIT $4`
+         ORDER BY dc.document_id::text ASC, dc.chunk_index ASC`
       : `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
                 dc.file_name AS source_file, d.document_tag,
                 dc.document_id, dc.chunk_index
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
          WHERE dc.deal_id = $1::uuid AND d.deal_id = $1::uuid
-         ORDER BY dc.document_id::text ASC, dc.chunk_index ASC
-         LIMIT $2`;
+         ORDER BY dc.document_id::text ASC, dc.chunk_index ASC`;
 
-    const chunkParams = cursorAnchor
-      ? [input.dealId, cursorAnchor.document_id, cursorAnchor.chunk_index, input.batchSize]
-      : [input.dealId, input.batchSize];
+    const allChunksParams = cursorAnchor
+      ? [input.dealId, cursorAnchor.document_id, cursorAnchor.chunk_index]
+      : [input.dealId];
 
-    const chunks = await db.query(
-      chunkQuery,
+    const allRemainingChunks: ChunkRow[] = await db.query(
+      allChunksQuery,
       z.object({
         chunk_id: z.string(),
         chunk_text: z.string(),
@@ -939,17 +969,167 @@ export default api({
         document_id: z.string(),
         chunk_index: z.number(),
       }),
-      chunkParams,
-      { label: "DcsExtract: select chunk batch" },
+      allChunksParams,
+      { label: "DcsExtract: fetch all remaining chunks" },
     );
 
-    // ── 6. Concurrent IN-MEMORY analysis with bounded worker pool ──
+    // §3b: Group chunks by document_id (preserving composite order)
+    const docChunkMap = new Map<string, ChunkRow[]>();
+    const docOrder: string[] = [];
+    for (const chunk of allRemainingChunks) {
+      let arr = docChunkMap.get(chunk.document_id);
+      if (!arr) {
+        arr = [];
+        docChunkMap.set(chunk.document_id, arr);
+        docOrder.push(chunk.document_id);
+      }
+      arr.push(chunk);
+    }
+
+    // §3c: For Excel docs, we need ALL chunks (not just remaining) to build windows.
+    // If cursor is mid-document for an Excel doc, we must fetch prior chunks too.
+    // However, since cursor is always at the END of a work unit's last owned chunk,
+    // and Excel work units own contiguous chunk ranges, the cursor always sits at
+    // the boundary between documents (or between windows within a document).
+    //
+    // For a partial Excel document (cursor was inside it), we need the FULL
+    // document's chunks to build windows, then skip windows already processed.
+    // But with work_unit_version="logical-excel-v1", the cursor for Excel docs
+    // always points to the lastOwnedChunkId of a window, meaning the remaining
+    // chunks start at the next window's first chunk.
+    //
+    // For documents where we have all chunks after cursor, we can detect if
+    // the first document is partial by checking if chunk_index > 0.
+    // If partial AND Excel: fetch the full document's chunks for window building.
+
+    // Check if first document in remaining set is a partial Excel document
+    if (docOrder.length > 0) {
+      const firstDocId = docOrder[0];
+      const firstDocChunks = docChunkMap.get(firstDocId)!;
+      const firstChunk = firstDocChunks[0];
+      const isExcel = isExcelDocument(firstChunk.document_tag, firstChunk.source_file);
+
+      if (isExcel && firstChunk.chunk_index > 0) {
+        // Partial Excel document — need ALL chunks for this doc to build windows
+        const fullDocChunks = await db.query(
+          `SELECT dc.id AS chunk_id, dc.content AS chunk_text,
+                  dc.file_name AS source_file, d.document_tag,
+                  dc.document_id, dc.chunk_index
+           FROM document_chunks dc
+           JOIN documents d ON d.id = dc.document_id
+           WHERE dc.document_id = $1::uuid AND dc.deal_id = $2::uuid AND d.deal_id = $2::uuid
+           ORDER BY dc.chunk_index ASC`,
+          z.object({
+            chunk_id: z.string(),
+            chunk_text: z.string(),
+            source_file: z.string(),
+            document_tag: z.string().nullable(),
+            document_id: z.string(),
+            chunk_index: z.number(),
+          }),
+          [firstDocId, input.dealId],
+          { label: "DcsExtract: fetch full Excel doc for window building" },
+        );
+
+        // Replace the partial set with the full document
+        docChunkMap.set(firstDocId, fullDocChunks);
+      }
+    }
+
+    // §3d: Build WorkUnit list from documents in composite order
+    const workUnits: WorkUnit[] = [];
+
+    for (const docId of docOrder) {
+      const docChunks = docChunkMap.get(docId)!;
+      const firstChunk = docChunks[0];
+      const isExcel = isExcelDocument(firstChunk.document_tag, firstChunk.source_file);
+
+      if (isExcel) {
+        // Build logical windows from ALL chunks of this document
+        const physicalChunks: PhysicalChunk[] = docChunks.map(c => ({
+          chunk_id: c.chunk_id,
+          chunk_index: c.chunk_index,
+          content: c.chunk_text,
+          document_id: c.document_id,
+          source_file: c.source_file,
+          document_tag: c.document_tag ?? "other",
+        }));
+
+        const windows = buildLogicalWindows(physicalChunks);
+
+        // Skip windows whose lastOwnedChunkId is at or before cursor.
+        // The cursor points to a physical chunk ID. A window is fully processed
+        // if its lastOwnedChunkId has already been committed.
+        // Since chunks are in composite order and cursor is a physical chunk ID,
+        // we can check: skip windows where lastOwnedChunkId is NOT in allRemainingChunks.
+        const remainingChunkIds = new Set(allRemainingChunks.map(c => c.chunk_id));
+
+        for (const win of windows) {
+          // Window is unprocessed if ANY of its owned chunks are in remaining set
+          const hasRemainingChunks = win.ownedChunkIds.some(id => remainingChunkIds.has(id));
+          if (!hasRemainingChunks) continue; // Fully processed, skip
+
+          // Collect the owned ChunkRow objects for this window
+          const chunkById = new Map(docChunks.map(c => [c.chunk_id, c]));
+          const ownedChunks = win.ownedChunkIds
+            .map(id => chunkById.get(id))
+            .filter((c): c is ChunkRow => c !== undefined);
+
+          workUnits.push({
+            kind: "excel_logical",
+            window: win,
+            ownedChunks,
+            ownedChunkIds: [...win.ownedChunkIds],
+            firstOwnedChunkId: win.firstOwnedChunkId,
+            lastOwnedChunkId: win.lastOwnedChunkId,
+            analysisText: win.windowText,
+            charCount: win.totalChars,
+            sourceFile: win.sourceFile,
+            documentTag: firstChunk.document_tag,
+            documentId: win.documentId,
+          });
+        }
+      } else {
+        // Non-Excel: one PhysicalWorkUnit per chunk
+        // Only include chunks that are in the remaining set (after cursor)
+        const remainingChunkIds = new Set(allRemainingChunks.map(c => c.chunk_id));
+        for (const chunk of docChunks) {
+          if (!remainingChunkIds.has(chunk.chunk_id)) continue;
+          workUnits.push({
+            kind: "physical",
+            chunk,
+            ownedChunkIds: [chunk.chunk_id],
+            firstOwnedChunkId: chunk.chunk_id,
+            lastOwnedChunkId: chunk.chunk_id,
+            analysisText: chunk.chunk_text,
+            charCount: chunk.chunk_text.length,
+            sourceFile: chunk.source_file,
+            documentTag: chunk.document_tag,
+            documentId: chunk.document_id,
+          });
+        }
+      }
+    }
+
+    // §4: Apply batchSize — counts owned physical chunks, not work units
+    let physicalChunkBudget = input.batchSize;
+    const batchWorkUnits: WorkUnit[] = [];
+    for (const wu of workUnits) {
+      const cost = wu.ownedChunkIds.length;
+      if (physicalChunkBudget <= 0) break;
+      batchWorkUnits.push(wu);
+      physicalChunkBudget -= cost;
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // §5: Concurrent IN-MEMORY analysis with bounded worker pool (5C.2E)
+    // ═════════════════════════════════════════════════════════════
     let finalStatus = "running";
 
-    // Effective concurrency (D1): verification mode forces 1
-    const effectiveConcurrency = Math.min(input.concurrency, chunks.length);
+    // Effective concurrency: one LLM call per work unit
+    const effectiveConcurrency = Math.min(input.concurrency, batchWorkUnits.length);
 
-    // Launch stagger gate (D2): 50ms between successive initial LLM calls
+    // Launch stagger gate: 50ms between successive initial LLM calls
     const STAGGER_MS = 50;
     let lastLaunchTime = 0;
     async function acquireLaunchSlot(): Promise<void> {
@@ -961,14 +1141,15 @@ export default api({
       lastLaunchTime = Date.now();
     }
 
-    // Concurrency telemetry (D8)
+    // Concurrency telemetry
     let activeWorkers = 0;
     let maxObservedConcurrency = 0;
     let llmCallsStartedThisCall = 0;
 
-    // D3: Workers call ONLY analyzeChunk (in-memory). No database writes.
-    async function analyzeChunkWithStagger(
-      chunk: ChunkRow,
+    // §5: Workers call ONLY analyzeChunk (in-memory). No database writes.
+    // For Excel work units, create a synthetic ChunkRow with chunk_text = window text.
+    async function analyzeWorkUnitWithStagger(
+      wu: WorkUnit,
     ): Promise<AnalysisOutcome> {
       activeWorkers++;
       if (activeWorkers > maxObservedConcurrency) {
@@ -977,9 +1158,26 @@ export default api({
       try {
         await acquireLaunchSlot();
         llmCallsStartedThisCall++;
+
+        // Build the ChunkRow to pass to analyzeChunk
+        let syntheticChunk: ChunkRow;
+        if (wu.kind === "excel_logical") {
+          // Synthetic ChunkRow: chunk_text is the window text
+          syntheticChunk = {
+            chunk_id: wu.firstOwnedChunkId,
+            chunk_text: wu.analysisText,
+            source_file: wu.sourceFile,
+            document_tag: wu.documentTag,
+            document_id: wu.documentId,
+            chunk_index: wu.window.windowIndex,
+          };
+        } else {
+          syntheticChunk = wu.chunk;
+        }
+
         return await analyzeChunk(
           ctx as unknown as PipelineContext,
-          chunk,
+          syntheticChunk,
           startTime,
           input.debug,
         );
@@ -988,20 +1186,18 @@ export default api({
       }
     }
 
-    // ── Bounded worker pool (D3): at most effectiveConcurrency active tasks
+    // Bounded worker pool: at most effectiveConcurrency active tasks
     type TaskOutcome = { index: number; result?: AnalysisOutcome; error?: string };
-    const outcomes: TaskOutcome[] = new Array(chunks.length);
+    const outcomes: TaskOutcome[] = new Array(batchWorkUnits.length);
     let stopScheduling = false;
 
-    // Process in waves using a pool approach
     let nextToSchedule = 0;
-    const inFlight = new Map<number, Promise<void>>(); // index → settlement promise
+    const inFlight = new Map<number, Promise<void>>();
 
     function canLaunchMore(): boolean {
       if (stopScheduling) return false;
-      if (nextToSchedule >= chunks.length) return false;
+      if (nextToSchedule >= batchWorkUnits.length) return false;
       if (inFlight.size >= effectiveConcurrency) return false;
-      // Headroom check (D6): need enough time for one max call + checkpoint writes
       const remaining = INVOCATION_BUDGET_MS - (Date.now() - startTime);
       if (remaining < MIN_CALL_HEADROOM_MS + MAX_PER_CALL_MS) return false;
       return true;
@@ -1009,17 +1205,16 @@ export default api({
 
     function scheduleOne(): void {
       const idx = nextToSchedule++;
-      const chunk = chunks[idx];
+      const wu = batchWorkUnits[idx];
 
-      // D3: worker calls ONLY analyzeChunk — zero database writes
-      const task = analyzeChunkWithStagger(chunk)
+      const task = analyzeWorkUnitWithStagger(wu)
         .then((result) => {
           outcomes[idx] = { index: idx, result };
         })
         .catch((err) => {
           const errMsg = err instanceof Error ? err.message : String(err);
           outcomes[idx] = { index: idx, error: errMsg.slice(0, 500) };
-          stopScheduling = true; // D3: stop scheduling on first failure
+          stopScheduling = true;
         })
         .finally(() => {
           inFlight.delete(idx);
@@ -1036,28 +1231,41 @@ export default api({
     // Pump: when a slot frees up, schedule next if allowed
     while (inFlight.size > 0) {
       await Promise.race(inFlight.values());
-      // After a settlement, try to schedule more
       while (canLaunchMore()) {
         scheduleOne();
       }
     }
 
-    // ── 6b. Ordered commit walk (D4) ───────────────────────────
-    // After ALL workers settle, walk outcomes in fetched composite order.
-    // Only this walk may write to the database.
-    // Commit contiguous success prefix; stop at first failure.
-    for (let i = 0; i < chunks.length; i++) {
-      const outcome = outcomes[i];
+    // ═════════════════════════════════════════════════════════════
+    // §6–§8: Ordered commit walk with physical mapping (5C.2E)
+    // ═════════════════════════════════════════════════════════════
+    //
+    // Walk work units in composite order.
+    // For each work unit, persist evidence to EACH owned physical chunk.
+    // For Excel: use mapSnippetToPhysicalChunk to route evidence items.
+    // Cursor advances to lastOwnedChunkId of each work unit.
+    // processed_count increments by ownedChunkIds.length (physical chunks).
 
-      // NOT STARTED: budget ran out before this chunk was scheduled
+    // §10 telemetry accumulators
+    let excelWindowsProcessedThisCall = 0;
+    let pdfWindowsProcessedThisCall = 0;
+    let physicalChunksCoveredThisCall = 0;
+    let physicalMappingRejectedThisCall = 0;
+    let totalExcelWindowChars = 0;
+    let maxExcelWindowChars = 0;
+
+    for (let i = 0; i < batchWorkUnits.length; i++) {
+      const outcome = outcomes[i];
+      const wu = batchWorkUnits[i];
+
+      // NOT STARTED: budget ran out before this work unit was scheduled
       if (!outcome) {
-        break; // Leave extract running, resumable from last committed cursor
+        break;
       }
 
-      // D5: FAILURE — stop at first failed chunk in UUID order
+      // §8: FAILURE — stop at first failed work unit
       if (outcome.error != null) {
         const bounded = outcome.error;
-        // Do not persist the failed chunk or later speculative successes
         await db.execute(
           `UPDATE dcs_pipeline_state
            SET status = 'failed', detail = $1, updated_at = now()
@@ -1066,108 +1274,261 @@ export default api({
             JSON.stringify({
               ...cumulative,
               error: bounded,
-              failed_chunk: chunks[i].chunk_id,
+              failed_chunk: wu.firstOwnedChunkId,
             }),
             stateId,
           ],
           { label: "DcsExtract: mark extract failed" },
         );
-        throw new Error(`DcsExtract failed on chunk ${chunks[i].chunk_id}: ${bounded}`);
+        throw new Error(`DcsExtract failed on work unit ${wu.firstOwnedChunkId}: ${bounded}`);
       }
 
-      // SUCCESS: persist evidence then checkpoint
+      // SUCCESS: map and persist evidence per physical chunk
       const analysisResult = outcome.result!;
 
-      // D2: Persist evidence through the explicit persistence function
-      let rowsWritten: number;
-      try {
-        rowsWritten = await persistChunkEvidence(db, input.runId, chunks[i], analysisResult);
-      } catch (persistErr) {
-        // D6: Persistence failure — do not advance cursor or cumulative
-        const pMsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
-        await db.execute(
-          `UPDATE dcs_pipeline_state
-           SET status = 'failed', detail = $1, updated_at = now()
-           WHERE id = $2::uuid`,
-          [
-            JSON.stringify({
-              ...cumulative,
-              error: `Evidence persistence failed: ${pMsg.slice(0, 400)}`,
-              failed_chunk: chunks[i].chunk_id,
-            }),
-            stateId,
-          ],
-          { label: "DcsExtract: mark failed on persistence error" },
-        );
-        throw new Error(`DcsExtract persistence failed on chunk ${chunks[i].chunk_id}: ${pMsg.slice(0, 400)}`);
+      if (wu.kind === "excel_logical") {
+        // §6: Map each accepted evidence item to a physical chunk
+        // Build per-chunk evidence buckets
+        const chunkEvidenceMap = new Map<string, PresenceItem[]>();
+        for (const chunkId of wu.ownedChunkIds) {
+          chunkEvidenceMap.set(chunkId, []);
+        }
+
+        let wuMappingRejected = 0;
+        for (const item of analysisResult.accepted) {
+          const mapping = mapSnippetToPhysicalChunk(wu.window, item.snippet);
+          if (mapping.foundInPrimary && mapping.mappedChunkId && chunkEvidenceMap.has(mapping.mappedChunkId)) {
+            chunkEvidenceMap.get(mapping.mappedChunkId)!.push(item);
+          } else {
+            // Context-only or unmapped snippet — rejected
+            wuMappingRejected++;
+          }
+        }
+
+        // §7: Persist evidence for each owned physical chunk in order
+        let wuRowsWritten = 0;
+        let wuEmptyChunks = 0;
+
+        for (const physChunkId of wu.ownedChunkIds) {
+          const chunkItems = chunkEvidenceMap.get(physChunkId) ?? [];
+          const physChunk = wu.ownedChunks.find(c => c.chunk_id === physChunkId);
+          if (!physChunk) {
+            throw new Error(`Physical chunk ${physChunkId} not found in work unit owned chunks`);
+          }
+
+          // Build a per-chunk AnalysisOutcome for persistChunkEvidence
+          const perChunkOutcome: AnalysisOutcome = {
+            chunkId: physChunkId,
+            sourceFile: physChunk.source_file,
+            documentTag: physChunk.document_tag ?? "other",
+            docClass: analysisResult.docClass,
+            accepted: chunkItems,
+            fabricationRejected: 0,
+            invalidDimensionRejected: 0,
+            duplicateDimensionRejected: 0,
+            jsonRepairApplied: false,
+            semanticRetryAttempted: false,
+            semanticRetryRecovered: false,
+            traceEntry: null,
+          };
+
+          let rowsWritten: number;
+          try {
+            rowsWritten = await persistChunkEvidence(db, input.runId, physChunk, perChunkOutcome);
+          } catch (persistErr) {
+            const pMsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
+            await db.execute(
+              `UPDATE dcs_pipeline_state
+               SET status = 'failed', detail = $1, updated_at = now()
+               WHERE id = $2::uuid`,
+              [
+                JSON.stringify({
+                  ...cumulative,
+                  error: `Evidence persistence failed: ${pMsg.slice(0, 400)}`,
+                  failed_chunk: physChunkId,
+                }),
+                stateId,
+              ],
+              { label: "DcsExtract: mark failed on persistence error" },
+            );
+            throw new Error(`DcsExtract persistence failed on chunk ${physChunkId}: ${pMsg.slice(0, 400)}`);
+          }
+
+          wuRowsWritten += rowsWritten;
+          if (rowsWritten === 0) wuEmptyChunks++;
+
+          // Advance cumulative per physical chunk
+          const nextCumulative: CumulativeDetail = {
+            ...cumulative,
+            processed_count: cumulative.processed_count + 1,
+            evidence_rows_written: cumulative.evidence_rows_written + rowsWritten,
+            empty_chunk_count: cumulative.empty_chunk_count + (rowsWritten === 0 ? 1 : 0),
+            fabrication_rejected: cumulative.fabrication_rejected,
+            invalid_dimension_rejected: cumulative.invalid_dimension_rejected,
+            duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected,
+            last_chunk_id: physChunkId,
+            json_repair_applied: cumulative.json_repair_applied,
+            semantic_retry_attempted: cumulative.semantic_retry_attempted,
+            semantic_retry_recovered: cumulative.semantic_retry_recovered,
+            physical_mapping_rejected: cumulative.physical_mapping_rejected,
+          };
+          const nextCursor = physChunkId;
+
+          try {
+            await db.execute(
+              `UPDATE dcs_pipeline_state
+               SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
+               WHERE id = $3::uuid`,
+              [nextCursor, JSON.stringify(nextCumulative), stateId],
+              { label: `DcsExtract: advance cursor to ${physChunkId.slice(0, 8)}` },
+            );
+          } catch (cpErr) {
+            const cpMsg = cpErr instanceof Error ? cpErr.message : String(cpErr);
+            await db.execute(
+              `UPDATE dcs_pipeline_state
+               SET status = 'failed', detail = $1, updated_at = now()
+               WHERE id = $2::uuid`,
+              [
+                JSON.stringify({
+                  ...cumulative,
+                  error: `Checkpoint failed: ${cpMsg.slice(0, 400)}`,
+                  failed_chunk: physChunkId,
+                }),
+                stateId,
+              ],
+              { label: "DcsExtract: mark failed on checkpoint error" },
+            );
+            throw new Error(`DcsExtract checkpoint failed on chunk ${physChunkId}: ${cpMsg.slice(0, 400)}`);
+          }
+
+          cumulative = nextCumulative;
+          cursorValue = nextCursor;
+          processedThisCall++;
+        }
+
+        // Work-unit-level accounting (only after all physical chunks committed)
+        rowsWrittenThisCall += wuRowsWritten;
+        emptyChunksThisCall += wuEmptyChunks;
+        // Rejection counters apply at work-unit level (from the single LLM call)
+        fabricationRejectedThisCall += analysisResult.fabricationRejected;
+        invalidDimensionRejectedThisCall += analysisResult.invalidDimensionRejected;
+        duplicateDimensionRejectedThisCall += analysisResult.duplicateDimensionRejected;
+        if (analysisResult.jsonRepairApplied) jsonRepairsAppliedThisCall++;
+        if (analysisResult.semanticRetryAttempted) semanticRetriesThisCall++;
+        if (analysisResult.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
+        if (analysisResult.traceEntry) trace.push(analysisResult.traceEntry);
+
+        // Update cumulative rejection counters (only at work-unit boundary)
+        cumulative = {
+          ...cumulative,
+          fabrication_rejected: cumulative.fabrication_rejected + analysisResult.fabricationRejected,
+          invalid_dimension_rejected: cumulative.invalid_dimension_rejected + analysisResult.invalidDimensionRejected,
+          duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + analysisResult.duplicateDimensionRejected,
+          json_repair_applied: cumulative.json_repair_applied + (analysisResult.jsonRepairApplied ? 1 : 0),
+          semantic_retry_attempted: cumulative.semantic_retry_attempted + (analysisResult.semanticRetryAttempted ? 1 : 0),
+          semantic_retry_recovered: cumulative.semantic_retry_recovered + (analysisResult.semanticRetryRecovered ? 1 : 0),
+          physical_mapping_rejected: cumulative.physical_mapping_rejected + wuMappingRejected,
+        };
+
+        physicalMappingRejectedThisCall += wuMappingRejected;
+
+        // Telemetry
+        excelWindowsProcessedThisCall++;
+        physicalChunksCoveredThisCall += wu.ownedChunkIds.length;
+        totalExcelWindowChars += wu.charCount;
+        if (wu.charCount > maxExcelWindowChars) maxExcelWindowChars = wu.charCount;
+
+      } else {
+        // §7: Physical work unit — same as original per-chunk path
+        let rowsWritten: number;
+        try {
+          rowsWritten = await persistChunkEvidence(db, input.runId, wu.chunk, analysisResult);
+        } catch (persistErr) {
+          const pMsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
+          await db.execute(
+            `UPDATE dcs_pipeline_state
+             SET status = 'failed', detail = $1, updated_at = now()
+             WHERE id = $2::uuid`,
+            [
+              JSON.stringify({
+                ...cumulative,
+                error: `Evidence persistence failed: ${pMsg.slice(0, 400)}`,
+                failed_chunk: wu.chunk.chunk_id,
+              }),
+              stateId,
+            ],
+            { label: "DcsExtract: mark failed on persistence error" },
+          );
+          throw new Error(`DcsExtract persistence failed on chunk ${wu.chunk.chunk_id}: ${pMsg.slice(0, 400)}`);
+        }
+
+        const nextCumulative: CumulativeDetail = {
+          ...cumulative,
+          processed_count: cumulative.processed_count + 1,
+          evidence_rows_written: cumulative.evidence_rows_written + rowsWritten,
+          empty_chunk_count: cumulative.empty_chunk_count + (rowsWritten === 0 ? 1 : 0),
+          fabrication_rejected: cumulative.fabrication_rejected + analysisResult.fabricationRejected,
+          invalid_dimension_rejected: cumulative.invalid_dimension_rejected + analysisResult.invalidDimensionRejected,
+          duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + analysisResult.duplicateDimensionRejected,
+          last_chunk_id: wu.chunk.chunk_id,
+          json_repair_applied: cumulative.json_repair_applied + (analysisResult.jsonRepairApplied ? 1 : 0),
+          semantic_retry_attempted: cumulative.semantic_retry_attempted + (analysisResult.semanticRetryAttempted ? 1 : 0),
+          semantic_retry_recovered: cumulative.semantic_retry_recovered + (analysisResult.semanticRetryRecovered ? 1 : 0),
+        };
+        const nextCursor = wu.chunk.chunk_id;
+
+        try {
+          await db.execute(
+            `UPDATE dcs_pipeline_state
+             SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
+             WHERE id = $3::uuid`,
+            [nextCursor, JSON.stringify(nextCumulative), stateId],
+            { label: `DcsExtract: advance cursor to ${wu.chunk.chunk_id.slice(0, 8)}` },
+          );
+        } catch (cpErr) {
+          const cpMsg = cpErr instanceof Error ? cpErr.message : String(cpErr);
+          await db.execute(
+            `UPDATE dcs_pipeline_state
+             SET status = 'failed', detail = $1, updated_at = now()
+             WHERE id = $2::uuid`,
+            [
+              JSON.stringify({
+                ...cumulative,
+                error: `Checkpoint failed: ${cpMsg.slice(0, 400)}`,
+                failed_chunk: wu.chunk.chunk_id,
+              }),
+              stateId,
+            ],
+            { label: "DcsExtract: mark failed on checkpoint error" },
+          );
+          throw new Error(`DcsExtract checkpoint failed on chunk ${wu.chunk.chunk_id}: ${cpMsg.slice(0, 400)}`);
+        }
+
+        cumulative = nextCumulative;
+        cursorValue = nextCursor;
+        processedThisCall++;
+        rowsWrittenThisCall += rowsWritten;
+        if (rowsWritten === 0) emptyChunksThisCall++;
+        fabricationRejectedThisCall += analysisResult.fabricationRejected;
+        invalidDimensionRejectedThisCall += analysisResult.invalidDimensionRejected;
+        duplicateDimensionRejectedThisCall += analysisResult.duplicateDimensionRejected;
+        if (analysisResult.jsonRepairApplied) jsonRepairsAppliedThisCall++;
+        if (analysisResult.semanticRetryAttempted) semanticRetriesThisCall++;
+        if (analysisResult.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
+        if (analysisResult.traceEntry) trace.push(analysisResult.traceEntry);
+
+        // Telemetry
+        pdfWindowsProcessedThisCall++;
+        physicalChunksCoveredThisCall++;
       }
-
-      // D4: Construct nextCumulative immutably (do NOT mutate cumulative)
-      const nextCumulative: CumulativeDetail = {
-        ...cumulative,
-        processed_count: cumulative.processed_count + 1,
-        evidence_rows_written: cumulative.evidence_rows_written + rowsWritten,
-        empty_chunk_count: cumulative.empty_chunk_count + (rowsWritten === 0 ? 1 : 0),
-        fabrication_rejected: cumulative.fabrication_rejected + analysisResult.fabricationRejected,
-        invalid_dimension_rejected: cumulative.invalid_dimension_rejected + analysisResult.invalidDimensionRejected,
-        duplicate_dimension_rejected: cumulative.duplicate_dimension_rejected + analysisResult.duplicateDimensionRejected,
-        last_chunk_id: chunks[i].chunk_id,
-        // Recovery counters: applied only after checkpoint succeeds
-        json_repair_applied: cumulative.json_repair_applied + (analysisResult.jsonRepairApplied ? 1 : 0),
-        semantic_retry_attempted: cumulative.semantic_retry_attempted + (analysisResult.semanticRetryAttempted ? 1 : 0),
-        semantic_retry_recovered: cumulative.semantic_retry_recovered + (analysisResult.semanticRetryRecovered ? 1 : 0),
-      };
-      const nextCursor = chunks[i].chunk_id;
-
-      // D4: Checkpoint UPDATE — persist cursor and cumulative together
-      try {
-        await db.execute(
-          `UPDATE dcs_pipeline_state
-           SET cursor_value = $1, detail = $2, status = 'running', updated_at = now()
-           WHERE id = $3::uuid`,
-          [nextCursor, JSON.stringify(nextCumulative), stateId],
-          { label: `DcsExtract: advance cursor to ${chunks[i].chunk_id.slice(0, 8)}` },
-        );
-      } catch (cpErr) {
-        // D6: Checkpoint UPDATE failure — do not advance in-memory cursor or cumulative
-        const cpMsg = cpErr instanceof Error ? cpErr.message : String(cpErr);
-        await db.execute(
-          `UPDATE dcs_pipeline_state
-           SET status = 'failed', detail = $1, updated_at = now()
-           WHERE id = $2::uuid`,
-          [
-            JSON.stringify({
-              ...cumulative,
-              error: `Checkpoint failed: ${cpMsg.slice(0, 400)}`,
-              failed_chunk: chunks[i].chunk_id,
-            }),
-            stateId,
-          ],
-          { label: "DcsExtract: mark failed on checkpoint error" },
-        );
-        throw new Error(`DcsExtract checkpoint failed on chunk ${chunks[i].chunk_id}: ${cpMsg.slice(0, 400)}`);
-      }
-
-      // D4: Only after successful checkpoint — assign in-memory state
-      cumulative = nextCumulative;
-      cursorValue = nextCursor;
-      processedThisCall++;
-      rowsWrittenThisCall += rowsWritten;
-      if (rowsWritten === 0) emptyChunksThisCall++;
-      fabricationRejectedThisCall += analysisResult.fabricationRejected;
-      invalidDimensionRejectedThisCall += analysisResult.invalidDimensionRejected;
-      duplicateDimensionRejectedThisCall += analysisResult.duplicateDimensionRejected;
-      if (analysisResult.jsonRepairApplied) jsonRepairsAppliedThisCall++;
-      if (analysisResult.semanticRetryAttempted) semanticRetriesThisCall++;
-      if (analysisResult.semanticRetryRecovered) semanticRetryRecoveriesThisCall++;
-      if (analysisResult.traceEntry) trace.push(analysisResult.traceEntry); // Cursor-order trace
     }
 
-    // ── 7. D6: Check remaining using composite cursor ─────────
-    // Resolve current cursor to composite position for remaining count
+    // ═════════════════════════════════════════════════════════════
+    // §9: Remaining count & completion (5C.2E)
+    // ═════════════════════════════════════════════════════════════
+    // Remaining always counts physical chunks (not work units).
     let remainingChunks: number;
     if (cursorValue) {
-      // Re-resolve cursor to get current composite anchor
       const curAnchor = await db.query(
         `SELECT dc.document_id, dc.chunk_index
          FROM document_chunks dc
@@ -1179,7 +1540,6 @@ export default api({
         { label: "DcsExtract: resolve cursor for remaining count" },
       );
       if (curAnchor.length === 0) {
-        // Should not happen — cursor was just checkpointed
         throw new Error(`Cursor ${cursorValue} lost after checkpoint — data integrity error`);
       }
       const remResult = await db.query(
@@ -1206,9 +1566,8 @@ export default api({
       remainingChunks = remResult[0]?.cnt ?? 0;
     }
 
-    // ── D7: Completion check with authoritative last chunk ─────
+    // Completion check with authoritative last physical chunk
     if (remainingChunks === 0) {
-      // Determine the authoritative last physical chunk
       const lastChunkRows = await db.query(
         `SELECT dc.id AS chunk_id
          FROM document_chunks dc
@@ -1229,7 +1588,6 @@ export default api({
           cumulative.last_chunk_id === authLastChunkId;
 
         if (!completionValid) {
-          // Completion precondition failed
           const errMsg =
             `Completion invariant violated: processed_count=${cumulative.processed_count} ` +
             `totalChunks=${totalChunks} cursorValue=${cursorValue} ` +
@@ -1250,7 +1608,6 @@ export default api({
           throw new Error(`DcsExtract: ${errMsg}`);
         }
       }
-      // else: empty corpus — no authoritative last chunk, safe to mark done
 
       finalStatus = "done";
       await db.execute(
@@ -1262,8 +1619,20 @@ export default api({
       );
     }
 
+    // §10: Output telemetry
+    const logicalWindowsProcessedThisCall = excelWindowsProcessedThisCall + pdfWindowsProcessedThisCall;
+    const averageExcelWindowChars = excelWindowsProcessedThisCall > 0
+      ? Math.round(totalExcelWindowChars / excelWindowsProcessedThisCall)
+      : 0;
+
     if (mode !== "verification") {
-      console.log(`[DcsExtract] run=${input.runId.slice(0, 8)} processed=${processedThisCall} written=${rowsWrittenThisCall} fabricationRejected=${fabricationRejectedThisCall} cursor=${cursorValue ?? "null"} remaining=${remainingChunks} status=${finalStatus}`);
+      console.log(
+        `[DcsExtract] run=${input.runId.slice(0, 8)} processed=${processedThisCall} ` +
+        `written=${rowsWrittenThisCall} fabricationRejected=${fabricationRejectedThisCall} ` +
+        `cursor=${cursorValue ?? "null"} remaining=${remainingChunks} status=${finalStatus} ` +
+        `excelWindows=${excelWindowsProcessedThisCall} pdfChunks=${pdfWindowsProcessedThisCall} ` +
+        `mappingRejected=${physicalMappingRejectedThisCall}`,
+      );
     }
 
     return {
@@ -1290,6 +1659,15 @@ export default api({
       jsonRepairsAppliedThisCall,
       semanticRetriesThisCall,
       semanticRetryRecoveriesThisCall,
+      // §10: New telemetry fields (5C.2E)
+      logicalWindowsProcessedThisCall,
+      excelWindowsProcessedThisCall,
+      pdfWindowsProcessedThisCall,
+      physicalChunksCoveredThisCall,
+      averageExcelWindowChars,
+      largestExcelWindowChars: maxExcelWindowChars,
+      physicalMappingRejectedThisCall,
+      effectiveWorkUnitVersion: WORK_UNIT_VERSION,
     };
   },
 });
@@ -1331,6 +1709,47 @@ interface AnalysisOutcome {
   /** Optional debug trace entry */
   traceEntry: TraceEntry | null;
 }
+
+// ═════════════════════════════════════════════════════════════════
+// §2: Unified Work-Unit type (5C.2E)
+// ═════════════════════════════════════════════════════════════════
+
+/** One physical chunk — used for all non-Excel documents. */
+interface PhysicalWorkUnit {
+  kind: "physical";
+  chunk: ChunkRow;
+  /** Single-element array for uniform iteration in commit walk. */
+  ownedChunkIds: [string];
+  firstOwnedChunkId: string;
+  lastOwnedChunkId: string;
+  /** Text sent to the model (= chunk_text). */
+  analysisText: string;
+  charCount: number;
+  sourceFile: string;
+  documentTag: string | null;
+  documentId: string;
+}
+
+/** One logical Excel window covering ≥1 physical chunks. */
+interface ExcelWorkUnit {
+  kind: "excel_logical";
+  window: LogicalWindow;
+  /** Ordered physical chunks owned by this window (chunk_index ASC). */
+  ownedChunks: ChunkRow[];
+  /** Physical chunk IDs in composite order. */
+  ownedChunkIds: string[];
+  firstOwnedChunkId: string;
+  lastOwnedChunkId: string;
+  /** Text sent to the model (= window.windowText). */
+  analysisText: string;
+  charCount: number;
+  sourceFile: string;
+  documentTag: string | null;
+  documentId: string;
+}
+
+/** Discriminated union: the scheduler produces these; workers consume them. */
+type WorkUnit = PhysicalWorkUnit | ExcelWorkUnit;
 
 // ═════════════════════════════════════════════════════════════════
 // D1: In-memory analysis function — NO database access
