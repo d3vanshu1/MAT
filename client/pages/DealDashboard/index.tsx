@@ -2920,9 +2920,10 @@ export default function DealDashboardPage() {
   // is a Superblocks Workflow (server-side cron) — this is complementary UX.
   // ---------------------------------------------------------------------------
   const resumingModulesRef = useRef<Set<string>>(new Set());
-  // B2 FIX — per-module resume attempt counter (cap at 3)
+  // B2 FIX — per-module resume attempt counter (cap at 10 to survive frequent
+  // build-finalize cycles during development without exhausting the counter)
   const resumeAttemptCountRef = useRef<Record<string, number>>({});
-  const MAX_RESUME_ATTEMPTS = 3;
+  const MAX_RESUME_ATTEMPTS = 10;
 
   // Stall detector — tracks last observed DCS evidence count & timestamp.
   // If evidence count hasn't changed for STALL_THRESHOLD_MS while the module
