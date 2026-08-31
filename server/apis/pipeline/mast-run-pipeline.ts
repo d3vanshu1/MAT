@@ -80,6 +80,13 @@ export default api({
     const db = ctx.integrations.ic_diligence_db;
     const ai = ctx.integrations.ai;
 
+    if (!ai) {
+      throw new Error(
+        `${LOG_PREFIX} Anthropic integration (ai) is missing from ctx.integrations. ` +
+        `Ensure the anthropic integration (${ANTHROPIC_ID}) is configured and accessible.`,
+      );
+    }
+
     // Generate a unique token for this invocation
     const token = mastRandomUUID();
 

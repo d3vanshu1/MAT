@@ -115,13 +115,6 @@ const registerMemo: StageHandler = async (
   const { db, ai, runId, dealId, resumePosition } = ctx;
   const startTime = Date.now();
 
-  if (!ai) {
-    throw new Error(
-      `${LOG_PREFIX} StageContext.ai is required for register_memo but was not provided. ` +
-      `The orchestrator must declare an anthropic integration and pass it in the context.`,
-    );
-  }
-
   const model = getModuleModel(MODULE_ID);
 
   // ── 1. Load all IC memo chunks ─────────────────────────────────────
@@ -159,6 +152,13 @@ const registerMemo: StageHandler = async (
   let rejectShortQuote = 0;
   let rejectQuoteNotFound = 0;
 
+  // Failure counters (D2)
+  let chunksAllCallsFailed = 0;
+  let chunksAllParsesFailed = 0;
+
+  // Truncation counter (D3)
+  let chunksTruncated = 0;
+
   while (chunkIdx < totalChunks) {
     // Budget check
     if (Date.now() - startTime > STAGE_BUDGET_MS) {
@@ -171,24 +171,29 @@ const registerMemo: StageHandler = async (
     const chunk = allChunks[chunkIdx];
     const locator = `${chunk.file_name} chunk ${chunk.chunk_index}`;
 
-    // ── 2a. Idempotency: delete existing rows for this chunk ─────────
-    await db.execute(
-      `DELETE FROM mast_assumptions
-       WHERE run_id = $1::uuid
-         AND origin_type = 'memo_prose'
-         AND origin_locator = $2`,
-      [runId, locator],
-      { label: `MAST-MEMO: clear existing rows for ${locator}` },
-    );
-
     // ── 2b. LLM call ────────────────────────────────────────────────
     const userPrompt = buildUserPrompt(chunk.content);
     let propositions: Array<{ proposition: string; quote: string }> = [];
     let attempts = 0;
-    const MAX_ATTEMPTS = 2; // one retry on parse failure
+    const MAX_ATTEMPTS = 2;
+    let lastAttemptWasError = false;
+    let lastAttemptWasParseFailure = false;
+    let lastAttemptWasTruncated = false;
+    let chunkCallErrors = 0;
+    let chunkParseErrors = 0;
+    let chunkWasTruncated = false;
 
-    while (attempts < MAX_ATTEMPTS && propositions.length === 0) {
+    // D4: retry only on error, parse failure, or truncation — not on empty valid result
+    while (attempts < MAX_ATTEMPTS) {
+      // After the first attempt, only retry if the previous attempt had a retriable problem
+      if (attempts > 0 && !lastAttemptWasError && !lastAttemptWasParseFailure && !lastAttemptWasTruncated) {
+        break;
+      }
       attempts++;
+      lastAttemptWasError = false;
+      lastAttemptWasParseFailure = false;
+      lastAttemptWasTruncated = false;
+
       try {
         const llmResponse = await ai.apiRequest(
           {
@@ -208,6 +213,17 @@ const registerMemo: StageHandler = async (
         totalInputTokens += llmResponse.usage.input_tokens;
         totalOutputTokens += llmResponse.usage.output_tokens;
 
+        // D3: detect truncation
+        if (llmResponse.stop_reason === "max_tokens") {
+          console.log(
+            `${LOG_PREFIX} Chunk ${chunkIdx}: TRUNCATED (stop_reason=max_tokens, attempt ${attempts}).`,
+          );
+          lastAttemptWasTruncated = true;
+          chunkWasTruncated = true;
+          // Do not retry on truncation — retry will truncate identically
+          // But parse whatever was returned in case it is still valid JSON
+        }
+
         const responseText = llmResponse.content
           .filter((c: any) => c.type === "text")
           .map((c: any) => c.text)
@@ -218,8 +234,10 @@ const registerMemo: StageHandler = async (
           const parsed = JSON.parse(responseText);
           if (!Array.isArray(parsed)) {
             console.log(
-              `${LOG_PREFIX} Chunk ${chunkIdx}: response is not an array. Raw (300): ${responseText.slice(0, 300)}`,
+              `${LOG_PREFIX} Chunk ${chunkIdx}: response is not an array (attempt ${attempts}). Raw (300): ${responseText.slice(0, 300)}`,
             );
+            lastAttemptWasParseFailure = true;
+            chunkParseErrors++;
             continue;
           }
           propositions = parsed.filter(
@@ -229,18 +247,36 @@ const registerMemo: StageHandler = async (
               typeof el.proposition === "string" &&
               typeof el.quote === "string",
           );
+          // Successfully parsed — break out regardless of proposition count (D4)
+          break;
         } catch (_parseErr) {
           console.log(
             `${LOG_PREFIX} Chunk ${chunkIdx}: JSON parse failure (attempt ${attempts}). Raw (300): ${responseText.slice(0, 300)}`,
           );
+          lastAttemptWasParseFailure = true;
+          chunkParseErrors++;
           continue;
         }
       } catch (llmErr) {
         console.log(
           `${LOG_PREFIX} Chunk ${chunkIdx}: LLM call failed (attempt ${attempts}): ${String(llmErr)}`,
         );
+        lastAttemptWasError = true;
+        chunkCallErrors++;
         continue;
       }
+    }
+
+    // D2: track chunks where all attempts failed
+    if (chunkCallErrors >= attempts) {
+      chunksAllCallsFailed++;
+    } else if (chunkParseErrors >= attempts) {
+      chunksAllParsesFailed++;
+    }
+
+    // D3: count truncated chunks
+    if (chunkWasTruncated) {
+      chunksTruncated++;
     }
 
     // Cap at PROPOSITIONS_PER_CHUNK_CAP
@@ -253,7 +289,7 @@ const registerMemo: StageHandler = async (
 
     // ── 2c. Quote gate — enforce in code ─────────────────────────────
     const normalizedChunkContent = normalize(chunk.content);
-    let chunkAccepted = 0;
+    const acceptedProps: Array<{ proposition: string; quote: string }> = [];
 
     for (const prop of propositions) {
       // Gate: proposition not empty
@@ -304,30 +340,44 @@ const registerMemo: StageHandler = async (
         continue;
       }
 
-      // ── 2d. Write accepted proposition ─────────────────────────────
-      await db.execute(
-        `INSERT INTO mast_assumptions (
-           run_id, deal_id, proposition, origin_type, origin_doc_id,
-           origin_locator, verbatim, quantified, value, unit, period,
-           detector, recursion_depth
-         ) VALUES (
-           $1::uuid, $2::uuid, $3, 'memo_prose', $4::uuid,
-           $5, $6, false, NULL, NULL, NULL,
-           NULL, 0
-         )`,
-        [
-          runId, dealId, prop.proposition, chunk.document_id,
-          locator, prop.quote,
-        ],
-        { label: `MAST-MEMO: insert proposition from ${locator}` },
-      );
-
-      chunkAccepted++;
+      acceptedProps.push(prop);
     }
 
-    totalAccepted += chunkAccepted;
+    // D1: idempotency delete runs only after successful parse and before inserts
+    if (acceptedProps.length > 0) {
+      await db.execute(
+        `DELETE FROM mast_assumptions
+         WHERE run_id = $1::uuid
+           AND origin_type = 'memo_prose'
+           AND origin_locator = $2`,
+        [runId, locator],
+        { label: `MAST-MEMO: clear existing rows for ${locator}` },
+      );
+
+      // ── 2d. Write accepted propositions ────────────────────────────
+      for (const prop of acceptedProps) {
+        await db.execute(
+          `INSERT INTO mast_assumptions (
+             run_id, deal_id, proposition, origin_type, origin_doc_id,
+             origin_locator, verbatim, quantified, value, unit, period,
+             detector, recursion_depth
+           ) VALUES (
+             $1::uuid, $2::uuid, $3, 'memo_prose', $4::uuid,
+             $5, $6, false, NULL, NULL, NULL,
+             NULL, 0
+           )`,
+          [
+            runId, dealId, prop.proposition, chunk.document_id,
+            locator, prop.quote,
+          ],
+          { label: `MAST-MEMO: insert proposition from ${locator}` },
+        );
+      }
+    }
+
+    totalAccepted += acceptedProps.length;
     console.log(
-      `${LOG_PREFIX} Chunk ${chunkIdx} (${locator}): ${chunkAccepted} accepted of ${propositions.length} returned.`,
+      `${LOG_PREFIX} Chunk ${chunkIdx} (${locator}): ${acceptedProps.length} accepted of ${propositions.length} returned.`,
     );
 
     chunkIdx++;
@@ -338,7 +388,8 @@ const registerMemo: StageHandler = async (
     `${LOG_PREFIX} Processed chunks ${resumePosition}–${chunkIdx - 1} of ${totalChunks}. ` +
     `Accepted: ${totalAccepted}. Tokens: ${totalInputTokens} in / ${totalOutputTokens} out. ` +
     `Rejections: empty_proposition=${rejectEmptyProposition}, short_proposition=${rejectShortProposition}, ` +
-    `empty_quote=${rejectEmptyQuote}, short_quote=${rejectShortQuote}, quote_not_found=${rejectQuoteNotFound}.`,
+    `empty_quote=${rejectEmptyQuote}, short_quote=${rejectShortQuote}, quote_not_found=${rejectQuoteNotFound}. ` +
+    `Failures: call_errors=${chunksAllCallsFailed}, parse_errors=${chunksAllParsesFailed}, truncated=${chunksTruncated}.`,
   );
 
   // ── 4. Completion check ────────────────────────────────────────────
@@ -349,6 +400,16 @@ const registerMemo: StageHandler = async (
       itemsTotal: totalChunks,
       resumePosition: chunkIdx,
     };
+  }
+
+  // D2: if >25% of chunks failed (call errors + parse errors), throw
+  const failedChunks = chunksAllCallsFailed + chunksAllParsesFailed;
+  if (failedChunks > totalChunks / 4) {
+    throw new Error(
+      `${LOG_PREFIX} ${failedChunks} of ${totalChunks} chunks failed to process ` +
+      `(call_errors=${chunksAllCallsFailed}, parse_errors=${chunksAllParsesFailed}). ` +
+      `Exceeds 25% threshold — run is not complete.`,
+    );
   }
 
   // All chunks processed — fail closed if zero accepted
