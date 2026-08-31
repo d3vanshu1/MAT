@@ -67,7 +67,7 @@ function toA1(row: number, col: number): string {
   return `${indexToCol(col + 1)}${row + 1}`;
 }
 
-interface CellRef {
+export interface CellRef {
   sheet: string;
   addr: string; // e.g. "C23"
 }
@@ -76,7 +76,7 @@ interface CellRef {
  * Extract all cell references from a formula string.
  * Ranges are expanded up to RANGE_CAP cells. Oversized ranges are logged and skipped.
  */
-function extractCellRefs(
+export function extractCellRefs(
   formula: string,
   currentSheet: string,
 ): CellRef[] {
@@ -123,7 +123,7 @@ function extractCellRefs(
 // Period header detection
 // ---------------------------------------------------------------------------
 
-interface ParsedCell {
+export interface ParsedCell {
   r: number;
   c: number;
   value: unknown;
@@ -136,7 +136,7 @@ interface ParsedCell {
  * of non-empty cells parse as a 4-digit year (2000–2100) or a date.
  * Returns a Map from row index to an array of string period values by column.
  */
-function detectPeriodHeaderRows(
+export function detectPeriodHeaderRows(
   cells: ParsedCell[],
 ): Map<number, Map<number, string>> {
   // Group cells by row for the first 6 rows
@@ -190,64 +190,59 @@ function detectPeriodHeaderRows(
 }
 
 // ---------------------------------------------------------------------------
-// Stage handler
+// selectPeriodRow — pick one header row from the map returned by
+// detectPeriodHeaderRows.  Prefer the row whose values parse
+// predominantly as 4-digit years (2000-2100) over one whose values
+// parse as dates.  Tie-break: lowest row index.
 // ---------------------------------------------------------------------------
 
-const DRIVER_CAP = 2000;
-
-const registerModelDrivers: StageHandler = async (
-  ctx: StageContext,
-): Promise<StageResult> => {
-  const { db, runId, dealId, resumePosition } = ctx;
-  const startTime = Date.now();
-
-  // ── 1. Resolve the model document ──────────────────────────────────
-  const modelDocs = await db.query(
-    `SELECT d.id, d.file_name, COUNT(dt.id)::int AS table_count, d.uploaded_at::text AS created_at
-     FROM documents d
-     JOIN doc_tables dt ON dt.document_id = d.id
-     WHERE d.deal_id = $1::uuid
-       AND d.document_tag = 'financial_model'
-     GROUP BY d.id, d.file_name, d.uploaded_at
-     ORDER BY COUNT(dt.id) DESC, d.uploaded_at DESC
-     LIMIT 1`,
-    ModelDocRow,
-    [dealId],
-    { label: "MAST: resolve financial model document" },
-  );
-
-  if (modelDocs.length === 0) {
-    console.log(`${LOG_PREFIX} No financial_model document found for deal ${dealId}. Stage complete with 0 drivers.`);
-    return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
+export function selectPeriodRow(
+  headerRows: Map<number, Map<number, string>>,
+): Map<number, string> | null {
+  if (headerRows.size === 0) return null;
+  if (headerRows.size === 1) {
+    return headerRows.values().next().value ?? null;
   }
 
-  const modelDoc = modelDocs[0];
-  console.log(
-    `${LOG_PREFIX} Chosen model document: ${modelDoc.file_name} (id=${modelDoc.id}, ${modelDoc.table_count} sheets)`,
-  );
+  let bestRow: number | null = null;
+  let bestYearFraction = -1;
 
-  // ── 2. Load all sheets for the document ────────────────────────────
-  const allSheets = await db.query(
-    `SELECT id, sheet_or_page, data
-     FROM doc_tables
-     WHERE document_id = $1::uuid
-     ORDER BY sheet_or_page ASC`,
-    DocTableRow,
-    [modelDoc.id],
-    { label: "MAST: load all sheets for model" },
-  );
-
-  if (allSheets.length === 0) {
-    console.log(`${LOG_PREFIX} No sheets found. Stage complete.`);
-    return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
+  for (const [rowIdx, colMap] of headerRows) {
+    let yearCount = 0;
+    let total = 0;
+    for (const val of colMap.values()) {
+      total++;
+      const num = Number(val);
+      if (Number.isInteger(num) && num >= 2000 && num <= 2100) {
+        yearCount++;
+      }
+    }
+    const yearFraction = total > 0 ? yearCount / total : 0;
+    if (
+      yearFraction > bestYearFraction ||
+      (yearFraction === bestYearFraction && (bestRow === null || rowIdx < bestRow))
+    ) {
+      bestYearFraction = yearFraction;
+      bestRow = rowIdx;
+    }
   }
 
-  // ── 3. Build workbook-wide reference index ─────────────────────────
-  //    Scan every formula in every sheet to build the set of referenced addresses.
+  if (bestRow === null) return null;
+  return headerRows.get(bestRow) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// buildReferenceIndex — scan every formula in every sheet to build
+// the set of referenced addresses and a per-address formula count.
+// ---------------------------------------------------------------------------
+
+export function buildReferenceIndex(
+  sheets: { sheet_or_page: string; data: any }[],
+): { refSet: Set<string>; refCountMap: Map<string, number> } {
   const refSet = new Set<string>(); // "SheetName!A1" normalized keys
   const refCountMap = new Map<string, number>(); // key → count of distinct formulas referencing it
 
-  for (const sheet of allSheets) {
+  for (const sheet of sheets) {
     const data = sheet.data as { cells?: ParsedCell[] };
     const cells = data?.cells ?? [];
     for (const cell of cells) {
@@ -267,6 +262,81 @@ const registerModelDrivers: StageHandler = async (
   }
 
   console.log(`${LOG_PREFIX} Reference index built: ${refSet.size} distinct cell addresses referenced across all formulas.`);
+  return { refSet, refCountMap };
+}
+
+// ---------------------------------------------------------------------------
+// resolveModelDocument — find the financial_model document with the
+// most sheets, breaking ties by most recent upload.
+// ---------------------------------------------------------------------------
+
+export async function resolveModelDocument(
+  db: any,
+  dealId: string,
+): Promise<z.infer<typeof ModelDocRow> | null> {
+  const modelDocs = await db.query(
+    `SELECT d.id, d.file_name, COUNT(dt.id)::int AS table_count, d.uploaded_at::text AS created_at
+     FROM documents d
+     JOIN doc_tables dt ON dt.document_id = d.id
+     WHERE d.deal_id = $1::uuid
+       AND d.document_tag = 'financial_model'
+     GROUP BY d.id, d.file_name, d.uploaded_at
+     ORDER BY COUNT(dt.id) DESC, d.uploaded_at DESC
+     LIMIT 1`,
+    ModelDocRow,
+    [dealId],
+    { label: "MAST: resolve financial model document" },
+  );
+
+  if (modelDocs.length === 0) {
+    console.log(`${LOG_PREFIX} No financial_model document found for deal ${dealId}.`);
+    return null;
+  }
+
+  const modelDoc = modelDocs[0];
+  console.log(
+    `${LOG_PREFIX} Chosen model document: ${modelDoc.file_name} (id=${modelDoc.id}, ${modelDoc.table_count} sheets)`,
+  );
+  return modelDoc;
+}
+
+// ---------------------------------------------------------------------------
+// Stage handler
+// ---------------------------------------------------------------------------
+
+const DRIVER_CAP = 2000;
+
+const registerModelDrivers: StageHandler = async (
+  ctx: StageContext,
+): Promise<StageResult> => {
+  const { db, runId, dealId, resumePosition } = ctx;
+  const startTime = Date.now();
+
+  // ── 1. Resolve the model document ──────────────────────────────────
+  const modelDoc = await resolveModelDocument(db, dealId);
+
+  if (modelDoc === null) {
+    return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
+  }
+
+  // ── 2. Load all sheets for the document ────────────────────────────
+  const allSheets = await db.query(
+    `SELECT id, sheet_or_page, data
+     FROM doc_tables
+     WHERE document_id = $1::uuid
+     ORDER BY sheet_or_page ASC`,
+    DocTableRow,
+    [modelDoc.id],
+    { label: "MAST: load all sheets for model" },
+  );
+
+  if (allSheets.length === 0) {
+    console.log(`${LOG_PREFIX} No sheets found. Stage complete.`);
+    return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
+  }
+
+  // ── 3. Build workbook-wide reference index ─────────────────────────
+  const { refSet, refCountMap } = buildReferenceIndex(allSheets);
 
   // ── 4. Process sheets with resume support ──────────────────────────
   const totalSheets = allSheets.length;
@@ -309,6 +379,7 @@ const registerModelDrivers: StageHandler = async (
     // ── 4b. Detect period header rows ────────────────────────────────
     const periodHeaders = detectPeriodHeaderRows(cells);
     const headerRowIndices = new Set(periodHeaders.keys());
+    const selectedPeriodRow = selectPeriodRow(periodHeaders);
 
     // ── 4c. Identify drivers ─────────────────────────────────────────
     interface DriverCandidate {
@@ -360,13 +431,12 @@ const registerModelDrivers: StageHandler = async (
         label = rowHeaders[cell.r].trim();
       }
 
-      // Period: value from period header row at the same column index
+      // Period: value from the selected period header row at the same column index
       let period: string | null = null;
-      for (const [_rowIdx, colMap] of periodHeaders) {
-        const val = colMap.get(cell.c);
+      if (selectedPeriodRow !== null) {
+        const val = selectedPeriodRow.get(cell.c);
         if (val !== undefined) {
           period = val;
-          break; // use first matching header row
         }
       }
 
