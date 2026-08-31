@@ -301,12 +301,12 @@ const propositionalize: StageHandler = async (
       for (let i = 0; i < batch.length; i++) {
         const sentence = sentenceMap.get(i + 1);
         if (sentence) {
-          // Verify the density tag is not in the rewritten sentence
-          const densityMatch = batch[i].proposition.match(/\(\d+\.\d+\)$/);
-          const densityTag = densityMatch ? densityMatch[0] : null;
-          if (densityTag && sentence.includes(densityTag)) {
+          // Reject any sentence containing a parenthesised decimal number
+          // (density tags like "(0.34)" are build metadata, not content)
+          const leakedTag = sentence.match(/\(\d+\.\d+\)/);
+          if (leakedTag) {
             console.log(
-              `${LOG_PREFIX} Row ${batch[i].id}: density tag "${densityTag}" leaked into rewritten proposition. Skipping.`,
+              `${LOG_PREFIX} Row ${batch[i].id}: density-like tag "${leakedTag[0]}" found in rewritten proposition. Skipping.`,
             );
             unchanged++;
             continue;

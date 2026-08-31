@@ -39,6 +39,7 @@ import inheritance from "./mast-inheritance.js";
 import emergent from "./mast-emergent.js";
 import propositionalize from "./mast-propositionalize.js";
 import supportSearch from "./mast-support-search.js";
+import forecastRecursion from "./mast-forecast-recursion.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -97,7 +98,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   inheritance: inheritance,
   emergent: emergent,
   support_search: supportSearch,
-  forecast_recursion: loopStub,
+  forecast_recursion: forecastRecursion,
   lineage: loopStub,
   dependence: singleShotStub,
   severity: singleShotStub,

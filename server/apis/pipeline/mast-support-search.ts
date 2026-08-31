@@ -108,6 +108,8 @@ function buildSweepPrompt(
 ASSUMPTIONS
 ${assumptionList}
 
+Passages are labelled 1 through ${chunks.length} for this request only. The "chunk" field in your response must be that label. Do not use document page numbers, corpus indices, or any other numbering.
+
 PASSAGES
 ${chunkList}
 
@@ -228,9 +230,15 @@ const supportSearch: StageHandler = async (
   const totalChunks = allChunks.length;
   const totalBatches = Math.ceil(totalChunks / CHUNKS_PER_CALL);
 
+  const totalCalls = passGroups.length * totalBatches;
   console.log(
-    `${LOG_PREFIX} ${totalChunks} reference chunks in ${totalBatches} batches.`,
+    `${LOG_PREFIX} ${totalChunks} reference chunks, ${totalBatches} batches/pass, ${totalCalls} total calls required.`,
   );
+  if (passGroups.length > 1) {
+    console.log(
+      `${LOG_PREFIX} Corpus will be swept once per pass group (${passGroups.length} passes).`,
+    );
+  }
 
   // ── 4. Decode resume position ─────────────────────────────────────
   let passIdx = Math.floor(resumePosition / PASS_MULTIPLIER);
@@ -259,6 +267,7 @@ const supportSearch: StageHandler = async (
   let rejectQuoteTooShort = 0;
   let rejectPrefixNotFound = 0;
   let rejectBadIndex = 0;
+  let remappedChunkLabel = 0;
   let callFailures = 0;
   let truncations = 0;
   let chunksProcessed = 0;
@@ -292,6 +301,7 @@ const supportSearch: StageHandler = async (
           rejectQuoteTooShort,
           rejectPrefixNotFound,
           rejectBadIndex,
+          remappedChunkLabel,
           hitsByKind,
           distinctAssumptionsHit: assumptionsHit.size,
           callFailures,
@@ -409,10 +419,18 @@ const supportSearch: StageHandler = async (
       for (const hit of rawHits) {
         totalHitsReturned++;
 
-        // Validate chunk label
+        // Validate chunk label — try batch-local first, then absolute remap
+        let resolvedChunkLabel = hit.chunk;
         if (hit.chunk < 1 || hit.chunk > chunkBatch.length) {
-          rejectBadIndex++;
-          continue;
+          // Attempt remap: model may have returned the absolute chunk_index
+          const remapIdx = chunkBatch.findIndex((c) => c.chunk_index === hit.chunk);
+          if (remapIdx >= 0) {
+            resolvedChunkLabel = remapIdx + 1;
+            remappedChunkLabel++;
+          } else {
+            rejectBadIndex++;
+            continue;
+          }
         }
 
         // Validate assumption index exists in this pass group
@@ -433,7 +451,7 @@ const supportSearch: StageHandler = async (
         }
 
         // Prefix gate — corrected from full-string to prefix match
-        const chunkContent = chunkBatch[hit.chunk - 1].content;
+        const chunkContent = chunkBatch[resolvedChunkLabel - 1].content;
         const normalizedChunk = normalize(chunkContent);
         const normalizedQuote = normalize(hit.quote);
 
@@ -461,7 +479,7 @@ const supportSearch: StageHandler = async (
         assumptionsHit.add(hit.index);
 
         const assumptionId = assumptionIdByIndex.get(hit.index);
-        const chunkData = chunkBatch[hit.chunk - 1];
+        const chunkData = chunkBatch[resolvedChunkLabel - 1];
         const locator = `${chunkData.file_name}:chunk_${chunkData.chunk_index}`;
         const classifierReason = `pass_${passIdx}_batch_${batchIdx}`;
 
@@ -500,7 +518,7 @@ const supportSearch: StageHandler = async (
     `${LOG_PREFIX} support_search complete. ` +
     `chunksProcessed=${chunksProcessed}, totalHitsReturned=${totalHitsReturned}, ` +
     `hitsPassedGate=${hitsPassedGate}, rejectQuoteTooShort=${rejectQuoteTooShort}, ` +
-    `rejectPrefixNotFound=${rejectPrefixNotFound}, rejectBadIndex=${rejectBadIndex}, ` +
+    `rejectPrefixNotFound=${rejectPrefixNotFound}, rejectBadIndex=${rejectBadIndex}, remappedChunkLabel=${remappedChunkLabel}, ` +
     `callFailures=${callFailures}, truncations=${truncations}, ` +
     `distinctAssumptionsHit=${assumptionsHit.size}/${numberedAssumptions.length}. ` +
     `hitsByKind=${JSON.stringify(hitsByKind)}.`,
@@ -525,7 +543,7 @@ const supportSearch: StageHandler = async (
     complete: true,
     itemsDone: totalChunks * passGroups.length,
     itemsTotal: totalChunks * passGroups.length,
-    resumePosition: passGroups.length * PASS_MULTIPLIER,
+    resumePosition: passGroups.length * PASS_MULTIPLIER + totalBatches,
   };
 };
 
