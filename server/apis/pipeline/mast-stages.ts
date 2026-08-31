@@ -37,6 +37,8 @@ import registerAssemble from "./mast-register-assemble.js";
 import relianceLinks from "./mast-reliance-links.js";
 import inheritance from "./mast-inheritance.js";
 import emergent from "./mast-emergent.js";
+import propositionalize from "./mast-propositionalize.js";
+import supportSearch from "./mast-support-search.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -90,10 +92,11 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   register_silent: registerSilent,
   register_memo: registerMemo,
   register_assemble: registerAssemble,
+  propositionalize: propositionalize,
   reliance_links: relianceLinks,
   inheritance: inheritance,
   emergent: emergent,
-  support_search: loopStub,
+  support_search: supportSearch,
   forecast_recursion: loopStub,
   lineage: loopStub,
   dependence: singleShotStub,
