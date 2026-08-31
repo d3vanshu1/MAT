@@ -41,6 +41,7 @@ import propositionalize from "./mast-propositionalize.js";
 import supportSearch from "./mast-support-search.js";
 import forecastRecursion from "./mast-forecast-recursion.js";
 import dependence from "./mast-dependence.js";
+import severity from "./mast-severity.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -102,7 +103,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   forecast_recursion: forecastRecursion,
   lineage: loopStub,
   dependence: dependence,
-  severity: singleShotStub,
+  severity: severity,
   fragility: loopStub,
   render: singleShotStub,
 };
