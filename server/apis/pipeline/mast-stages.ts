@@ -33,6 +33,7 @@ import type { StageName, StageContext, StageResult, StageHandler } from "./mast-
 import registerModelDrivers from "./mast-register-model-drivers.js";
 import registerSilent from "./mast-register-silent.js";
 import registerMemo from "./mast-register-memo.js";
+import registerAssemble from "./mast-register-assemble.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -85,7 +86,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   register_model_drivers: registerModelDrivers,
   register_silent: registerSilent,
   register_memo: registerMemo,
-  register_assemble: singleShotStub,
+  register_assemble: registerAssemble,
   reliance_links: singleShotStub,
   inheritance: loopStub,
   emergent: singleShotStub,

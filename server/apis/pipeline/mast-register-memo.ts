@@ -182,6 +182,7 @@ const registerMemo: StageHandler = async (
     let chunkCallErrors = 0;
     let chunkParseErrors = 0;
     let chunkWasTruncated = false;
+    let chunkParsedSuccessfully = false;
 
     // D4: retry only on error, parse failure, or truncation — not on empty valid result
     while (attempts < MAX_ATTEMPTS) {
@@ -248,6 +249,7 @@ const registerMemo: StageHandler = async (
               typeof el.quote === "string",
           );
           // Successfully parsed — break out regardless of proposition count (D4)
+          chunkParsedSuccessfully = true;
           break;
         } catch (_parseErr) {
           console.log(
@@ -343,8 +345,8 @@ const registerMemo: StageHandler = async (
       acceptedProps.push(prop);
     }
 
-    // D1: idempotency delete runs only after successful parse and before inserts
-    if (acceptedProps.length > 0) {
+    // D1: idempotency delete runs only after successful parse, before inserts
+    if (chunkParsedSuccessfully) {
       await db.execute(
         `DELETE FROM mast_assumptions
          WHERE run_id = $1::uuid
