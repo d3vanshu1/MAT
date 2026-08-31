@@ -39,6 +39,7 @@ export type StageName = (typeof STAGES)[number];
  */
 export const LOOP_STAGES: ReadonlySet<string> = new Set([
   "register_model_drivers",
+  "register_silent",
   "inheritance",
   "support_search",
   "forecast_recursion",
@@ -156,6 +157,9 @@ function loadRealHandlers(): void {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { default: registerModelDrivers } = require("./mast-register-model-drivers.js");
   HANDLER_MAP.register_model_drivers = registerModelDrivers;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { default: registerSilent } = require("./mast-register-silent.js");
+  HANDLER_MAP.register_silent = registerSilent;
 }
 
 /** Look up the handler for a stage name. */
