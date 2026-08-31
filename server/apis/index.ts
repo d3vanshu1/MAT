@@ -169,6 +169,7 @@ import MastRunPipeline from './pipeline/mast-run-pipeline.js';
 import MastResetPipeline from './pipeline/mast-reset-pipeline.js';
 import MastDiagFormulaCoverage from './pipeline/mast-diag-formula-coverage.js';
 import MastDiagRetrievalProbe from './pipeline/mast-diag-retrieval-probe.js';
+import MastDiagSweepProbe from './pipeline/mast-diag-sweep-probe.js';
 import BssRunPipeline from './pipeline/bss-run-pipeline.js';
 import EroGetActiveRun from './pipeline/ero-get-active-run.js';
 import EroRunPipeline from './pipeline/ero-run-pipeline.js';
@@ -310,7 +311,7 @@ const apis = {
   // DCS rebuild
   DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic, RunCurationFixtures, DcsComputeDimensionRationales, DcsPersistRationalesOneshot, DcsRepublishV2,
   // MAST v2 pipeline
-  MastRunPipeline, MastResetPipeline, MastDiagFormulaCoverage, MastDiagRetrievalProbe,
+  MastRunPipeline, MastResetPipeline, MastDiagFormulaCoverage, MastDiagRetrievalProbe, MastDiagSweepProbe,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
