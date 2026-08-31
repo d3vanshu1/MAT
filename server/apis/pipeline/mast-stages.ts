@@ -1,90 +1,38 @@
 /**
  * mast-stages.ts
  *
- * Canonical stage registry for MAST v2 (Model Assumptions Stress Test).
+ * Stage registry for MAST v2 (Model Assumptions Stress Test).
  *
- * Every stage handler shares one signature so that later packets swap a stub
- * for a real implementation without changing the orchestrator.
+ * Re-exports the canonical types and constants from mast-contract.ts
+ * (the leaf module) so existing importers keep working.
+ *
+ * Contains only the handler registry, stubs, and getStageHandler.
  *
  * MAST owns this registry end to end. No imports from OA, CC, BSS, ERO, or DCS.
  */
 
 // ---------------------------------------------------------------------------
-// Stage list — the canonical pipeline sequence
+// Re-export all contract symbols so existing `from "./mast-stages.js"` work
 // ---------------------------------------------------------------------------
+export {
+  STAGES,
+  type StageName,
+  LOOP_STAGES,
+  STAGE_BUDGET_MS,
+  type StageContext,
+  type StageResult,
+  type StageHandler,
+} from "./mast-contract.js";
 
-export const STAGES = [
-  "register_model_drivers",
-  "register_silent",
-  "register_memo",
-  "register_assemble",
-  "reliance_links",
-  "inheritance",
-  "emergent",
-  "support_search",
-  "forecast_recursion",
-  "lineage",
-  "dependence",
-  "severity",
-  "fragility",
-  "render",
-] as const;
-
-export type StageName = (typeof STAGES)[number];
-
-/**
- * Stages that iterate per item and must resume mid-stage.
- * The orchestrator uses this to decide whether a "running" stage
- * should be re-entered rather than restarted.
- */
-export const LOOP_STAGES: ReadonlySet<string> = new Set([
-  "register_model_drivers",
-  "register_silent",
-  "register_memo",
-  "inheritance",
-  "support_search",
-  "forecast_recursion",
-  "lineage",
-  "fragility",
-]);
-
-/**
- * Budget (ms) for loop stages — stop starting new items past this.
- * 180s gives a 120s margin before the 300s platform kill.
- */
-export const STAGE_BUDGET_MS = 180_000;
+import type { StageName, StageContext, StageResult, StageHandler } from "./mast-contract.js";
 
 // ---------------------------------------------------------------------------
-// Handler signature
+// Handler imports — static top-level, no circular risk because handlers
+// import from mast-contract.ts (the leaf), not from this file.
 // ---------------------------------------------------------------------------
-
-/**
- * Every stage handler receives the same arguments and returns the same shape.
- * The orchestrator never inspects internals beyond this contract.
- */
-export interface StageContext {
-  db: {
-    query: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]>;
-    execute: (sql: string, params: unknown[], meta?: { label: string }) => Promise<any>;
-  };
-  /** Anthropic integration client — required for LLM stages (register_memo, etc.). */
-  ai?: {
-    apiRequest: (request: any, schemas: any, meta?: { label: string }) => Promise<any>;
-  };
-  runId: string;
-  dealId: string;
-  resumePosition: number;
-}
-
-export interface StageResult {
-  complete: boolean;
-  itemsDone: number;
-  itemsTotal: number;
-  /** New resume_position to persist — only meaningful when complete is false. */
-  resumePosition: number;
-}
-
-export type StageHandler = (ctx: StageContext) => Promise<StageResult>;
+import registerModelDrivers from "./mast-register-model-drivers.js";
+import registerSilent from "./mast-register-silent.js";
+import registerMemo from "./mast-register-memo.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -133,16 +81,10 @@ function loopStub(ctx: StageContext): Promise<StageResult> {
 // Handler registry
 // ---------------------------------------------------------------------------
 
-/**
- * Real handler imports are late-bound to avoid circular initialization.
- * Stage handler modules import types from this file, so a top-level import
- * here would create a TDZ reference error.
- */
-let _realHandlersLoaded = false;
 const HANDLER_MAP: Record<StageName, StageHandler> = {
-  register_model_drivers: singleShotStub, // replaced at first lookup
-  register_silent: singleShotStub,
-  register_memo: singleShotStub,
+  register_model_drivers: registerModelDrivers,
+  register_silent: registerSilent,
+  register_memo: registerMemo,
   register_assemble: singleShotStub,
   reliance_links: singleShotStub,
   inheritance: loopStub,
@@ -156,22 +98,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   render: singleShotStub,
 };
 
-function loadRealHandlers(): void {
-  if (_realHandlersLoaded) return;
-  _realHandlersLoaded = true;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { default: registerModelDrivers } = require("./mast-register-model-drivers.js");
-  HANDLER_MAP.register_model_drivers = registerModelDrivers;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { default: registerSilent } = require("./mast-register-silent.js");
-  HANDLER_MAP.register_silent = registerSilent;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { default: registerMemo } = require("./mast-register-memo.js");
-  HANDLER_MAP.register_memo = registerMemo;
-}
-
 /** Look up the handler for a stage name. */
 export function getStageHandler(stage: StageName): StageHandler {
-  loadRealHandlers();
   return HANDLER_MAP[stage];
 }

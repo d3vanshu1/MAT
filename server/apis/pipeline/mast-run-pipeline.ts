@@ -8,7 +8,7 @@
  *
  * MAST owns this orchestrator end to end. No imports from OA, CC, BSS, ERO, or DCS.
  */
-import { api, z, postgres } from "@superblocksteam/sdk-api";
+import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import {
   STAGES,
   type StageName,
@@ -16,6 +16,7 @@ import {
 } from "./mast-stages.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
+const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
 const LOG_PREFIX = "[MAST-PIPELINE]";
 
@@ -59,6 +60,7 @@ export default api({
 
   integrations: {
     ic_diligence_db: postgres(IC_DILIGENCE_DB),
+    ai: anthropic(ANTHROPIC_ID),
   },
 
   input: z.object({
@@ -76,6 +78,7 @@ export default api({
 
   async run(ctx, { runId, dealId }) {
     const db = ctx.integrations.ic_diligence_db;
+    const ai = ctx.integrations.ai;
 
     // Generate a unique token for this invocation
     const token = mastRandomUUID();
@@ -198,6 +201,7 @@ export default api({
       const handler = getStageHandler(currentStage);
       const result = await handler({
         db,
+        ai,
         runId,
         dealId,
         resumePosition,

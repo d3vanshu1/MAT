@@ -13,8 +13,8 @@
  *
  * MAST owns this handler. No imports from OA, CC, BSS, ERO, or DCS.
  */
-import type { StageContext, StageResult, StageHandler } from "./mast-stages.js";
-import { STAGE_BUDGET_MS } from "./mast-stages.js";
+import type { StageContext, StageResult, StageHandler } from "./mast-contract.js";
+import { STAGE_BUDGET_MS } from "./mast-contract.js";
 import { getModuleModel } from "./model-config.js";
 import { z } from "@superblocksteam/sdk-api";
 
