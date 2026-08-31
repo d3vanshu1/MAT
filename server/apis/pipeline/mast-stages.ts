@@ -40,6 +40,7 @@ import emergent from "./mast-emergent.js";
 import propositionalize from "./mast-propositionalize.js";
 import supportSearch from "./mast-support-search.js";
 import forecastRecursion from "./mast-forecast-recursion.js";
+import dependence from "./mast-dependence.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -100,7 +101,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   support_search: supportSearch,
   forecast_recursion: forecastRecursion,
   lineage: loopStub,
-  dependence: singleShotStub,
+  dependence: dependence,
   severity: singleShotStub,
   fragility: loopStub,
   render: singleShotStub,
