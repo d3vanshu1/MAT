@@ -40,6 +40,7 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
   "register_model_drivers",
   "register_silent",
   "register_memo",
+  "reliance_links",
   "inheritance",
   "support_search",
   "forecast_recursion",

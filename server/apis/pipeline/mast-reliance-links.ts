@@ -25,14 +25,15 @@
  *   - |left| < 1000 → discard.
  *   - left is a whole number 1–100 → discard.
  *   - Max 5 right-side matches per left figure (keep smallest abs diff).
- *   - Max 2000 links total (keep by |left| desc).
+ *   - Max 2000 links total across all invocations (keep by |left| desc).
  *
  * RESUMABILITY:
  *   resume_position = index of next left-side figure in a stable list.
  *   Right-side index rebuilt each invocation (held in memory).
  *
  * IDEMPOTENCY:
- *   At resume_position 0, delete all mast_reliance_links for this run.
+ *   At resume_position 0, delete all mast_reliance_links for this run
+ *   before any early returns.
  *   At any other position, delete nothing.
  *
  * FAIL CLOSED:
@@ -80,6 +81,10 @@ const RefDocRow = z.object({
   id: z.string(),
   file_name: z.string(),
   document_tag: z.string().nullable(),
+});
+
+const CountRow = z.object({
+  cnt: z.coerce.number(),
 });
 
 // ---------------------------------------------------------------------------
@@ -209,11 +214,13 @@ function roundTo6(v: number): number {
   return Math.round(v * 1e6) / 1e6;
 }
 
-function withinTolerance(a: number, b: number): boolean {
-  const diff = Math.abs(a - b);
+function toleranceThreshold(a: number, b: number): number {
   const maxAbs = Math.max(Math.abs(a), Math.abs(b));
-  const threshold = Math.max(maxAbs * 0.005, 1000);
-  return diff <= threshold;
+  return Math.max(maxAbs * 0.005, 1000);
+}
+
+function withinTolerance(a: number, b: number): boolean {
+  return Math.abs(a - b) <= toleranceThreshold(a, b);
 }
 
 const SCALE_FACTORS = [1_000, 1_000_000, 1_000_000_000];
@@ -247,7 +254,7 @@ function tryMatch(left: number, right: number): MatchResult | null {
       };
     }
 
-    // right * factor ≈ left  (i.e. left / factor ≈ right / factor ... no: left ≈ right * factor)
+    // right * factor ≈ left  (i.e. left ≈ right * factor)
     const scaledRight = right * factor;
     if (withinTolerance(left, scaledRight)) {
       return {
@@ -275,8 +282,166 @@ function isSuppressed(leftValue: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Right-side indexed lookup structures (B1)
+// ---------------------------------------------------------------------------
+
+interface RightSideIndex {
+  /** Sorted by value ascending for binary-search windowed lookups. */
+  sorted: RightSideEntry[];
+  /** Hash map: roundTo6(value) → entries with that rounded value. */
+  exactMap: Map<number, RightSideEntry[]>;
+}
+
+function buildRightSideIndex(entries: RightSideEntry[]): RightSideIndex {
+  const sorted = entries.slice().sort((a, b) => a.value - b.value);
+
+  const exactMap = new Map<number, RightSideEntry[]>();
+  for (const e of entries) {
+    const key = roundTo6(e.value);
+    let bucket = exactMap.get(key);
+    if (!bucket) {
+      bucket = [];
+      exactMap.set(key, bucket);
+    }
+    bucket.push(e);
+  }
+
+  return { sorted, exactMap };
+}
+
+/**
+ * Binary search for the first index in `sorted` where value >= target.
+ */
+function lowerBound(sorted: RightSideEntry[], target: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid].value < target) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/**
+ * Collect all entries in `sorted` whose value is in [lo, hi].
+ * Uses binary search to find the start, then walks forward.
+ */
+function windowedLookup(
+  sorted: RightSideEntry[],
+  lo: number,
+  hi: number,
+): RightSideEntry[] {
+  const results: RightSideEntry[] = [];
+  const startIdx = lowerBound(sorted, lo);
+  for (let i = startIdx; i < sorted.length; i++) {
+    if (sorted[i].value > hi) break;
+    results.push(sorted[i]);
+  }
+  return results;
+}
+
+/**
+ * Find all right-side matches for a given left value using the indexed
+ * structures. Produces identical results to a full scan with tryMatch.
+ */
+function findMatches(
+  leftValue: number,
+  index: RightSideIndex,
+): Array<{ right: RightSideEntry; match: MatchResult }> {
+  const results: Array<{ right: RightSideEntry; match: MatchResult }> = [];
+  // Track already-matched right entries by identity to preserve first-match-wins
+  const matched = new Set<RightSideEntry>();
+
+  // --- numeric_exact: hash lookup ---
+  const exactKey = roundTo6(leftValue);
+  const exactBucket = index.exactMap.get(exactKey);
+  if (exactBucket) {
+    for (const right of exactBucket) {
+      // Verify the exact match (roundTo6 of both must be equal)
+      if (roundTo6(right.value) === exactKey) {
+        matched.add(right);
+        results.push({
+          right,
+          match: { method: "numeric_exact", absDiff: Math.abs(leftValue - right.value), notes: null },
+        });
+      }
+    }
+  }
+
+  // --- numeric_tolerance: windowed lookup ---
+  // Threshold depends on both left and right, but we can compute a
+  // conservative window using left alone, since threshold ≥ max(|left|*0.005, 1000)
+  // and right values inside the window only make it larger.
+  const leftAbs = Math.abs(leftValue);
+  const minThreshold = Math.max(leftAbs * 0.005, 1000);
+  const windowLo = leftValue - minThreshold;
+  const windowHi = leftValue + minThreshold;
+  const toleranceCandidates = windowedLookup(index.sorted, windowLo, windowHi);
+
+  for (const right of toleranceCandidates) {
+    if (matched.has(right)) continue; // already matched as exact
+    if (withinTolerance(leftValue, right.value)) {
+      matched.add(right);
+      results.push({
+        right,
+        match: { method: "numeric_tolerance", absDiff: Math.abs(leftValue - right.value), notes: null },
+      });
+    }
+  }
+
+  // --- scaled_match: windowed lookup for each scale factor ---
+  for (const factor of SCALE_FACTORS) {
+    // left * factor ≈ right  →  search around left*factor
+    const scaledLeft = leftValue * factor;
+    const slAbs = Math.abs(scaledLeft);
+    const slThreshold = Math.max(slAbs * 0.005, 1000);
+    const slCandidates = windowedLookup(index.sorted, scaledLeft - slThreshold, scaledLeft + slThreshold);
+    for (const right of slCandidates) {
+      if (matched.has(right)) continue;
+      if (withinTolerance(scaledLeft, right.value)) {
+        matched.add(right);
+        results.push({
+          right,
+          match: { method: "scaled_match", absDiff: Math.abs(scaledLeft - right.value), notes: `left*${factor}` },
+        });
+      }
+    }
+
+    // right * factor ≈ left  →  search around left/factor
+    const targetRight = leftValue / factor;
+    const trAbs = Math.abs(targetRight);
+    // threshold for withinTolerance(left, right*factor): max(max(|left|, |right*factor|)*0.005, 1000)
+    // right*factor ≈ left, so max abs ≈ |left|. Use left-based threshold.
+    const trThreshold = Math.max(Math.max(leftAbs, trAbs * factor) * 0.005, 1000) / factor;
+    // Be conservative: widen window slightly
+    const trWindowThreshold = Math.max(trThreshold, Math.max(trAbs * 0.005, 1000));
+    const trCandidates = windowedLookup(index.sorted, targetRight - trWindowThreshold, targetRight + trWindowThreshold);
+    for (const right of trCandidates) {
+      if (matched.has(right)) continue;
+      const scaledRight = right.value * factor;
+      if (withinTolerance(leftValue, scaledRight)) {
+        matched.add(right);
+        results.push({
+          right,
+          match: { method: "scaled_match", absDiff: Math.abs(leftValue - scaledRight), notes: `right*${factor}` },
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Stage handler
 // ---------------------------------------------------------------------------
+
+const GLOBAL_LINK_CAP = 2000;
+const FAN_OUT_CAP = 5;
 
 const relianceLinks: StageHandler = async (
   ctx: StageContext,
@@ -344,7 +509,16 @@ const relianceLinks: StageHandler = async (
 
   console.log(`${LOG_PREFIX} Left side: ${leftSide.length} figures from ${leftRows.length} assumption rows.`);
 
-  // ── 2. Build right-side index (reference documents) ────────────────
+  // ── 2. Idempotency — clear on first invocation (B3: before early return) ─
+  if (resumePosition === 0) {
+    await db.execute(
+      `DELETE FROM mast_reliance_links WHERE run_id = $1`,
+      [runId],
+      { label: `${LOG_PREFIX} idempotent delete` },
+    );
+  }
+
+  // ── 3. Build right-side index (reference documents) ────────────────
   //   Documents where document_tag is NOT 'financial_model' and NOT 'ic_memo'.
 
   const refDocs = await db.query(
@@ -361,7 +535,7 @@ const relianceLinks: StageHandler = async (
 
   console.log(`${LOG_PREFIX} Reference documents found: ${refDocs.length}`);
 
-  const rightSide: RightSideEntry[] = [];
+  const rightSideRaw: RightSideEntry[] = [];
   let docsWithNoTables = 0;
 
   for (const doc of refDocs) {
@@ -387,21 +561,7 @@ const relianceLinks: StageHandler = async (
       const data = sheet.data as { cells?: ParsedCell[] };
       const cells = data?.cells ?? [];
 
-      // Build a row → label map: for each row, find the left-most non-empty string cell
-      const rowLabels = new Map<number, string>();
-      for (const cell of cells) {
-        if (cell.type !== "string" && cell.type !== "s") continue;
-        if (typeof cell.value !== "string" || cell.value.trim().length === 0) continue;
-        const existing = rowLabels.get(cell.r);
-        if (existing === undefined) {
-          rowLabels.set(cell.r, cell.value.trim());
-        }
-        // Keep the left-most (smallest c) string cell as label
-        // Since we iterate in order from the cells array, only update if this cell is further left
-        // We need to track the column too
-      }
-
-      // Re-do label map properly tracking column position
+      // B5: single label pass — track column position to find left-most string cell per row
       const rowLabelEntries = new Map<number, { col: number; label: string }>();
       for (const cell of cells) {
         if (cell.type !== "string" && cell.type !== "s") continue;
@@ -420,7 +580,7 @@ const relianceLinks: StageHandler = async (
         const addr = toA1(cell.r, cell.c);
         const labelEntry = rowLabelEntries.get(cell.r);
 
-        rightSide.push({
+        rightSideRaw.push({
           docId: doc.id,
           sheetOrPage: sheet.sheet_or_page,
           addr,
@@ -432,12 +592,12 @@ const relianceLinks: StageHandler = async (
   }
 
   console.log(
-    `${LOG_PREFIX} Right side: ${rightSide.length} numeric cells from ${refDocs.length} reference docs ` +
+    `${LOG_PREFIX} Right side: ${rightSideRaw.length} numeric cells from ${refDocs.length} reference docs ` +
       `(${docsWithNoTables} with no doc_tables rows).`,
   );
 
   // If right side is empty, log and return complete with 0 links
-  if (rightSide.length === 0) {
+  if (rightSideRaw.length === 0) {
     console.log(
       `${LOG_PREFIX} Right-side index is empty. ${refDocs.length} reference docs examined, ` +
         `${docsWithNoTables} with no doc_tables. Returning complete with 0 links.`,
@@ -445,16 +605,27 @@ const relianceLinks: StageHandler = async (
     return { complete: true, itemsDone: leftSide.length, itemsTotal: leftSide.length, resumePosition: 0 };
   }
 
-  // ── 3. Idempotency — clear on first invocation ────────────────────
-  if (resumePosition === 0) {
-    await db.execute(
-      `DELETE FROM mast_reliance_links WHERE run_id = $1`,
-      [runId],
-      { label: `${LOG_PREFIX} idempotent delete` },
+  // B1: Build indexed lookup structures (sorted array + hash map)
+  const rightIndex = buildRightSideIndex(rightSideRaw);
+
+  // ── 4. Determine remaining global link allowance (B2) ──────────────
+  const existingCountRows = await db.query(
+    `SELECT COUNT(*)::int AS cnt FROM mast_reliance_links WHERE run_id = $1`,
+    CountRow,
+    [runId],
+    { label: `${LOG_PREFIX} count existing links for global cap` },
+  );
+  const existingLinkCount = existingCountRows.length > 0 ? existingCountRows[0].cnt : 0;
+  let remainingAllowance = GLOBAL_LINK_CAP - existingLinkCount;
+
+  if (remainingAllowance <= 0) {
+    console.log(
+      `${LOG_PREFIX} Global link cap already reached (${existingLinkCount} existing). ` +
+        `Advancing resume_position without writing.`,
     );
   }
 
-  // ── 4. Match left figures against right-side index ─────────────────
+  // ── 5. Match left figures against right-side index ─────────────────
   interface PendingLink {
     left: LeftSideEntry;
     right: RightSideEntry;
@@ -485,22 +656,18 @@ const relianceLinks: StageHandler = async (
       continue;
     }
 
-    // Find all right-side matches for this left figure
-    const matches: Array<{ right: RightSideEntry; match: MatchResult }> = [];
+    // Skip matching if global cap already reached (B2) — still advance figIdx
+    if (remainingAllowance <= 0) continue;
 
-    for (const right of rightSide) {
-      const result = tryMatch(left.value, right.value);
-      if (result) {
-        matches.push({ right, match: result });
-      }
-    }
+    // B1: Use indexed lookup instead of full scan
+    const matches = findMatches(left.value, rightIndex);
 
     // Cap fan-out at 5, keep smallest absDiff
-    if (matches.length > 5) {
+    if (matches.length > FAN_OUT_CAP) {
       matches.sort((a, b) => a.match.absDiff - b.match.absDiff);
-      const discarded = matches.length - 5;
+      const discarded = matches.length - FAN_OUT_CAP;
       fanOutDiscarded += discarded;
-      matches.length = 5;
+      matches.length = FAN_OUT_CAP;
     }
 
     for (const { right, match } of matches) {
@@ -516,18 +683,24 @@ const relianceLinks: StageHandler = async (
       `${fanOutDiscarded} discarded (fan-out cap).`,
   );
 
-  // ── 5. Global cap at 2000 links — keep by |left| desc ─────────────
+  // ── 6. Apply remaining allowance cap (B2) — keep by |left| desc ───
   let globalDiscarded = 0;
-  if (allLinks.length > 2000) {
-    allLinks.sort((a, b) => Math.abs(b.left.value) - Math.abs(a.left.value));
-    globalDiscarded = allLinks.length - 2000;
-    allLinks.length = 2000;
+  if (allLinks.length > remainingAllowance) {
+    if (remainingAllowance <= 0) {
+      globalDiscarded = allLinks.length;
+      allLinks.length = 0;
+    } else {
+      allLinks.sort((a, b) => Math.abs(b.left.value) - Math.abs(a.left.value));
+      globalDiscarded = allLinks.length - remainingAllowance;
+      allLinks.length = remainingAllowance;
+    }
     console.log(
-      `${LOG_PREFIX} Global cap applied: kept 2000 links, discarded ${globalDiscarded}.`,
+      `${LOG_PREFIX} Global cap applied: kept ${allLinks.length} links (${existingLinkCount} already written + ${allLinks.length} this invocation = ${existingLinkCount + allLinks.length}), ` +
+        `discarded ${globalDiscarded}.`,
     );
   }
 
-  // ── 6. Write links to mast_reliance_links ──────────────────────────
+  // ── 7. Write links to mast_reliance_links ──────────────────────────
   let written = 0;
 
   for (const link of allLinks) {
@@ -559,9 +732,9 @@ const relianceLinks: StageHandler = async (
   }
 
   console.log(
-    `${LOG_PREFIX} Summary: ${written} links written. ` +
+    `${LOG_PREFIX} Summary: ${written} links written (${existingLinkCount + written} total for run). ` +
       `Left side: ${leftSide.length} figures (processed ${figIdx - resumePosition} this invocation). ` +
-      `Right side: ${rightSide.length} cells from ${refDocs.length} docs. ` +
+      `Right side: ${rightSideRaw.length} cells from ${refDocs.length} docs. ` +
       `Suppressed: ${suppressedSmall}. Fan-out discarded: ${fanOutDiscarded}. Global cap discarded: ${globalDiscarded}.`,
   );
 
