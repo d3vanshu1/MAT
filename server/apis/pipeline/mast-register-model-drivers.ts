@@ -288,7 +288,7 @@ export function classifySheet(
   const hasForwardValues = forwardNumericCount >= 5;
 
   const isInputSheet =
-    numericDensity < 0.55 &&
+    numericDensity < 0.35 &&
     numericCells >= 20 &&
     hasForwardValues;
 
@@ -451,6 +451,8 @@ const registerModelDrivers: StageHandler = async (
 
     const drivers: DriverCandidate[] = [];
     let zeroSkipped = 0;
+    let magnitudeExcluded = 0;
+    let labelRejected = 0;
 
     // Build a quick lookup for cells by (row, col)
     const cellGrid = new Map<string, ParsedCell>();
@@ -470,6 +472,10 @@ const registerModelDrivers: StageHandler = async (
       if (typeof cell.value !== "number") continue;
       if (cell.value === 0) { zeroSkipped++; continue; }
 
+      // Magnitude filter: only rates, percentages, multiples, margins, day counts
+      const absVal = Math.abs(cell.value);
+      if (absVal >= 1000) { magnitudeExcluded++; continue; }
+
       // Label: nearest non-empty string cell to the left in the same row
       let label: string | null = null;
       for (let lc = cell.c - 1; lc >= 0; lc--) {
@@ -484,8 +490,10 @@ const registerModelDrivers: StageHandler = async (
         label = rowHeaders[cell.r].trim();
       }
 
-      // Driver must have a non-empty label
+      // Driver must have a non-empty label with at least 2 alphanumeric characters
       if (label === null) continue;
+      const alphaCount = (label.match(/[a-zA-Z0-9]/g) || []).length;
+      if (alphaCount < 2) { labelRejected++; continue; }
 
       // Period: value from the selected period header row at the same column index
       let period: string | null = null;
@@ -508,14 +516,14 @@ const registerModelDrivers: StageHandler = async (
       });
     }
 
-    // ── 4d. Cap at DRIVER_CAP, ordered by abs value ascending ────────
+    // ── 4d. Cap at DRIVER_CAP, ordered by abs value descending ───────
     let driversToWrite = drivers;
     if (drivers.length > DRIVER_CAP) {
       console.log(
         `${LOG_PREFIX} Sheet "${sheetName}" has ${drivers.length} drivers — capping at ${DRIVER_CAP}, dropping ${drivers.length - DRIVER_CAP}.`,
       );
       driversToWrite = drivers
-        .sort((a, b) => Math.abs(a.value) - Math.abs(b.value))
+        .sort((a, b) => Math.abs(b.value) - Math.abs(a.value))
         .slice(0, DRIVER_CAP);
     }
 
@@ -545,7 +553,7 @@ const registerModelDrivers: StageHandler = async (
     }
 
     console.log(
-      `${LOG_PREFIX} Sheet "${sheetName}": ${driversToWrite.length} drivers written, ${zeroSkipped} zero-valued cells skipped.`,
+      `${LOG_PREFIX} Sheet "${sheetName}": ${driversToWrite.length} drivers written, ${zeroSkipped} zero-skipped, ${magnitudeExcluded} magnitude-excluded, ${labelRejected} label-rejected.`,
     );
     totalDriversWritten += driversToWrite.length;
     sheetIdx++;
