@@ -450,6 +450,7 @@ const registerModelDrivers: StageHandler = async (
     }
 
     const drivers: DriverCandidate[] = [];
+    let zeroSkipped = 0;
 
     // Build a quick lookup for cells by (row, col)
     const cellGrid = new Map<string, ParsedCell>();
@@ -464,9 +465,10 @@ const registerModelDrivers: StageHandler = async (
       // Exclusion: period header row
       if (headerRowIndices.has(cell.r)) continue;
 
-      // Driver test: type is number, value is a number
+      // Driver test: type is number, value is a number, value is not zero
       if (cell.type !== "number") continue;
       if (typeof cell.value !== "number") continue;
+      if (cell.value === 0) { zeroSkipped++; continue; }
 
       // Label: nearest non-empty string cell to the left in the same row
       let label: string | null = null;
@@ -543,7 +545,7 @@ const registerModelDrivers: StageHandler = async (
     }
 
     console.log(
-      `${LOG_PREFIX} Sheet "${sheetName}": ${driversToWrite.length} drivers written.`,
+      `${LOG_PREFIX} Sheet "${sheetName}": ${driversToWrite.length} drivers written, ${zeroSkipped} zero-valued cells skipped.`,
     );
     totalDriversWritten += driversToWrite.length;
     sheetIdx++;
