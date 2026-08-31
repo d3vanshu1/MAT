@@ -51,6 +51,7 @@ import type {
   StageHandler,
 } from "./mast-contract.js";
 import { STAGE_BUDGET_MS } from "./mast-contract.js";
+import { loadSheetByName } from "./mast-doc-tables.js";
 import { getModuleModel } from "./model-config.js";
 
 const LOG_PREFIX = "[MAST-INHERIT]";
@@ -461,18 +462,10 @@ const inheritance: StageHandler = async (
       // Try table path first
       const parsed = item.toLocator ? parseA1(item.toLocator) : null;
       if (parsed) {
-        const sheets = await db.query(
-          `SELECT id, sheet_or_page, data
-             FROM doc_tables
-            WHERE document_id = $1::uuid AND sheet_or_page = $2
-            ORDER BY id ASC`,
-          DocTableRow,
-          [item.toDocId, parsed.sheet],
-          { label: `${LOG_PREFIX} table path for ${itemLabel}` },
-        );
+        const loadedSheet = await loadSheetByName(db, item.toDocId, parsed.sheet);
 
-        if (sheets.length > 0) {
-          const data = sheets[0].data as { cells?: ParsedCell[] };
+        if (loadedSheet) {
+          const data = loadedSheet.data as { cells?: ParsedCell[] };
           const cells = data?.cells ?? [];
           if (cells.length > 0) {
             context = buildNeighbourhood(cells, parsed.row, parsed.col);

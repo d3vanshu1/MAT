@@ -50,6 +50,7 @@ import type {
   StageHandler,
 } from "./mast-contract.js";
 import { STAGE_BUDGET_MS } from "./mast-contract.js";
+import { loadAllSheets } from "./mast-doc-tables.js";
 import { resolveModelDocument } from "./mast-register-model-drivers.js";
 
 const LOG_PREFIX = "[MAST-LINKS]";
@@ -539,15 +540,11 @@ const relianceLinks: StageHandler = async (
   let docsWithNoTables = 0;
 
   for (const doc of refDocs) {
-    const sheets = await db.query(
-      `SELECT id, document_id, sheet_or_page, data
-         FROM doc_tables
-        WHERE document_id = $1::uuid
-        ORDER BY sheet_or_page ASC`,
-      DocTableRow,
-      [doc.id],
-      { label: `${LOG_PREFIX} load doc_tables for ${doc.file_name.slice(0, 40)}` },
-    );
+    const { sheets, skipped } = await loadAllSheets(db, doc.id);
+
+    if (skipped > 0) {
+      console.log(`${LOG_PREFIX} ${skipped} sheet(s) skipped for "${doc.file_name.slice(0, 40)}" due to size limit.`);
+    }
 
     if (sheets.length === 0) {
       docsWithNoTables++;

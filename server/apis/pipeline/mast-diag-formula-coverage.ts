@@ -8,6 +8,7 @@
  * MAST owns this API. No imports from OA, CC, BSS, ERO, or DCS.
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
+import { loadAllSheets } from "./mast-doc-tables.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -57,15 +58,13 @@ export default api({
   async run(ctx, { documentId }) {
     const db = ctx.integrations.ic_diligence_db;
 
-    const rows = await db.query(
-      `SELECT sheet_or_page, data
-       FROM doc_tables
-       WHERE document_id = $1::uuid
-       ORDER BY sheet_or_page`,
-      DocTableRow,
-      [documentId],
-      { label: "MAST diag: read doc_tables for document" },
-    );
+    const { sheets: loadedSheets, skipped } = await loadAllSheets(db, documentId);
+
+    if (skipped > 0) {
+      console.log(`[MAST-DIAG] ${skipped} sheet(s) skipped due to size limit.`);
+    }
+
+    const rows = loadedSheets;
 
     const sheets: z.infer<typeof SheetEntry>[] = [];
 

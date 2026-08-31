@@ -13,6 +13,7 @@
  */
 import type { StageContext, StageResult, StageHandler } from "./mast-contract.js";
 import { STAGE_BUDGET_MS } from "./mast-contract.js";
+import { loadAllSheets } from "./mast-doc-tables.js";
 import { z } from "@superblocksteam/sdk-api";
 
 const LOG_PREFIX = "[MAST-DRIVERS]";
@@ -319,16 +320,12 @@ const registerModelDrivers: StageHandler = async (
     return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
   }
 
-  // ── 2. Load all sheets for the document ────────────────────────────
-  const allSheets = await db.query(
-    `SELECT id, sheet_or_page, data
-     FROM doc_tables
-     WHERE document_id = $1::uuid
-     ORDER BY sheet_or_page ASC`,
-    DocTableRow,
-    [modelDoc.id],
-    { label: "MAST: load all sheets for model" },
-  );
+  // ── 2. Load all sheets for the document (one per query) ────────────
+  const { sheets: allSheets, skipped } = await loadAllSheets(db, modelDoc.id);
+
+  if (skipped > 0) {
+    console.log(`${LOG_PREFIX} ${skipped} sheet(s) skipped due to size limit.`);
+  }
 
   if (allSheets.length === 0) {
     console.log(`${LOG_PREFIX} No sheets found. Stage complete.`);

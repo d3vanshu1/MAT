@@ -22,6 +22,7 @@ import {
   resolveModelDocument,
   selectPeriodRow,
 } from "./mast-register-model-drivers.js";
+import { loadAllSheets } from "./mast-doc-tables.js";
 
 const LOG_PREFIX = "[MAST-EMERGENT]";
 
@@ -138,14 +139,11 @@ async function computeForecastHorizon(
   db: StageContext["db"],
   modelDocId: string,
 ): Promise<number | null> {
-  const sheets = await db.query(
-    `SELECT id, document_id, sheet_or_page, data
-     FROM doc_tables
-     WHERE document_id = $1::uuid`,
-    DocTableRow,
-    [modelDocId],
-    { label: "EMERGENT: load model sheets for horizon" },
-  );
+  const { sheets, skipped } = await loadAllSheets(db, modelDocId);
+
+  if (skipped > 0) {
+    console.log(`${LOG_PREFIX} ${skipped} sheet(s) skipped for model document due to size limit.`);
+  }
 
   if (sheets.length === 0) {
     console.log(`${LOG_PREFIX} No doc_tables for model document — cannot determine horizon.`);
@@ -471,14 +469,7 @@ async function ruleReferenceTrendBreak(
 
   for (const refDoc of refDocs) {
     // Load sheets for this reference document
-    const sheets = await db.query(
-      `SELECT id, document_id, sheet_or_page, data
-       FROM doc_tables
-       WHERE document_id = $1::uuid`,
-      DocTableRow,
-      [refDoc.id],
-      { label: `EMERGENT-E3: load sheets for ${refDoc.file_name}` },
-    );
+    const { sheets } = await loadAllSheets(db, refDoc.id);
 
     for (const sheet of sheets) {
       let cells: ParsedCell[];
