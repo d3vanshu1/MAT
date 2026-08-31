@@ -42,6 +42,7 @@ import supportSearch from "./mast-support-search.js";
 import forecastRecursion from "./mast-forecast-recursion.js";
 import dependence from "./mast-dependence.js";
 import severity from "./mast-severity.js";
+import fragility from "./mast-fragility.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -104,7 +105,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   lineage: loopStub,
   dependence: dependence,
   severity: severity,
-  fragility: loopStub,
+  fragility: fragility,
   render: singleShotStub,
 };
 
