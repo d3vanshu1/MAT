@@ -1,6 +1,7 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { CanonicalFindingSchema } from "../pipeline/canonical-finding.js";
 import { strictReloadFindings } from "./strict-reload-findings.js";
+import { isDcsV2Report, mapDcsV2ToCanonical } from "./dcs-v2-compat.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -88,18 +89,24 @@ export default api({
       let outputCorrupt = false;
       try {
         if (row.findings) {
-          findings = strictReloadFindings(
-            row.findings,
-            `LoadModuleResults module_id=${row.module_id} run_id=${row.run_id}`
-          ).findings;
+          // DCS v2 bypass: detect report-envelope format and map to canonical
+          const parsed = typeof row.findings === "string" ? JSON.parse(row.findings) : row.findings;
+          if (isDcsV2Report(parsed)) {
+            findings = mapDcsV2ToCanonical(parsed[0]);
+          } else {
+            findings = strictReloadFindings(
+              row.findings,
+              `LoadModuleResults module_id=${row.module_id} run_id=${row.run_id}`
+            ).findings;
+          }
         }
       } catch (err) {
-        console.error(`[LoadModuleResults] Fail-closed:`, err instanceof Error ? err.message : err);
+        console.warn(`[LoadModuleResults] Fail-closed:`, err instanceof Error ? err.message : err);
         const d = (err as { detail?: { invalid?: Array<{ title: string; issues: string }>; malformed_count?: number } })?.detail;
         if (d) {
-          console.error(
+          console.warn(
             `[LoadModuleResults] Module dropped from results — module_id=${row.module_id} run_id=${row.run_id} malformed=${d.malformed_count ?? 0}`,
-            (d.invalid ?? []).slice(0, 10)
+            JSON.stringify((d.invalid ?? []).slice(0, 10))
           );
         }
         outputCorrupt = true;

@@ -1,6 +1,7 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { CanonicalFindingSchema } from "../pipeline/canonical-finding.js";
 import { strictReloadFindings } from "./strict-reload-findings.js";
+import { isDcsV2Report, mapDcsV2ToCanonical } from "./dcs-v2-compat.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -132,13 +133,20 @@ export default api({
     const row = rows[0];
 
     // RC1 + Fix 3: strict reload — fail closed on any corruption
-    let findings;
+    let findings: z.infer<typeof CanonicalFindingSchema>[];
     try {
-      findings = row.findings
-        ? strictReloadFindings(row.findings, `GetRunOutput run_id=${runId}`).findings
-        : [];
+      if (row.findings) {
+        const parsed = typeof row.findings === "string" ? JSON.parse(row.findings) : row.findings;
+        if (isDcsV2Report(parsed)) {
+          findings = mapDcsV2ToCanonical(parsed[0]);
+        } else {
+          findings = strictReloadFindings(row.findings, `GetRunOutput run_id=${runId}`).findings;
+        }
+      } else {
+        findings = [];
+      }
     } catch (err) {
-      console.error(`[GetRunOutput] Fail-closed:`, err instanceof Error ? err.message : err);
+      console.warn(`[GetRunOutput] Fail-closed:`, err instanceof Error ? err.message : err);
       return {
         run: {
           id: row.run_id,
