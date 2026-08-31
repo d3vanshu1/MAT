@@ -188,6 +188,7 @@ import DcsRenderReport from './pipeline/dcs-render-report.js';
 import DcsComputeMaterialityOverlay from './pipeline/dcs-compute-materiality-overlay.js';
 import DcsRunPipeline from './pipeline/dcs-run-pipeline.js';
 import DcsPreflightDiagnostic from './pipeline/dcs-preflight-diagnostic.js';
+import RunCurationFixtures from './pipeline/run-curation-fixtures.js';
 import PublishEroToModuleOutputs from './pipeline/publish-ero-to-module-outputs.js';
 import EroTestPublish from './pipeline/ero-test-publish.js';
 import BssGetFindings from './pipeline/bss-get-findings.js';
@@ -299,7 +300,7 @@ const apis = {
   // ERO v2 pipeline
   EroGetActiveRun, EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish, EroTestDedup,
   // DCS rebuild
-  DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic,
+  DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic, RunCurationFixtures,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

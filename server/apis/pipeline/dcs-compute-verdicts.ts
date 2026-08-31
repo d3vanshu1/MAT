@@ -18,6 +18,15 @@ import {
   SCORE_VALUES,
 } from "./dcs-rubric.js";
 import type { DimensionState, DocClass } from "./dcs-rubric.js";
+import {
+  curateDimensionPackets,
+  computeExitDimensionState,
+} from "./dcs-evidence-curation.js";
+import type {
+  RawEvidenceRow,
+  ChunkMeta,
+  CuratedDimensionPacket,
+} from "./dcs-evidence-curation.js";
 
 // ── Integration ID ───────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -39,14 +48,23 @@ const ExtractDetailSchema = z.object({
 });
 
 const EvidenceRowSchema = z.object({
+  id: z.string(),
   dimension_id: z.string(),
   chunk_id: z.string(),
   source_file: z.string(),
   document_tag: z.string(),
   doc_class: z.enum(["narrative", "workproduct"]),
   is_substantive: z.boolean(),
+  snippet: z.string(),
 });
 type EvidenceRow = z.infer<typeof EvidenceRowSchema>;
+
+const ChunkMetaSchema = z.object({
+  chunk_id: z.string(),
+  chunk_index: z.number(),
+  file_name: z.string(),
+  file_type: z.string(),
+});
 
 const VerdictSchema = z.object({
   dimension_id: z.string(),
@@ -94,6 +112,7 @@ export default api({
     }),
     persistedVerdicts: z.boolean(),
     verdictStageStatus: z.string().nullable(),
+    curatedDimensionPackets: z.any().optional(),
   }),
 
   async run(ctx, input) {
@@ -167,9 +186,9 @@ export default api({
       );
     }
 
-    // ── 5. Read all evidence rows ──────────────────────────────
+    // ── 5. Read all evidence rows (with id + snippet for curation) ──
     const evidenceRows = await db.query(
-      `SELECT dimension_id, chunk_id, source_file, document_tag, doc_class, is_substantive
+      `SELECT id, dimension_id, chunk_id, source_file, document_tag, doc_class, is_substantive, snippet
        FROM dcs_evidence
        WHERE run_id = $1::uuid
        ORDER BY dimension_id, chunk_id, source_file`,
@@ -177,6 +196,33 @@ export default api({
       [input.runId],
       { label: "DcsVerdicts: read all evidence" },
     );
+
+    // ── 5b. Load chunk metadata for source-location resolution ──
+    const distinctChunkIds = [...new Set(evidenceRows.map((r) => r.chunk_id))];
+    const chunkMetaMap = new Map<string, ChunkMeta>();
+
+    if (distinctChunkIds.length > 0) {
+      // Batch query in groups of 500 to avoid parameter limits
+      const BATCH_SIZE = 500;
+      for (let i = 0; i < distinctChunkIds.length; i += BATCH_SIZE) {
+        const batch = distinctChunkIds.slice(i, i + BATCH_SIZE);
+        const placeholders = batch.map((_, idx) => `$${idx + 1}::uuid`).join(",");
+        const chunkMetas = await db.query(
+          `SELECT dc.id AS chunk_id, dc.chunk_index, dc.file_name,
+                  COALESCE(d.file_type, 'unknown') AS file_type
+           FROM document_chunks dc
+           JOIN documents d ON d.id = dc.document_id
+           WHERE dc.id IN (${placeholders})
+           LIMIT ${BATCH_SIZE}`,
+          ChunkMetaSchema,
+          batch,
+          { label: `DcsVerdicts: chunk metadata batch ${i / BATCH_SIZE + 1}` },
+        );
+        for (const cm of chunkMetas) {
+          chunkMetaMap.set(cm.chunk_id, cm);
+        }
+      }
+    }
 
     // Validate all dimension_ids against the rubric
     for (const row of evidenceRows) {
@@ -204,10 +250,21 @@ export default api({
     for (const dim of DCS_DIMENSIONS) {
       const rows = evidenceByDimension.get(dim.id)!;
 
-      // Compute state using rubric pure function
-      const state: DimensionState = computeDimensionState(
-        rows.map((r) => ({ doc_class: r.doc_class as DocClass, is_substantive: r.is_substantive })),
-      );
+      // Compute state using rubric pure function.
+      // Exit dimension uses the promotion gate from dcs-evidence-curation.
+      const state: DimensionState = dim.id === "exit"
+        ? computeExitDimensionState(
+            rows.map((r) => ({
+              doc_class: r.doc_class as DocClass,
+              is_substantive: r.is_substantive,
+              snippet: r.snippet,
+              document_tag: r.document_tag,
+              source_file: r.source_file,
+            })),
+          )
+        : computeDimensionState(
+            rows.map((r) => ({ doc_class: r.doc_class as DocClass, is_substantive: r.is_substantive })),
+          );
       const scoreValue = SCORE_VALUES[state];
       stateCounts[state]++;
 
@@ -250,7 +307,12 @@ export default api({
       if (state === "absent") {
         rationale = "No accepted evidence rows were extracted for this dimension.";
       } else if (state === "asserted") {
-        rationale = `${rows.length} accepted row(s); none is substantive workproduct evidence.`;
+        const wpSubstCount = rows.filter(
+          (r) => r.doc_class === "workproduct" && r.is_substantive,
+        ).length;
+        rationale = dim.id === "exit" && wpSubstCount > 0
+          ? `${rows.length} accepted row(s); ${wpSubstCount} workproduct row(s) exist but none pass the exit promotion gate.`
+          : `${rows.length} accepted row(s); none is substantive workproduct evidence.`;
       } else {
         // evidenced
         const wpSubstantive = rows.filter(
@@ -272,6 +334,23 @@ export default api({
       });
     }
 
+    // ── 7b. Curate dimension packets ────────────────────────────
+    const rawEvidenceForCurator: RawEvidenceRow[] = evidenceRows.map((r) => ({
+      id: r.id,
+      dimension_id: r.dimension_id,
+      chunk_id: r.chunk_id,
+      source_file: r.source_file,
+      document_tag: r.document_tag,
+      doc_class: r.doc_class as DocClass,
+      is_substantive: r.is_substantive,
+      snippet: r.snippet,
+    }));
+
+    const curatedDimensionPackets = curateDimensionPackets(
+      rawEvidenceForCurator,
+      chunkMetaMap,
+    );
+
     // ── 8. Verification mode: return without writes ────────────
     if (input.verificationMode) {
       return {
@@ -287,6 +366,7 @@ export default api({
         stateCounts,
         persistedVerdicts: false,
         verdictStageStatus: null,
+        curatedDimensionPackets,
       };
     }
 
@@ -475,6 +555,7 @@ export default api({
         stateCounts,
         persistedVerdicts: true,
         verdictStageStatus: "done",
+        curatedDimensionPackets,
       };
     } catch (err) {
       // If persistence or readback fails after verdict-stage row exists,
