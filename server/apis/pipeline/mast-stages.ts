@@ -38,6 +38,7 @@ export type StageName = (typeof STAGES)[number];
  * should be re-entered rather than restarted.
  */
 export const LOOP_STAGES: ReadonlySet<string> = new Set([
+  "register_model_drivers",
   "inheritance",
   "support_search",
   "forecast_recursion",
@@ -126,8 +127,14 @@ function loopStub(ctx: StageContext): Promise<StageResult> {
 // Handler registry
 // ---------------------------------------------------------------------------
 
+/**
+ * Real handler imports are late-bound to avoid circular initialization.
+ * Stage handler modules import types from this file, so a top-level import
+ * here would create a TDZ reference error.
+ */
+let _realHandlersLoaded = false;
 const HANDLER_MAP: Record<StageName, StageHandler> = {
-  register_model_drivers: singleShotStub,
+  register_model_drivers: singleShotStub, // replaced at first lookup
   register_silent: singleShotStub,
   register_memo: singleShotStub,
   register_assemble: singleShotStub,
@@ -143,7 +150,16 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   render: singleShotStub,
 };
 
+function loadRealHandlers(): void {
+  if (_realHandlersLoaded) return;
+  _realHandlersLoaded = true;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { default: registerModelDrivers } = require("./mast-register-model-drivers.js");
+  HANDLER_MAP.register_model_drivers = registerModelDrivers;
+}
+
 /** Look up the handler for a stage name. */
 export function getStageHandler(stage: StageName): StageHandler {
+  loadRealHandlers();
   return HANDLER_MAP[stage];
 }

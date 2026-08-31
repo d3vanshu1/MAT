@@ -20,7 +20,7 @@ const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const LOG_PREFIX = "[MAST-PIPELINE]";
 
 // ---------------------------------------------------------------------------
-// Cross-environment UUID v4 — avoids Node `crypto` import that Vite externalizes
+// Cross-environment UUID v4 — globalThis.crypto.randomUUID is not reliably available in this runtime
 // ---------------------------------------------------------------------------
 function mastRandomUUID(): string {
   if (typeof globalThis !== "undefined" && typeof (globalThis as any).crypto?.randomUUID === "function") {
