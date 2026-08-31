@@ -43,6 +43,7 @@ import forecastRecursion from "./mast-forecast-recursion.js";
 import dependence from "./mast-dependence.js";
 import severity from "./mast-severity.js";
 import fragility from "./mast-fragility.js";
+import render from "./mast-render.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -106,7 +107,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   dependence: dependence,
   severity: severity,
   fragility: fragility,
-  render: singleShotStub,
+  render: render,
 };
 
 /** Look up the handler for a stage name. */
