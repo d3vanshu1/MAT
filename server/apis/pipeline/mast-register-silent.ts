@@ -20,7 +20,6 @@ import type { StageContext, StageResult, StageHandler } from "./mast-contract.js
 import { STAGE_BUDGET_MS } from "./mast-contract.js";
 import { loadAllSheets } from "./mast-doc-tables.js";
 import {
-  buildReferenceIndex,
   detectPeriodHeaderRows,
   selectPeriodRow,
   resolveModelDocument,
@@ -166,8 +165,8 @@ interface DetectorHit {
   proposition: string;
   value: number;
   period: string | null;
-  /** Sum of refCountMap values for the row's cells — used for cap ordering. */
-  rowRefScore: number;
+  /** Absolute value of the row's first forecast cell — used for cap ordering. */
+  firstForecastAbs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,10 +199,7 @@ const registerSilent: StageHandler = async (
     return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
   }
 
-  // ── 3. Build workbook-wide reference index ─────────────────────────
-  const { refSet, refCountMap } = buildReferenceIndex(allSheets);
-
-  // ── 4. Process sheets with resume support ──────────────────────────
+  // ── 3. Process sheets with resume support ──────────────────────────
   const totalSheets = allSheets.length;
   let sheetIdx = resumePosition;
   let totalHitsWritten = 0;
@@ -296,19 +292,14 @@ const registerSilent: StageHandler = async (
       }
       if (label === null) continue;
 
-      // At least one cell in the row must appear in refSet
-      let hasRef = false;
-      let rowRefScore = 0;
+      // At least two numeric cells in the row
+      let numericCount = 0;
       for (const rc of _rowCells) {
-        const addr = toA1(rc.r, rc.c);
-        const key = `${sheetName}!${addr}`;
-        const cnt = refCountMap.get(key);
-        if (cnt !== undefined) {
-          hasRef = true;
-          rowRefScore += cnt;
+        if (rc.type === "number" && typeof rc.value === "number") {
+          numericCount++;
         }
       }
-      if (!hasRef) continue;
+      if (numericCount < 2) continue;
 
       // ── Gather forecast and historical numeric values ──────────────
       const forecastValues: { col: number; value: number }[] = [];
@@ -335,6 +326,11 @@ const registerSilent: StageHandler = async (
         return raw.length > 500 ? raw.slice(0, 500) : raw;
       };
 
+      // First forecast abs value for cap ordering
+      const firstForecastAbs = forecastValues.length > 0
+        ? Math.abs(forecastValues[0].value)
+        : 0;
+
       // ── DETECTOR 1: all_zero_forecast ──────────────────────────────
       if (forecastValues.length >= 2) {
         const allZero = forecastValues.every((fv) => fv.value === 0);
@@ -357,7 +353,7 @@ const registerSilent: StageHandler = async (
               : `"${label}" is zero across all forecast periods`,
             value: 0,
             period,
-            rowRefScore,
+            firstForecastAbs,
           });
           // If detector 1 fires, detector 2 does not run on this row
           continue;
@@ -387,7 +383,7 @@ const registerSilent: StageHandler = async (
               : `"${label}" is constant at ${first} across all forecast periods`,
             value: first,
             period,
-            rowRefScore,
+            firstForecastAbs,
           });
         }
       }
@@ -452,7 +448,7 @@ const registerSilent: StageHandler = async (
                       : `"${label}" forecast breaks the historical growth trend (rate ${(forecastRate * 100).toFixed(1)}% vs historical range ${(minRate * 100).toFixed(1)}%–${(maxRate * 100).toFixed(1)}%)`,
                     value: fv.value,
                     period,
-                    rowRefScore,
+                    firstForecastAbs,
                   });
                 }
               }
@@ -469,14 +465,14 @@ const registerSilent: StageHandler = async (
       );
     }
 
-    // ── 4d. Cap at DETECTOR_CAP, ordered by rowRefScore desc ─────────
+    // ── 4d. Cap at DETECTOR_CAP, ordered by firstForecastAbs asc ─────
     let hitsToWrite = hits;
     if (hits.length > DETECTOR_CAP) {
       console.log(
         `${LOG_PREFIX} Sheet "${sheetName}": ${hits.length} detector hits — capping at ${DETECTOR_CAP}, dropping ${hits.length - DETECTOR_CAP}.`,
       );
       hitsToWrite = hits
-        .sort((a, b) => b.rowRefScore - a.rowRefScore)
+        .sort((a, b) => a.firstForecastAbs - b.firstForecastAbs)
         .slice(0, DETECTOR_CAP);
     }
 

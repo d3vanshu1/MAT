@@ -4,8 +4,9 @@
  * Stage handler for register_model_drivers.
  *
  * Reads the deal team financial model out of doc_tables and writes one
- * mast_assumptions row per driver cell. A driver is a hardcoded constant
- * that is referenced by at least one formula somewhere in the workbook.
+ * mast_assumptions row per driver cell.  A driver is a numeric constant
+ * on an input sheet — a sheet with moderate numeric density and forward-
+ * looking values — that has a non-empty row label.
  *
  * Pure code. No LLM anywhere.
  *
@@ -36,22 +37,8 @@ const ModelDocRow = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Cell reference extraction
+// Helpers
 // ---------------------------------------------------------------------------
-
-/** Matches A1-style refs: optional sheet prefix, col letters, row digits, optional range end. */
-const CELL_REF_RE =
-  /(?:(?:'([^']+)'|([A-Za-z0-9_]+))!)?\$?([A-Z]{1,3})\$?(\d{1,7})(?::\$?([A-Z]{1,3})\$?(\d{1,7}))?/g;
-
-const RANGE_CAP = 5000;
-
-function colToIndex(col: string): number {
-  let idx = 0;
-  for (let i = 0; i < col.length; i++) {
-    idx = idx * 26 + (col.charCodeAt(i) - 64);
-  }
-  return idx;
-}
 
 function indexToCol(idx: number): string {
   let col = "";
@@ -66,58 +53,6 @@ function indexToCol(idx: number): string {
 /** A1 address from 0-based row/col. */
 function toA1(row: number, col: number): string {
   return `${indexToCol(col + 1)}${row + 1}`;
-}
-
-export interface CellRef {
-  sheet: string;
-  addr: string; // e.g. "C23"
-}
-
-/**
- * Extract all cell references from a formula string.
- * Ranges are expanded up to RANGE_CAP cells. Oversized ranges are logged and skipped.
- */
-export function extractCellRefs(
-  formula: string,
-  currentSheet: string,
-): CellRef[] {
-  const refs: CellRef[] = [];
-  CELL_REF_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = CELL_REF_RE.exec(formula)) !== null) {
-    const sheet = m[1] ?? m[2] ?? currentSheet;
-    const startCol = m[3].toUpperCase();
-    const startRow = parseInt(m[4], 10);
-    const endCol = m[5]?.toUpperCase();
-    const endRow = m[6] ? parseInt(m[6], 10) : undefined;
-
-    if (endCol && endRow !== undefined) {
-      const sc = colToIndex(startCol);
-      const ec = colToIndex(endCol);
-      const sr = startRow;
-      const er = endRow;
-      const totalCells = (Math.abs(ec - sc) + 1) * (Math.abs(er - sr) + 1);
-      if (totalCells > RANGE_CAP) {
-        console.log(
-          `${LOG_PREFIX} Skipping oversized range ${startCol}${startRow}:${endCol}${endRow} (${totalCells} cells) on sheet ${sheet}`,
-        );
-        continue;
-      }
-      const minC = Math.min(sc, ec);
-      const maxC = Math.max(sc, ec);
-      const minR = Math.min(sr, er);
-      const maxR = Math.max(sr, er);
-      for (let c = minC; c <= maxC; c++) {
-        const colStr = indexToCol(c);
-        for (let r = minR; r <= maxR; r++) {
-          refs.push({ sheet, addr: `${colStr}${r}` });
-        }
-      }
-    } else {
-      refs.push({ sheet, addr: `${startCol}${startRow}` });
-    }
-  }
-  return refs;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,37 +168,137 @@ export function selectPeriodRow(
 }
 
 // ---------------------------------------------------------------------------
-// buildReferenceIndex — scan every formula in every sheet to build
-// the set of referenced addresses and a per-address formula count.
+// classifySheet — structural classification of a loaded sheet
 // ---------------------------------------------------------------------------
 
-export function buildReferenceIndex(
-  sheets: { sheet_or_page: string; data: any }[],
-): { refSet: Set<string>; refCountMap: Map<string, number> } {
-  const refSet = new Set<string>(); // "SheetName!A1" normalized keys
-  const refCountMap = new Map<string, number>(); // key → count of distinct formulas referencing it
+/** Set of lowercased tokens that classify a column as actual. */
+const ACTUAL_TOKENS = new Set(["actual", "act"]);
+const FORECAST_TOKENS = new Set(["forecast", "budget", "plan", "fcst"]);
 
-  for (const sheet of sheets) {
-    const data = sheet.data as { cells?: ParsedCell[] };
-    const cells = data?.cells ?? [];
+export interface SheetClassification {
+  totalNonEmptyCells: number;
+  numericCells: number;
+  numericDensity: number;
+  hasForwardValues: boolean;
+  isInputSheet: boolean;
+}
+
+export function classifySheet(
+  sheet: { sheet_or_page: string; data: any },
+  selectedPeriodRow: Map<number, string> | null,
+): SheetClassification {
+  const data = sheet.data as { cells?: ParsedCell[] };
+  const cells = data?.cells ?? [];
+
+  let totalNonEmptyCells = 0;
+  let numericCells = 0;
+
+  for (const cell of cells) {
+    if (cell.type === "empty" || cell.value === null || cell.value === "") continue;
+    totalNonEmptyCells++;
+    if (cell.type === "number" && typeof cell.value === "number") {
+      numericCells++;
+    }
+  }
+
+  const numericDensity = totalNonEmptyCells > 0 ? numericCells / totalNonEmptyCells : 0;
+
+  // ── Forward-value detection ────────────────────────────────────────
+  // Find maximum actual year via actual/forecast classification row
+  let maxActualYear = -1;
+  let hasActualForecastRow = false;
+
+  if (selectedPeriodRow !== null) {
+    // Scan first 6 rows for actual/forecast classification row
+    const rowMap = new Map<number, ParsedCell[]>();
     for (const cell of cells) {
-      if (typeof cell.formula !== "string" || cell.formula.length === 0) continue;
-      const refs = extractCellRefs(cell.formula, sheet.sheet_or_page);
-      // Deduplicate refs within a single formula to count distinct formulas
-      const seen = new Set<string>();
-      for (const ref of refs) {
-        const key = `${ref.sheet}!${ref.addr}`;
-        refSet.add(key);
-        if (!seen.has(key)) {
-          seen.add(key);
-          refCountMap.set(key, (refCountMap.get(key) ?? 0) + 1);
+      if (cell.r > 5) continue;
+      let arr = rowMap.get(cell.r);
+      if (!arr) {
+        arr = [];
+        rowMap.set(cell.r, arr);
+      }
+      arr.push(cell);
+    }
+
+    for (const [_rowIdx, rowCells] of rowMap) {
+      const nonEmpty = rowCells.filter(
+        (c) => c.type !== "empty" && c.value !== null && c.value !== "",
+      );
+      if (nonEmpty.length === 0) continue;
+
+      let matchCount = 0;
+      for (const c of nonEmpty) {
+        const tok = String(c.value).trim().toLowerCase();
+        if (ACTUAL_TOKENS.has(tok) || FORECAST_TOKENS.has(tok)) {
+          matchCount++;
         }
+      }
+
+      if (matchCount > nonEmpty.length / 2) {
+        hasActualForecastRow = true;
+        // Identify actual columns and their max year
+        for (const c of nonEmpty) {
+          const tok = String(c.value).trim().toLowerCase();
+          if (ACTUAL_TOKENS.has(tok)) {
+            // Find the year value for this column from the period row
+            const periodVal = selectedPeriodRow.get(c.c);
+            if (periodVal !== undefined) {
+              const yr = Number(periodVal);
+              if (Number.isInteger(yr) && yr >= 2000 && yr <= 2100 && yr > maxActualYear) {
+                maxActualYear = yr;
+              }
+            }
+          }
+        }
+        break;
       }
     }
   }
 
-  console.log(`${LOG_PREFIX} Reference index built: ${refSet.size} distinct cell addresses referenced across all formulas.`);
-  return { refSet, refCountMap };
+  // Count numeric cells in forward columns
+  let forwardNumericCount = 0;
+
+  if (selectedPeriodRow !== null) {
+    // Build set of forward columns
+    const forwardCols = new Set<number>();
+    for (const [col, val] of selectedPeriodRow) {
+      const yr = Number(val);
+      if (Number.isInteger(yr) && yr >= 2000 && yr <= 2100) {
+        if (hasActualForecastRow) {
+          // Only columns whose year > maxActualYear are forward
+          if (yr > maxActualYear) {
+            forwardCols.add(col);
+          }
+        } else {
+          // No actual/forecast row — all period columns count
+          forwardCols.add(col);
+        }
+      }
+    }
+
+    for (const cell of cells) {
+      if (cell.type !== "number" || typeof cell.value !== "number") continue;
+      if (forwardCols.has(cell.c)) {
+        forwardNumericCount++;
+      }
+    }
+  }
+
+  const hasForwardValues = forwardNumericCount >= 5;
+
+  const isInputSheet =
+    numericDensity < 0.55 &&
+    numericCells >= 20 &&
+    hasForwardValues;
+
+  return {
+    totalNonEmptyCells,
+    numericCells,
+    numericDensity,
+    hasForwardValues,
+    isInputSheet,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -332,8 +367,26 @@ const registerModelDrivers: StageHandler = async (
     return { complete: true, itemsDone: 0, itemsTotal: 0, resumePosition: 0 };
   }
 
-  // ── 3. Build workbook-wide reference index ─────────────────────────
-  const { refSet, refCountMap } = buildReferenceIndex(allSheets);
+  // ── 3. Classify sheets ─────────────────────────────────────────────
+  // Build a shared period row for each sheet, then classify
+  const sheetClassifications = new Map<string, SheetClassification>();
+  for (const sheet of allSheets) {
+    const data = sheet.data as { cells?: ParsedCell[] };
+    const cells = data?.cells ?? [];
+    const periodHeaders = detectPeriodHeaderRows(cells);
+    const periodRow = selectPeriodRow(periodHeaders);
+    const classification = classifySheet(sheet, periodRow);
+    sheetClassifications.set(sheet.sheet_or_page, classification);
+
+    console.log(
+      `${LOG_PREFIX} Sheet "${sheet.sheet_or_page}": ` +
+      `totalNonEmpty=${classification.totalNonEmptyCells}, ` +
+      `numeric=${classification.numericCells}, ` +
+      `density=${classification.numericDensity.toFixed(2)}, ` +
+      `hasForward=${classification.hasForwardValues}, ` +
+      `isInput=${classification.isInputSheet}`,
+    );
+  }
 
   // ── 4. Process sheets with resume support ──────────────────────────
   const totalSheets = allSheets.length;
@@ -363,6 +416,14 @@ const registerModelDrivers: StageHandler = async (
     const cells = data?.cells ?? [];
     const rowHeaders = data?.row_headers ?? [];
 
+    // Skip non-input sheets
+    const classification = sheetClassifications.get(sheetName);
+    if (!classification || !classification.isInputSheet) {
+      console.log(`${LOG_PREFIX} Sheet "${sheetName}": not an input sheet. Skipping.`);
+      sheetIdx++;
+      continue;
+    }
+
     // ── 4a. Idempotency: delete existing rows for this sheet ─────────
     await db.execute(
       `DELETE FROM mast_assumptions
@@ -383,9 +444,7 @@ const registerModelDrivers: StageHandler = async (
       row: number;
       col: number;
       value: number;
-      refKey: string;
-      refCount: number;
-      label: string | null;
+      label: string;
       period: string | null;
       locator: string;
     }
@@ -405,14 +464,9 @@ const registerModelDrivers: StageHandler = async (
       // Exclusion: period header row
       if (headerRowIndices.has(cell.r)) continue;
 
-      // Driver test: type is number, formula is null or empty, address is referenced
+      // Driver test: type is number, value is a number
       if (cell.type !== "number") continue;
-      if (typeof cell.formula === "string" && cell.formula.length > 0) continue;
       if (typeof cell.value !== "number") continue;
-
-      const addr = toA1(cell.r, cell.c);
-      const refKey = `${sheetName}!${addr}`;
-      if (!refSet.has(refKey)) continue;
 
       // Label: nearest non-empty string cell to the left in the same row
       let label: string | null = null;
@@ -428,6 +482,9 @@ const registerModelDrivers: StageHandler = async (
         label = rowHeaders[cell.r].trim();
       }
 
+      // Driver must have a non-empty label
+      if (label === null) continue;
+
       // Period: value from the selected period header row at the same column index
       let period: string | null = null;
       if (selectedPeriodRow !== null) {
@@ -437,41 +494,38 @@ const registerModelDrivers: StageHandler = async (
         }
       }
 
+      const addr = toA1(cell.r, cell.c);
+
       drivers.push({
         row: cell.r,
         col: cell.c,
         value: cell.value,
-        refKey,
-        refCount: refCountMap.get(refKey) ?? 0,
         label,
         period,
         locator: `${sheetName}!${addr}`,
       });
     }
 
-    // ── 4d. Cap at DRIVER_CAP, ordered by refCount desc ──────────────
+    // ── 4d. Cap at DRIVER_CAP, ordered by abs value ascending ────────
     let driversToWrite = drivers;
     if (drivers.length > DRIVER_CAP) {
       console.log(
         `${LOG_PREFIX} Sheet "${sheetName}" has ${drivers.length} drivers — capping at ${DRIVER_CAP}, dropping ${drivers.length - DRIVER_CAP}.`,
       );
       driversToWrite = drivers
-        .sort((a, b) => b.refCount - a.refCount)
+        .sort((a, b) => Math.abs(a.value) - Math.abs(b.value))
         .slice(0, DRIVER_CAP);
     }
 
     // ── 4e. Write to mast_assumptions ────────────────────────────────
+    const densityTag = `(${classification.numericDensity.toFixed(2)})`;
+
     for (const d of driversToWrite) {
-      const verbatim =
-        d.label != null ? `${d.label} = ${d.value}` : `= ${d.value}`;
+      const verbatim = `${d.label} = ${d.value}`;
       const proposition =
-        d.label != null
-          ? d.period != null
-            ? `${d.label} = ${d.value} (${d.period})`
-            : `${d.label} = ${d.value}`
-          : d.period != null
-            ? `= ${d.value} (${d.period})`
-            : `= ${d.value}`;
+        d.period != null
+          ? `${d.label} = ${d.value} (${d.period}) ${densityTag}`
+          : `${d.label} = ${d.value} ${densityTag}`;
 
       await db.execute(
         `INSERT INTO mast_assumptions (
