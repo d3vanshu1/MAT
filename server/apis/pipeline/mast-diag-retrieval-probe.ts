@@ -132,7 +132,6 @@ export function propositionToQuery(proposition: string): string {
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
 
-  // Deduplicate while preserving order
   const seen = new Set<string>();
   const unique: string[] = [];
   for (const t of tokens) {
@@ -179,15 +178,17 @@ const ChunkHitRow = z.object({
   document_tag: z.string().nullable(),
 });
 
-const ExistsRow = z.object({
-  found: z.coerce.boolean(),
+const CorpusChunkRow = z.object({
+  chunk_index: z.coerce.number(),
+  file_name: z.string(),
+  content: z.string(),
 });
 
 // ---------------------------------------------------------------------------
 // Retrieval mode names
 // ---------------------------------------------------------------------------
 
-const MODES = ["mode_a", "mode_b", "mode_c"] as const;
+const MODES = ["mode_a", "mode_b", "mode_c", "mode_d", "mode_e"] as const;
 type ModeName = (typeof MODES)[number];
 
 // ---------------------------------------------------------------------------
@@ -200,19 +201,28 @@ const ModeResultSchema = z.object({
   top_rank_tag: z.string().nullable(),
   chunks_returned: z.number(),
   skipped: z.boolean().optional(),
+  tag_distribution: z.record(z.string(), z.number()).optional(),
 });
 
 // ---------------------------------------------------------------------------
 // Per-probe result schema
 // ---------------------------------------------------------------------------
 
+const PhraseLocationSchema = z.object({
+  chunk_index: z.number(),
+  file_name: z.string(),
+}).nullable();
+
 const ProbeResultSchema = z.object({
   id: z.string(),
   extracted_query: z.string(),
   phrase_exists_in_corpus: z.boolean(),
+  phrase_location: PhraseLocationSchema,
   mode_a: ModeResultSchema,
   mode_b: ModeResultSchema,
   mode_c: ModeResultSchema,
+  mode_d: ModeResultSchema,
+  mode_e: ModeResultSchema,
   verbose_chunks: z
     .record(
       z.string(),
@@ -233,6 +243,12 @@ const AggregatesSchema = z.object({
   phrase_in_corpus_but_not_retrieved: z.number(),
   mean_rank: z.number().nullable(),
 });
+
+// ---------------------------------------------------------------------------
+// Batch size for corpus phrase check
+// ---------------------------------------------------------------------------
+
+const CORPUS_BATCH = 500;
 
 // ---------------------------------------------------------------------------
 // API
@@ -282,9 +298,23 @@ export default api({
         ? excludedDocs.map((d) => d.id)
         : ["00000000-0000-0000-0000-000000000000"];
 
-    // ── Helper: run a single FTS retrieval ──────────────────────────
-    async function retrieve(
+    // ── Count total in-scope chunks for batched phrase check ────────
+    const countRows = await db.query(
+      `SELECT COUNT(*)::int AS cnt
+       FROM document_chunks dc
+       JOIN documents d ON d.id = dc.document_id
+       WHERE dc.deal_id = $1::uuid
+         AND d.document_tag NOT IN ('financial_model', 'ic_memo')`,
+      z.object({ cnt: z.coerce.number() }),
+      [dealId],
+      { label: "PROBE: count in-scope chunks" },
+    );
+    const totalChunks = countRows.length > 0 ? countRows[0].cnt : 0;
+
+    // ── Helper: retrieve with custom ranking SQL ────────────────────
+    async function retrieveRanked(
       tsqueryExpr: string,
+      rankExpr: string,
       params: unknown[],
       label: string,
     ): Promise<z.infer<typeof ChunkHitRow>[]> {
@@ -294,7 +324,7 @@ export default api({
                 dc.file_name,
                 dc.chunk_index,
                 dc.content,
-                ts_rank_cd(dc.tsv, q) AS rank,
+                ${rankExpr} AS rank,
                 d.document_tag
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
@@ -308,6 +338,15 @@ export default api({
         params,
         { label },
       );
+    }
+
+    // ── Convenience: standard retrieve (ts_rank_cd default) ─────────
+    async function retrieve(
+      tsqueryExpr: string,
+      params: unknown[],
+      label: string,
+    ): Promise<z.infer<typeof ChunkHitRow>[]> {
+      return retrieveRanked(tsqueryExpr, "ts_rank_cd(dc.tsv, q)", params, label);
     }
 
     // ── Helper: score hits against a probe ───────────────────────────
@@ -328,11 +367,30 @@ export default api({
         }
       }
 
+      // Tag distribution
+      const tagDist: Record<string, number> = {};
+      for (const h of hits) {
+        const tag = h.document_tag ?? "null";
+        tagDist[tag] = (tagDist[tag] ?? 0) + 1;
+      }
+
       return {
         found_at_rank: foundAtRank,
         tag_match: tagMatch,
         top_rank_tag: hits.length > 0 ? (hits[0].document_tag ?? null) : null,
         chunks_returned: hits.length,
+        tag_distribution: tagDist,
+      };
+    }
+
+    // ── Helper: skipped mode result ─────────────────────────────────
+    function skippedMode(): z.infer<typeof ModeResultSchema> {
+      return {
+        found_at_rank: null,
+        tag_match: null,
+        top_rank_tag: null,
+        chunks_returned: 0,
+        skipped: true,
       };
     }
 
@@ -347,8 +405,9 @@ export default api({
         .map(sanitiseTerm)
         .filter((t) => t.length > 0);
       const hasTerms = sanitisedTerms.length > 0;
+      const orExpr = hasTerms ? sanitisedTerms.join(" | ") : "";
 
-      // ── Mode A: websearch_to_tsquery (original behaviour, control) ─
+      // ── Mode A: websearch_to_tsquery (original, control) ───────────
       const hitsA = await retrieve(
         `websearch_to_tsquery('english', $2)`,
         [dealId, probe.proposition, excludedIds],
@@ -356,11 +415,10 @@ export default api({
       );
       const modeA = scoreHits(hitsA, normPhrase, probe.expectedDocTag);
 
-      // ── Mode B: to_tsquery with OR-joined extracted terms ──────────
+      // ── Mode B: to_tsquery OR (ts_rank_cd default) ─────────────────
       let modeB: z.infer<typeof ModeResultSchema>;
       let hitsB: z.infer<typeof ChunkHitRow>[] = [];
       if (hasTerms) {
-        const orExpr = sanitisedTerms.join(" | ");
         hitsB = await retrieve(
           `to_tsquery('english', $2)`,
           [dealId, orExpr, excludedIds],
@@ -368,16 +426,10 @@ export default api({
         );
         modeB = scoreHits(hitsB, normPhrase, probe.expectedDocTag);
       } else {
-        modeB = {
-          found_at_rank: null,
-          tag_match: null,
-          top_rank_tag: null,
-          chunks_returned: 0,
-          skipped: true,
-        };
+        modeB = skippedMode();
       }
 
-      // ── Mode C: plainto_tsquery with extracted terms (AND) ─────────
+      // ── Mode C: plainto_tsquery AND ────────────────────────────────
       let modeC: z.infer<typeof ModeResultSchema>;
       let hitsC: z.infer<typeof ChunkHitRow>[] = [];
       if (hasTerms) {
@@ -388,30 +440,79 @@ export default api({
         );
         modeC = scoreHits(hitsC, normPhrase, probe.expectedDocTag);
       } else {
-        modeC = {
-          found_at_rank: null,
-          tag_match: null,
-          top_rank_tag: null,
-          chunks_returned: 0,
-          skipped: true,
-        };
+        modeC = skippedMode();
       }
 
-      // ── phrase_exists_in_corpus (mode-independent) ─────────────────
-      const existsRows = await db.query(
-        `SELECT EXISTS (
-           SELECT 1
+      // ── Mode D: to_tsquery OR, ts_rank_cd with normalization 32 ────
+      let modeD: z.infer<typeof ModeResultSchema>;
+      let hitsD: z.infer<typeof ChunkHitRow>[] = [];
+      if (hasTerms) {
+        hitsD = await retrieveRanked(
+          `to_tsquery('english', $2)`,
+          "ts_rank_cd(dc.tsv, q, 32)",
+          [dealId, orExpr, excludedIds],
+          `PROBE-D: "${probe.id}"`,
+        );
+        modeD = scoreHits(hitsD, normPhrase, probe.expectedDocTag);
+      } else {
+        modeD = skippedMode();
+      }
+
+      // ── Mode E: to_tsquery OR, rank by distinct term count, ────────
+      //    tiebreak by ts_rank_cd
+      let modeE: z.infer<typeof ModeResultSchema>;
+      let hitsE: z.infer<typeof ChunkHitRow>[] = [];
+      if (hasTerms) {
+        // Build individual tsquery checks to count distinct matching terms
+        const termCountParts = sanitisedTerms.map(
+          (t) => `CASE WHEN dc.tsv @@ to_tsquery('english', '${t}') THEN 1 ELSE 0 END`,
+        );
+        const termCountExpr = termCountParts.join(" + ");
+        const rankExpr = `(${termCountExpr})::float + ts_rank_cd(dc.tsv, q) * 0.001`;
+
+        hitsE = await retrieveRanked(
+          `to_tsquery('english', $2)`,
+          rankExpr,
+          [dealId, orExpr, excludedIds],
+          `PROBE-E: "${probe.id}"`,
+        );
+        modeE = scoreHits(hitsE, normPhrase, probe.expectedDocTag);
+      } else {
+        modeE = skippedMode();
+      }
+
+      // ── phrase_exists_in_corpus — batched normalized scan ───────────
+      let phraseExists = false;
+      let phraseLocation: z.infer<typeof PhraseLocationSchema> = null;
+
+      for (let offset = 0; offset < totalChunks; offset += CORPUS_BATCH) {
+        const batch = await db.query(
+          `SELECT dc.chunk_index, dc.file_name, dc.content
            FROM document_chunks dc
            JOIN documents d ON d.id = dc.document_id
            WHERE dc.deal_id = $1::uuid
              AND d.document_tag NOT IN ('financial_model', 'ic_memo')
-             AND dc.content ILIKE $2
-         ) AS found`,
-        ExistsRow,
-        [dealId, `%${probe.expectedPhrase}%`],
-        { label: `PROBE: phrase exists "${probe.id}"` },
-      );
-      const phraseExists = existsRows.length > 0 && existsRows[0].found;
+           ORDER BY dc.document_id, dc.chunk_index
+           LIMIT $2 OFFSET $3`,
+          CorpusChunkRow,
+          [dealId, CORPUS_BATCH, offset],
+          { label: `PROBE: corpus scan batch ${offset} for "${probe.id}"` },
+        );
+
+        for (const row of batch) {
+          if (normalize(row.content).includes(normPhrase)) {
+            phraseExists = true;
+            phraseLocation = {
+              chunk_index: row.chunk_index,
+              file_name: row.file_name,
+            };
+            break;
+          }
+        }
+
+        if (phraseExists) break;
+        if (batch.length < CORPUS_BATCH) break;
+      }
 
       // ── Verbose ────────────────────────────────────────────────────
       let verboseChunks:
@@ -423,6 +524,8 @@ export default api({
           ["mode_a", hitsA],
           ["mode_b", hitsB],
           ["mode_c", hitsC],
+          ["mode_d", hitsD],
+          ["mode_e", hitsE],
         ] as const) {
           verboseChunks[mode] = hits.slice(0, 3).map((h) => ({
             file_name: h.file_name,
@@ -435,9 +538,12 @@ export default api({
         id: probe.id,
         extracted_query: extracted,
         phrase_exists_in_corpus: phraseExists,
+        phrase_location: phraseLocation,
         mode_a: modeA,
         mode_b: modeB,
         mode_c: modeC,
+        mode_d: modeD,
+        mode_e: modeE,
         ...(verboseChunks ? { verbose_chunks: verboseChunks } : {}),
       });
     }
