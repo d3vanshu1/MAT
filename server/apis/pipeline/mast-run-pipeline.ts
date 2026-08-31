@@ -43,6 +43,10 @@ const LOCK_STALENESS_MS = 300_000; // 300 seconds
 // ---------------------------------------------------------------------------
 
 const CasResultRow = z.object({ run_id: z.string() });
+const RunIdRow = z.object({ id: z.string() });
+const ModuleRunRow = z.object({ id: z.string(), status: z.string() });
+
+const MAST_MODULE_ID = "model_assumptions_stress";
 
 const StateRow = z.object({
   stage: z.string(),
@@ -64,7 +68,7 @@ export default api({
   },
 
   input: z.object({
-    runId: z.string().uuid(),
+    runId: z.string().uuid().optional(),
     dealId: z.string().uuid(),
   }),
 
@@ -74,9 +78,10 @@ export default api({
     resumePosition: z.number(),
     itemsTotal: z.number(),
     message: z.string(),
+    runId: z.string(),
   }),
 
-  async run(ctx, { runId, dealId }) {
+  async run(ctx, { runId: inputRunId, dealId }) {
     const db = ctx.integrations.ic_diligence_db;
     const ai = ctx.integrations.ai;
 
@@ -85,6 +90,56 @@ export default api({
         `${LOG_PREFIX} Anthropic integration (ai) is missing from ctx.integrations. ` +
         `Ensure the anthropic integration (${ANTHROPIC_ID}) is configured and accessible.`,
       );
+    }
+
+    // ── 0. Resolve or create module_runs row ──────────────────────────
+    let runId: string;
+
+    if (inputRunId) {
+      // Validate the supplied runId exists for this deal and module
+      const runCheck = await db.query(
+        `SELECT id, status FROM module_runs
+         WHERE id = $1::uuid AND deal_id = $2::uuid AND module_id = $3
+         LIMIT 1`,
+        ModuleRunRow,
+        [inputRunId, dealId, MAST_MODULE_ID],
+        { label: "MAST: validate module_runs row" },
+      );
+      if (runCheck.length === 0) {
+        throw new Error(
+          `${LOG_PREFIX} No module_runs row for runId=${inputRunId} deal=${dealId} module=${MAST_MODULE_ID}`,
+        );
+      }
+      runId = inputRunId;
+      console.log(`${LOG_PREFIX} Using supplied run ${runId} (status=${runCheck[0].status}).`);
+    } else {
+      // Look for an existing non-completed run
+      const existingRun = await db.query(
+        `SELECT id FROM module_runs
+         WHERE deal_id = $1::uuid AND module_id = $2 AND status != 'completed'::module_status
+         ORDER BY triggered_at DESC
+         LIMIT 1`,
+        RunIdRow,
+        [dealId, MAST_MODULE_ID],
+        { label: "MAST: check existing active run" },
+      );
+
+      if (existingRun.length > 0) {
+        runId = existingRun[0].id;
+        console.log(`${LOG_PREFIX} Resuming existing run ${runId}.`);
+      } else {
+        // Create a new module_runs row
+        const newRunRows = await db.query(
+          `INSERT INTO module_runs (deal_id, module_id, status, documents_included)
+           VALUES ($1::uuid, $2, 'running'::module_status, '{}'::text[])
+           RETURNING id`,
+          RunIdRow,
+          [dealId, MAST_MODULE_ID],
+          { label: "MAST: create module_runs row" },
+        );
+        runId = newRunRows[0].id;
+        console.log(`${LOG_PREFIX} Created new run ${runId}.`);
+      }
     }
 
     // Generate a unique token for this invocation
@@ -124,13 +179,14 @@ export default api({
 
     if (claimed.length === 0) {
       console.log(`${LOG_PREFIX} Lock held by another invocation for run ${runId}.`);
-      return {
-        status: "owned_elsewhere" as const,
-        stage: null,
-        resumePosition: 0,
-        itemsTotal: 0,
-        message: "Lock held by another invocation.",
-      };
+        return {
+          status: "owned_elsewhere" as const,
+          stage: null,
+          resumePosition: 0,
+          itemsTotal: 0,
+          message: "Lock held by another invocation.",
+          runId,
+        };
     }
 
     // ── Helper: release lock (only if this invocation still owns it) ──
@@ -186,6 +242,7 @@ export default api({
           resumePosition: 0,
           itemsTotal: 0,
           message: `All ${STAGES.length} stages complete.`,
+          runId,
         };
       }
 
@@ -234,6 +291,7 @@ export default api({
           resumePosition: result.resumePosition,
           itemsTotal: result.itemsTotal,
           message: `Stage ${currentStage} complete.`,
+          runId,
         };
       }
 
@@ -256,6 +314,7 @@ export default api({
         resumePosition: result.resumePosition,
         itemsTotal: result.itemsTotal,
         message: `Stage ${currentStage} partial: ${result.itemsDone}/${result.itemsTotal} items done.`,
+        runId,
       };
     } catch (err) {
       // ── Error path: mark stage failed, release lock ─────────────────
@@ -283,6 +342,7 @@ export default api({
         resumePosition: 0,
         itemsTotal: 0,
         message: msg.slice(0, 2000),
+        runId,
       };
     }
   },
