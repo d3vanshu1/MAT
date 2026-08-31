@@ -40,6 +40,7 @@ export type StageName = (typeof STAGES)[number];
 export const LOOP_STAGES: ReadonlySet<string> = new Set([
   "register_model_drivers",
   "register_silent",
+  "register_memo",
   "inheritance",
   "support_search",
   "forecast_recursion",
@@ -65,6 +66,10 @@ export interface StageContext {
   db: {
     query: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]>;
     execute: (sql: string, params: unknown[], meta?: { label: string }) => Promise<any>;
+  };
+  /** Anthropic integration client — required for LLM stages (register_memo, etc.). */
+  ai?: {
+    apiRequest: (request: any, schemas: any, meta?: { label: string }) => Promise<any>;
   };
   runId: string;
   dealId: string;
@@ -160,6 +165,9 @@ function loadRealHandlers(): void {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { default: registerSilent } = require("./mast-register-silent.js");
   HANDLER_MAP.register_silent = registerSilent;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { default: registerMemo } = require("./mast-register-memo.js");
+  HANDLER_MAP.register_memo = registerMemo;
 }
 
 /** Look up the handler for a stage name. */

@@ -37,6 +37,8 @@ export const SONNET_MODULES = new Set([
   // memo corpus. Haiku produces generic, non-anchored questions at that context
   // size; the module's output is read directly by deal teams.
   "ic_challenge_mode",
+  // MAST memo extraction requires verbatim fidelity that Haiku does not deliver
+  "mast_v2",
 ]);
 
 // ---------------------------------------------------------------------------
