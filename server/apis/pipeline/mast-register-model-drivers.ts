@@ -15,9 +15,44 @@
 import type { StageContext, StageResult, StageHandler } from "./mast-contract.js";
 import { STAGE_BUDGET_MS } from "./mast-contract.js";
 import { loadAllSheets } from "./mast-doc-tables.js";
+import { getModuleModel } from "./model-config.js";
 import { z } from "@superblocksteam/sdk-api";
 
 const LOG_PREFIX = "[MAST-DRIVERS]";
+
+const MODULE_ID = "mast_v2";
+const ADJUDICATION_BATCH_SIZE = 40;
+const MAX_OUTPUT_TOKENS = 4096;
+
+// Label values that are not real labels (case-insensitive exact match after trim)
+const LABEL_BLACKLIST = new Set(["n.a.", "na", "n/a", "nm", "n.m.", "tbd"]);
+
+/** Strip parens, percent signs, commas, currency symbols, and spaces, then
+ *  test whether what remains parses as a finite number. */
+function labelIsNumeric(label: string): boolean {
+  const stripped = label.replace(/[()%,$ £€¥\s]/g, "");
+  if (stripped.length === 0) return true;
+  return Number.isFinite(Number(stripped));
+}
+
+/** True if the label consists solely of punctuation (no alphanumeric). */
+function labelIsPunctuation(label: string): boolean {
+  return !/[a-zA-Z0-9]/.test(label);
+}
+
+// Anthropic response schema (matches mast-register-memo pattern)
+const MessageResponseSchema = z.object({
+  id: z.string(),
+  type: z.literal("message"),
+  role: z.literal("assistant"),
+  content: z.array(z.object({ type: z.literal("text"), text: z.string() })),
+  model: z.string(),
+  stop_reason: z.string().nullable(),
+  usage: z.object({
+    input_tokens: z.number(),
+    output_tokens: z.number(),
+  }),
+});
 
 // ---------------------------------------------------------------------------
 // DB row schemas
@@ -474,7 +509,7 @@ const registerModelDrivers: StageHandler = async (
 
       // Magnitude filter: only rates, percentages, multiples, margins, day counts
       const absVal = Math.abs(cell.value);
-      if (absVal >= 1000) { magnitudeExcluded++; continue; }
+      if (absVal >= 10000) { magnitudeExcluded++; continue; }
 
       // Label: nearest non-empty string cell to the left in the same row
       let label: string | null = null;
@@ -490,10 +525,16 @@ const registerModelDrivers: StageHandler = async (
         label = rowHeaders[cell.r].trim();
       }
 
-      // Driver must have a non-empty label with at least 2 alphanumeric characters
+      // Driver must have a real label
       if (label === null) continue;
       const alphaCount = (label.match(/[a-zA-Z0-9]/g) || []).length;
       if (alphaCount < 2) { labelRejected++; continue; }
+      // Reject blacklisted tokens (n.a., na, n/a, nm, n.m., tbd)
+      if (LABEL_BLACKLIST.has(label.toLowerCase())) { labelRejected++; continue; }
+      // Reject labels that are purely punctuation
+      if (labelIsPunctuation(label)) { labelRejected++; continue; }
+      // Reject labels that are just a number in disguise
+      if (labelIsNumeric(label)) { labelRejected++; continue; }
 
       // Period: value from the selected period header row at the same column index
       let period: string | null = null;
@@ -517,17 +558,188 @@ const registerModelDrivers: StageHandler = async (
     }
 
     // ── 4d. Cap at DRIVER_CAP, ordered by abs value descending ───────
-    let driversToWrite = drivers;
+    let cappedDrivers = drivers;
     if (drivers.length > DRIVER_CAP) {
       console.log(
         `${LOG_PREFIX} Sheet "${sheetName}" has ${drivers.length} drivers — capping at ${DRIVER_CAP}, dropping ${drivers.length - DRIVER_CAP}.`,
       );
-      driversToWrite = drivers
+      cappedDrivers = drivers
         .sort((a, b) => Math.abs(b.value) - Math.abs(a.value))
         .slice(0, DRIVER_CAP);
     }
 
-    // ── 4e. Write to mast_assumptions ────────────────────────────────
+    // ── 4e. Adjudication — LLM filters non-assumptions ──────────────
+    const model = getModuleModel(MODULE_ID);
+    const sortedForAdj = [...cappedDrivers].sort((a, b) =>
+      a.locator.localeCompare(b.locator),
+    );
+    const adjudicatedDrivers: DriverCandidate[] = [];
+    let adjudicationRejected = 0;
+    let unadjudicatedCount = 0;
+    const sentToAdjudication = sortedForAdj.length;
+
+    for (let batchStart = 0; batchStart < sortedForAdj.length; batchStart += ADJUDICATION_BATCH_SIZE) {
+      // Budget check inside adjudication loop
+      if (Date.now() - startTime > STAGE_BUDGET_MS) {
+        // Keep remaining un-adjudicated entries (fail open)
+        const remaining = sortedForAdj.slice(batchStart);
+        adjudicatedDrivers.push(...remaining);
+        unadjudicatedCount += remaining.length;
+        console.log(
+          `${LOG_PREFIX} Sheet "${sheetName}": budget exceeded during adjudication at batch offset ${batchStart}. Keeping ${remaining.length} entries unadjudicated.`,
+        );
+        break;
+      }
+
+      const batch = sortedForAdj.slice(
+        batchStart,
+        batchStart + ADJUDICATION_BATCH_SIZE,
+      );
+
+      // Build numbered list
+      const numberedList = batch
+        .map((d, i) => {
+          const addr = d.locator; // already "SheetName!A1"
+          return `${i + 1}. Sheet: ${sheetName}, Cell: ${addr.split("!")[1]}, Label: ${d.label}, Value: ${d.value}, Period: ${d.period ?? "none"}`;
+        })
+        .join("\n");
+
+      const adjPrompt = `You are reviewing entries extracted from a financial model spreadsheet.
+
+Below is a numbered list of entries. For each one, decide whether it is an underwriting assumption — a choice the deal team made that could have been made differently and that would change the outcome if made differently.
+
+The following are NOT assumptions and MUST be rejected:
+- Calendar or date arithmetic such as days in a period, working days, or day counts
+- Counts of customers, connections, units, or headcount
+- Account balances, brought-forward or carried-forward figures
+- Historical actuals
+- Index or reference numbers
+- Any entry whose label is missing, meaningless, or is itself a number
+
+You are judging entries, not producing new ones. Do not invent, rename, or reword any entry.
+
+Return a JSON array only. No prose. No markdown fences. Each element has exactly two fields: "index" (integer matching the numbered entry) and "keep" (boolean). You must return one element for every entry in the list.
+
+--- ENTRIES ---
+${numberedList}
+--- END ENTRIES ---`;
+
+      let keepSet: Set<number> | null = null;
+      let attempts = 0;
+      const MAX_ATTEMPTS = 2;
+      let lastWasError = false;
+      let lastWasParseFailure = false;
+      let lastWasTruncated = false;
+
+      while (attempts < MAX_ATTEMPTS) {
+        if (attempts > 0 && !lastWasError && !lastWasParseFailure && !lastWasTruncated) {
+          break;
+        }
+        attempts++;
+        lastWasError = false;
+        lastWasParseFailure = false;
+        lastWasTruncated = false;
+
+        try {
+          const llmResponse = await ctx.ai.apiRequest(
+            {
+              method: "POST",
+              path: "/v1/messages",
+              body: {
+                model,
+                max_tokens: MAX_OUTPUT_TOKENS,
+                messages: [{ role: "user", content: adjPrompt }],
+              },
+            },
+            { response: MessageResponseSchema },
+            { label: `MAST-DRIVERS: adjudicate ${sheetName} batch ${batchStart}–${batchStart + batch.length - 1} attempt ${attempts}` },
+          );
+
+          // Detect truncation
+          if (llmResponse.stop_reason === "max_tokens") {
+            console.log(
+              `${LOG_PREFIX} Sheet "${sheetName}" adj batch ${batchStart}: TRUNCATED (attempt ${attempts}).`,
+            );
+            lastWasTruncated = true;
+          }
+
+          const responseText = llmResponse.content
+            .filter((c: any) => c.type === "text")
+            .map((c: any) => c.text)
+            .join("");
+
+          try {
+            const parsed = JSON.parse(responseText);
+            if (!Array.isArray(parsed)) {
+              console.log(
+                `${LOG_PREFIX} Sheet "${sheetName}" adj batch ${batchStart}: response is not an array (attempt ${attempts}). Raw (300): ${responseText.slice(0, 300)}`,
+              );
+              lastWasParseFailure = true;
+              continue;
+            }
+            // Build keep set from valid elements
+            keepSet = new Set<number>();
+            for (const el of parsed) {
+              if (
+                el &&
+                typeof el === "object" &&
+                typeof el.index === "number" &&
+                typeof el.keep === "boolean" &&
+                el.index >= 1 &&
+                el.index <= batch.length
+              ) {
+                if (el.keep) {
+                  keepSet.add(el.index);
+                }
+              }
+            }
+            // If the response omits entries, keep them (fail open)
+            for (let i = 1; i <= batch.length; i++) {
+              const mentioned = parsed.some(
+                (el: any) => el && typeof el === "object" && el.index === i,
+              );
+              if (!mentioned) {
+                keepSet.add(i);
+              }
+            }
+            // Successfully parsed — done
+            break;
+          } catch (_parseErr) {
+            console.log(
+              `${LOG_PREFIX} Sheet "${sheetName}" adj batch ${batchStart}: JSON parse failure (attempt ${attempts}). Raw (300): ${responseText.slice(0, 300)}`,
+            );
+            lastWasParseFailure = true;
+            continue;
+          }
+        } catch (llmErr) {
+          console.log(
+            `${LOG_PREFIX} Sheet "${sheetName}" adj batch ${batchStart}: LLM call failed (attempt ${attempts}): ${String(llmErr)}`,
+          );
+          lastWasError = true;
+          continue;
+        }
+      }
+
+      // If all attempts failed, keep every entry (fail open)
+      if (keepSet === null) {
+        adjudicatedDrivers.push(...batch);
+        unadjudicatedCount += batch.length;
+        console.log(
+          `${LOG_PREFIX} Sheet "${sheetName}" adj batch ${batchStart}: all attempts failed — keeping ${batch.length} entries unadjudicated.`,
+        );
+      } else {
+        for (let i = 0; i < batch.length; i++) {
+          if (keepSet.has(i + 1)) {
+            adjudicatedDrivers.push(batch[i]);
+          } else {
+            adjudicationRejected++;
+          }
+        }
+      }
+    }
+
+    // ── 4f. Write surviving entries to mast_assumptions ──────────────
+    const driversToWrite = adjudicatedDrivers;
     const densityTag = `(${classification.numericDensity.toFixed(2)})`;
 
     for (const d of driversToWrite) {
@@ -553,7 +765,7 @@ const registerModelDrivers: StageHandler = async (
     }
 
     console.log(
-      `${LOG_PREFIX} Sheet "${sheetName}": ${driversToWrite.length} drivers written, ${zeroSkipped} zero-skipped, ${magnitudeExcluded} magnitude-excluded, ${labelRejected} label-rejected.`,
+      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
     );
     totalDriversWritten += driversToWrite.length;
     sheetIdx++;
