@@ -12,13 +12,27 @@ import { api, z, postgres } from "@superblocksteam/sdk-api";
 import {
   STAGES,
   type StageName,
-  LOOP_STAGES,
   getStageHandler,
 } from "./mast-stages.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
 const LOG_PREFIX = "[MAST-PIPELINE]";
+
+// ---------------------------------------------------------------------------
+// Cross-environment UUID v4 — avoids Node `crypto` import that Vite externalizes
+// ---------------------------------------------------------------------------
+function mastRandomUUID(): string {
+  if (typeof globalThis !== "undefined" && typeof (globalThis as any).crypto?.randomUUID === "function") {
+    return (globalThis as any).crypto.randomUUID() as string;
+  }
+  // RFC 4122 v4 UUID — pure JS fallback
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 /** Staleness threshold for lock reclaim (ms). */
 const LOCK_STALENESS_MS = 300_000; // 300 seconds
@@ -64,7 +78,7 @@ export default api({
     const db = ctx.integrations.ic_diligence_db;
 
     // Generate a unique token for this invocation
-    const token = crypto.randomUUID();
+    const token = mastRandomUUID();
 
     // ── 1. Ensure rows exist for every stage + _lock ──────────────────
     const allStages = [...STAGES, "_lock"] as const;
@@ -109,16 +123,21 @@ export default api({
       };
     }
 
-    // ── Helper: release lock ──────────────────────────────────────────
+    // ── Helper: release lock (only if this invocation still owns it) ──
     const releaseLock = async () => {
       await db.execute(
         `UPDATE mast_pipeline_state
          SET payload = NULL, updated_at = now()
-         WHERE run_id = $1::uuid AND stage = '_lock'`,
-        [runId],
+         WHERE run_id = $1::uuid
+           AND stage = '_lock'
+           AND payload->>'owner_token' = $2::text`,
+        [runId, token],
         { label: "MAST release lock" },
       );
     };
+
+    // Track stage for the error path
+    let activeStage: StageName | null = null;
 
     try {
       // ── 3. Read all non-lock stage rows, ordered by registry ────────
@@ -145,6 +164,7 @@ export default api({
           break;
         }
       }
+      activeStage = currentStage;
 
       // All stages complete
       if (currentStage === null) {
@@ -231,36 +251,24 @@ export default api({
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`${LOG_PREFIX} Stage FAILED: ${msg}`);
 
-      // Best-effort: mark the current stage as failed
-      // We may not know which stage was running if the error was in the read,
-      // but the lock release is critical regardless.
-      try {
-        // Find the running stage to mark it failed
-        const runningRows = await db.query(
-          `SELECT stage FROM mast_pipeline_state
-           WHERE run_id = $1::uuid AND status = 'running' AND stage != '_lock'
-           LIMIT 1`,
-          z.object({ stage: z.string() }),
-          [runId],
-          { label: "MAST find running stage for error" },
-        );
-        if (runningRows.length > 0) {
+      if (activeStage !== null) {
+        try {
           await db.execute(
             `UPDATE mast_pipeline_state
              SET status = 'failed', error_text = $3, updated_at = now()
              WHERE run_id = $1::uuid AND stage = $2`,
-            [runId, runningRows[0].stage, msg.slice(0, 2000)],
-            { label: `MAST mark failed: ${runningRows[0].stage}` },
+            [runId, activeStage, msg.slice(0, 2000)],
+            { label: `MAST mark failed: ${activeStage}` },
           );
+        } catch {
+          // Ignore — lock release is more important
         }
-      } catch {
-        // Ignore — lock release is more important
       }
 
       await releaseLock();
       return {
         status: "failed" as const,
-        stage: null,
+        stage: activeStage,
         resumePosition: 0,
         itemsTotal: 0,
         message: msg.slice(0, 2000),
