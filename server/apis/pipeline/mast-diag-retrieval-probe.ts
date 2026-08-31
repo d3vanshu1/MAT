@@ -31,7 +31,78 @@ export interface RetrievalProbe {
 // ---------------------------------------------------------------------------
 // PROBE SET INSERTION POINT
 // ---------------------------------------------------------------------------
-export const PROBES: RetrievalProbe[] = [];
+export const PROBES: RetrievalProbe[] = [
+  {
+    id: "P1_grr_basis",
+    proposition: "Gross revenue retention is sustainable at current levels and supports the customer retention assumptions in the model",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "GRR has been calculated as the sum of Churn and Product",
+    note: "FDD basis of preparation for retention metrics - a methodological judgment",
+  },
+  {
+    id: "P2_flip_acquisition",
+    proposition: "The Flip acquisition expanded the group's SME mobile capability in the South",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "Flip is a Hertfordshire-based unified communications provider offering voice, connectivity, IT, and mobile solutions to SMEs",
+    note: "Expected easy hit - high lexical overlap",
+  },
+  {
+    id: "P3_framework_termination",
+    proposition: "Public sector framework contracts will remain in place across the hold period",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "the Trust may terminate the call-off agreement under RM6116",
+    note: "Legal DD contract termination rights",
+  },
+  {
+    id: "P4_restrictive_covenants",
+    proposition: "Sellers of previously acquired businesses remain bound by non-compete restrictions",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "Restricted Period: 9 June 2022",
+    note: "Low lexical overlap - the honest test",
+  },
+  {
+    id: "P5_supplier_contracts",
+    proposition: "The group's wholesale connectivity supply arrangements are long-standing and stable",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "BT Wholesale Ethernet Agreement Sept 2015",
+    note: "Data room index entry - tests retrieval against list-shaped content",
+  },
+  {
+    id: "P6_debt_security",
+    proposition: "Existing group borrowings are secured against company assets",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "in favour of Ares Management Limited",
+    note: "Low lexical overlap - debenture described without the word security",
+  },
+  {
+    id: "P7_property_costs",
+    proposition: "Property costs are fixed and the group carries no offsetting rights against rent",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "There is no right for the tenant deduct sums owing from the landlord from the rent",
+    note: "Lease summary - memo language differs sharply from source",
+  },
+  {
+    id: "P8_brand_protection",
+    proposition: "The group's brand and trademarks are adequately protected",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "sporadically in its email marketing materials",
+    note: "Trademark usage risk stated obliquely",
+  },
+  {
+    id: "P9_legacy_migration",
+    proposition: "Customers will migrate off legacy telephony onto hosted platforms on the forecast timeline",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "The primary factor is the legacy of ISDN",
+    note: "CDD migration complexity - moderate overlap",
+  },
+  {
+    id: "P10_teams_displacement",
+    proposition: "Microsoft Teams adoption does not displace the group's telephony revenue",
+    expectedDocTag: "consultant_report",
+    expectedPhrase: "Customers often adopt hybrid setups",
+    note: "CDD hybrid adoption - expected hit",
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Normalization — lowercase, non-letter/digit/space → single space, collapse, trim
@@ -154,9 +225,9 @@ export default api({
                 dc.content,
                 ts_rank_cd(dc.tsv, q) AS rank,
                 d.document_tag
-         FROM document_chunks dc,
-              websearch_to_tsquery('english', $2) q
+         FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
+         CROSS JOIN websearch_to_tsquery('english', $2) q
          WHERE dc.deal_id = $1::uuid
            AND dc.tsv @@ q
            AND dc.document_id != ALL($3::uuid[])
