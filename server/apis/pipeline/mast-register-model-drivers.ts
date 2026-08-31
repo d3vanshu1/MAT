@@ -91,6 +91,55 @@ function toA1(row: number, col: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// resolveNumeric — coerce string cells that are actually numbers
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a numeric value from a cell, or null if the cell is not numeric.
+ * Handles native numbers and string cells whose trimmed value, after stripping
+ * commas, currency symbols, and surrounding parentheses, parses as finite.
+ * A trailing percent sign divides the result by 100.
+ * Parenthesised values are negative (accounting convention).
+ */
+export function resolveNumeric(
+  cell: ParsedCell,
+): number | null {
+  if (cell.type === "number" && typeof cell.value === "number") {
+    return cell.value;
+  }
+  if (cell.type === "string" && cell.value != null) {
+    let s = String(cell.value).trim();
+    if (s.length === 0) return null;
+
+    // Detect negative accounting notation: (123) → -123
+    let isNeg = false;
+    if (s.startsWith("(") && s.endsWith(")")) {
+      isNeg = true;
+      s = s.slice(1, -1).trim();
+    }
+
+    // Strip commas and currency symbols
+    s = s.replace(/[,$ £€¥]/g, "");
+
+    // Detect trailing percent sign
+    let pct = false;
+    if (s.endsWith("%")) {
+      pct = true;
+      s = s.slice(0, -1).trim();
+    }
+
+    if (s.length === 0) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+
+    let result = isNeg ? -Math.abs(n) : n;
+    if (pct) result /= 100;
+    return result;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Period header detection
 // ---------------------------------------------------------------------------
 
@@ -231,7 +280,7 @@ export function classifySheet(
   for (const cell of cells) {
     if (cell.type === "empty" || cell.value === null || cell.value === "") continue;
     totalNonEmptyCells++;
-    if (cell.type === "number" && typeof cell.value === "number") {
+    if (resolveNumeric(cell) !== null) {
       numericCells++;
     }
   }
@@ -313,7 +362,7 @@ export function classifySheet(
     }
 
     for (const cell of cells) {
-      if (cell.type !== "number" || typeof cell.value !== "number") continue;
+      if (resolveNumeric(cell) === null) continue;
       if (forwardCols.has(cell.c)) {
         forwardNumericCount++;
       }
@@ -427,6 +476,7 @@ const registerModelDrivers: StageHandler = async (
   const totalSheets = allSheets.length;
   let sheetIdx = resumePosition;
   let totalDriversWritten = 0;
+  const sheetSummaries: Array<Record<string, unknown>> = [];
 
   while (sheetIdx < totalSheets) {
     // Budget check
@@ -488,6 +538,7 @@ const registerModelDrivers: StageHandler = async (
     let zeroSkipped = 0;
     let magnitudeExcluded = 0;
     let labelRejected = 0;
+    let coercionRecovered = 0;
 
     // Build a quick lookup for cells by (row, col)
     const cellGrid = new Map<string, ParsedCell>();
@@ -502,20 +553,25 @@ const registerModelDrivers: StageHandler = async (
       // Exclusion: period header row
       if (headerRowIndices.has(cell.r)) continue;
 
-      // Driver test: type is number, value is a number, value is not zero
-      if (cell.type !== "number") continue;
-      if (typeof cell.value !== "number") continue;
-      if (cell.value === 0) { zeroSkipped++; continue; }
+      // Driver test: resolve numeric value (native number or coerced string)
+      const resolvedValue = resolveNumeric(cell);
+      if (resolvedValue === null) continue;
+      if (resolvedValue === 0) { zeroSkipped++; continue; }
+      const wasCoerced = cell.type === "string";
+      if (wasCoerced) coercionRecovered++;
 
       // Magnitude filter: only rates, percentages, multiples, margins, day counts
-      const absVal = Math.abs(cell.value);
+      const absVal = Math.abs(resolvedValue);
       if (absVal >= 10000) { magnitudeExcluded++; continue; }
 
       // Label: nearest non-empty string cell to the left in the same row
+      // A cell that resolves numerically through coercion is never eligible to be a label.
       let label: string | null = null;
       for (let lc = cell.c - 1; lc >= 0; lc--) {
         const leftCell = cellGrid.get(`${cell.r},${lc}`);
         if (leftCell && leftCell.type === "string" && leftCell.value != null && String(leftCell.value).trim().length > 0) {
+          // Skip if this string cell resolves as a number (coerced numeric)
+          if (resolveNumeric(leftCell) !== null) continue;
           label = String(leftCell.value).trim();
           break;
         }
@@ -550,7 +606,7 @@ const registerModelDrivers: StageHandler = async (
       drivers.push({
         row: cell.r,
         col: cell.c,
-        value: cell.value,
+        value: resolvedValue,
         label,
         period,
         locator: `${sheetName}!${addr}`,
@@ -764,11 +820,49 @@ ${numberedList}
       );
     }
 
+    // Accumulate per-sheet summary for payload persistence
+    sheetSummaries.push({
+      sheet: sheetName,
+      candidates: drivers.length,
+      labelRejected,
+      magnitudeExcluded,
+      coercionRecovered,
+      sentToAdj: sentToAdjudication,
+      kept: driversToWrite.length,
+      adjRejected: adjudicationRejected,
+      unadj: unadjudicatedCount,
+      written: driversToWrite.length,
+    });
+
     console.log(
-      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
+      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, coercionRecovered=${coercionRecovered}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
     );
     totalDriversWritten += driversToWrite.length;
     sheetIdx++;
+  }
+
+  // ── Persist summary to pipeline_state payload ──────────────────
+  try {
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [
+        runId,
+        "register_model_drivers",
+        JSON.stringify({
+          totalDriversWritten,
+          totalSheets,
+          sheets: sheetSummaries,
+          classifications: Object.fromEntries(
+            [...sheetClassifications.entries()].map(([k, v]) => [k, v]),
+          ),
+        }),
+      ],
+      { label: "MAST-DRIVERS: persist stage summary" },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
   }
 
   console.log(

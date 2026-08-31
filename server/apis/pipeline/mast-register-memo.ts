@@ -394,7 +394,38 @@ const registerMemo: StageHandler = async (
     `Failures: call_errors=${chunksAllCallsFailed}, parse_errors=${chunksAllParsesFailed}, truncated=${chunksTruncated}.`,
   );
 
-  // ── 4. Completion check ────────────────────────────────────────────
+  // ── 4. Persist stage summary into payload ─────────────────────────
+  const summaryPayload = {
+    chunksProcessedThisInvocation: chunkIdx - resumePosition,
+    totalAcceptedThisInvocation: totalAccepted,
+    totalInputTokens,
+    totalOutputTokens,
+    rejections: {
+      emptyProposition: rejectEmptyProposition,
+      shortProposition: rejectShortProposition,
+      emptyQuote: rejectEmptyQuote,
+      shortQuote: rejectShortQuote,
+      quoteNotFound: rejectQuoteNotFound,
+    },
+    failures: {
+      callErrors: chunksAllCallsFailed,
+      parseErrors: chunksAllParsesFailed,
+      truncated: chunksTruncated,
+    },
+  };
+  try {
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [runId, "register_memo", JSON.stringify(summaryPayload)],
+      { label: "MAST-MEMO: persist stage summary" },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+  }
+
+  // ── 5. Completion check ────────────────────────────────────────────
   if (chunkIdx < totalChunks) {
     return {
       complete: false,

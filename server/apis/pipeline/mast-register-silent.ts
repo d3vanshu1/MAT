@@ -23,6 +23,8 @@ import {
   detectPeriodHeaderRows,
   selectPeriodRow,
   resolveModelDocument,
+  classifySheet,
+  resolveNumeric,
 } from "./mast-register-model-drivers.js";
 import type { ParsedCell } from "./mast-register-model-drivers.js";
 import { z } from "@superblocksteam/sdk-api";
@@ -203,6 +205,7 @@ const registerSilent: StageHandler = async (
   const totalSheets = allSheets.length;
   let sheetIdx = resumePosition;
   let totalHitsWritten = 0;
+  const sheetSummaries: Array<Record<string, unknown>> = [];
 
   while (sheetIdx < totalSheets) {
     // Budget check
@@ -226,6 +229,39 @@ const registerSilent: StageHandler = async (
     };
     const cells = data?.cells ?? [];
     const rowHeaders = data?.row_headers ?? [];
+
+    // ── 4a-pre. Classify sheet — skip non-input sheets ──────────────
+    const periodHeadersForClassify = detectPeriodHeaderRows(cells);
+    const periodRowForClassify = selectPeriodRow(periodHeadersForClassify);
+    const sheetClassification = classifySheet(sheet, periodRowForClassify);
+
+    if (!sheetClassification.isInputSheet) {
+      console.log(
+        `${LOG_PREFIX} Sheet "${sheetName}": classification=NOT_INPUT ` +
+        `(density=${sheetClassification.numericDensity.toFixed(2)}, ` +
+        `numeric=${sheetClassification.numericCells}, ` +
+        `hasForward=${sheetClassification.hasForwardValues}). Skipping.`,
+      );
+      sheetSummaries.push({
+        sheet: sheetName,
+        classification: "not_input",
+        numericDensity: sheetClassification.numericDensity,
+        numericCells: sheetClassification.numericCells,
+        hasForwardValues: sheetClassification.hasForwardValues,
+        skipped: true,
+        hits: 0,
+        written: 0,
+      });
+      sheetIdx++;
+      continue;
+    }
+
+    console.log(
+      `${LOG_PREFIX} Sheet "${sheetName}": classification=INPUT ` +
+      `(density=${sheetClassification.numericDensity.toFixed(2)}, ` +
+      `numeric=${sheetClassification.numericCells}, ` +
+      `hasForward=${sheetClassification.hasForwardValues}). Processing.`,
+    );
 
     // ── 4a. Idempotency: delete existing silent rows for this sheet ──
     await db.execute(
@@ -292,10 +328,10 @@ const registerSilent: StageHandler = async (
       }
       if (label === null) continue;
 
-      // At least two numeric cells in the row
+      // At least two numeric cells in the row (using resolveNumeric for coercion)
       let numericCount = 0;
       for (const rc of _rowCells) {
-        if (rc.type === "number" && typeof rc.value === "number") {
+        if (resolveNumeric(rc) !== null) {
           numericCount++;
         }
       }
@@ -305,12 +341,11 @@ const registerSilent: StageHandler = async (
       const forecastValues: { col: number; value: number }[] = [];
       for (const fc of forecastCols) {
         const cell = cellGrid.get(`${rowIdx},${fc}`);
-        if (
-          cell &&
-          cell.type === "number" &&
-          typeof cell.value === "number"
-        ) {
-          forecastValues.push({ col: fc, value: cell.value });
+        if (cell) {
+          const rv = resolveNumeric(cell);
+          if (rv !== null) {
+            forecastValues.push({ col: fc, value: rv });
+          }
         }
       }
 
@@ -397,12 +432,11 @@ const registerSilent: StageHandler = async (
         const historicalValues: { col: number; value: number }[] = [];
         for (const hc of historicalCols) {
           const cell = cellGrid.get(`${rowIdx},${hc}`);
-          if (
-            cell &&
-            cell.type === "number" &&
-            typeof cell.value === "number"
-          ) {
-            historicalValues.push({ col: hc, value: cell.value });
+          if (cell) {
+            const rv = resolveNumeric(cell);
+            if (rv !== null) {
+              historicalValues.push({ col: hc, value: rv });
+            }
           }
         }
 
@@ -500,11 +534,49 @@ const registerSilent: StageHandler = async (
       );
     }
 
+    // Accumulate per-sheet detector hit counts
+    const detectorCounts: Record<string, number> = {};
+    for (const h of hitsToWrite) {
+      detectorCounts[h.detector] = (detectorCounts[h.detector] ?? 0) + 1;
+    }
+    sheetSummaries.push({
+      sheet: sheetName,
+      classification: "input",
+      numericDensity: sheetClassification.numericDensity,
+      numericCells: sheetClassification.numericCells,
+      hasForwardValues: sheetClassification.hasForwardValues,
+      skipped: false,
+      eligible: hits.length,
+      detectors: detectorCounts,
+      written: hitsToWrite.length,
+    });
+
     console.log(
       `${LOG_PREFIX} Sheet "${sheetName}": ${hitsToWrite.length} silent detector hits written.`,
     );
     totalHitsWritten += hitsToWrite.length;
     sheetIdx++;
+  }
+
+  // ── Persist summary to pipeline_state payload ──────────────────
+  try {
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [
+        runId,
+        "register_silent",
+        JSON.stringify({
+          totalHitsWritten,
+          totalSheets,
+          sheets: sheetSummaries,
+        }),
+      ],
+      { label: "MAST-SILENT: persist stage summary" },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
   }
 
   console.log(
