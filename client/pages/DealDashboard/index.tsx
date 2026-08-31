@@ -434,6 +434,9 @@ export default function DealDashboardPage() {
   const { run: publishEroApi } = useApi("PublishEroToModuleOutputs");
   // DCS rebuild orchestrator
   const { run: dcsRunPipelineApi } = useApi("DcsRunPipeline");
+  // MAST v2 orchestrator
+  const { run: mastRunPipelineApi } = useApi("MastRunPipeline");
+  const { run: mastPublishApi } = useApi("MastPublish");
 
   // Cancellation tracking — stores run IDs that have been cancelled
   const cancelledRunsRef = useRef<Set<string>>(new Set());
@@ -2534,6 +2537,148 @@ export default function DealDashboardPage() {
   );
 
   // ---------------------------------------------------------------------------
+  // MAST v2 stage labels
+  // ---------------------------------------------------------------------------
+
+  const MAST_STAGE_LABELS: Record<string, string> = {
+    register_model_drivers: "Extracting model drivers",
+    register_silent: "Detecting silent assumptions",
+    register_memo: "Scanning memo",
+    register_assemble: "Assembling register",
+    propositionalize: "Rewriting propositions",
+    reliance_links: "Linking reliance",
+    inheritance: "Checking inheritance",
+    emergent: "Detecting emergent patterns",
+    support_search: "Sweeping corpus for support",
+    forecast_recursion: "Recursing forecasts",
+    lineage: "Tracing lineage",
+    dependence: "Scoring dependence",
+    severity: "Computing severity",
+    fragility: "Generating falsification conditions",
+    render: "Rendering report",
+  };
+
+  // ---------------------------------------------------------------------------
+  // MAST v2 — poll-loop orchestrator
+  // ---------------------------------------------------------------------------
+
+  const runMastPipeline = useCallback(
+    async (resumeRunId?: string) => {
+      if (!dealId) return;
+
+      pipelinePollingActive.current.add("model_assumptions_stress");
+
+      const MAST_POLL_INTERVAL_MS = 3_000;
+      const MAST_MAX_OWNED_ELSEWHERE = 5;
+      let consecutiveOwnedElsewhere = 0;
+
+      setModuleProgress("model_assumptions_stress", {
+        message: "Starting MAST v2 pipeline…",
+      });
+
+      let terminal = false;
+
+      while (!terminal) {
+        let result: {
+          status: string;
+          stage: string | null;
+          resumePosition: number;
+          itemsTotal: number;
+          message: string;
+          runId: string;
+        };
+
+        try {
+          const raw = await mastRunPipelineApi({ dealId, runId: resumeRunId ?? undefined });
+          if (!raw) throw new Error("MastRunPipeline returned no result");
+          result = raw;
+          // Capture runId for resume after first call
+          if (!resumeRunId && result.runId) {
+            resumeRunId = result.runId;
+            activeRunIdRef.current["model_assumptions_stress"] = result.runId;
+          }
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+          const isNetwork = /failed to fetch|network|timeout|abort/i.test(msg);
+          if (isNetwork) {
+            setModuleProgress("model_assumptions_stress", {
+              message: "Connection interrupted, retrying…",
+            });
+            await new Promise(r => setTimeout(r, MAST_POLL_INTERVAL_MS * 2));
+            continue;
+          }
+          throw err;
+        }
+
+        consecutiveOwnedElsewhere = 0; // reset on any non-owned response
+
+        const stageLabel = result.stage
+          ? (MAST_STAGE_LABELS[result.stage] ?? result.stage)
+          : "initializing";
+
+        switch (result.status) {
+          case "done": {
+            terminal = true;
+            setModuleProgress("model_assumptions_stress", {
+              message: "MAST complete — refreshing…",
+            });
+            await refetchModules();
+            toast.success("Model Assumptions Stress Test complete!");
+            break;
+          }
+
+          case "advanced":
+          case "stage_partial": {
+            const progress = result.resumePosition > 0 && result.itemsTotal > 0
+              ? ` (${result.resumePosition}/${result.itemsTotal})`
+              : "";
+            setModuleProgress("model_assumptions_stress", {
+              message: `${stageLabel}${progress}…`,
+            });
+            break;
+          }
+
+          case "failed": {
+            terminal = true;
+            throw new Error(`MAST pipeline failed at ${stageLabel}: ${result.message}`);
+          }
+
+          case "owned_elsewhere": {
+            consecutiveOwnedElsewhere++;
+            if (consecutiveOwnedElsewhere >= MAST_MAX_OWNED_ELSEWHERE) {
+              terminal = true;
+              setModuleProgress("model_assumptions_stress", {
+                message: "A MAST run is already in progress from another session.",
+              });
+              toast.warning("A MAST run is already in progress. Please wait for it to complete.");
+              break;
+            }
+            setModuleProgress("model_assumptions_stress", {
+              message: "Waiting for lock…",
+            });
+            await new Promise(r => setTimeout(r, MAST_POLL_INTERVAL_MS * 3));
+            continue; // skip the normal poll delay
+          }
+
+          default: {
+            setModuleProgress("model_assumptions_stress", {
+              message: `${stageLabel}… (${result.status})`,
+            });
+            break;
+          }
+        }
+
+        if (!terminal) {
+          await new Promise(r => setTimeout(r, MAST_POLL_INTERVAL_MS));
+        }
+      }
+    },
+    [dealId, mastRunPipelineApi, setModuleProgress, refetchModules],
+  );
+
+  // ---------------------------------------------------------------------------
   // Run single module
   // ---------------------------------------------------------------------------
 
@@ -2615,6 +2760,9 @@ export default function DealDashboardPage() {
         } else if (moduleId === "diligence_completeness" && dealId) {
           // DCS rebuild — uses DcsRunPipeline orchestrator instead of v1
           await runDcsPipeline();
+        } else if (moduleId === "model_assumptions_stress" && dealId) {
+          // MAST v2 divert — uses MastRunPipeline orchestrator instead of v1
+          await runMastPipeline(resumeRunId);
         } else if (dealId) {
           // Server-side pipeline: survives tab closure, checkpointed
           // (web research modules now use the same server pipeline path)

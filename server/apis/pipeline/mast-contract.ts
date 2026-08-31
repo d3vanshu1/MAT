@@ -66,12 +66,12 @@ export const STAGE_BUDGET_MS = 180_000;
  */
 export interface StageContext {
   db: {
-    query: (sql: string, schema: any, params: unknown[], meta?: { label: string }) => Promise<any[]>;
-    execute: (sql: string, params: unknown[], meta?: { label: string }) => Promise<any>;
+    query: (sql: string, schema: any, params: unknown[], meta?: { label?: string }) => Promise<any[]>;
+    execute: (sql: string, params: unknown[], meta?: { label?: string }) => Promise<any>;
   };
   /** Anthropic integration client — required for LLM stages. */
   ai: {
-    apiRequest: (request: any, schemas: any, meta?: { label: string }) => Promise<any>;
+    apiRequest: (request: any, schemas: any, meta?: { label?: string }) => Promise<any>;
   };
   runId: string;
   dealId: string;

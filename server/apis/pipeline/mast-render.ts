@@ -19,6 +19,7 @@
  */
 import type { StageContext, StageResult, StageHandler } from "./mast-contract.js";
 import { z } from "@superblocksteam/sdk-api";
+import mastPublish from "./mast-publish-inline.js";
 
 const LOG_PREFIX = "[MAST-RENDER]";
 
@@ -496,6 +497,7 @@ const render: StageHandler = async (
     sweepRan,
     ruleTableDefaultCount,
     reportLength: report.length,
+    nothingCount: supportCounts.nothing,
   };
 
   // ── 9. Persist payload ────────────────────────────────────────────
@@ -514,6 +516,17 @@ const render: StageHandler = async (
     );
   } catch (payloadErr) {
     console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+  }
+
+  // ── 10. Publish to module_outputs ──────────────────────────────
+  try {
+    await mastPublish(db, runId, dealId, report, sectionCounts);
+    console.log(`${LOG_PREFIX} Published to module_outputs.`);
+  } catch (publishErr) {
+    console.log(
+      `${LOG_PREFIX} Publish to module_outputs failed: ${String(publishErr)}. ` +
+      `Report is preserved in payload. Run can be re-published.`,
+    );
   }
 
   return {
