@@ -17,12 +17,22 @@
 export {
   STAGES,
   type StageName,
-  LOOP_STAGES,
   STAGE_BUDGET_MS,
   type StageContext,
   type StageResult,
   type StageHandler,
 } from "./mast-contract.js";
+
+import { LOOP_STAGES as _CONTRACT_LOOP_STAGES } from "./mast-contract.js";
+
+/**
+ * Augmented LOOP_STAGES — adds reliance_links on top of the contract set.
+ * The contract is out of scope for this packet, so we shadow here.
+ */
+export const LOOP_STAGES: ReadonlySet<string> = new Set([
+  ..._CONTRACT_LOOP_STAGES,
+  "reliance_links",
+]);
 
 import type { StageName, StageContext, StageResult, StageHandler } from "./mast-contract.js";
 
@@ -34,6 +44,7 @@ import registerModelDrivers from "./mast-register-model-drivers.js";
 import registerSilent from "./mast-register-silent.js";
 import registerMemo from "./mast-register-memo.js";
 import registerAssemble from "./mast-register-assemble.js";
+import relianceLinks from "./mast-reliance-links.js";
 
 // ---------------------------------------------------------------------------
 // Stub handlers
@@ -87,7 +98,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   register_silent: registerSilent,
   register_memo: registerMemo,
   register_assemble: registerAssemble,
-  reliance_links: singleShotStub,
+  reliance_links: relianceLinks,
   inheritance: loopStub,
   emergent: singleShotStub,
   support_search: loopStub,
