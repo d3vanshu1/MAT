@@ -165,6 +165,8 @@ import RunMigration036 from './pipeline/run-migration-036.js';
 import RunMigration037 from './pipeline/run-migration-037.js';
 import RunMigration038 from './pipeline/run-migration-038.js';
 import RunMigration039 from './pipeline/run-migration-039.js';
+import MastRunPipeline from './pipeline/mast-run-pipeline.js';
+import MastResetPipeline from './pipeline/mast-reset-pipeline.js';
 import BssRunPipeline from './pipeline/bss-run-pipeline.js';
 import EroGetActiveRun from './pipeline/ero-get-active-run.js';
 import EroRunPipeline from './pipeline/ero-run-pipeline.js';
@@ -305,6 +307,8 @@ const apis = {
   EroGetActiveRun, EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish, EroTestDedup,
   // DCS rebuild
   DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic, RunCurationFixtures, DcsComputeDimensionRationales, DcsPersistRationalesOneshot, DcsRepublishV2,
+  // MAST v2 pipeline
+  MastRunPipeline, MastResetPipeline,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
