@@ -20,9 +20,18 @@ import {
   computeHeadlineScore,
 } from "./dcs-rubric.js";
 import type { DimensionState } from "./dcs-rubric.js";
-import { renderDcsScorecard } from "./dcs-report-renderer.js";
-import type { DimensionRecord } from "./dcs-report-renderer.js";
+import { renderDcsScorecard, renderDcsReportV2 } from "./dcs-report-renderer.js";
+import type {
+  DimensionRecord,
+  CorpusScopeInput,
+  ReportV2Input,
+  ReportV2Output,
+  CoverageOverviewEntry,
+  PriorityGapEntry,
+} from "./dcs-report-renderer.js";
+import type { DimensionRationale } from "./dcs-dimension-rationale-validator.js";
 import { validateMaterialityOverlay } from "./dcs-materiality-overlay-validator.js";
+import { sha256hex } from "./sha256-pure.js";
 
 // ── Integration ID ───────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -116,6 +125,8 @@ export default api({
     verificationVerdicts: z.array(VerificationVerdictSchema).optional().nullable(),
     verificationSummary: VerificationSummarySchema.optional().nullable(),
     verificationMaterialityOverlay: z.string().optional().nullable(),
+    // V2: persisted rationales for grounded report
+    verificationRationales: z.array(z.any()).optional().nullable(),
   }),
 
   output: z.object({
@@ -136,6 +147,28 @@ export default api({
     renderStageStatus: z.string(),
     materialityOverlay: z.string().nullable(),
     materialityOverlayIncluded: z.boolean(),
+    // V2 additions
+    reportVersion: z.number(),
+    coverageOverview: z.array(z.object({
+      dimension: z.string(),
+      coverage: z.string(),
+      depth: z.string(),
+      principalLimitation: z.string(),
+    })).nullable(),
+    dimensionRationales: z.array(z.any()).nullable(),
+    corpusScope: z.object({
+      includedCount: z.number(),
+      excludedCount: z.number(),
+      extractionComplete: z.boolean(),
+    }).nullable(),
+    rationaleHash: z.string().nullable(),
+    priorityGaps: z.array(z.object({
+      dimension: z.string(),
+      coverage: z.string(),
+      gap: z.string(),
+      icImplication: z.string(),
+      basis: z.string(),
+    })).nullable(),
   }),
 
   async run(ctx, input) {
@@ -776,10 +809,101 @@ export default api({
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 9. Pure rendering
+    // 9. Load rationales and determine report version
     // ═══════════════════════════════════════════════════════════════
     const provisional = isVerification ? !coverageComplete : false;
 
+    let rationales: DimensionRationale[] | null = null;
+    let rationaleHash: string | null = null;
+
+    if (isVerification && input.verificationRationales) {
+      // Verification mode: use supplied rationales
+      rationales = input.verificationRationales as DimensionRationale[];
+      if (rationales.length !== 10) {
+        throw new Error(
+          `Verification rationales must contain exactly 10 dimensions, got ${rationales.length}.`,
+        );
+      }
+      rationaleHash =
+        "sha256-v1:" +
+        sha256hex(JSON.stringify(rationales, Object.keys(rationales[0] ?? {}).sort()));
+    } else if (!isVerification) {
+      // Normal mode: load rationales from verdict-stage detail
+      const verdictState = await db.query(
+        `SELECT detail FROM dcs_pipeline_state
+         WHERE run_id = $1::uuid AND stage = 'verdicts' LIMIT 1`,
+        z.object({ detail: z.string().nullable() }),
+        [input.runId],
+        { label: "DcsRender: load verdict detail for rationales" },
+      );
+      if (verdictState.length > 0 && verdictState[0].detail) {
+        const vd = JSON.parse(verdictState[0].detail);
+        if (vd.rationales_done === true && Array.isArray(vd.dimension_rationales)) {
+          rationales = vd.dimension_rationales as DimensionRationale[];
+          rationaleHash = vd.rationale_hash ?? null;
+        }
+      }
+    }
+
+    // Determine report version: v2 if rationales available, v1 otherwise
+    const useV2 = rationales !== null && rationales.length === 10;
+
+    // Build corpus scope for v2
+    let corpusInput: CorpusScopeInput | null = null;
+    let v2Result: ReportV2Output | null = null;
+
+    if (useV2) {
+      // Query included documents
+      const includedDocs = await db.query(
+        `SELECT DISTINCT d.file_name, d.document_tag
+         FROM documents d
+         INNER JOIN dcs_evidence e ON e.source_file = d.file_name
+         WHERE e.run_id = $1::uuid AND d.deal_id = $2::uuid
+         ORDER BY d.file_name
+         LIMIT 10`,
+        z.object({ file_name: z.string(), document_tag: z.string().nullable() }),
+        [input.runId, input.dealId],
+        { label: "DcsRender: load included documents" },
+      );
+
+      // Query all deal documents to find excluded
+      const allDocs = await db.query(
+        `SELECT file_name, document_tag FROM documents
+         WHERE deal_id = $1::uuid ORDER BY file_name LIMIT 10`,
+        z.object({ file_name: z.string(), document_tag: z.string().nullable() }),
+        [input.dealId],
+        { label: "DcsRender: load all deal documents" },
+      );
+
+      const includedFileNames = new Set(includedDocs.map((d) => d.file_name));
+      const excludedDocs = allDocs
+        .filter((d) => !includedFileNames.has(d.file_name))
+        .map((d) => ({
+          fileName: d.file_name,
+          reason: "not included in production-indexed corpus",
+        }));
+
+      corpusInput = {
+        includedDocuments: includedDocs.map((d) => ({
+          fileName: d.file_name,
+          documentTag: d.document_tag ?? "unknown",
+        })),
+        excludedDocuments: excludedDocs,
+        processedChunks: extractDetail.processed_count,
+        totalChunks: extractDetail.total_chunks,
+        extractionComplete: coverageComplete,
+        reportGeneratedAt: new Date().toISOString().slice(0, 10),
+      };
+
+      v2Result = renderDcsReportV2({
+        runId: input.runId,
+        rationales: rationales!,
+        corpus: corpusInput,
+        provisional,
+      });
+    }
+
+    // V1 scorecard render (always computed for backward compat fields)
     const scorecardResult = renderDcsScorecard({
       runId: input.runId,
       provisional,
@@ -796,6 +920,12 @@ export default api({
       materialityOverlay,
     });
 
+    // Select the final output values based on version
+    const finalHeader = v2Result?.executiveHeader ?? scorecardResult.executiveHeader;
+    const finalMarkdown = v2Result?.fullReportMarkdown ?? scorecardResult.fullReportMarkdown;
+    const finalHash = v2Result?.reportHash ?? scorecardResult.reportHash;
+    const reportVersion = useV2 ? 2 : 1;
+
     // ═══════════════════════════════════════════════════════════════
     // 10. Verification mode: return without writes
     // ═══════════════════════════════════════════════════════════════
@@ -810,14 +940,20 @@ export default api({
         assertedCount,
         absentCount,
         dimensionCount: 10,
-        executiveHeader: scorecardResult.executiveHeader,
-        fullReportMarkdown: scorecardResult.fullReportMarkdown,
-        reportHash: scorecardResult.reportHash,
+        executiveHeader: finalHeader,
+        fullReportMarkdown: finalMarkdown,
+        reportHash: finalHash,
         dimensions: scorecardResult.dimensions,
         persistedRenderState: false,
         renderStageStatus: "verification",
         materialityOverlay: scorecardResult.materialityOverlayIncluded ? materialityOverlay : null,
-        materialityOverlayIncluded: scorecardResult.materialityOverlayIncluded,
+        materialityOverlayIncluded: useV2 ? false : scorecardResult.materialityOverlayIncluded,
+        reportVersion,
+        coverageOverview: v2Result?.coverageOverview ?? null,
+        dimensionRationales: rationales ?? null,
+        corpusScope: v2Result?.corpusScopeDisplay ?? null,
+        rationaleHash,
+        priorityGaps: v2Result?.priorityGaps ?? null,
       };
     }
 
@@ -847,8 +983,8 @@ export default api({
     try {
       // 11b. Update to done with detail
       const renderDetail = {
-        report_hash: scorecardResult.reportHash,
-        markdown_length: scorecardResult.fullReportMarkdown.length,
+        report_hash: finalHash,
+        markdown_length: finalMarkdown.length,
         dimension_count: 10,
         headline_score: headlineScore,
         processed_chunks: extractDetail.processed_count,
@@ -856,7 +992,9 @@ export default api({
         evidence_rows: actualEvidenceCount,
         provisional: false,
         computed_in_code: true,
-        materiality_overlay_included: scorecardResult.materialityOverlayIncluded,
+        materiality_overlay_included: useV2 ? false : scorecardResult.materialityOverlayIncluded,
+        report_version: reportVersion,
+        rationale_hash: rationaleHash,
       };
 
       await db.execute(
@@ -932,14 +1070,20 @@ export default api({
         assertedCount,
         absentCount,
         dimensionCount: 10,
-        executiveHeader: scorecardResult.executiveHeader,
-        fullReportMarkdown: scorecardResult.fullReportMarkdown,
-        reportHash: scorecardResult.reportHash,
+        executiveHeader: finalHeader,
+        fullReportMarkdown: finalMarkdown,
+        reportHash: finalHash,
         dimensions: scorecardResult.dimensions,
-        materialityOverlay: scorecardResult.materialityOverlayIncluded ? materialityOverlay : null,
-        materialityOverlayIncluded: scorecardResult.materialityOverlayIncluded,
+        materialityOverlay: useV2 ? null : (scorecardResult.materialityOverlayIncluded ? materialityOverlay : null),
+        materialityOverlayIncluded: useV2 ? false : scorecardResult.materialityOverlayIncluded,
         persistedRenderState: true,
         renderStageStatus: "done",
+        reportVersion,
+        coverageOverview: v2Result?.coverageOverview ?? null,
+        dimensionRationales: rationales ?? null,
+        corpusScope: v2Result?.corpusScopeDisplay ?? null,
+        rationaleHash,
+        priorityGaps: v2Result?.priorityGaps ?? null,
       };
     } catch (err) {
       // If rendering/persistence fails after running row exists, mark failed

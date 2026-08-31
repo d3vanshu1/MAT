@@ -1992,8 +1992,9 @@ export default function DealDashboardPage() {
     extract: "Extracting evidence",
     verdicts: "Computing dimension verdicts",
     summary: "Computing headline score",
-    overlay: "Analyzing materiality overlay",
-    render: "Rendering report",
+    rationales: "Generating dimension rationales",
+    overlay: "Analyzing materiality overlay", // legacy fallback
+    render: "Rendering IC-facing report",
     complete: "Publishing results",
   };
 
@@ -2513,7 +2514,7 @@ export default function DealDashboardPage() {
             });
             // Refresh module results from DB — module_outputs was published server-side
             await refetchModules();
-            toast.success("Diligence Completeness Score complete!");
+            toast.success("Diligence Completeness report complete!");
             break;
           }
 

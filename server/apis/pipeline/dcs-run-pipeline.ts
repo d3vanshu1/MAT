@@ -7,7 +7,7 @@
  *   1. extract        → DcsExtractPresence (cursor-resumable)
  *   2. verdicts       → DcsComputeVerdicts
  *   3. summary        → DcsComputeSummary
- *   4. overlay        → DcsComputeMaterialityOverlay
+ *   4. rationales     → DcsComputeDimensionRationales
  *   5. render         → DcsRenderReport
  *   6. complete       → marks module_runs row completed
  *
@@ -23,8 +23,8 @@
  *
  * STAGE TRACKING:
  *   - dcs_pipeline_state rows are constrained to: extract, verdicts, render.
- *   - summary/overlay/complete are logical stages tracked via the verdicts
- *     row's detail JSON: { summary_done, overlay_done }.
+ *   - summary/rationales/complete are logical stages tracked via the verdicts
+ *     row's detail JSON: { summary_done, rationales_done }.
  *   - complete is inferred from module_runs.status = 'completed'.
  *
  * BUDGET:
@@ -44,7 +44,9 @@ import DcsExtractPresence from "./dcs-extract-presence.js";
 import DcsComputeVerdicts from "./dcs-compute-verdicts.js";
 import DcsComputeSummary from "./dcs-compute-summary.js";
 import DcsComputeMaterialityOverlay from "./dcs-compute-materiality-overlay.js";
+import DcsComputeDimensionRationales from "./dcs-compute-dimension-rationales.js";
 import DcsRenderReport from "./dcs-render-report.js";
+import { sha256hex } from "./sha256-pure.js";
 
 // ── Integration IDs ──────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -59,7 +61,7 @@ const DCS_STAGES = [
   "extract",
   "verdicts",
   "summary",
-  "overlay",
+  "rationales",
   "render",
   "complete",
 ] as const;
@@ -118,7 +120,12 @@ const OutputIdRow = z.object({ id: z.string() });
  */
 interface VerdictsDetail {
   summary_done?: boolean;
-  overlay_done?: boolean;
+  overlay_done?: boolean; // Legacy — retained for backward compat reads
+  rationales_done?: boolean;
+  rationale_schema_version?: number;
+  dimension_rationales?: unknown[];
+  rationale_hash?: string;
+  rationale_generated_at?: string;
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -569,47 +576,120 @@ export default api({
             ownerToken,
             status: "advanced",
             stage: "summary",
-            nextStage: "overlay",
+            nextStage: "rationales",
             resumeRequired: true,
             headlineScore: summaryResult.headlineScore,
           });
         }
 
-        // ── D. Overlay ─────────────────────────────────────────
-        case "overlay": {
+        // ── D. Rationales ───────────────────────────────────────
+        case "rationales": {
           if (remaining() < MIN_HEADROOM_MS) {
-            console.log(`${LOG_PREFIX} Insufficient headroom for overlay (${remaining()}ms).`);
+            console.log(`${LOG_PREFIX} Insufficient headroom for rationales (${remaining()}ms).`);
             return mkResult({
               runId,
               ownerToken,
               status: "stage_partial",
-              stage: "overlay",
-              nextStage: "overlay",
+              stage: "rationales",
+              nextStage: "rationales",
               resumeRequired: true,
             });
           }
 
-          const overlayResult = await DcsComputeMaterialityOverlay.run(ctx, {
-            runId,
+          // ── Check for resume: if rationales_done is already set, skip ──
+          const verdictsRowForResume = stateMap.get("verdicts");
+          const verdictsDetailForResume = parseVerdictsDetail(
+            verdictsRowForResume?.detail ?? null,
+          );
+          if (verdictsDetailForResume.rationales_done) {
+            console.log(
+              `${LOG_PREFIX} Rationales already done (resume skip) — advancing to render.`,
+            );
+            return mkResult({
+              runId,
+              ownerToken,
+              status: "advanced",
+              stage: "rationales",
+              nextStage: "render",
+              resumeRequired: true,
+            });
+          }
+
+          // ── Call DcsComputeDimensionRationales ──
+          const rationaleResult = await DcsComputeDimensionRationales.run(ctx, {
             dealId,
-            verificationMode: false,
-            verificationVerdicts: undefined,
-            verificationOverlayCandidate: undefined,
+            runId,
+            mode: "live" as const,
+            concurrency: 3,
+            debug: false,
           });
 
-          // Mark overlay_done in verdicts detail
-          await setVerdictsDetailFlag(db, runId, "overlay_done", true);
+          const rationales = rationaleResult.rationales as unknown[];
+          if (!Array.isArray(rationales) || rationales.length !== 10) {
+            throw new Error(
+              `Rationale count mismatch: expected 10, got ${Array.isArray(rationales) ? rationales.length : "non-array"}`,
+            );
+          }
+
+          // ── Validate all rationales passed ──
+          for (const r of rationales as Array<{ dimensionId: string; validation?: { allChecksPassed?: boolean }; degraded?: boolean }>) {
+            if (r.degraded) {
+              throw new Error(
+                `Rationale for ${r.dimensionId} is degraded — aborting.`,
+              );
+            }
+            if (r.validation && !r.validation.allChecksPassed) {
+              throw new Error(
+                `Rationale validation failed for ${r.dimensionId} — aborting.`,
+              );
+            }
+          }
+
+          // ── Canonicalize and hash ──
+          const canonicalJson = JSON.stringify(rationales, Object.keys(rationales[0] as Record<string, unknown>).sort());
+          const rationaleHash = `sha256-rationale:${sha256hex(canonicalJson)}`;
+          const rationaleGeneratedAt = new Date().toISOString();
+
+          // ── Persist all rationale fields atomically into verdicts detail ──
+          const currentVerdictsRows = await db.query(
+            `SELECT detail FROM dcs_pipeline_state
+             WHERE run_id = $1::uuid AND stage = 'verdicts'
+             LIMIT 1`,
+            z.object({ detail: z.string().nullable() }),
+            [runId],
+            { label: "Read verdicts detail for rationales" },
+          );
+
+          const currentDetail = parseVerdictsDetail(
+            currentVerdictsRows[0]?.detail ?? null,
+          );
+          const updatedDetail: VerdictsDetail = {
+            ...currentDetail,
+            rationales_done: true,
+            rationale_schema_version: 1,
+            dimension_rationales: rationales,
+            rationale_hash: rationaleHash,
+            rationale_generated_at: rationaleGeneratedAt,
+          };
+
+          await db.execute(
+            `UPDATE dcs_pipeline_state
+             SET detail = $2, updated_at = now()
+             WHERE run_id = $1::uuid AND stage = 'verdicts'`,
+            [runId, JSON.stringify(updatedDetail)],
+            { label: "Set verdicts detail: rationales batch" },
+          );
           await heartbeatOwner(db, runId);
 
           console.log(
-            `${LOG_PREFIX} Overlay complete: accepted=${overlayResult.overlayAccepted}, modelCalled=${overlayResult.modelCalled}`,
+            `${LOG_PREFIX} Rationales complete: count=${rationales.length}, hash=${rationaleHash}, telemetry=${JSON.stringify(rationaleResult.telemetry)}`,
           );
 
           return mkResult({
             runId,
             ownerToken,
             status: "advanced",
-            stage: "overlay",
+            stage: "rationales",
             nextStage: "render",
             resumeRequired: true,
           });
@@ -638,13 +718,14 @@ export default api({
             verificationVerdicts: undefined,
             verificationSummary: undefined,
             verificationMaterialityOverlay: undefined,
+            verificationRationales: undefined,
           });
 
           await markPhysicalStageDone(db, runId, "render");
           await heartbeatOwner(db, runId);
 
           console.log(
-            `${LOG_PREFIX} Render complete: hash=${renderResult.reportHash}, score=${renderResult.headlineScore}`,
+            `${LOG_PREFIX} Render complete: version=${renderResult.reportVersion}, hash=${renderResult.reportHash}, rationaleHash=${renderResult.rationaleHash ?? "n/a"}, score=${renderResult.headlineScore}`,
           );
 
           return mkResult({
@@ -690,10 +771,25 @@ export default api({
               verificationVerdicts: undefined,
               verificationSummary: undefined,
               verificationMaterialityOverlay: undefined,
+              verificationRationales: undefined,
             });
 
             publishedHeader = renderResult.executiveHeader;
             publishedReport = renderResult.fullReportMarkdown;
+
+            // ── Build findings payload (v2-aware) ──
+            const findings = renderResult.reportVersion === 2
+              ? [{
+                  reportVersion: renderResult.reportVersion,
+                  coverageOverview: renderResult.coverageOverview,
+                  dimensionRationales: renderResult.dimensionRationales,
+                  corpusScope: renderResult.corpusScope,
+                  reportMarkdown: renderResult.fullReportMarkdown,
+                  reportHash: renderResult.reportHash,
+                  rationaleHash: renderResult.rationaleHash,
+                  priorityGaps: renderResult.priorityGaps,
+                }]
+              : [];
 
             // DELETE + INSERT (matches ERO pattern)
             await db.execute(
@@ -708,7 +804,7 @@ export default api({
                VALUES ($1::uuid, $2, $3::jsonb, $4)
                RETURNING id`,
               OutputIdRow,
-              [runId, renderResult.executiveHeader, JSON.stringify([]), renderResult.fullReportMarkdown],
+              [runId, renderResult.executiveHeader, JSON.stringify(findings), renderResult.fullReportMarkdown],
               { label: "Publish: insert module_outputs row" },
             );
 
@@ -829,7 +925,7 @@ export default api({
  * Returns null if all stages are complete.
  *
  * Physical stages (extract, verdicts, render) → checked via dcs_pipeline_state.
- * Logical stages (summary, overlay) → checked via verdicts row detail JSON.
+ * Logical stages (summary, rationales) → checked via verdicts row detail JSON.
  * Complete → checked via render being done (module_runs update is the action).
  */
 function determineCurrentStage(
@@ -847,8 +943,8 @@ function determineCurrentStage(
   const verdictsDetail = parseVerdictsDetail(verdictsRow.detail);
   if (!verdictsDetail.summary_done) return "summary";
 
-  // 4. overlay (logical — tracked in verdicts detail)
-  if (!verdictsDetail.overlay_done) return "overlay";
+  // 4. rationales (logical — tracked in verdicts detail)
+  if (!verdictsDetail.rationales_done) return "rationales";
 
   // 5. render
   const renderRow = stateMap.get("render");
