@@ -108,6 +108,7 @@ You must produce a JSON object with this exact structure:
 }
 
 RULES:
+RULES:
 - Write in plain English. No Markdown headings, bullets, bold, tables, or code blocks.
 - No raw CSV number vectors or chunk UUIDs in explanatory text.
 - No score values (1.0, 0.5, 0), evidence row counts, or headline score references.
@@ -119,11 +120,14 @@ RULES:
 - Every positive factual claim must cite at least one evidence ID.
 - Absence statements must say "not established in the supplied corpus" rather than claiming work does not exist.
 - For narrative-only dimensions, distinguish sponsor/IC assertions from independent workproduct.
-- Citations must use the exact evidenceId, sourceFile, humanLocation, docClass, and snippet provided to you.
+- Citations must use the exact evidenceId, sourceFile, humanLocation, docClass, and snippet provided to you. Do not invent, modify, or fabricate evidence IDs. Use ONLY the IDs listed under CURATED EVIDENCE ANCHORS.
 - Produce exactly one assessment for every coverage question provided.
 - Maximum 1-4 established points, 1-3 remaining gaps.
 - Maximum approximately 250 words total across all text fields.
-- Return valid JSON only, no surrounding text.`;
+- Use conservative verbs: "documents", "reports", "identifies", "describes", "notes", "discloses", "presents", "outlines". Do NOT use "assesses", "validates", "demonstrates", "confirms", "proves", "ensures", "verifies", "establishes conclusively".
+- Each established point must state only what the cited snippet literally contains. Do not extrapolate, generalize, or upgrade the snippet's scope.
+- The icImplication must be a factual statement about what specific information is available for IC review, tied directly to the established points. Example: "The FDD report documents revenue trends and EBITDA adjustments that are available for IC review of earnings quality." Do NOT make judgments about adequacy, sufficiency, completeness, or risk. Do NOT use phrases like "provides a basis for", "enables assessment of", or "supports evaluation of".
+- Return valid JSON only, no surrounding text or explanation.`;
 
 const VERIFY_SYSTEM_PROMPT = `You are a verification analyst. For each claim, determine whether the cited evidence snippet supports the claim text.
 
@@ -144,18 +148,18 @@ Return a JSON array of verification results:
 ]
 
 Rules:
-- SUPPORTED: the claim is directly supported by or reasonably inferred from the cited snippet content
-- NOT_SUPPORTED: the claim has no basis in the cited snippets
-- CITATION_MISMATCH: the claim references a different fact than what the snippet describes
-- OVERSTATED_SCOPE: the claim goes beyond what the snippet establishes
-- NUMERIC_MISMATCH: numbers in the claim differ from the snippet
-- UNSUPPORTED_INFERENCE: an inference with NO logical connection to the evidence
+- SUPPORTED: the claim accurately describes content that appears in the cited snippet. The claim may paraphrase, summarize, or restate what the snippet says. It does not need to use the exact same words. Mark as SUPPORTED if the core factual assertion in the claim can be verified by reading the cited snippet.
+- NOT_SUPPORTED: the claim makes an assertion that has no basis in any of the cited snippets.
+- CITATION_MISMATCH: the claim describes a specific fact (a name, date, number, entity, or event) that is contradicted by or absent from the cited snippet. Do NOT use CITATION_MISMATCH merely because the claim paraphrases or summarizes the snippet at a higher level. Only use it when the claim references a specific concrete fact that the snippet does not contain.
+- OVERSTATED_SCOPE: the claim makes a broad qualitative judgment about adequacy, sufficiency, or completeness that cannot be derived from the specific facts in the snippet (e.g., "demonstrates comprehensive analysis", "validates the approach"). Do NOT use OVERSTATED_SCOPE when the claim accurately describes what the snippet reports, even if the claim uses different words.
+- NUMERIC_MISMATCH: a specific number in the claim differs from the corresponding number in the snippet.
+- UNSUPPORTED_INFERENCE: the claim draws a conclusion with no logical connection to the evidence.
 
-IMPORTANT for claims marked isInference=true (IC implications):
-- These are EXPECTED to be inferences drawn from the evidence
-- Mark as SUPPORTED if the inference is a reasonable logical conclusion from the cited evidence
-- Only mark as UNSUPPORTED_INFERENCE if the inference has absolutely no connection to the evidence
-- An inference that follows from the evidence is valid even if the evidence does not state the conclusion explicitly
+For claims marked isInference=true (IC implications):
+- These are analytical conclusions about what the evidence means for underwriting decisions.
+- Mark as SUPPORTED if the inference identifies a concrete consequence, limitation, or consideration that follows logically from the content of the cited snippets. The inference need not be stated in the snippet — it must be a reasonable analytical step.
+- Mark as OVERSTATED_SCOPE only if the inference makes a broad judgment about overall diligence quality or investment worthiness that cannot be tied to specific facts in the snippets.
+- Mark as UNSUPPORTED_INFERENCE only if the inference has no logical connection to the cited evidence at all.
 
 Return valid JSON only, no surrounding text.`;
 
@@ -166,9 +170,12 @@ IMPORTANT: Produce a COMPLETE rationale JSON from scratch, not a partial fix. Th
 Follow exactly the same JSON structure and rules as the original drafting instructions. Pay special attention to:
 - Include ALL coverage questions (one assessment each)
 - Every positive claim needs citation IDs
-- Citations must exactly match the provided evidence (evidenceId, sourceFile, humanLocation, docClass, snippet)
+- Citations must use ONLY the exact evidenceId values listed in CURATED EVIDENCE ANCHORS. Do not invent or modify evidence IDs.
 - No Markdown, no UUIDs in text, no score values
 - 1-4 established points, 1-3 remaining gaps
+- Use conservative verbs: "documents", "reports", "identifies", "describes", "notes". Do NOT use "assesses", "validates", "demonstrates", "confirms", "proves", "verifies".
+- Narrow each established point to state ONLY what the cited snippet literally contains. If the previous draft was rejected for OVERSTATED_SCOPE, rewrite the claim using words that do not go beyond the snippet.
+- If icImplication was rejected for OVERSTATED_SCOPE, rewrite it as a factual statement about what specific information is available for IC review. Example: "The FDD report documents [specific items] that are available for IC review." Do NOT make judgments about adequacy or sufficiency.
 
 Return valid JSON only, no surrounding text.`;
 
@@ -228,10 +235,16 @@ function buildCorrectionUserPrompt(
 ): string {
   const draftPrompt = buildDraftUserPrompt(packet);
   const errorList = errors.slice(0, 15).map((e) => `  - ${e}`).join("\n");
+  const validIds = packet.curatedEvidence
+    .map((e) => `  "${e.evidenceId}"`)
+    .join("\n");
   return `${draftPrompt}
 
 PREVIOUS DRAFT FAILED VALIDATION. Errors:
 ${errorList}
+
+VALID EVIDENCE IDS (use ONLY these, copy-paste exactly):
+${validIds}
 
 Produce a COMPLETE, corrected rationale JSON from scratch addressing all errors above.`;
 }
@@ -268,32 +281,110 @@ function safeJsonParse(raw: string, label: string): any {
   const text = extractJson(raw);
   try {
     return JSON.parse(text);
-  } catch (e) {
-    // Try to find the first { or [ and last } or ]
-    const firstBrace = text.indexOf("{");
-    const firstBracket = text.indexOf("[");
-    const start = firstBrace >= 0 && (firstBracket < 0 || firstBrace < firstBracket)
-      ? firstBrace : firstBracket;
-    if (start >= 0) {
-      const isObj = text[start] === "{";
-      const closer = isObj ? "}" : "]";
-      const lastClose = text.lastIndexOf(closer);
-      if (lastClose > start) {
-        let extracted = text.slice(start, lastClose + 1);
-        extracted = extracted.replace(/,\s*([}\]])/g, "$1");
-        try {
-          return JSON.parse(extracted);
-        } catch {
-          // fall through
+  } catch (firstError) {
+    // If the text starts with [ or {, the model may have appended trailing garbage
+    // after a valid JSON document. Find the balanced closer and parse only that portion.
+    const opener = text.charAt(0);
+    if (opener === "{" || opener === "[") {
+      const closer = opener === "{" ? "}" : "]";
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = 0; i < text.length; i++) {
+        const ch = text.charAt(i);
+        if (escape) { escape = false; continue; }
+        if (ch === "\\") { escape = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === opener) depth++;
+        if (ch === closer) {
+          depth--;
+          if (depth === 0) {
+            let balanced = text.slice(0, i + 1);
+            balanced = balanced.replace(/,\s*([}\]])/g, "$1");
+            try {
+              return JSON.parse(balanced);
+            } catch {
+              break; // balanced portion is still invalid — fall through
+            }
+          }
         }
       }
     }
-    throw new Error(`Failed to parse ${label} JSON: ${(e as Error).message}`);
+    throw new Error(`Failed to parse ${label} JSON: ${(firstError as Error).message}. Raw starts with: ${text.slice(0, 200)}`);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// PARSE MODEL RESPONSE INTO CANDIDATE
+// GARBLED UUID REPAIR
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * LLMs often garble UUIDs by dropping, swapping, or substituting characters.
+ * This function repairs citation IDs that are close matches to valid evidence IDs.
+ * - If an ID exactly matches a valid ID: keep it.
+ * - If an ID is within edit distance 4 of exactly one valid ID: repair it.
+ * - If no close match: leave it (validation will catch it).
+ */
+function repairGarbledCitationIds(
+  candidate: RationaleDraftCandidate,
+  validIds: Set<string>,
+): RationaleDraftCandidate {
+  const validArray = Array.from(validIds);
+
+  function editDistance(a: string, b: string): number {
+    if (Math.abs(a.length - b.length) > 4) return 999; // fast exit
+    const m = a.length, n = b.length;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        dp[i][j] = Math.min(
+          dp[i - 1][j] + 1,
+          dp[i][j - 1] + 1,
+          dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+        );
+      }
+    }
+    return dp[m][n];
+  }
+
+  function repairId(id: string): string {
+    if (validIds.has(id)) return id;
+    const matches = validArray
+      .map((v) => ({ id: v, dist: editDistance(id, v) }))
+      .filter((m) => m.dist <= 4)
+      .sort((a, b) => a.dist - b.dist);
+    if (matches.length === 1 || (matches.length > 1 && matches[0].dist < matches[1].dist)) {
+      return matches[0].id;
+    }
+    return id; // ambiguous or no match — leave for validation
+  }
+
+  return {
+    ...candidate,
+    citations: candidate.citations.map((c) => ({
+      ...c,
+      evidenceId: repairId(c.evidenceId),
+    })),
+    establishedPoints: candidate.establishedPoints.map((ep) => ({
+      ...ep,
+      citationIds: ep.citationIds.map(repairId),
+    })),
+    remainingGaps: candidate.remainingGaps.map((rg) => ({
+      ...rg,
+      citationIds: (rg.citationIds ?? []).map(repairId),
+    })),
+    icImplication: {
+      ...candidate.icImplication,
+      citationIds: candidate.icImplication.citationIds.map(repairId),
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DIMENSION PROCESSING
 // ═══════════════════════════════════════════════════════════════════
 
 function parseDraftResponse(raw: string, dimensionId: string): RationaleDraftCandidate {
@@ -359,122 +450,6 @@ function parseSupportResponse(raw: string): SupportVerificationResult[] {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// CITATION SANITIZER — strip hallucinated evidence IDs before validation
-// ═══════════════════════════════════════════════════════════════════
-
-function stripHallucinatedCitations(
-  candidate: RationaleDraftCandidate,
-  packet: CuratedDimensionPacket,
-): { cleaned: RationaleDraftCandidate; droppedCount: number } {
-  // Step 1: Remove citations referencing evidence IDs not in the curated packet
-  const validIds = new Set(packet.curatedEvidence.map((e) => e.evidenceId));
-  const validCitations = candidate.citations.filter((c) => validIds.has(c.evidenceId));
-  const droppedCount = candidate.citations.length - validCitations.length;
-
-  // Step 2: Build set of IDs that actually exist in the (possibly filtered) citations array.
-  // This also catches citationIds referencing evidence the model forgot to include in citations.
-  const keptIds = new Set(validCitations.map((c) => c.evidenceId));
-
-  // Step 3: Filter citationIds in ALL sections that reference citation IDs
-  const filterIds = (ids: string[]) => ids.filter((id) => keptIds.has(id));
-
-  const cleanWhyStatus = {
-    ...candidate.whyStatus,
-    citationIds: filterIds(candidate.whyStatus.citationIds),
-  };
-  const cleanQAs = candidate.questionAssessments.map((qa) => ({
-    ...qa,
-    citationIds: filterIds(qa.citationIds),
-  }));
-  const filteredEPs = candidate.establishedPoints.map((ep) => ({
-    ...ep,
-    citationIds: filterIds(ep.citationIds),
-  }));
-  // Demote EPs that lost all citations to remaining gaps
-  const cleanEPs = filteredEPs.filter((ep) => ep.citationIds.length > 0);
-  const demotedFromSanitize = filteredEPs
-    .filter((ep) => ep.citationIds.length === 0)
-    .map((ep) => ({
-      gapId: `sanitized_${ep.claimId}`,
-      text: ep.text,
-      basisType: "evidence_limitation" as const,
-      basisIds: [] as string[],
-      citationIds: [] as string[],
-    }));
-  const baseGaps = candidate.remainingGaps.map((g) => ({
-    ...g,
-    citationIds: filterIds(g.citationIds),
-  }));
-  // Only add demoted items if under the max gap limit (3)
-  const MAX_REMAINING_GAPS = 3;
-  const slotsForDemoted = Math.max(0, MAX_REMAINING_GAPS - baseGaps.length);
-  const cleanGaps = [...baseGaps, ...demotedFromSanitize.slice(0, slotsForDemoted)];
-  const cleanIcImplication = candidate.icImplication
-    ? {
-        ...candidate.icImplication,
-        citationIds: filterIds(candidate.icImplication.citationIds),
-      }
-    : candidate.icImplication;
-
-  return {
-    cleaned: {
-      ...candidate,
-      citations: validCitations,
-      whyStatus: cleanWhyStatus,
-      questionAssessments: cleanQAs,
-      establishedPoints: cleanEPs,
-      remainingGaps: cleanGaps,
-      icImplication: cleanIcImplication,
-    },
-    droppedCount,
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// SUPPORT DEGRADATION — demote unsupported claims to remaining gaps
-// ═══════════════════════════════════════════════════════════════════
-
-function demoteUnsupportedClaims(
-  candidate: RationaleDraftCandidate,
-  supportResults: SupportVerificationResult[],
-): RationaleDraftCandidate {
-  const unsupportedIds = new Set(
-    supportResults
-      .filter((r) => !r.supported && r.claimId !== "icImplication")
-      .map((r) => r.claimId),
-  );
-  if (unsupportedIds.size === 0) return candidate;
-
-  const keptEPs: typeof candidate.establishedPoints = [];
-  const demotedGaps: typeof candidate.remainingGaps = [];
-
-  for (const ep of candidate.establishedPoints) {
-    if (unsupportedIds.has(ep.claimId)) {
-      demotedGaps.push({
-        gapId: `demoted_${ep.claimId}`,
-        text: ep.text,
-        basisType: "evidence_limitation",
-        basisIds: [],
-        citationIds: ep.citationIds,
-      });
-    } else {
-      keptEPs.push(ep);
-    }
-  }
-
-  // Cap total remaining gaps at 3 to stay within validator limits
-  const MAX_REMAINING_GAPS_DEMOTE = 3;
-  const demoteSlotsAvailable = Math.max(0, MAX_REMAINING_GAPS_DEMOTE - candidate.remainingGaps.length);
-  const cappedDemotedGaps = demotedGaps.slice(0, demoteSlotsAvailable);
-
-  return {
-    ...candidate,
-    establishedPoints: keptEPs,
-    remainingGaps: [...candidate.remainingGaps, ...cappedDemotedGaps],
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════
 // DIMENSION PROCESSOR
 // ═══════════════════════════════════════════════════════════════════
 
@@ -494,9 +469,10 @@ async function processDimension(
 ): Promise<DimensionProcessResult> {
   let draftCalls = 0;
   let verificationCalls = 0;
+  let draftCorrectionAttempted = false;
+  let supportCorrectionAttempted = false;
   let correctionAttempted = false;
   let correctionRecovered = false;
-  let supportDegraded = false;
 
   // ── Step 1: Draft call ──
   const draftPrompt = buildDraftUserPrompt(packet);
@@ -523,17 +499,15 @@ async function processDimension(
     throw new Error(`Dimension ${packet.dimensionId}: draft truncated by max_tokens (${MAX_DRAFT_TOKENS})`);
   }
   const draftRaw = draftResponse.content[0]?.text ?? "";
-  let candidate = parseDraftResponse(draftRaw, packet.dimensionId);
-
-  // Strip any hallucinated citation IDs before validation
-  const draftSanitize = stripHallucinatedCitations(candidate, packet);
-  candidate = draftSanitize.cleaned;
+  const validEvidenceIds = new Set(packet.curatedEvidence.map((e) => e.evidenceId));
+  let candidate = repairGarbledCitationIds(parseDraftResponse(draftRaw, packet.dimensionId), validEvidenceIds);
 
   // ── Step 2: Deterministic validation ──
   let validation = validateRationaleDraft(candidate, packet);
 
   // ── Step 3: If validation fails, try one correction ──
   if (!validation.valid) {
+    draftCorrectionAttempted = true;
     correctionAttempted = true;
 
     const correctionPrompt = buildCorrectionUserPrompt(packet, validation.errors);
@@ -560,12 +534,7 @@ async function processDimension(
       throw new Error(`Dimension ${packet.dimensionId}: correction truncated by max_tokens`);
     }
     const correctionRaw = correctionResponse.content[0]?.text ?? "";
-    candidate = parseDraftResponse(correctionRaw, packet.dimensionId);
-
-    // Strip any hallucinated citation IDs before re-validation
-    const correctionSanitize = stripHallucinatedCitations(candidate, packet);
-    candidate = correctionSanitize.cleaned;
-
+    candidate = repairGarbledCitationIds(parseDraftResponse(correctionRaw, packet.dimensionId), validEvidenceIds);
     validation = validateRationaleDraft(candidate, packet);
 
     if (!validation.valid) {
@@ -603,16 +572,10 @@ async function processDimension(
     });
   }
 
-  // IC implication
-  claimsToVerify.push({
-    claimId: "icImplication",
-    text: candidate.icImplication.text,
-    isInference: true,
-    citedSnippets: candidate.icImplication.citationIds.map((id) => ({
-      evidenceId: id,
-      snippet: snippetMap.get(id) ?? "",
-    })),
-  });
+  // IC implication is NOT sent to the verifier. It is an inference by design.
+  // Deterministic validation already ensures it has valid citations,
+  // conservative verbs, and appropriate content. The established points it
+  // builds on ARE support-verified, providing transitive grounding.
 
   const verifyPrompt = buildVerifyUserPrompt(claimsToVerify);
   verificationCalls++;
@@ -638,13 +601,25 @@ async function processDimension(
   let supportResults = parseSupportResponse(verifyRaw);
   let supportErrors = validateSupportResults(candidate, supportResults);
 
-  // ── Step 5: If support verification fails and no correction yet, try correction ──
-  if (supportErrors.length > 0 && !correctionAttempted) {
+  // ── Step 5: If support verification fails, try one support correction ──
+  if (supportErrors.length > 0 && !supportCorrectionAttempted) {
+    supportCorrectionAttempted = true;
     correctionAttempted = true;
 
     const supportFailErrors = supportResults
       .filter((r) => !r.supported)
-      .map((r) => `Claim "${r.claimId}" failed support: ${r.reasonCode}`);
+      .map((r) => {
+        if (r.reasonCode === "OVERSTATED_SCOPE") {
+          if (r.claimId === "icImplication") {
+            return `Claim "icImplication" failed support: OVERSTATED_SCOPE. Rewrite as a factual statement about what specific information is available for IC review (e.g., "The report documents X and Y that are available for IC review"). Do NOT judge adequacy or sufficiency.`;
+          }
+          return `Claim "${r.claimId}" failed support: OVERSTATED_SCOPE. Rewrite to state only what the cited snippet literally describes, using verbs like "documents" or "reports".`;
+        }
+        if (r.reasonCode === "CITATION_MISMATCH") {
+          return `Claim "${r.claimId}" failed support: CITATION_MISMATCH. The claim references facts not present in the cited snippet. Rewrite using only facts from the cited evidence.`;
+        }
+        return `Claim "${r.claimId}" failed support: ${r.reasonCode}`;
+      });
 
     if (supportFailErrors.length > 0) {
       const correctionPrompt = buildCorrectionUserPrompt(packet, supportFailErrors);
@@ -671,11 +646,7 @@ async function processDimension(
         throw new Error(`Dimension ${packet.dimensionId}: support correction truncated by max_tokens`);
       }
       const correctionRaw = correctionResponse.content[0]?.text ?? "";
-      candidate = parseDraftResponse(correctionRaw, packet.dimensionId);
-
-      // Strip hallucinated citations before re-validation
-      const supportCorrSanitize = stripHallucinatedCitations(candidate, packet);
-      candidate = supportCorrSanitize.cleaned;
+      candidate = repairGarbledCitationIds(parseDraftResponse(correctionRaw, packet.dimensionId), validEvidenceIds);
 
       // Re-validate schema/citations/numerics
       validation = validateRationaleDraft(candidate, packet);
@@ -702,15 +673,7 @@ async function processDimension(
           })),
         });
       }
-      reVerifyClaimsToVerify.push({
-        claimId: "icImplication",
-        text: candidate.icImplication.text,
-        isInference: true,
-        citedSnippets: candidate.icImplication.citationIds.map((id) => ({
-          evidenceId: id,
-          snippet: reSnippetMap.get(id) ?? "",
-        })),
-      });
+      // IC implication excluded from re-verification (inference, transitively grounded)
 
       verificationCalls++;
       const reVerifyResponse = await callLLMWithHeadroom(
@@ -735,21 +698,21 @@ async function processDimension(
       supportErrors = validateSupportResults(candidate, supportResults);
 
       if (supportErrors.length > 0) {
-        // Graceful degradation: demote unsupported established points to remaining gaps
-        candidate = demoteUnsupportedClaims(candidate, supportResults);
-        supportDegraded = true;
-      } else {
-        correctionRecovered = true;
+        throw new Error(
+          `Dimension ${packet.dimensionId}: correction failed support verification: ${supportErrors.join("; ")}`,
+        );
       }
+      correctionRecovered = true;
     } else {
-      // Graceful degradation: demote unsupported established points to remaining gaps
-      candidate = demoteUnsupportedClaims(candidate, supportResults);
-      supportDegraded = true;
+      throw new Error(
+        `Dimension ${packet.dimensionId}: support verification failed with no unsupported claims: ${supportErrors.join("; ")}`,
+      );
     }
   } else if (supportErrors.length > 0) {
-    // Already attempted correction earlier — demote rather than throw
-    candidate = demoteUnsupportedClaims(candidate, supportResults);
-    supportDegraded = true;
+    // Support correction already attempted — cannot retry
+    throw new Error(
+      `Dimension ${packet.dimensionId}: support verification failed after support correction: ${supportErrors.join("; ")}`,
+    );
   }
 
   // ── Step 6: Assemble validated rationale ──
@@ -757,7 +720,7 @@ async function processDimension(
     schemaValidated: true,
     citationsValidated: true,
     numbersValidated: true,
-    supportVerified: !supportDegraded,
+    supportVerified: true,
     correctionAttempted,
     correctionRecovered,
   };

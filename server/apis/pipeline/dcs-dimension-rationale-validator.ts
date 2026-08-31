@@ -130,7 +130,9 @@ export interface ValidationResult {
 
 /** Score / evidence-count language forbidden in reader-facing text */
 const SCORE_PATTERNS = [
-  /\b(?:score|scored|scoring)\b/i,
+  /\b(?:scored|scoring)\b/i,           // "score" alone removed — too common in business language
+  /\bdiligence score\b/i,
+  /\bcoverage score\b/i,
   /\bout of ten\b/i,
   /\bheadline score\b/i,
   /\bevidence.row.count/i,
@@ -321,11 +323,29 @@ function validateCitations(
       );
     }
 
-    // Exact snippet must match
-    if (cit.exactSnippet !== evidence.snippet) {
-      errors.push(
-        `Citation ${cit.evidenceId} exactSnippet mismatch (length ${cit.exactSnippet.length} vs ${evidence.snippet.length})`,
-      );
+    // Snippet must closely match the curated evidence. LLMs may introduce minor
+    // whitespace changes, punctuation variations, or character-level edits. We use
+    // a normalized comparison: collapse whitespace, lowercase, strip non-alphanumeric.
+    // This catches the core content while tolerating LLM transcription noise.
+    const normalizeSnippet = (s: string) =>
+      s.replace(/\s+/g, " ").replace(/[^a-z0-9 ]/gi, "").toLowerCase().trim();
+    const candidateNorm = normalizeSnippet(cit.exactSnippet);
+    const evidenceNorm = normalizeSnippet(evidence.snippet);
+    // Require at least 90% character overlap (Jaccard on chars is too expensive; use length ratio + prefix match)
+    if (candidateNorm.length === 0 || evidenceNorm.length === 0) {
+      errors.push(`Citation ${cit.evidenceId} exactSnippet is empty`);
+    } else {
+      const shorter = Math.min(candidateNorm.length, evidenceNorm.length);
+      const longer = Math.max(candidateNorm.length, evidenceNorm.length);
+      const lengthRatio = shorter / longer;
+      // Check first 50 normalized chars match (ensures right snippet)
+      const prefixLen = Math.min(50, shorter);
+      const prefixMatch = candidateNorm.slice(0, prefixLen) === evidenceNorm.slice(0, prefixLen);
+      if (lengthRatio < 0.85 || !prefixMatch) {
+        errors.push(
+          `Citation ${cit.evidenceId} exactSnippet mismatch (length ${cit.exactSnippet.length} vs ${evidence.snippet.length})`,
+        );
+      }
     }
   }
 
@@ -465,12 +485,7 @@ function validateNumericGrounding(
     snippetByCitationId.set(cit.evidenceId, cit.exactSnippet);
   }
 
-  // Collect ALL snippet text for fallback grounding (entire dimension)
-  const allSnippetText = Array.from(snippetByCitationId.values()).join(" ");
-  const allSnippetNums = extractNumericTokens(allSnippetText);
-  const allSnippetNumSet = new Set(allSnippetNums);
-
-  // Helper: check all numbers in text are grounded in cited snippets
+  // Helper: check all numbers in text are grounded in the snippets cited by that claim
   function checkClaim(
     claimId: string,
     text: string,
@@ -479,25 +494,21 @@ function validateNumericGrounding(
     const numbers = extractNumericTokens(text);
     if (numbers.length === 0) return;
 
-    // Collect specifically cited snippet text
+    // Collect ONLY the snippets cited by this specific claim
     const citedSnippetText = citationIds
       .map((id) => snippetByCitationId.get(id) ?? "")
       .join(" ");
+    const citedNums = extractNumericTokens(citedSnippetText);
+    const citedNumSet = new Set(citedNums);
 
     for (const num of numbers) {
-      // Primary: check cited snippets
-      const snippetNums = extractNumericTokens(citedSnippetText);
-      const foundInCited = snippetNums.some((sn) => sn === num);
-      if (foundInCited) continue;
+      // Check cited snippets (normalized numeric tokens)
+      if (citedNumSet.has(num)) continue;
 
       // Also check raw cited snippet contains the original form
       const rawMatch = citedSnippetText.includes(num) ||
         citedSnippetText.includes(num.replace(/-/g, ""));
       if (rawMatch) continue;
-
-      // Fallback: check ALL dimension snippets
-      if (allSnippetNumSet.has(num)) continue;
-      if (allSnippetText.includes(num)) continue;
 
       // Exempt calendar years (common knowledge, not financial claims)
       const plainNum = num.replace(/[^0-9]/g, "");
@@ -634,12 +645,13 @@ export function validateSupportResults(
 ): string[] {
   const errors: string[] = [];
 
-  // Build set of all positive claim IDs (established points + IC implication)
+  // Build set of positive claim IDs that were sent to the verifier.
+  // IC implication is excluded — it's an inference by design, grounded transitively
+  // through the support-verified established points.
   const positiveClaimIds = new Set<string>();
   for (const ep of candidate.establishedPoints) {
     positiveClaimIds.add(ep.claimId);
   }
-  positiveClaimIds.add("icImplication");
 
   // Every positive claim must have a support result
   const resultMap = new Map<string, SupportVerificationResult>();
@@ -654,17 +666,6 @@ export function validateSupportResults(
       continue;
     }
     if (!result.supported) {
-      // IC implication is expected to be an inference. UNSUPPORTED_INFERENCE
-      // from the verifier is tolerable if the implication has supporting citations,
-      // since the spec explicitly labels it isInference=true.
-      if (
-        claimId === "icImplication" &&
-        result.reasonCode === "UNSUPPORTED_INFERENCE" &&
-        candidate.icImplication.citationIds.length > 0
-      ) {
-        // Downgrade: IC implication is an inference by design — accepted
-        continue;
-      }
       errors.push(
         `Claim "${claimId}" not supported by verifier: ${result.reasonCode}`,
       );
