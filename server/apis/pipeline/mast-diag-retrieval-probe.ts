@@ -105,6 +105,47 @@ export const PROBES: RetrievalProbe[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Stopwords — common English function words + deal-generic low-signal terms
+// ---------------------------------------------------------------------------
+
+const STOPWORDS = new Set([
+  // Function words
+  "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+  "her", "was", "one", "our", "out", "has", "have", "been", "some", "them",
+  "than", "its", "over", "also", "that", "this", "with", "from", "into",
+  "does", "each", "which", "their", "will", "would", "there", "what", "about",
+  "when", "make", "like", "been", "more", "other", "could", "after", "should",
+  "being", "those", "still", "between", "these", "such",
+  // Deal-generic low-signal terms
+  "group", "company", "business", "deal", "model", "assume", "assumed",
+  "assumption", "forecast", "current", "level", "support", "remain",
+  "within", "across", "period",
+]);
+
+// ---------------------------------------------------------------------------
+// propositionToQuery — extract discriminating terms from a proposition
+// ---------------------------------------------------------------------------
+
+export function propositionToQuery(proposition: string): string {
+  const tokens = proposition
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+
+  // Deduplicate while preserving order
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const t of tokens) {
+    if (!seen.has(t)) {
+      seen.add(t);
+      unique.push(t);
+    }
+  }
+
+  return unique.join(" ");
+}
+
+// ---------------------------------------------------------------------------
 // Normalization — lowercase, non-letter/digit/space → single space, collapse, trim
 // ---------------------------------------------------------------------------
 
@@ -114,6 +155,14 @@ function normalize(s: string): string {
     .replace(/[^a-z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// ---------------------------------------------------------------------------
+// Sanitise a single term for to_tsquery — only letters and digits
+// ---------------------------------------------------------------------------
+
+function sanitiseTerm(t: string): string {
+  return t.replace(/[^a-z0-9]/g, "");
 }
 
 // ---------------------------------------------------------------------------
@@ -135,22 +184,44 @@ const ExistsRow = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Retrieval mode names
+// ---------------------------------------------------------------------------
+
+const MODES = ["mode_a", "mode_b", "mode_c"] as const;
+type ModeName = (typeof MODES)[number];
+
+// ---------------------------------------------------------------------------
+// Per-mode result
+// ---------------------------------------------------------------------------
+
+const ModeResultSchema = z.object({
+  found_at_rank: z.number().nullable(),
+  tag_match: z.boolean().nullable(),
+  top_rank_tag: z.string().nullable(),
+  chunks_returned: z.number(),
+  skipped: z.boolean().optional(),
+});
+
+// ---------------------------------------------------------------------------
 // Per-probe result schema
 // ---------------------------------------------------------------------------
 
 const ProbeResultSchema = z.object({
   id: z.string(),
-  found_at_rank: z.number().nullable(),
-  tag_match: z.boolean().nullable(),
+  extracted_query: z.string(),
   phrase_exists_in_corpus: z.boolean(),
-  top_rank_tag: z.string().nullable(),
-  chunks_returned: z.number(),
+  mode_a: ModeResultSchema,
+  mode_b: ModeResultSchema,
+  mode_c: ModeResultSchema,
   verbose_chunks: z
-    .array(
-      z.object({
-        file_name: z.string(),
-        preview: z.string(),
-      }),
+    .record(
+      z.string(),
+      z.array(
+        z.object({
+          file_name: z.string(),
+          preview: z.string(),
+        }),
+      ),
     )
     .optional(),
 });
@@ -183,7 +254,7 @@ export default api({
   output: z.object({
     message: z.string().optional(),
     results: z.array(ProbeResultSchema).optional(),
-    aggregates: AggregatesSchema.optional(),
+    aggregates: z.record(z.string(), AggregatesSchema).optional(),
   }),
 
   async run(ctx, { dealId, verbose }) {
@@ -211,13 +282,13 @@ export default api({
         ? excludedDocs.map((d) => d.id)
         : ["00000000-0000-0000-0000-000000000000"];
 
-    // ── Run each probe ──────────────────────────────────────────────
-    const results: z.infer<typeof ProbeResultSchema>[] = [];
-    const ranksForMean: number[] = [];
-
-    for (const probe of PROBES) {
-      // 1. Retrieval: same FTS pattern the repo uses
-      const hits = await db.query(
+    // ── Helper: run a single FTS retrieval ──────────────────────────
+    async function retrieve(
+      tsqueryExpr: string,
+      params: unknown[],
+      label: string,
+    ): Promise<z.infer<typeof ChunkHitRow>[]> {
+      return db.query(
         `SELECT dc.id AS chunk_id,
                 dc.document_id,
                 dc.file_name,
@@ -227,36 +298,106 @@ export default api({
                 d.document_tag
          FROM document_chunks dc
          JOIN documents d ON d.id = dc.document_id
-         CROSS JOIN websearch_to_tsquery('english', $2) q
+         CROSS JOIN ${tsqueryExpr} q
          WHERE dc.deal_id = $1::uuid
            AND dc.tsv @@ q
            AND dc.document_id != ALL($3::uuid[])
          ORDER BY rank DESC
          LIMIT 10`,
         ChunkHitRow,
-        [dealId, probe.proposition, excludedIds],
-        { label: `PROBE: retrieve for "${probe.id}"` },
+        params,
+        { label },
       );
+    }
 
-      // 2. Score: find expectedPhrase in returned chunks
-      const normPhrase = normalize(probe.expectedPhrase);
+    // ── Helper: score hits against a probe ───────────────────────────
+    function scoreHits(
+      hits: z.infer<typeof ChunkHitRow>[],
+      normPhrase: string,
+      expectedDocTag: string,
+    ): z.infer<typeof ModeResultSchema> {
       let foundAtRank: number | null = null;
       let tagMatch: boolean | null = null;
 
       for (let i = 0; i < hits.length; i++) {
         const normContent = normalize(hits[i].content);
         if (normContent.includes(normPhrase)) {
-          foundAtRank = i + 1; // 1-based
-          tagMatch = hits[i].document_tag === probe.expectedDocTag;
+          foundAtRank = i + 1;
+          tagMatch = hits[i].document_tag === expectedDocTag;
           break;
         }
       }
 
-      if (foundAtRank != null) {
-        ranksForMean.push(foundAtRank);
+      return {
+        found_at_rank: foundAtRank,
+        tag_match: tagMatch,
+        top_rank_tag: hits.length > 0 ? (hits[0].document_tag ?? null) : null,
+        chunks_returned: hits.length,
+      };
+    }
+
+    // ── Run each probe ──────────────────────────────────────────────
+    const results: z.infer<typeof ProbeResultSchema>[] = [];
+
+    for (const probe of PROBES) {
+      const normPhrase = normalize(probe.expectedPhrase);
+      const extracted = propositionToQuery(probe.proposition);
+      const sanitisedTerms = extracted
+        .split(" ")
+        .map(sanitiseTerm)
+        .filter((t) => t.length > 0);
+      const hasTerms = sanitisedTerms.length > 0;
+
+      // ── Mode A: websearch_to_tsquery (original behaviour, control) ─
+      const hitsA = await retrieve(
+        `websearch_to_tsquery('english', $2)`,
+        [dealId, probe.proposition, excludedIds],
+        `PROBE-A: "${probe.id}"`,
+      );
+      const modeA = scoreHits(hitsA, normPhrase, probe.expectedDocTag);
+
+      // ── Mode B: to_tsquery with OR-joined extracted terms ──────────
+      let modeB: z.infer<typeof ModeResultSchema>;
+      let hitsB: z.infer<typeof ChunkHitRow>[] = [];
+      if (hasTerms) {
+        const orExpr = sanitisedTerms.join(" | ");
+        hitsB = await retrieve(
+          `to_tsquery('english', $2)`,
+          [dealId, orExpr, excludedIds],
+          `PROBE-B: "${probe.id}"`,
+        );
+        modeB = scoreHits(hitsB, normPhrase, probe.expectedDocTag);
+      } else {
+        modeB = {
+          found_at_rank: null,
+          tag_match: null,
+          top_rank_tag: null,
+          chunks_returned: 0,
+          skipped: true,
+        };
       }
 
-      // 3. phrase_exists_in_corpus — independent search
+      // ── Mode C: plainto_tsquery with extracted terms (AND) ─────────
+      let modeC: z.infer<typeof ModeResultSchema>;
+      let hitsC: z.infer<typeof ChunkHitRow>[] = [];
+      if (hasTerms) {
+        hitsC = await retrieve(
+          `plainto_tsquery('english', $2)`,
+          [dealId, extracted, excludedIds],
+          `PROBE-C: "${probe.id}"`,
+        );
+        modeC = scoreHits(hitsC, normPhrase, probe.expectedDocTag);
+      } else {
+        modeC = {
+          found_at_rank: null,
+          tag_match: null,
+          top_rank_tag: null,
+          chunks_returned: 0,
+          skipped: true,
+        };
+      }
+
+      // ── phrase_exists_in_corpus (mode-independent) ─────────────────
       const existsRows = await db.query(
         `SELECT EXISTS (
            SELECT 1
@@ -268,57 +409,72 @@ export default api({
          ) AS found`,
         ExistsRow,
         [dealId, `%${probe.expectedPhrase}%`],
-        { label: `PROBE: phrase exists check for "${probe.id}"` },
+        { label: `PROBE: phrase exists "${probe.id}"` },
       );
       const phraseExists = existsRows.length > 0 && existsRows[0].found;
 
-      // 4. top_rank_tag
-      const topRankTag =
-        hits.length > 0 ? (hits[0].document_tag ?? null) : null;
-
-      // 5. Verbose chunks
-      let verboseChunks: { file_name: string; preview: string }[] | undefined;
+      // ── Verbose ────────────────────────────────────────────────────
+      let verboseChunks:
+        | Record<string, { file_name: string; preview: string }[]>
+        | undefined;
       if (verbose) {
-        verboseChunks = hits.slice(0, 3).map((h) => ({
-          file_name: h.file_name,
-          preview: h.content.slice(0, 200),
-        }));
+        verboseChunks = {};
+        for (const [mode, hits] of [
+          ["mode_a", hitsA],
+          ["mode_b", hitsB],
+          ["mode_c", hitsC],
+        ] as const) {
+          verboseChunks[mode] = hits.slice(0, 3).map((h) => ({
+            file_name: h.file_name,
+            preview: h.content.slice(0, 200),
+          }));
+        }
       }
 
       results.push({
         id: probe.id,
-        found_at_rank: foundAtRank,
-        tag_match: tagMatch,
+        extracted_query: extracted,
         phrase_exists_in_corpus: phraseExists,
-        top_rank_tag: topRankTag,
-        chunks_returned: hits.length,
+        mode_a: modeA,
+        mode_b: modeB,
+        mode_c: modeC,
         ...(verboseChunks ? { verbose_chunks: verboseChunks } : {}),
       });
     }
 
-    // ── Aggregates ──────────────────────────────────────────────────
-    const totalProbes = PROBES.length;
-    const foundAnyRank = results.filter((r) => r.found_at_rank != null).length;
-    const foundRank1to3 = results.filter(
-      (r) => r.found_at_rank != null && r.found_at_rank <= 3,
-    ).length;
-    const phraseInCorpusNotRetrieved = results.filter(
-      (r) => r.phrase_exists_in_corpus && r.found_at_rank == null,
-    ).length;
-    const meanRank =
-      ranksForMean.length > 0
-        ? ranksForMean.reduce((a, b) => a + b, 0) / ranksForMean.length
-        : null;
+    // ── Per-mode aggregates ─────────────────────────────────────────
+    const aggregates: Record<string, z.infer<typeof AggregatesSchema>> = {};
 
-    return {
-      results,
-      aggregates: {
-        total_probes: totalProbes,
-        found_any_rank: foundAnyRank,
-        found_rank_1_to_3: foundRank1to3,
-        phrase_in_corpus_but_not_retrieved: phraseInCorpusNotRetrieved,
-        mean_rank: meanRank,
-      },
-    };
+    for (const mode of MODES) {
+      const ranks: number[] = [];
+      let foundAny = 0;
+      let found1to3 = 0;
+      let phraseNotRetrieved = 0;
+
+      for (const r of results) {
+        const mr = r[mode];
+        if (mr.skipped) continue;
+        if (mr.found_at_rank != null) {
+          foundAny++;
+          ranks.push(mr.found_at_rank);
+          if (mr.found_at_rank <= 3) found1to3++;
+        } else if (r.phrase_exists_in_corpus) {
+          phraseNotRetrieved++;
+        }
+      }
+
+      aggregates[mode] = {
+        total_probes: PROBES.length,
+        found_any_rank: foundAny,
+        found_rank_1_to_3: found1to3,
+        phrase_in_corpus_but_not_retrieved: phraseNotRetrieved,
+        mean_rank:
+          ranks.length > 0
+            ? ranks.reduce((a, b) => a + b, 0) / ranks.length
+            : null,
+      };
+    }
+
+    return { results, aggregates };
   },
 });
