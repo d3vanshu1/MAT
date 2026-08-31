@@ -2208,13 +2208,13 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
          WHERE deal_id = $1 AND module_id = $2 AND status = 'running'::module_status
          LIMIT 1
        )
-       INSERT INTO module_runs (deal_id, module_id, status, owner_token)
-       SELECT $1, $2, 'running'::module_status, $3::uuid
+       INSERT INTO module_runs (deal_id, module_id, status)
+       SELECT $1, $2, 'running'::module_status
        WHERE NOT EXISTS (SELECT 1 FROM guard)
        RETURNING id AS run_id`,
       RunIdSchema,
-      [dealId, moduleId, ownerToken],
-      { label: "Create pipeline run (guarded, with owner token)" }
+      [dealId, moduleId],
+      { label: "Create pipeline run (guarded)" }
     );
 
     if (newRunRows.length === 0) {
@@ -2234,12 +2234,12 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
         // Race: the other run just completed between our check and this query.
         // Retry with a plain insert (no guard needed anymore).
         const retryRows = await ctx.integrations.db.query(
-          `INSERT INTO module_runs (deal_id, module_id, status, owner_token)
-           VALUES ($1, $2, 'running'::module_status, $3::uuid)
+          `INSERT INTO module_runs (deal_id, module_id, status)
+           VALUES ($1, $2, 'running'::module_status)
            RETURNING id AS run_id`,
           RunIdSchema,
-          [dealId, moduleId, ownerToken],
-          { label: "Create pipeline run (retry after guard race, with owner token)" }
+          [dealId, moduleId],
+          { label: "Create pipeline run (retry after guard race)" }
         );
         runId = retryRows[0].run_id;
       }
@@ -2265,9 +2265,9 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
     // the round-trip into the compare-and-swap below. A Date round-trip
     // truncates to milliseconds and the CAS would then never match.
     const currentStatus = await ctx.integrations.db.query(
-      `SELECT status, triggered_at::text AS triggered_at, owner_token
+      `SELECT status, triggered_at::text AS triggered_at
        FROM module_runs WHERE id = $1 LIMIT 1`,
-      z.object({ status: z.string(), triggered_at: z.string().nullable(), owner_token: z.string().nullable() }),
+      z.object({ status: z.string(), triggered_at: z.string().nullable() }),
       [runId],
       { label: "Check run status before resume" }
     );
@@ -2311,48 +2311,18 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
     }
 
     // B2 FIX — Ownership claim with token, timing-independent.
-    //
-    // The claiming driver mints a UUID once; resumes pass it through.
-    // The CAS claims the run only if:
-    //   - owner_token IS NULL (unclaimed — first invocation or old row), OR
-    //   - owner_token matches my token (I am the rightful owner resuming).
-    // A foreign driver with a different token is rejected regardless of
-    // how much time has passed — no timing dependency, no heartbeat race.
-    //
-    // triggered_at stays as a heartbeat signal only (updated on claim
-    // and periodically during processing). It is no longer part of the
-    // ownership decision.
-    const claimed = await ctx.integrations.db.query(
+    // DORMANT: owner_token column on module_runs does not exist yet
+    // (app DB user lacks ALTER privilege — see B2 knowledge entry).
+    // When the column is added, re-enable the CAS below.
+    // For now, unconditionally update triggered_at as a heartbeat.
+    await ctx.integrations.db.execute(
       `UPDATE module_runs
-       SET triggered_at = now(), owner_token = $3::uuid
+       SET triggered_at = now()
        WHERE id = $1
-         AND status = 'running'::module_status
-         AND (owner_token IS NULL OR owner_token = $3::uuid)
-       RETURNING id`,
-      z.object({ id: z.string() }),
-      [runId, observedTriggeredAt, ownerToken],
-      { label: "Resume run — claim ownership (token CAS)" }
+         AND status = 'running'::module_status`,
+      [runId],
+      { label: "Resume run — heartbeat (B2 CAS dormant)" }
     );
-
-    if (claimed.length === 0) {
-      // Another driver owns this run (different token) or the run
-      // left 'running' status between the read and this update.
-      // Yield — two drivers over one run is exactly what B2 prevents.
-      console.warn(
-        `[pipeline] Resume claim rejected for run ${runId} — owned by another driver (token mismatch). Yielding.`
-      );
-      return {
-        status: "in_progress",
-        runId,
-        phase: "awaiting_claim",
-        progress: { analysisTotal: 0, analysisCompleted: 0, mergeRound: 0, mergeTotal: 0 },
-        result: null,
-        failedChunks: 0,
-        truncatedChunks: 0,
-        truncatedMerges: 0,
-        firstError: null,
-      };
-    }
   }
 
   // --- Step 0.3.5: Load filename→tag map for deterministic independent flag ---
