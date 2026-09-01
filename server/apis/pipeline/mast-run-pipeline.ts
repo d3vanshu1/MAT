@@ -68,7 +68,7 @@ export default api({
   },
 
   input: z.object({
-    runId: z.string().uuid().optional(),
+    runId: z.string().uuid().nullish(),
     dealId: z.string().uuid(),
   }),
 
