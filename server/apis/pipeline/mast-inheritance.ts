@@ -344,7 +344,7 @@ const inheritance: StageHandler = async (
   const linkPairs = await db.query(
     `SELECT to_doc_id, to_locator,
             COUNT(*)::int AS link_count,
-            MIN(id)::text AS min_link_id,
+            MIN(id::text) AS min_link_id,
             (ARRAY_AGG(to_value ORDER BY id))[1] AS to_value,
             (ARRAY_AGG(to_label ORDER BY id))[1] AS to_label
        FROM mast_reliance_links
