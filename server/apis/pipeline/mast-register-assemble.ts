@@ -174,7 +174,8 @@ const registerAssemble: StageHandler = async (
   const groupAssignment = new Map<string, string>();
 
   // ── 4. Rule A — model_explicit clustering ──────────────────────────
-  //   Key: sheet + "|" + value + "|" + period + "|" + label(proposition)
+  //   Key: sheet + "|" + value.  Label is dropped because propositions
+  //   are rewritten sentences after the P21 stage reorder.
   //   Min cluster size: 3.  Canonical = lowest origin_locator.
 
   // Build cluster map
@@ -188,10 +189,7 @@ const registerAssemble: StageHandler = async (
     if (!parsed) continue;
     // Stringify value for grouping (NULL → "null")
     const valStr = row.value != null ? String(row.value) : "null";
-    const periodStr = row.period ?? "null";
-    const propText = row.proposition.trim();
-    if (propText.length === 0) continue; // non-empty label required
-    const key = `${parsed.sheet}|${valStr}|${periodStr}|${propText}`;
+    const key = `${parsed.sheet}|${valStr}`;
     let cluster = ruleAClusters.get(key);
     if (!cluster) {
       cluster = { rows: [], locators: [] };

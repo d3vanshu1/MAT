@@ -151,13 +151,25 @@ const render: StageHandler = async (
   // ── Filter: remove rows whose proposition still contains a density tag ──
   const DENSITY_RE = /\(\d+\.\d+\)/;
   const unrewrittenRows = allFindings.filter((f) => DENSITY_RE.test(f.proposition));
-  const duplicateRowsExcluded = 0; // canonical filter is in the SQL; count is informational
   const unrewrittenCount = unrewrittenRows.length;
   const unrewrittenIds = new Set(unrewrittenRows.map((f) => f.finding_id));
   const filteredFindings = allFindings.filter((f) => !unrewrittenIds.has(f.finding_id));
 
+  // Count duplicate (non-canonical) rows in DB
+  const dupCountRows = await db.query(
+    `SELECT COUNT(*)::int AS total FROM mast_assumptions
+     WHERE run_id = $1::uuid
+       AND dedup_group_id IS NOT NULL
+       AND dedup_group_id != id`,
+    z.object({ total: z.number() }),
+    [runId],
+    { label: "MAST-RENDER: count duplicate rows" },
+  );
+  const duplicateRowsExcluded = dupCountRows[0]?.total ?? 0;
+
   console.log(
     `${LOG_PREFIX} ${allFindings.length} findings loaded (canonical only). ` +
+    `${duplicateRowsExcluded} duplicates excluded by dedup. ` +
     `${unrewrittenCount} excluded as unrewritten (density tag in proposition).`,
   );
 
@@ -455,6 +467,11 @@ const render: StageHandler = async (
 
   // 6g. Exclusion disclosures
   const exclusionParts: string[] = [];
+  if (duplicateRowsExcluded > 0) {
+    exclusionParts.push(
+      `${duplicateRowsExcluded} row${duplicateRowsExcluded === 1 ? " was" : "s were"} excluded as duplicates`,
+    );
+  }
   if (unrewrittenCount > 0) {
     exclusionParts.push(
       `${unrewrittenCount} row${unrewrittenCount === 1 ? " was" : "s were"} excluded because ` +
@@ -523,6 +540,7 @@ const render: StageHandler = async (
     reportLength: report.length,
     nothingCount: supportCounts.nothing,
     unrewrittenExcluded: unrewrittenCount,
+    duplicateRowsExcluded,
   };
 
   // ── 9. Persist payload ────────────────────────────────────────────
