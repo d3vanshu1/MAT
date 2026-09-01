@@ -135,7 +135,7 @@ const forecastRecursion: StageHandler = async (
   //    Group by verbatim so identical projections cited against
   //    multiple assumptions are processed once.
   const groups = await db.query(
-    `SELECT verbatim, MIN(doc_id) AS doc_id, MIN(locator) AS locator,
+    `SELECT verbatim, MIN(doc_id::text) AS doc_id, MIN(locator) AS locator,
             COUNT(DISTINCT assumption_id)::int AS citation_count
      FROM mast_support_evidence
      WHERE run_id = $1::uuid AND statement_type = 'forecast'
