@@ -128,6 +128,7 @@ const render: StageHandler = async (
      FROM mast_findings f
      JOIN mast_assumptions a ON a.id = f.assumption_id
      WHERE f.run_id = $1::uuid
+       AND a.dedup_group_id = a.id
      ORDER BY
        CASE a.dependence_tier
          WHEN 'critical' THEN 0
@@ -147,7 +148,18 @@ const render: StageHandler = async (
     );
   }
 
-  console.log(`${LOG_PREFIX} ${allFindings.length} findings loaded.`);
+  // ── Filter: remove rows whose proposition still contains a density tag ──
+  const DENSITY_RE = /\(\d+\.\d+\)/;
+  const unrewrittenRows = allFindings.filter((f) => DENSITY_RE.test(f.proposition));
+  const duplicateRowsExcluded = 0; // canonical filter is in the SQL; count is informational
+  const unrewrittenCount = unrewrittenRows.length;
+  const unrewrittenIds = new Set(unrewrittenRows.map((f) => f.finding_id));
+  const filteredFindings = allFindings.filter((f) => !unrewrittenIds.has(f.finding_id));
+
+  console.log(
+    `${LOG_PREFIX} ${allFindings.length} findings loaded (canonical only). ` +
+    `${unrewrittenCount} excluded as unrewritten (density tag in proposition).`,
+  );
 
   // ── 2. Load support evidence ──────────────────────────────────────
   const evidenceRows = await db.query(
@@ -218,18 +230,18 @@ const render: StageHandler = async (
   const referencedDocIds = new Set(assumptionDocRows.map((r) => r.origin_doc_id));
 
   // ── 5. Compute counts from rows ──────────────────────────────────
-  const totalFindings = allFindings.length;
+  const totalFindings = filteredFindings.length;
 
   // Support state counts from findings
   const supportCounts = { measured: 0, forecast: 0, asserted: 0, nothing: 0 };
-  for (const f of allFindings) {
+  for (const f of filteredFindings) {
     const support = extractSupportState(f.severity_basis) as keyof typeof supportCounts;
     if (support in supportCounts) supportCounts[support]++;
   }
 
   // Severity counts from findings
   const sevCounts = { critical: 0, warning: 0, info: 0 };
-  for (const f of allFindings) {
+  for (const f of filteredFindings) {
     const sev = f.severity as keyof typeof sevCounts;
     if (sev in sevCounts) sevCounts[sev]++;
   }
@@ -250,7 +262,7 @@ const render: StageHandler = async (
 
   // ── Section 2: Critical List ──────────────────────────────────────
   sections.push("## 2. Critical Findings\n");
-  const criticals = allFindings.filter((f) => f.severity === "critical");
+  const criticals = filteredFindings.filter((f) => f.severity === "critical");
   const criticalsCapped = criticals.slice(0, CRITICAL_CAP);
   const criticalOmitted = criticals.length - criticalsCapped.length;
 
@@ -294,7 +306,7 @@ const render: StageHandler = async (
 
   // ── Section 3: Warnings ───────────────────────────────────────────
   sections.push("## 3. Warnings\n");
-  const warnings = allFindings.filter((f) => f.severity === "warning");
+  const warnings = filteredFindings.filter((f) => f.severity === "warning");
   const warningsCapped = warnings.slice(0, WARNING_CAP);
   const warningOmitted = warnings.length - warningsCapped.length;
 
@@ -322,7 +334,7 @@ const render: StageHandler = async (
 
   // ── Section 4: Silent Assumptions ─────────────────────────────────
   sections.push("\n## 4. Silent Assumptions\n");
-  const silentFindings = allFindings.filter((f) => f.origin_type === "model_implicit");
+  const silentFindings = filteredFindings.filter((f) => f.origin_type === "model_implicit");
 
   if (silentFindings.length === 0) {
     sections.push("No silent assumptions were detected in this model.\n");
@@ -356,7 +368,7 @@ const render: StageHandler = async (
 
   // ── Section 5: Inherited Assumptions ──────────────────────────────
   sections.push("## 5. Inherited Assumptions\n");
-  const inheritedFindings = allFindings.filter(
+  const inheritedFindings = filteredFindings.filter(
     (f) => f.origin_type === "inherited" || (f.recursion_depth !== null && f.recursion_depth >= 1),
   );
 
@@ -441,13 +453,25 @@ const render: StageHandler = async (
     );
   }
 
+  // 6g. Exclusion disclosures
+  const exclusionParts: string[] = [];
+  if (unrewrittenCount > 0) {
+    exclusionParts.push(
+      `${unrewrittenCount} row${unrewrittenCount === 1 ? " was" : "s were"} excluded because ` +
+      "they could not be expressed as propositions",
+    );
+  }
+  if (exclusionParts.length > 0) {
+    sections.push(exclusionParts.join(". ") + ".\n\n");
+  }
+
   // ── Section 7: Full Register Appendix ─────────────────────────────
   sections.push("## 7. Full Register\n\n");
   sections.push("| # | Proposition | Dependence | Support | Severity |\n");
   sections.push("|---|-------------|------------|---------|----------|\n");
 
   // Sort all findings by dependence tier then severity
-  const sorted = [...allFindings].sort((a, b) => {
+  const sorted = [...filteredFindings].sort((a, b) => {
     const ta = TIER_ORDER[a.dependence_tier ?? "low"] ?? 3;
     const tb = TIER_ORDER[b.dependence_tier ?? "low"] ?? 3;
     if (ta !== tb) return ta - tb;
@@ -498,6 +522,7 @@ const render: StageHandler = async (
     ruleTableDefaultCount,
     reportLength: report.length,
     nothingCount: supportCounts.nothing,
+    unrewrittenExcluded: unrewrittenCount,
   };
 
   // ── 9. Persist payload ────────────────────────────────────────────

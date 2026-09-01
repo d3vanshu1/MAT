@@ -64,6 +64,16 @@ const TOGGLE_KEYWORDS = [
   "sensitivity", "scenario", "case",
 ];
 
+// ---------------------------------------------------------------------------
+// Rate / ratio keyword set for quantity filter
+// ---------------------------------------------------------------------------
+
+const RATE_KEYWORDS = [
+  "percent", "rate", "margin", "multiple", "growth",
+  "escalator", "inflation", "yield", "conversion",
+  "penetration", "toggle", "switch", "scenario", "case",
+];
+
 /** Strip parens, percent signs, commas, currency symbols, and spaces, then
  *  test whether what remains parses as a finite number. */
 function labelIsNumeric(label: string): boolean {
@@ -575,6 +585,7 @@ const registerModelDrivers: StageHandler = async (
     let zeroSkipped = 0;
     let toggleZerosAdmitted = 0;
     let magnitudeExcluded = 0;
+    let quantityExcluded = 0;
     let labelRejected = 0;
     let coercionRecovered = 0;
 
@@ -644,6 +655,22 @@ const registerModelDrivers: StageHandler = async (
           continue;
         }
       }
+
+      // Quantity filter: reject whole-number counts that are not rates/ratios.
+      // Toggle-admitted zeros skip this filter — they were already accepted.
+      if (!isZero) {
+        const absVal = Math.abs(resolvedValue);
+        const isWholeNumber = Number.isInteger(resolvedValue);
+        const lbl = label.toLowerCase();
+        const hasRateLabel = RATE_KEYWORDS.some((kw) => lbl.includes(kw));
+        const isSubUnitDecimal = absVal > 0 && absVal < 1;
+        const isNonWholePercentRange = absVal >= 1 && absVal < 100 && !isWholeNumber;
+        if (!isSubUnitDecimal && !isNonWholePercentRange && !hasRateLabel) {
+          quantityExcluded++;
+          continue;
+        }
+      }
+
       const alphaCount = (label.match(/[a-zA-Z0-9]/g) || []).length;
       if (alphaCount < 2) { labelRejected++; continue; }
       // Reject blacklisted tokens (n.a., na, n/a, nm, n.m., tbd)
@@ -887,6 +914,7 @@ ${numberedList}
       candidates: drivers.length,
       labelRejected,
       magnitudeExcluded,
+      quantityExcluded,
       toggleZerosAdmitted,
       coercionRecovered,
       sentToAdj: sentToAdjudication,
@@ -897,7 +925,7 @@ ${numberedList}
     });
 
     console.log(
-      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, toggleZeros=${toggleZerosAdmitted}, coercionRecovered=${coercionRecovered}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
+      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, quantityExcluded=${quantityExcluded}, toggleZeros=${toggleZerosAdmitted}, coercionRecovered=${coercionRecovered}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
     );
     totalDriversWritten += driversToWrite.length;
     sheetIdx++;

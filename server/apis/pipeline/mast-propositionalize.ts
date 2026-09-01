@@ -219,22 +219,22 @@ const propositionalize: StageHandler = async (
   const startTime = Date.now();
   const model = getModuleModel(MODULE_ID);
 
-  // ── 1. Load canonical model_explicit and model_implicit rows ──────
+  // ── 1. Load model_explicit and model_implicit rows ─────────────────
+  //    Runs before register_assemble, so dedup_group_id is not yet set.
   const allRows = await db.query(
     `SELECT id, proposition, origin_locator, value, period
      FROM mast_assumptions
      WHERE run_id = $1::uuid
-       AND dedup_group_id = id
        AND origin_type IN ('model_explicit', 'model_implicit')
      ORDER BY id`,
     AssumptionRow,
     [runId],
-    { label: "MAST-PROP: load canonical model assumptions" },
+    { label: "MAST-PROP: load model assumptions" },
   );
 
   const totalRows = allRows.length;
   console.log(
-    `${LOG_PREFIX} ${totalRows} canonical model assumptions loaded. Resume position: ${ctx.resumePosition}.`,
+    `${LOG_PREFIX} ${totalRows} model assumptions loaded. Resume position: ${ctx.resumePosition}.`,
   );
 
   if (totalRows === 0) {
