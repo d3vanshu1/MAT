@@ -182,6 +182,23 @@ export default function ModuleCard({
           </div>
         )}
 
+        {/* Completed but no output stored (e.g. prior run cleared) — show Re-run */}
+        {isComplete && !hasOutput && !isRunning && (
+          <div className="flex items-center gap-2">
+            <ICButton size="sm" onClick={onRun} disabled={disabled}>
+              <RotateCcw className="w-3.5 h-3.5" />
+              Re-run
+            </ICButton>
+            <ICButton variant="ghost" size="sm" onClick={onViewHistory}>
+              <History className="w-3.5 h-3.5" />
+              History
+            </ICButton>
+            {disabled && disabledReason && (
+              <p className="text-[10px] text-ic-coral/80 font-light mt-1.5">{disabledReason}</p>
+            )}
+          </div>
+        )}
+
         {/* Completed state — with inline output */}
         {isComplete && hasOutput && (
           <div className="space-y-3">
