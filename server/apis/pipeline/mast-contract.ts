@@ -52,9 +52,11 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
 
 /**
  * Budget (ms) for loop stages — stop starting new items past this.
- * 180s gives a 120s margin before the 300s platform kill.
+ * 55s gives ample margin before the 120s language-step platform kill.
+ * The orchestrator will be re-invoked by the frontend poll loop and
+ * resume from the saved checkpoint.
  */
-export const STAGE_BUDGET_MS = 180_000;
+export const STAGE_BUDGET_MS = 55_000;
 
 // ---------------------------------------------------------------------------
 // Handler signature
