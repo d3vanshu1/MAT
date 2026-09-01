@@ -508,7 +508,7 @@ export default function DealDashboardPage() {
   const completedModules = useMemo(
     () =>
       Object.entries(statuses)
-        .filter(([, s]) => s.latestRun?.status === "completed")
+        .filter(([, s]) => s.latestRun?.status === "completed" && s.latestOutput != null)
         .map(([id]) => id),
     [statuses]
   );
