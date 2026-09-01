@@ -272,75 +272,140 @@ const render: StageHandler = async (
     `and ${supportCounts.nothing} have nothing behind them anywhere in the room.\n`,
   );
 
+  // ── Check for synthesized findings from synthesize stage ────────
+  const synthPayload = payloadMap.get("synthesize") as any;
+  const synthFindings: any[] = synthPayload?.findings ?? [];
+  const useSynthesized = synthFindings.length > 0;
+  let synthCriticalCount = 0;
+  let synthWarningCount = 0;
+  let synthInputCount = 0;
+
+  if (useSynthesized) {
+    synthInputCount = synthPayload?.stats?.inputFindings ?? 0;
+    console.log(
+      `${LOG_PREFIX} Using ${synthFindings.length} synthesized findings for sections 2/3.`,
+    );
+  }
+
   // ── Section 2: Critical List ──────────────────────────────────────
   sections.push("## 2. Critical Findings\n");
-  const criticals = filteredFindings.filter((f) => f.severity === "critical");
-  const criticalsCapped = criticals.slice(0, CRITICAL_CAP);
-  const criticalOmitted = criticals.length - criticalsCapped.length;
 
-  if (criticalsCapped.length === 0) {
-    sections.push("No findings reached critical severity.\n");
-  } else {
-    for (const f of criticalsCapped) {
-      const support = extractSupportState(f.severity_basis);
-      const tier = f.dependence_tier ?? "low";
-      const basis = f.dependence_basis ?? "rule_table_default";
+  if (useSynthesized) {
+    // Synthesized criticals
+    const synthCriticals = synthFindings.filter((f: any) => f.severity === "critical");
+    synthCriticalCount = synthCriticals.length;
 
-      let block = `### ${f.proposition}\n\n`;
-      block += `- **Dependence:** ${tier} (${basis})\n`;
-      block += `- **Support:** ${support}\n`;
-
-      if (f.falsification_condition) {
-        block += `- **Falsification:** ${f.falsification_condition}\n`;
-      }
-      if (f.monitoring_trigger) {
-        block += `- **Monitor:** ${f.monitoring_trigger}\n`;
-      }
-
-      // Up to 2 supporting quotes
-      const evidence = evidenceByAssumption.get(f.assumption_id) ?? [];
-      const quotes = evidence.slice(0, 2);
-      if (quotes.length > 0) {
-        block += "\n**Supporting evidence:**\n\n";
-        for (const q of quotes) {
-          const loc = q.locator ? ` (${q.locator})` : "";
-          block += `> "${q.verbatim}"${loc} [${q.statement_type}]\n\n`;
+    if (synthCriticals.length === 0) {
+      sections.push("No findings reached critical severity.\n");
+    } else {
+      for (const sf of synthCriticals) {
+        let block = `### ${sf.title}\n\n`;
+        block += `${sf.body}\n\n`;
+        block += `- **Evidence quality:** ${sf.supportSummary}\n`;
+        if (sf.contradiction) {
+          block += `- **Contradiction:** ${sf.contradiction}\n`;
         }
+        if (sf.severityCorrected) {
+          block += `- *Severity adjusted: ${sf.correctionReason}*\n`;
+        }
+        block += `- *Synthesized from ${sf.memberCount} register entries (cluster: "${sf.clusterLabel}")*\n`;
+        sections.push(block + "\n");
+      }
+    }
+  } else {
+    // Fallback: original register-level criticals
+    const criticals = filteredFindings.filter((f) => f.severity === "critical");
+    const criticalsCapped = criticals.slice(0, CRITICAL_CAP);
+    const criticalOmitted = criticals.length - criticalsCapped.length;
+
+    if (criticalsCapped.length === 0) {
+      sections.push("No findings reached critical severity.\n");
+    } else {
+      for (const f of criticalsCapped) {
+        const support = extractSupportState(f.severity_basis);
+        const tier = f.dependence_tier ?? "low";
+        const basis = f.dependence_basis ?? "rule_table_default";
+
+        let block = `### ${f.proposition}\n\n`;
+        block += `- **Dependence:** ${tier} (${basis})\n`;
+        block += `- **Support:** ${support}\n`;
+
+        if (f.falsification_condition) {
+          block += `- **Falsification:** ${f.falsification_condition}\n`;
+        }
+        if (f.monitoring_trigger) {
+          block += `- **Monitor:** ${f.monitoring_trigger}\n`;
+        }
+
+        // Up to 2 supporting quotes
+        const evidence = evidenceByAssumption.get(f.assumption_id) ?? [];
+        const quotes = evidence.slice(0, 2);
+        if (quotes.length > 0) {
+          block += "\n**Supporting evidence:**\n\n";
+          for (const q of quotes) {
+            const loc = q.locator ? ` (${q.locator})` : "";
+            block += `> "${q.verbatim}"${loc} [${q.statement_type}]\n\n`;
+          }
+        }
+
+        sections.push(block);
       }
 
-      sections.push(block);
-    }
-
-    if (criticalOmitted > 0) {
-      sections.push(`*${criticalOmitted} additional critical findings omitted.*\n`);
+      if (criticalOmitted > 0) {
+        sections.push(`*${criticalOmitted} additional critical findings omitted.*\n`);
+      }
     }
   }
 
   // ── Section 3: Warnings ───────────────────────────────────────────
   sections.push("## 3. Warnings\n");
-  const warnings = filteredFindings.filter((f) => f.severity === "warning");
-  const warningsCapped = warnings.slice(0, WARNING_CAP);
-  const warningOmitted = warnings.length - warningsCapped.length;
 
-  if (warningsCapped.length === 0) {
-    sections.push("No findings reached warning severity.\n");
-  } else {
-    for (const f of warningsCapped) {
-      const support = extractSupportState(f.severity_basis);
-      const tier = f.dependence_tier ?? "low";
-      const basis = f.dependence_basis ?? "rule_table_default";
-      let line = `- **${f.proposition}** — dependence: ${tier} (${basis}), support: ${support}`;
-      if (f.falsification_condition) {
-        line += `. Falsification: ${f.falsification_condition}`;
+  if (useSynthesized) {
+    // Synthesized warnings
+    const synthWarnings = synthFindings.filter((f: any) => f.severity === "warning");
+    synthWarningCount = synthWarnings.length;
+
+    if (synthWarnings.length === 0) {
+      sections.push("No findings reached warning severity.\n");
+    } else {
+      for (const sf of synthWarnings) {
+        let line = `- **${sf.title}** — ${sf.body}`;
+        if (sf.contradiction) {
+          line += ` Contradiction: ${sf.contradiction}`;
+        }
+        line += ` *(${sf.memberCount} register entries, evidence: ${sf.supportSummary})*`;
+        if (sf.severityCorrected) {
+          line += ` [severity adjusted: ${sf.correctionReason}]`;
+        }
+        sections.push(line + "\n");
       }
-      if (f.monitoring_trigger) {
-        line += `. Monitor: ${f.monitoring_trigger}`;
-      }
-      sections.push(line + "\n");
     }
+  } else {
+    // Fallback: original register-level warnings
+    const warnings = filteredFindings.filter((f) => f.severity === "warning");
+    const warningsCapped = warnings.slice(0, WARNING_CAP);
+    const warningOmitted = warnings.length - warningsCapped.length;
 
-    if (warningOmitted > 0) {
-      sections.push(`\n*${warningOmitted} additional warning findings omitted.*\n`);
+    if (warningsCapped.length === 0) {
+      sections.push("No findings reached warning severity.\n");
+    } else {
+      for (const f of warningsCapped) {
+        const support = extractSupportState(f.severity_basis);
+        const tier = f.dependence_tier ?? "low";
+        const basis = f.dependence_basis ?? "rule_table_default";
+        let line = `- **${f.proposition}** — dependence: ${tier} (${basis}), support: ${support}`;
+        if (f.falsification_condition) {
+          line += `. Falsification: ${f.falsification_condition}`;
+        }
+        if (f.monitoring_trigger) {
+          line += `. Monitor: ${f.monitoring_trigger}`;
+        }
+        sections.push(line + "\n");
+      }
+
+      if (warningOmitted > 0) {
+        sections.push(`\n*${warningOmitted} additional warning findings omitted.*\n`);
+      }
     }
   }
 
@@ -454,15 +519,19 @@ const render: StageHandler = async (
     sections.push("\n");
   }
 
-  // 6f. Capped counts
-  if (criticalOmitted > 0 || warningOmitted > 0) {
-    const parts: string[] = [];
-    if (criticalOmitted > 0) parts.push(`${criticalOmitted} critical`);
-    if (warningOmitted > 0) parts.push(`${warningOmitted} warning`);
-    sections.push(
-      `${parts.join(" and ")} finding${criticalOmitted + warningOmitted === 1 ? " was" : "s were"} ` +
-      "omitted from the detailed sections above due to length limits.\n\n",
-    );
+  // 6f. Capped counts (only relevant in fallback mode, synthesis has its own caps)
+  if (!useSynthesized) {
+    const criticalOmitted = Math.max(0, sevCounts.critical - CRITICAL_CAP);
+    const warningOmitted = Math.max(0, sevCounts.warning - WARNING_CAP);
+    if (criticalOmitted > 0 || warningOmitted > 0) {
+      const parts: string[] = [];
+      if (criticalOmitted > 0) parts.push(`${criticalOmitted} critical`);
+      if (warningOmitted > 0) parts.push(`${warningOmitted} warning`);
+      sections.push(
+        `${parts.join(" and ")} finding${criticalOmitted + warningOmitted === 1 ? " was" : "s were"} ` +
+        "omitted from the detailed sections above due to length limits.\n\n",
+      );
+    }
   }
 
   // 6g. Exclusion disclosures
@@ -480,6 +549,16 @@ const render: StageHandler = async (
   }
   if (exclusionParts.length > 0) {
     sections.push(exclusionParts.join(". ") + ".\n\n");
+  }
+
+  // 6h. Synthesis compression disclosure
+  if (useSynthesized) {
+    sections.push(
+      `${synthInputCount} register rows were synthesized into ` +
+      `${synthCriticalCount + synthWarningCount} findings ` +
+      `(${synthCriticalCount} critical, ${synthWarningCount} warning). ` +
+      `The full register is preserved in section 7.\n\n`,
+    );
   }
 
   // ── Section 7: Full Register Appendix ─────────────────────────────
@@ -514,19 +593,19 @@ const render: StageHandler = async (
 
   console.log(
     `${LOG_PREFIX} Report assembled. ${report.length} characters. ` +
-    `${totalFindings} findings, ${criticals.length} critical, ` +
-    `${warnings.length} warning, ${sevCounts.info} info.`,
+    `${totalFindings} findings, ${sevCounts.critical} critical, ` +
+    `${sevCounts.warning} warning, ${sevCounts.info} info.`,
   );
 
   // ── 8. Section counts for payload ─────────────────────────────────
   const sectionCounts = {
     totalFindings,
-    critical: criticals.length,
-    criticalRendered: criticalsCapped.length,
-    criticalOmitted,
-    warning: warnings.length,
-    warningRendered: warningsCapped.length,
-    warningOmitted,
+    critical: sevCounts.critical,
+    criticalRendered: useSynthesized ? synthCriticalCount : Math.min(sevCounts.critical, CRITICAL_CAP),
+    criticalOmitted: useSynthesized ? 0 : Math.max(0, sevCounts.critical - CRITICAL_CAP),
+    warning: sevCounts.warning,
+    warningRendered: useSynthesized ? synthWarningCount : Math.min(sevCounts.warning, WARNING_CAP),
+    warningOmitted: useSynthesized ? 0 : Math.max(0, sevCounts.warning - WARNING_CAP),
     info: sevCounts.info,
     silent: silentFindings.length,
     inherited: inheritedFindings.length,
@@ -541,6 +620,10 @@ const render: StageHandler = async (
     nothingCount: supportCounts.nothing,
     unrewrittenExcluded: unrewrittenCount,
     duplicateRowsExcluded,
+    synthesized: useSynthesized,
+    synthCriticalCount: useSynthesized ? synthCriticalCount : 0,
+    synthWarningCount: useSynthesized ? synthWarningCount : 0,
+    synthInputCount: useSynthesized ? synthInputCount : 0,
   };
 
   // ── 9. Persist payload ────────────────────────────────────────────

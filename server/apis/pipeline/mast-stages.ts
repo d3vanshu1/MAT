@@ -43,6 +43,7 @@ import forecastRecursion from "./mast-forecast-recursion.js";
 import dependence from "./mast-dependence.js";
 import severity from "./mast-severity.js";
 import fragility from "./mast-fragility.js";
+import synthesize from "./mast-synthesize.js";
 import render from "./mast-render.js";
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   dependence: dependence,
   severity: severity,
   fragility: fragility,
+  synthesize: synthesize,
   render: render,
 };
 

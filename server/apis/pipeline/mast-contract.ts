@@ -27,6 +27,7 @@ export const STAGES = [
   "dependence",
   "severity",
   "fragility",
+  "synthesize",
   "render",
 ] as const;
 
@@ -48,6 +49,7 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
   "forecast_recursion",
   "lineage",
   "fragility",
+  "synthesize",
 ]);
 
 /**
