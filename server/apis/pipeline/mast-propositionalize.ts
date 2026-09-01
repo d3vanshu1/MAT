@@ -20,6 +20,79 @@ import { z } from "@superblocksteam/sdk-api";
 const LOG_PREFIX = "[MAST-PROP]";
 
 const MODULE_ID = "mast_v2";
+
+// ---------------------------------------------------------------------------
+// Subjectless proposition filter (FIX 4)
+// ---------------------------------------------------------------------------
+
+/** Common assumption vocabulary — words that appear in any financial rewrite. */
+const ASSUMPTION_VOCAB = new Set([
+  "assumes", "assume", "assumed", "assumption",
+  "rate", "percent", "percentage", "growth", "decline",
+  "increase", "decrease", "value", "total", "amount",
+  "margin", "multiple", "ratio", "factor",
+  "annual", "monthly", "quarterly", "yearly",
+  "period", "forecast", "projected", "estimated",
+  "approximately", "constant", "fixed", "flat",
+  "overlay", "adjustment", "applied",
+  "times", "basis", "points",
+]);
+
+/** English stop words — short function words. */
+const STOP_WORDS = new Set([
+  "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+  "in", "on", "at", "to", "of", "for", "by", "from", "with", "and",
+  "or", "not", "no", "but", "if", "as", "its", "it", "this", "that",
+  "than", "has", "have", "had", "will", "would", "shall", "should",
+  "may", "might", "can", "could", "each", "all", "per", "over",
+]);
+
+/** Metric-only words — labels consisting only of these are too generic. */
+const METRIC_ONLY_WORDS = new Set([
+  "growth", "value", "total", "amount", "percent",
+  "rate", "margin", "ratio", "multiple", "factor",
+  "change", "delta", "count", "sum", "net",
+]);
+
+/**
+ * Returns true when the rewritten sentence is subjectless — its only
+ * substantive tokens are sheet-name fragments, assumption vocabulary,
+ * stop words, and numbers.  Conservative: when in doubt, return false
+ * (keep the row).
+ */
+function isSubjectlessSentence(
+  sentence: string,
+  sheetName: string,
+  label: string,
+): boolean {
+  // Condition 2: label must be fewer than 3 chars or consist only of metric words
+  const labelWords = label.toLowerCase().replace(/[^a-z\s]/g, "").split(/\s+/).filter(Boolean);
+  const labelIsShort = label.replace(/[^a-zA-Z]/g, "").length < 3;
+  const labelIsMetricOnly = labelWords.length > 0 && labelWords.every((w) => METRIC_ONLY_WORDS.has(w));
+  if (!labelIsShort && !labelIsMetricOnly) return false;
+
+  // Condition 1: sentence contains no alphabetic token of 4+ chars
+  // other than sheet name tokens, assumption vocab, and stop words
+  const sheetTokens = new Set(
+    sheetName.toLowerCase().replace(/[^a-z\s]/g, " ").split(/\s+/).filter((t) => t.length > 0),
+  );
+
+  const sentenceTokens = sentence
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length >= 4);
+
+  for (const tok of sentenceTokens) {
+    if (sheetTokens.has(tok)) continue;
+    if (ASSUMPTION_VOCAB.has(tok)) continue;
+    if (STOP_WORDS.has(tok)) continue;
+    // Found a substantive token — sentence is NOT subjectless
+    return false;
+  }
+
+  return true;
+}
 const BATCH_SIZE = 40;
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_ATTEMPTS = 2;
@@ -172,6 +245,7 @@ const propositionalize: StageHandler = async (
   let rowIdx = ctx.resumePosition;
   let rewritten = 0;
   let unchanged = 0;
+  let subjectless = 0;
   let batchFailures = 0;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
@@ -312,6 +386,17 @@ const propositionalize: StageHandler = async (
             continue;
           }
 
+          // Reject subjectless propositions (FIX 4)
+          const rowSheetName = sheetNameFrom(batch[i].origin_locator);
+          const rowLabel = extractLabel(stripDensityTag(batch[i].proposition));
+          if (isSubjectlessSentence(sentence, rowSheetName, rowLabel)) {
+            console.log(
+              `${LOG_PREFIX} Row ${batch[i].id}: subjectless proposition rejected. Sheet="${rowSheetName}", label="${rowLabel}".`,
+            );
+            subjectless++;
+            continue;
+          }
+
           await db.execute(
             `UPDATE mast_assumptions SET proposition = $2 WHERE id = $1::uuid`,
             [batch[i].id, sentence],
@@ -330,7 +415,7 @@ const propositionalize: StageHandler = async (
   // ── 3. Log and persist payload ────────────────────────────────────
   console.log(
     `${LOG_PREFIX} Processed rows ${ctx.resumePosition}–${rowIdx - 1} of ${totalRows}. ` +
-    `Rewritten: ${rewritten}, unchanged: ${unchanged}, batchFailures: ${batchFailures}. ` +
+    `Rewritten: ${rewritten}, unchanged: ${unchanged}, subjectless: ${subjectless}, batchFailures: ${batchFailures}. ` +
     `Tokens: ${totalInputTokens} in / ${totalOutputTokens} out.`,
   );
 
@@ -338,6 +423,7 @@ const propositionalize: StageHandler = async (
     rowsProcessed: rowIdx - ctx.resumePosition,
     rewritten,
     unchanged,
+    subjectless,
     batchFailures,
     totalInputTokens,
     totalOutputTokens,

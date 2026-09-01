@@ -25,6 +25,7 @@ import {
   resolveModelDocument,
   classifySheet,
   resolveNumeric,
+  looksLikeDateString,
 } from "./mast-register-model-drivers.js";
 import type { ParsedCell } from "./mast-register-model-drivers.js";
 import { z } from "@superblocksteam/sdk-api";
@@ -308,17 +309,24 @@ const registerSilent: StageHandler = async (
       if (headerRowIndices.has(rowIdx)) continue;
 
       // ── Relevance filter ───────────────────────────────────────────
-      // Row must have a non-empty label
+      // Row must have a non-empty label.
+      // Skip date-type cells and string cells that parse as dates.
       let label: string | null = null;
-      // Find leftmost non-empty string cell in the row
       const sortedRowCells = _rowCells.slice().sort((a, b) => a.c - b.c);
       for (const rc of sortedRowCells) {
+        // Skip date-type cells
+        if (rc.type === "date") continue;
         if (
           rc.type === "string" &&
           rc.value != null &&
           String(rc.value).trim().length > 0
         ) {
-          label = String(rc.value).trim();
+          const trimmed = String(rc.value).trim();
+          // Skip if it resolves as a number
+          if (resolveNumeric(rc) !== null) continue;
+          // Skip if it looks like a date
+          if (looksLikeDateString(trimmed)) continue;
+          label = trimmed;
           break;
         }
       }
@@ -328,10 +336,12 @@ const registerSilent: StageHandler = async (
       }
       if (label === null) continue;
 
-      // At least two numeric cells in the row (using resolveNumeric for coercion)
+      // At least two numeric cells in the row.
+      // A cell counts as numeric if its type is "number" or resolveNumeric
+      // returns non-null — this includes zero-valued cells.
       let numericCount = 0;
       for (const rc of _rowCells) {
-        if (resolveNumeric(rc) !== null) {
+        if (rc.type === "number" || resolveNumeric(rc) !== null) {
           numericCount++;
         }
       }

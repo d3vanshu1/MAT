@@ -27,6 +27,43 @@ const MAX_OUTPUT_TOKENS = 4096;
 // Label values that are not real labels (case-insensitive exact match after trim)
 const LABEL_BLACKLIST = new Set(["n.a.", "na", "n/a", "nm", "n.m.", "tbd"]);
 
+// ---------------------------------------------------------------------------
+// Date detection for label resolution (FIX 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when a trimmed string value looks like a date rather than
+ * a meaningful label.  Used by the walk-left label resolver to skip past
+ * date cells that sit between the driver value and the real label.
+ */
+export function looksLikeDateString(s: string): boolean {
+  const t = s.trim();
+  if (t.length === 0) return false;
+  // Month-year: "Jan-24", "January 2024", "Feb 2025", "Mar-2024"
+  if (/^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s\-\/]?\d{2,4}$/i.test(t)) return true;
+  // Date with slashes or dashes: "1/15/2024", "2024-01-15", "15-01-2024"
+  if (/^\d{1,4}[\-\/]\d{1,2}[\-\/]\d{1,4}$/.test(t)) return true;
+  // Quarter: "Q1 2024", "1Q24", "Q1'24"
+  if (/^[Qq]\d[\s\-']?\d{2,4}$/.test(t) || /^\d[Qq][\s\-']?\d{2,4}$/.test(t)) return true;
+  // FY/CY/HY: "FY2024", "CY2024", "FY 2024"
+  if (/^(?:FY|CY|HY)\s?\d{2,4}$/i.test(t)) return true;
+  // Year-month: "2024-01", "2024/01"
+  if (/^\d{4}[\-\/]\d{1,2}$/.test(t)) return true;
+  // Month only: "January", "Feb", "September"
+  if (/^(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)$/i.test(t)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Toggle keyword set for zero-value exception (FIX 2)
+// ---------------------------------------------------------------------------
+
+const TOGGLE_KEYWORDS = [
+  "toggle", "switch", "flag", "on off", "on/off",
+  "enable", "disable", "include", "exclude",
+  "sensitivity", "scenario", "case",
+];
+
 /** Strip parens, percent signs, commas, currency symbols, and spaces, then
  *  test whether what remains parses as a finite number. */
 function labelIsNumeric(label: string): boolean {
@@ -536,6 +573,7 @@ const registerModelDrivers: StageHandler = async (
 
     const drivers: DriverCandidate[] = [];
     let zeroSkipped = 0;
+    let toggleZerosAdmitted = 0;
     let magnitudeExcluded = 0;
     let labelRejected = 0;
     let coercionRecovered = 0;
@@ -556,23 +594,34 @@ const registerModelDrivers: StageHandler = async (
       // Driver test: resolve numeric value (native number or coerced string)
       const resolvedValue = resolveNumeric(cell);
       if (resolvedValue === null) continue;
-      if (resolvedValue === 0) { zeroSkipped++; continue; }
-      const wasCoerced = cell.type === "string";
-      if (wasCoerced) coercionRecovered++;
 
-      // Magnitude filter: only rates, percentages, multiples, margins, day counts
-      const absVal = Math.abs(resolvedValue);
-      if (absVal >= 10000) { magnitudeExcluded++; continue; }
+      const isZero = resolvedValue === 0;
 
-      // Label: nearest non-empty string cell to the left in the same row
-      // A cell that resolves numerically through coercion is never eligible to be a label.
+      if (!isZero) {
+        const wasCoerced = cell.type === "string";
+        if (wasCoerced) coercionRecovered++;
+
+        // Magnitude filter: only rates, percentages, multiples, margins, day counts
+        const absVal = Math.abs(resolvedValue);
+        if (absVal >= 10000) { magnitudeExcluded++; continue; }
+      }
+
+      // Label: nearest non-empty string cell to the left in the same row.
+      // Skip date-type cells and string cells that parse as dates.
+      // A cell that resolves numerically through coercion is never eligible.
       let label: string | null = null;
       for (let lc = cell.c - 1; lc >= 0; lc--) {
         const leftCell = cellGrid.get(`${cell.r},${lc}`);
-        if (leftCell && leftCell.type === "string" && leftCell.value != null && String(leftCell.value).trim().length > 0) {
+        if (!leftCell) continue;
+        // Skip date-type cells
+        if (leftCell.type === "date") continue;
+        if (leftCell.type === "string" && leftCell.value != null && String(leftCell.value).trim().length > 0) {
+          const trimmed = String(leftCell.value).trim();
           // Skip if this string cell resolves as a number (coerced numeric)
           if (resolveNumeric(leftCell) !== null) continue;
-          label = String(leftCell.value).trim();
+          // Skip if this string cell looks like a date
+          if (looksLikeDateString(trimmed)) continue;
+          label = trimmed;
           break;
         }
       }
@@ -583,6 +632,18 @@ const registerModelDrivers: StageHandler = async (
 
       // Driver must have a real label
       if (label === null) continue;
+
+      // Zero check with toggle exception (FIX 2)
+      if (isZero) {
+        const lbl = label.toLowerCase();
+        const isToggle = TOGGLE_KEYWORDS.some((kw) => lbl.includes(kw));
+        if (isToggle) {
+          toggleZerosAdmitted++;
+        } else {
+          zeroSkipped++;
+          continue;
+        }
+      }
       const alphaCount = (label.match(/[a-zA-Z0-9]/g) || []).length;
       if (alphaCount < 2) { labelRejected++; continue; }
       // Reject blacklisted tokens (n.a., na, n/a, nm, n.m., tbd)
@@ -826,6 +887,7 @@ ${numberedList}
       candidates: drivers.length,
       labelRejected,
       magnitudeExcluded,
+      toggleZerosAdmitted,
       coercionRecovered,
       sentToAdj: sentToAdjudication,
       kept: driversToWrite.length,
@@ -835,7 +897,7 @@ ${numberedList}
     });
 
     console.log(
-      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, coercionRecovered=${coercionRecovered}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
+      `${LOG_PREFIX} Sheet "${sheetName}": candidates=${drivers.length}, labelRejected=${labelRejected}, magnitudeExcluded=${magnitudeExcluded}, toggleZeros=${toggleZerosAdmitted}, coercionRecovered=${coercionRecovered}, sentToAdj=${sentToAdjudication}, kept=${driversToWrite.length}, adjRejected=${adjudicationRejected}, unadj=${unadjudicatedCount}, written=${driversToWrite.length}.`,
     );
     totalDriversWritten += driversToWrite.length;
     sheetIdx++;
