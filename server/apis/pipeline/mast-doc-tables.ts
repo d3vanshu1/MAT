@@ -97,6 +97,22 @@ export async function loadSheet(
 // ---------------------------------------------------------------------------
 // loadAllSheets — fetch every sheet one at a time, with size guard
 // ---------------------------------------------------------------------------
+//
+// xlsx ingestion note (see MastRegisterRowsProbe findings):
+//   parseExcel in pdfProcessor.ts scans the first rows of each sheet for a
+//   "header" row (first row with ≥ 2 non-empty cells).  That row becomes
+//   data.col_headers; every subsequent row becomes a data row.
+//
+//   On SCG-style workbooks the scanned row is the "Actual / Forecast" row.
+//   It is consumed as column headers, so:
+//     - col_headers[c] contains the A/F flag for column c
+//     - data rows use positional r index (0-based from row after headers),
+//       NOT the absolute Excel row number
+//     - absR is null on all 96 sheets across 8 documents
+//
+//   The A/F data is NOT lost — it lives in col_headers, positionally aligned
+//   with c.  Consumers that need per-column A/F must read from col_headers.
+// ---------------------------------------------------------------------------
 
 export async function loadAllSheets(
   db: any,

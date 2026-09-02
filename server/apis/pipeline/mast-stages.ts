@@ -64,36 +64,12 @@ function singleShotStub(_ctx: StageContext): Promise<StageResult> {
   });
 }
 
-/**
- * Loop stub: simulates a worklist of 5 items, processes exactly 2 per
- * invocation, advances resume_position by 2, and reports complete only
- * when resume_position reaches 5.
- *
- * This exercises the resume path so that the orchestrator's partial-stage
- * logic is proven, not assumed.
- */
-function loopStub(ctx: StageContext): Promise<StageResult> {
-  // STUB — replaced in a later packet
-  const WORKLIST_SIZE = 5;
-  const BATCH_SIZE = 2;
-
-  const pos = ctx.resumePosition;
-  const newPos = Math.min(pos + BATCH_SIZE, WORKLIST_SIZE);
-  const complete = newPos >= WORKLIST_SIZE;
-
-  return Promise.resolve({
-    complete,
-    itemsDone: newPos,
-    itemsTotal: WORKLIST_SIZE,
-    resumePosition: newPos,
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Handler registry
 // ---------------------------------------------------------------------------
 
-const HANDLER_MAP: Record<StageName, StageHandler> = {
+const HANDLER_MAP: Partial<Record<StageName, StageHandler>> = {
   register_model_drivers: registerModelDrivers,
   register_silent: registerSilent,
   register_memo: registerMemo,
@@ -104,7 +80,9 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   emergent: emergent,
   support_search: supportSearch,
   forecast_recursion: forecastRecursion,
-  lineage: loopStub,
+  // lineage: removed — stage still in STAGES/LOOP_STAGES (mast-contract.ts)
+  // but has no handler. getStageHandler will return undefined; orchestrator
+  // must skip stages with no handler until the contract arrays are pruned.
   dependence: dependence,
   severity: severity,
   fragility: fragility,
@@ -112,7 +90,7 @@ const HANDLER_MAP: Record<StageName, StageHandler> = {
   render: render,
 };
 
-/** Look up the handler for a stage name. */
-export function getStageHandler(stage: StageName): StageHandler {
+/** Look up the handler for a stage name. Returns undefined for stages with no handler (e.g. lineage). */
+export function getStageHandler(stage: StageName): StageHandler | undefined {
   return HANDLER_MAP[stage];
 }

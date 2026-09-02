@@ -284,6 +284,31 @@ export default api({
       );
 
       const handler = getStageHandler(currentStage);
+      if (!handler) {
+        // Stage has no handler (e.g. lineage — removed, pending contract prune).
+        // Treat as instantly complete so the orchestrator advances past it.
+        const elapsed = Date.now() - invocationStart;
+        console.log(`${LOG_PREFIX} Stage ${currentStage} has no handler — auto-completing.`);
+        await db.execute(
+          `UPDATE mast_pipeline_state
+           SET status = 'complete', resume_position = 0, updated_at = now()
+           WHERE run_id = $1::uuid AND stage = $2`,
+          [runId, currentStage],
+          { label: `MAST auto-complete handler-less stage: ${currentStage}` },
+        );
+        console.log(
+          `${LOG_PREFIX} INVOCATION_ELAPSED stage=${currentStage} status=advanced elapsed_ms=${elapsed} resume_position=0`,
+        );
+        await releaseLock();
+        return {
+          status: "advanced" as const,
+          stage: currentStage,
+          resumePosition: 0,
+          itemsTotal: 0,
+          message: `Stage ${currentStage} auto-completed (no handler).`,
+          runId,
+        };
+      }
       const result = await handler({
         db,
         ai,

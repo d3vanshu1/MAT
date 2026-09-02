@@ -53,6 +53,7 @@ export default api({
 
   output: z.object({
     found: z.number(),
+    mastRunsExcluded: z.number(),
     processed: z.array(z.object({
       runId: z.string(),
       moduleId: z.string(),
@@ -70,6 +71,7 @@ export default api({
       `SELECT mr.id, mr.deal_id, mr.module_id
        FROM module_runs mr
        WHERE mr.status = 'running'::module_status
+         AND mr.module_id != 'model_assumptions_stress'
          AND mr.triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'
          AND NOT EXISTS (
            SELECT 1 FROM merge_checkpoints mc
@@ -81,11 +83,30 @@ export default api({
        LIMIT 10`,
       StaleRunSchema,
       [],
-      { label: "Find stale running pipelines (includes diagnostic runs)" }
+      { label: "Find stale running pipelines (excludes MAST)" }
     );
 
+    // -----------------------------------------------------------------------
+    // MAST exclusion diagnostic — log how many MAST runs were skipped so
+    // operators can confirm the filter is working and no MAST run is stuck.
+    // -----------------------------------------------------------------------
+    const mastExcluded = await ctx.integrations.db.query(
+      `SELECT count(*)::int AS cnt
+       FROM module_runs mr
+       WHERE mr.status = 'running'::module_status
+         AND mr.module_id = 'model_assumptions_stress'
+         AND mr.triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'`,
+      z.object({ cnt: z.number() }),
+      [],
+      { label: "Count excluded MAST stale runs" }
+    );
+    const mastRunsExcluded = mastExcluded[0]?.cnt ?? 0;
+    if (mastRunsExcluded > 0) {
+      console.log(`[RESUME] MAST_EXCLUDED count=${mastRunsExcluded}`);
+    }
+
     if (staleRuns.length === 0) {
-      return { found: 0, processed: [] };
+      return { found: 0, processed: [], mastRunsExcluded };
     }
 
     const processed: Array<{ runId: string; moduleId: string; outcome: string }> = [];
@@ -179,6 +200,7 @@ export default api({
 
     return {
       found: staleRuns.length,
+      mastRunsExcluded,
       processed,
     };
   },
