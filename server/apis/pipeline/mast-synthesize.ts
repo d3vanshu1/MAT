@@ -380,10 +380,8 @@ async function stepA_cluster(
     inputClusters: number;
     batchCount: number;
     mergesApplied: number;
-    failedBatches: number;
   }
   const roundStats: MergeRoundStats[] = [];
-  let totalFailedBatches = 0;
 
   /**
    * Build the merge prompt for a batch of clusters.
@@ -413,14 +411,6 @@ ${entries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.
     roundNum: number,
     batchIdx: number,
   ): Promise<{ merged: MergeEntry[]; mergesApplied: number } | null> {
-    const entries = batch.map((c, i) => ({
-      index: i + 1,
-      label: c.label,
-      memberCount: c.members.length,
-      sampleProposition: c.members[0]?.proposition.slice(0, 120) ?? "",
-    }));
-
-    const prompt = buildMergePrompt(entries);
     const label = `SYNTH-MERGE R${roundNum}B${batchIdx}`;
 
     // Attempt the call with shrink-on-truncation.
@@ -603,66 +593,45 @@ ${entries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.
       }
     }
 
-    // If everything fits in one batch and no merges occurred in the
-    // previous round, stop early (checked after processing below).
-    const singleBatch = batches.length === 1;
-
     let roundMerges = 0;
-    let roundFailedBatches = 0;
     const roundResults: MergeEntry[] = [];
 
     for (let bIdx = 0; bIdx < batches.length; bIdx++) {
       const result = await mergeBatch(batches[bIdx], round, bIdx);
       if (result === null) {
-        // Change 2: fail closed — record failure
-        roundFailedBatches++;
-        console.log(
-          `${LOG_PREFIX} Merge round ${round} batch ${bIdx}: FAILED (${batches[bIdx].length} clusters).`,
+        // Fail fast: on failure the batch's clusters are never pushed into
+        // roundResults, so currentList would silently lose them. Throwing at
+        // the point of failure prevents that state from ever existing and
+        // stops later rounds from burning budget after the run is doomed.
+        throw new Error(
+          `${LOG_PREFIX} Cross-batch merge failed: round ${round}, batch ${bIdx}, ` +
+          `${batches[bIdx].length} clusters in batch. Fail-closed: not returning ` +
+          `partially merged clusters.`,
         );
-        continue;
       }
       roundResults.push(...result.merged);
       roundMerges += result.mergesApplied;
     }
-
-    totalFailedBatches += roundFailedBatches;
 
     roundStats.push({
       round,
       inputClusters: inputCount,
       batchCount: batches.length,
       mergesApplied: roundMerges,
-      failedBatches: roundFailedBatches,
     });
 
     console.log(
       `${LOG_PREFIX} Merge round ${round}: ${inputCount} → ${roundResults.length} clusters ` +
-      `(${roundMerges} merges, ${batches.length} batches, ${roundFailedBatches} failed).`,
+      `(${roundMerges} merges, ${batches.length} batches).`,
     );
 
     currentList = roundResults;
 
-    // Stop conditions
+    // Stop: no merges this round, or list now fits in one batch with no merges
     if (roundMerges === 0) {
       console.log(`${LOG_PREFIX} Merge stopping: round ${round} produced no merges.`);
       break;
     }
-    if (singleBatch) {
-      // Fits in one batch and merges were applied — check next round
-      // (but if round+1 also fits in one batch with 0 merges, we stop)
-    }
-  }
-
-  // Change 2: fail closed — if any batch failed in any round, throw.
-  if (totalFailedBatches > 0) {
-    const failDetail = roundStats
-      .filter((r) => r.failedBatches > 0)
-      .map((r) => `round ${r.round}: ${r.failedBatches} failed of ${r.batchCount} batches (${r.inputClusters} input clusters)`)
-      .join("; ");
-    throw new Error(
-      `${LOG_PREFIX} Cross-batch merge failed. ${totalFailedBatches} batch(es) failed. ${failDetail}. ` +
-      `Fail-closed: not returning partially merged clusters.`,
-    );
   }
 
   // Change 4: assign final sequential ids from 1
