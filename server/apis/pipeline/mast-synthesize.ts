@@ -1029,7 +1029,8 @@ const synthesize: StageHandler = async (
     const sa = sevOrder[clusterSeverity(a.members)] ?? 2;
     const sb = sevOrder[clusterSeverity(b.members)] ?? 2;
     if (sa !== sb) return sa - sb;
-    return b.members.length - a.members.length;
+    if (b.members.length !== a.members.length) return b.members.length - a.members.length;
+    return a.id - b.id;
   });
 
   const composeCandidates = rankedClusters.slice(0, COMPOSE_CANDIDATE_CAP);
