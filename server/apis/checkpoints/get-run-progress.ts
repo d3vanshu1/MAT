@@ -54,6 +54,8 @@ export default api({
         // analysis and merge checkpoints are structurally zero there because both
         // phases are skipped by design.
         stageCheckpointCount: z.number(),
+        // MAST-specific: completed stages from mast_pipeline_state (0 for non-MAST)
+        mastStagesComplete: z.number(),
         // Errors surfaced from checkpoint JSONB (if any)
         checkpointErrors: z.array(z.string()),
       })
@@ -138,6 +140,23 @@ export default api({
         // Table absent or unreadable — leave at 0.
       }
 
+      // MAST-specific: count completed stages from mast_pipeline_state
+      let mastStagesComplete = 0;
+      if (run.module_id === "model_assumptions_stress") {
+        try {
+          const mastRows = await ctx.integrations.db.query(
+            `SELECT COUNT(*)::int AS cnt FROM mast_pipeline_state
+             WHERE run_id = $1::uuid AND status = 'complete' AND stage != '_lock'`,
+            CountSchema,
+            [run.id],
+            { label: "Count MAST completed stages" },
+          );
+          mastStagesComplete = mastRows[0]?.cnt ?? 0;
+        } catch {
+          // mast_pipeline_state may not exist — leave at 0
+        }
+      }
+
       // Surface errors from merge checkpoint JSONB
       const errorRows = await ctx.integrations.db.query(
         `SELECT merged_json->>'error' AS error_text
@@ -164,6 +183,7 @@ export default api({
         analysisCheckpointCount: analysisRows[0]?.cnt ?? 0,
         mergeCheckpointCount: ckptRows[0]?.cnt ?? 0,
         stageCheckpointCount,
+        mastStagesComplete,
         checkpointErrors: errorRows
           .map((r) => r.error_text)
           .filter((e): e is string => e !== null),

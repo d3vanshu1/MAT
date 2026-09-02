@@ -3133,7 +3133,7 @@ export default function DealDashboardPage() {
           // Skip if the pipeline polling loop is now providing real-time progress
           if (pipelinePollingActive.current.has(moduleId)) continue;
 
-          const run = runs.find((r: { moduleId: string; status: string; analysisCheckpointCount?: number; mergeCheckpointCount?: number; stageCheckpointCount?: number }) => r.moduleId === moduleId && r.status === "running");
+          const run = runs.find((r: { moduleId: string; status: string; analysisCheckpointCount?: number; mergeCheckpointCount?: number; stageCheckpointCount?: number; mastStagesComplete?: number }) => r.moduleId === moduleId && r.status === "running");
           if (!run) {
             // Run is no longer "running" in DB — it completed or failed while
             // we were polling. Refetch module results to get the final output.
@@ -3154,10 +3154,10 @@ export default function DealDashboardPage() {
           // Derive progress from checkpoint counts
           let message: string;
           const MAST_TOTAL_STAGES = 16;
-          if (moduleId === "model_assumptions_stress" && run.stageCheckpointCount != null && run.stageCheckpointCount > 0) {
-            // MAST uses stage checkpoints, not analysis/merge checkpoints
-            const completed = Math.min(run.stageCheckpointCount, MAST_TOTAL_STAGES);
-            message = `MAST analysis: ${completed}/${MAST_TOTAL_STAGES} stages complete (server-side)…`;
+if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null && run.mastStagesComplete > 0) {
+  // MAST tracks progress in mast_pipeline_state, not pipeline_checkpoints
+  const completed = Math.min(run.mastStagesComplete, MAST_TOTAL_STAGES);
+  message = `MAST analysis: ${completed}/${MAST_TOTAL_STAGES} stages complete (server-side)…`;
           } else if (run.mergeCheckpointCount && run.mergeCheckpointCount > 0) {
             message = `Merge phase: ${run.mergeCheckpointCount} nodes merged (server-side)…`;
           } else if (run.analysisCheckpointCount && run.analysisCheckpointCount > 0) {
