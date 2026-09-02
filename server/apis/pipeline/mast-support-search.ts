@@ -52,6 +52,8 @@ const MessageResponseSchema = z.object({
   usage: z.object({
     input_tokens: z.number(),
     output_tokens: z.number(),
+    cache_creation_input_tokens: z.number().optional(),
+    cache_read_input_tokens: z.number().optional(),
   }),
 });
 
@@ -91,27 +93,20 @@ function normalize(s: string): string {
 const SYSTEM_PROMPT =
   "You are an investment diligence analyst reviewing passages from deal documents against a numbered list of assumptions. Return only valid JSON.";
 
-function buildSweepPrompt(
+/**
+ * buildCachedPrefix — the static portion of the user prompt that is identical
+ * across every batch within a pass group.  Sent as a cached system block so
+ * Anthropic's prompt-caching avoids re-tokenising it on each call.
+ */
+function buildCachedPrefix(
   assumptions: Array<{ index: number; proposition: string }>,
-  chunks: Array<{ label: number; content: string }>,
 ): string {
   const assumptionList = assumptions
     .map((a) => `${a.index}. ${a.proposition}`)
     .join("\n");
 
-  const chunkList = chunks
-    .map((c) => `--- CHUNK ${c.label} ---\n${c.content}\n--- END CHUNK ${c.label} ---`)
-    .join("\n\n");
-
-  return `Below is a numbered list of assumptions that a deal model depends on, followed by ${chunks.length} passages from deal documents, each labelled with its number.
-
-ASSUMPTIONS
+  return `ASSUMPTIONS
 ${assumptionList}
-
-Passages are labelled 1 through ${chunks.length} for this request only. The "chunk" field in your response must be that label. Do not use document page numbers, corpus indices, or any other numbering.
-
-PASSAGES
-${chunkList}
 
 TASK
 Which of the numbered assumptions does each passage say something about — supporting or undermining?
@@ -130,6 +125,26 @@ For each hit return four fields:
   - "asserted" means it is stated without support
 
 Respond with a JSON array only. No prose, no markdown fences. An empty array [] is valid.`;
+}
+
+/**
+ * buildPassagesBlock — the variable portion of the user prompt that changes
+ * with every batch: the intro sentence, the chunk-labelling sentence, and
+ * the PASSAGES block.
+ */
+function buildPassagesBlock(
+  chunks: Array<{ label: number; content: string }>,
+): string {
+  const chunkList = chunks
+    .map((c) => `--- CHUNK ${c.label} ---\n${c.content}\n--- END CHUNK ${c.label} ---`)
+    .join("\n\n");
+
+  return `Below is a numbered list of assumptions that a deal model depends on, followed by ${chunks.length} passages from deal documents, each labelled with its number.
+
+Passages are labelled 1 through ${chunks.length} for this request only. The "chunk" field in your response must be that label. Do not use document page numbers, corpus indices, or any other numbering.
+
+PASSAGES
+${chunkList}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +288,8 @@ const supportSearch: StageHandler = async (
   let chunksProcessed = 0;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let totalCacheCreationTokens = 0;
+  let totalCacheReadTokens = 0;
   const hitsByKind: Record<string, number> = {};
   const assumptionsHit = new Set<number>();
 
@@ -308,6 +325,8 @@ const supportSearch: StageHandler = async (
           truncations,
           totalInputTokens,
           totalOutputTokens,
+          totalCacheCreationTokens,
+          totalCacheReadTokens,
         });
 
         return {
@@ -328,7 +347,8 @@ const supportSearch: StageHandler = async (
         content: c.content,
       }));
 
-      const userPrompt = buildSweepPrompt(passAssumptions, labelledChunks);
+      const cachedPrefix = buildCachedPrefix(passAssumptions);
+      const userPrompt = buildPassagesBlock(labelledChunks);
 
       // ── LLM call with retry ──────────────────────────────────────
       let rawHits: RawHit[] = [];
@@ -354,7 +374,10 @@ const supportSearch: StageHandler = async (
               body: {
                 model,
                 max_tokens: MAX_OUTPUT_TOKENS,
-                system: SYSTEM_PROMPT,
+                system: [
+                  { type: "text", text: SYSTEM_PROMPT },
+                  { type: "text", text: cachedPrefix, cache_control: { type: "ephemeral" } },
+                ],
                 messages: [{ role: "user", content: userPrompt }],
               },
             },
@@ -364,6 +387,15 @@ const supportSearch: StageHandler = async (
 
           totalInputTokens += llmResponse.usage.input_tokens;
           totalOutputTokens += llmResponse.usage.output_tokens;
+          totalCacheCreationTokens += llmResponse.usage.cache_creation_input_tokens ?? 0;
+          totalCacheReadTokens += llmResponse.usage.cache_read_input_tokens ?? 0;
+
+          console.log(
+            `${LOG_PREFIX} CACHE pass=${passIdx} batch=${batchIdx} ` +
+            `created=${llmResponse.usage.cache_creation_input_tokens ?? 0} ` +
+            `read=${llmResponse.usage.cache_read_input_tokens ?? 0} ` +
+            `input=${llmResponse.usage.input_tokens}`,
+          );
 
           if (llmResponse.stop_reason === "max_tokens") {
             console.log(
@@ -521,7 +553,8 @@ const supportSearch: StageHandler = async (
     `rejectPrefixNotFound=${rejectPrefixNotFound}, rejectBadIndex=${rejectBadIndex}, remappedChunkLabel=${remappedChunkLabel}, ` +
     `callFailures=${callFailures}, truncations=${truncations}, ` +
     `distinctAssumptionsHit=${assumptionsHit.size}/${numberedAssumptions.length}. ` +
-    `hitsByKind=${JSON.stringify(hitsByKind)}.`,
+    `hitsByKind=${JSON.stringify(hitsByKind)}. ` +
+    `totalCacheCreationTokens=${totalCacheCreationTokens}, totalCacheReadTokens=${totalCacheReadTokens}.`,
   );
 
   await persistPayload(db, runId, {
@@ -537,6 +570,8 @@ const supportSearch: StageHandler = async (
     truncations,
     totalInputTokens,
     totalOutputTokens,
+    totalCacheCreationTokens,
+    totalCacheReadTokens,
   });
 
   return {
