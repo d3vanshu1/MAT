@@ -79,7 +79,7 @@ export default api({
       skippedDueToBudget: z.number(),
     }).optional(),
     // B2 FIX — owner token for the caller to pass back on resume
-    ownerToken: z.string().optional(),
+    ownerToken: z.string().nullable().optional(),
   }),
 
   async run(ctx, input): Promise<PipelineResult> {
