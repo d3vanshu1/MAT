@@ -728,12 +728,63 @@ function clusterSeverity(members: RawFinding[]): string {
 // Stage handler
 // ---------------------------------------------------------------------------
 
+// Schema for reading partial payload back from DB on resume
+const PartialPayloadRow = z.object({
+  payload: z.any().nullable(),
+});
+
 const synthesize: StageHandler = async (
   ctx: StageContext,
 ): Promise<StageResult> => {
-  const { db, ai, runId } = ctx;
+  const { db, ai, runId, resumePosition } = ctx;
   const startTime = Date.now();
   const model = getModuleModel(MODULE_ID);
+
+  // ── 0. Resume from checkpoint if resumePosition > 0 ──────────────
+  //    The partial payload persisted on prior invocations contains the
+  //    serialised cluster array so we can skip expensive LLM work.
+  let resumedClusters: Cluster[] | null = null;
+  let resumedTotalEligible: number | null = null;
+  let resumedCappedCount = 0;
+
+  if (resumePosition >= 1) {
+    console.log(
+      `${LOG_PREFIX} Resuming from checkpoint. resumePosition=${resumePosition}.`,
+    );
+    try {
+      const payloadRows = await db.query(
+        `SELECT payload FROM mast_pipeline_state
+         WHERE run_id = $1::uuid AND stage = 'synthesize'`,
+        PartialPayloadRow,
+        [runId],
+        { label: "MAST-SYNTH: read partial payload for resume" },
+      );
+      const existing = payloadRows[0]?.payload;
+      if (existing && Array.isArray(existing.clusters)) {
+        resumedClusters = (existing.clusters as any[]).map(
+          (c: any): Cluster => ({
+            id: c.id,
+            label: c.label,
+            members: c.members ?? [],
+            pairedContext: c.pairedContext ?? [],
+          }),
+        );
+        resumedTotalEligible = existing.stats?.inputFindings ?? 0;
+        resumedCappedCount = existing.stats?.inputCapped ?? 0;
+        console.log(
+          `${LOG_PREFIX} Restored ${resumedClusters.length} clusters from checkpoint.`,
+        );
+      } else {
+        console.log(
+          `${LOG_PREFIX} No usable cluster data in checkpoint payload. Starting from scratch.`,
+        );
+      }
+    } catch (readErr) {
+      console.log(
+        `${LOG_PREFIX} Failed to read checkpoint payload: ${String(readErr)}. Starting from scratch.`,
+      );
+    }
+  }
 
   // ── 1. Load critical + warning findings joined to assumptions ─────
   const rawFindings = await db.query(
@@ -814,16 +865,35 @@ const synthesize: StageHandler = async (
   }
 
   // ── Step A: Cluster ───────────────────────────────────────────────
-  console.log(`${LOG_PREFIX} Step A: Clustering ${capped.length} findings...`);
-  const clusters = await stepA_cluster(ai, model, capped);
+  //    Skip if we resumed with clusters already built.
+  let clusters: Cluster[];
+  const effectiveTotalEligible = resumedTotalEligible ?? totalEligible;
+  const effectiveCappedCount = resumedClusters ? resumedCappedCount : cappedCount;
+
+  if (resumedClusters && resumePosition >= 1) {
+    clusters = resumedClusters;
+    console.log(
+      `${LOG_PREFIX} Step A: SKIPPED (resumed ${clusters.length} clusters from checkpoint).`,
+    );
+  } else {
+    console.log(`${LOG_PREFIX} Step A: Clustering ${capped.length} findings...`);
+    clusters = await stepA_cluster(ai, model, capped);
+  }
 
   if (Date.now() - startTime > STAGE_BUDGET_MS) {
     console.log(`${LOG_PREFIX} Budget exceeded after Step A. Pausing.`);
-    // Persist partial progress
+    // Persist partial progress WITH cluster data for resumption
     const partialPayload = {
       findings: [],
+      clusters: clusters.map((c) => ({
+        id: c.id,
+        label: c.label,
+        members: c.members,
+        pairedContext: c.pairedContext,
+      })),
       stats: {
-        inputFindings: totalEligible,
+        inputFindings: effectiveTotalEligible,
+        inputCapped: effectiveCappedCount,
         clustersFormed: clusters.length,
         findingsProduced: 0,
         severityCorrections: 0,
@@ -850,15 +920,29 @@ const synthesize: StageHandler = async (
   }
 
   // ── Step B: Pair ──────────────────────────────────────────────────
-  console.log(`${LOG_PREFIX} Step B: Pairing ${clusters.length} clusters...`);
-  await stepB_pair(db, runId, clusters);
+  //    Skip if we resumed past pairing.
+  if (resumedClusters && resumePosition >= 2) {
+    console.log(
+      `${LOG_PREFIX} Step B: SKIPPED (resumed with pairedContext from checkpoint).`,
+    );
+  } else {
+    console.log(`${LOG_PREFIX} Step B: Pairing ${clusters.length} clusters...`);
+    await stepB_pair(db, runId, clusters);
+  }
 
   if (Date.now() - startTime > STAGE_BUDGET_MS) {
     console.log(`${LOG_PREFIX} Budget exceeded after Step B. Pausing.`);
     const partialPayload = {
       findings: [],
+      clusters: clusters.map((c) => ({
+        id: c.id,
+        label: c.label,
+        members: c.members,
+        pairedContext: c.pairedContext,
+      })),
       stats: {
-        inputFindings: totalEligible,
+        inputFindings: effectiveTotalEligible,
+        inputCapped: effectiveCappedCount,
         clustersFormed: clusters.length,
         findingsProduced: 0,
         severityCorrections: 0,
@@ -955,8 +1039,8 @@ const synthesize: StageHandler = async (
   const payload = {
     findings: finalFindings,
     stats: {
-      inputFindings: totalEligible,
-      inputCapped: cappedCount,
+      inputFindings: effectiveTotalEligible,
+      inputCapped: effectiveCappedCount,
       clustersFormed: clusters.length,
       findingsProduced: finalFindings.length,
       criticalProduced: cappedCriticals.length,
