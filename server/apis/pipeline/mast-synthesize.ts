@@ -146,6 +146,32 @@ interface Cluster {
   pairedContext: string[];
 }
 
+interface MergeEntry {
+  internalId: number;
+  label: string;
+  members: RawFinding[];
+}
+
+interface StepACheckpoint {
+  phase: "clustering" | "merging";
+  /** Next clustering batch index (0-based). Meaningful only when phase === "clustering". */
+  clusterBatchIndex: number;
+  /** Clusters accumulated during clustering. null once phase is "merging" (already consumed). */
+  allBatchClusters: { label: string; members: RawFinding[] }[] | null;
+  /** Next merge round to execute (1-based). 0 while still in clustering phase. */
+  mergeRound: number;
+  /** Cluster list entering the next merge round. null while still in clustering phase. */
+  currentList: MergeEntry[] | null;
+  /** Counter for stable internal IDs across invocations. */
+  internalIdCounter: number;
+}
+
+interface StepAResult {
+  complete: boolean;
+  clusters: Cluster[];
+  checkpoint: StepACheckpoint | null;
+}
+
 interface SynthesizedFinding {
   clusterId: number;
   clusterLabel: string;
@@ -268,9 +294,10 @@ async function stepA_cluster(
   ai: StageContext["ai"],
   model: string,
   findings: RawFinding[],
-): Promise<Cluster[]> {
-  const stepAStart = Date.now();
-
+  startTime: number,
+  budgetMs: number,
+  resumeCheckpoint?: StepACheckpoint,
+): Promise<StepAResult> {
   // ── Per-batch clustering ──────────────────────────────────────────
   interface BatchAssignment {
     index: number;
@@ -283,8 +310,45 @@ async function stepA_cluster(
     label: string;
     members: RawFinding[];
   }[] = [];
+  let clusterBatchStart = 0;
 
-  for (let i = 0; i < findings.length; i += CLUSTER_BATCH_SIZE) {
+  // Restore clustering-phase checkpoint if present
+  if (resumeCheckpoint && resumeCheckpoint.phase === "clustering") {
+    clusterBatchStart = resumeCheckpoint.clusterBatchIndex;
+    if (resumeCheckpoint.allBatchClusters) {
+      allBatchClusters.push(...resumeCheckpoint.allBatchClusters);
+    }
+    console.log(
+      `${LOG_PREFIX} Step A resume: clustering phase, batch index ${clusterBatchStart}, ` +
+      `${allBatchClusters.length} clusters accumulated.`,
+    );
+  }
+
+  // Skip clustering entirely if resuming from merge phase
+  if (!resumeCheckpoint || resumeCheckpoint.phase === "clustering") {
+  for (let i = clusterBatchStart * CLUSTER_BATCH_SIZE; i < findings.length; i += CLUSTER_BATCH_SIZE) {
+    // Budget check before each clustering batch
+    if (Date.now() - startTime > budgetMs) {
+      const batchIdx = Math.floor(i / CLUSTER_BATCH_SIZE);
+      console.log(
+        `${LOG_PREFIX} Step A budget exhausted during clustering at batch ` +
+        `${batchIdx}/${Math.ceil(findings.length / CLUSTER_BATCH_SIZE)}. ` +
+        `${allBatchClusters.length} clusters accumulated. ` +
+        `Elapsed: ${((Date.now() - startTime) / 1000).toFixed(1)}s.`,
+      );
+      return {
+        complete: false,
+        clusters: [],
+        checkpoint: {
+          phase: "clustering",
+          clusterBatchIndex: batchIdx,
+          allBatchClusters,
+          mergeRound: 0,
+          currentList: null,
+          internalIdCounter: 0,
+        },
+      };
+    }
     const batch = findings.slice(i, i + CLUSTER_BATCH_SIZE);
     const entries = batch.map((f, idx) => ({
       index: idx + 1,
@@ -343,6 +407,7 @@ async function stepA_cluster(
       allBatchClusters.push(entry);
     }
   }
+  } // end: skip clustering if resuming from merge phase
 
   console.log(
     `${LOG_PREFIX} Step A per-batch: ${allBatchClusters.length} clusters from ${findings.length} findings.`,
@@ -353,27 +418,40 @@ async function stepA_cluster(
     console.log(
       `${LOG_PREFIX} MERGE_STATS rounds=0 finalClusters=${allBatchClusters.length} (skip: ≤1 cluster)`,
     );
-    return allBatchClusters.map((c, i) => ({
-      id: i + 1,
-      label: c.label,
-      members: c.members,
-      pairedContext: [],
-    }));
+    return {
+      complete: true,
+      clusters: allBatchClusters.map((c, i) => ({
+        id: i + 1,
+        label: c.label,
+        members: c.members,
+        pairedContext: [],
+      })),
+      checkpoint: null,
+    };
   }
 
   // Working list: each entry carries a label, members, and a stable internal id.
   // Internal ids are never derived from model-supplied mergeGroup values.
   let internalIdCounter = 0;
-  interface MergeEntry {
-    internalId: number;
-    label: string;
-    members: RawFinding[];
+  let currentList: MergeEntry[];
+  let mergeRoundStart = 1;
+
+  // Restore merge-phase checkpoint if present
+  if (resumeCheckpoint && resumeCheckpoint.phase === "merging") {
+    internalIdCounter = resumeCheckpoint.internalIdCounter;
+    currentList = resumeCheckpoint.currentList!;
+    mergeRoundStart = resumeCheckpoint.mergeRound;
+    console.log(
+      `${LOG_PREFIX} Step A resume: merge phase, round ${mergeRoundStart}, ` +
+      `${currentList.length} clusters, idCounter=${internalIdCounter}.`,
+    );
+  } else {
+    currentList = allBatchClusters.map((c) => ({
+      internalId: ++internalIdCounter,
+      label: c.label,
+      members: c.members,
+    }));
   }
-  let currentList: MergeEntry[] = allBatchClusters.map((c) => ({
-    internalId: ++internalIdCounter,
-    label: c.label,
-    members: c.members,
-  }));
 
   interface MergeRoundStats {
     round: number;
@@ -556,21 +634,26 @@ ${entries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.
   }
 
   // ── Merge rounds ──────────────────────────────────────────────────
-  for (let round = 1; round <= MERGE_MAX_ROUNDS; round++) {
-    // Change 5: budget check before each round — return best result so far
-    // instead of throwing, so the handler can checkpoint and resume
-    if (Date.now() - stepAStart > STAGE_BUDGET_MS) {
+  for (let round = mergeRoundStart; round <= MERGE_MAX_ROUNDS; round++) {
+    // Budget check before each round — checkpoint for resume on exhaustion
+    if (Date.now() - startTime > budgetMs) {
       console.log(
-        `${LOG_PREFIX} Merge budget reached before round ${round}. ` +
-        `Returning ${currentList.length} clusters from prior rounds. ` +
-        `Elapsed: ${((Date.now() - stepAStart) / 1000).toFixed(1)}s.`,
+        `${LOG_PREFIX} Merge budget exhausted before round ${round}. ` +
+        `${currentList.length} clusters. Checkpointing for resume. ` +
+        `Elapsed: ${((Date.now() - startTime) / 1000).toFixed(1)}s.`,
       );
-      return currentList.map((entry, i) => ({
-        id: i + 1,
-        label: entry.label,
-        members: entry.members,
-        pairedContext: [] as string[],
-      }));
+      return {
+        complete: false,
+        clusters: [],
+        checkpoint: {
+          phase: "merging",
+          clusterBatchIndex: Math.ceil(findings.length / CLUSTER_BATCH_SIZE),
+          allBatchClusters: null, // consumed — not persisted in merge phase
+          mergeRound: round,
+          currentList,
+          internalIdCounter,
+        },
+      };
     }
 
     const inputCount = currentList.length;
@@ -649,23 +732,31 @@ ${entries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.
     pairedContext: [] as string[],
   }));
 
+  const preMergeCount = resumeCheckpoint?.phase === "merging"
+    ? currentList.length // resumed mid-merge, allBatchClusters not available
+    : allBatchClusters.length;
+
   // Change 6: report merge statistics via logging
-  // (return signature cannot change without touching the handler)
   const mergeStatsObj = {
-    preMergeClusters: allBatchClusters.length,
+    preMergeClusters: preMergeCount,
     finalClusters: merged.length,
     roundsUsed: roundStats.length,
     rounds: roundStats,
+    resumedFromMergeRound: mergeRoundStart > 1 ? mergeRoundStart : undefined,
   };
   console.log(
     `${LOG_PREFIX} MERGE_STATS ${JSON.stringify(mergeStatsObj)}`,
   );
 
   console.log(
-    `${LOG_PREFIX} Step A merged: ${merged.length} clusters from ${allBatchClusters.length} pre-merge clusters.`,
+    `${LOG_PREFIX} Step A merged: ${merged.length} clusters from ${preMergeCount} pre-merge clusters.`,
   );
 
-  return merged;
+  return {
+    complete: true,
+    clusters: merged,
+    checkpoint: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -993,67 +1084,77 @@ const synthesize: StageHandler = async (
   const startTime = Date.now();
   const model = getModuleModel(MODULE_ID);
 
-  // ── 0. Resume from checkpoint if resumePosition > 0 ──────────────
+  // ── 0. Resume from checkpoint ────────────────────────────────────
   //    The partial payload persisted on prior invocations contains the
   //    serialised cluster array so we can skip expensive LLM work.
+  //    Also checked at resumePosition === 0 for Step A partial checkpoints.
   let resumedClusters: Cluster[] | null = null;
   let resumedTotalEligible: number | null = null;
   let resumedCappedCount = 0;
   let resumedComposeResults: Map<number, ComposeResult> | null = null;
   let resumedComposeOffset = 0;
+  let resumedStepA: StepACheckpoint | null = null;
 
-  if (resumePosition >= 1) {
-    console.log(
-      `${LOG_PREFIX} Resuming from checkpoint. resumePosition=${resumePosition}.`,
-    );
+  // Read payload on any invocation — stepA checkpoints use resumePosition=0
+  {
     try {
       const payloadRows = await db.query(
         `SELECT payload FROM mast_pipeline_state
          WHERE run_id = $1::uuid AND stage = 'synthesize'`,
         PartialPayloadRow,
         [runId],
-        { label: "MAST-SYNTH: read partial payload for resume" },
+        { label: "MAST-SYNTH: read checkpoint payload" },
       );
       const existing = payloadRows[0]?.payload;
-      if (existing && Array.isArray(existing.clusters)) {
-        resumedClusters = (existing.clusters as any[]).map(
-          (c: any): Cluster => ({
-            id: c.id,
-            label: c.label,
-            members: c.members ?? [],
-            pairedContext: c.pairedContext ?? [],
-          }),
-        );
-        resumedTotalEligible = existing.stats?.inputFindings ?? 0;
-        resumedCappedCount = existing.stats?.inputCapped ?? 0;
-        console.log(
-          `${LOG_PREFIX} Restored ${resumedClusters.length} clusters from checkpoint.`,
-        );
 
-        // Restore partial compose results if resuming into Step C (resumePosition >= 3)
-        if (
-          resumePosition >= 3 &&
-          existing.composePartial &&
-          Array.isArray(existing.composePartial.entries)
-        ) {
-          resumedComposeResults = new Map<number, ComposeResult>();
-          for (const e of existing.composePartial.entries as any[]) {
-            resumedComposeResults.set(e.clusterId, {
-              title: e.title,
-              body: e.body,
-              supportSummary: e.supportSummary,
-              contradiction: e.contradiction ?? null,
-            });
-          }
-          resumedComposeOffset = resumePosition - 3;
+      if (existing) {
+        // Step A partial checkpoint (resumePosition stays 0)
+        if (resumePosition === 0 && existing.stepA) {
+          resumedStepA = existing.stepA as StepACheckpoint;
+          resumedTotalEligible = existing.stats?.inputFindings ?? null;
+          resumedCappedCount = existing.stats?.inputCapped ?? 0;
           console.log(
-            `${LOG_PREFIX} Restored ${resumedComposeResults.size} compose results, resuming from offset ${resumedComposeOffset}.`,
+            `${LOG_PREFIX} Restored Step A checkpoint: phase=${resumedStepA.phase}.`,
           );
         }
-      } else {
-        console.log(
-          `${LOG_PREFIX} No usable cluster data in checkpoint payload. Starting from scratch.`,
-        );
+
+        // Post-Step-A checkpoint (resumePosition >= 1)
+        if (resumePosition >= 1 && Array.isArray(existing.clusters)) {
+          resumedClusters = (existing.clusters as any[]).map(
+            (c: any): Cluster => ({
+              id: c.id,
+              label: c.label,
+              members: c.members ?? [],
+              pairedContext: c.pairedContext ?? [],
+            }),
+          );
+          resumedTotalEligible = existing.stats?.inputFindings ?? 0;
+          resumedCappedCount = existing.stats?.inputCapped ?? 0;
+          console.log(
+            `${LOG_PREFIX} Restored ${resumedClusters.length} clusters from checkpoint. resumePosition=${resumePosition}.`,
+          );
+
+          // Restore partial compose results if resuming into Step C (resumePosition >= 3)
+          if (
+            resumePosition >= 3 &&
+            existing.composePartial &&
+            Array.isArray(existing.composePartial.entries)
+          ) {
+            resumedComposeResults = new Map<number, ComposeResult>();
+            for (const e of existing.composePartial.entries as any[]) {
+              resumedComposeResults.set(e.clusterId, {
+                title: e.title,
+                body: e.body,
+                supportSummary: e.supportSummary,
+                contradiction: e.contradiction ?? null,
+              });
+            }
+            resumedComposeOffset = resumePosition - 3;
+            console.log(
+              `${LOG_PREFIX} Restored ${resumedComposeResults.size} compose results, resuming from offset ${resumedComposeOffset}.`,
+            );
+          }
+        }
       }
     } catch (readErr) {
       console.log(
@@ -1152,8 +1253,46 @@ const synthesize: StageHandler = async (
       `${LOG_PREFIX} Step A: SKIPPED (resumed ${clusters.length} clusters from checkpoint).`,
     );
   } else {
-    console.log(`${LOG_PREFIX} Step A: Clustering ${capped.length} findings...`);
-    clusters = await stepA_cluster(ai, model, capped);
+    console.log(
+      `${LOG_PREFIX} Step A: ${resumedStepA ? 'Resuming' : 'Clustering'} ${capped.length} findings...`,
+    );
+    const stepAResult = await stepA_cluster(
+      ai, model, capped, startTime, STAGE_BUDGET_MS, resumedStepA ?? undefined,
+    );
+
+    if (!stepAResult.complete) {
+      console.log(
+        `${LOG_PREFIX} Step A incomplete (${stepAResult.checkpoint!.phase}). Persisting checkpoint.`,
+      );
+      const partialPayload = {
+        findings: [],
+        stepA: stepAResult.checkpoint,
+        stats: {
+          inputFindings: effectiveTotalEligible,
+          inputCapped: effectiveCappedCount,
+          partialStop: `during_stepA_${stepAResult.checkpoint!.phase}`,
+        },
+      };
+      try {
+        await db.execute(
+          `UPDATE mast_pipeline_state
+           SET payload = $3::jsonb
+           WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+          [runId, "synthesize", JSON.stringify(partialPayload)],
+          { label: "MAST-SYNTH: persist stepA checkpoint" },
+        );
+      } catch (_) {
+        /* best effort */
+      }
+      return {
+        complete: false,
+        itemsDone: 0,
+        itemsTotal: 0,
+        resumePosition: 0, // stay at 0 — stepA cursor lives in payload.stepA
+      };
+    }
+
+    clusters = stepAResult.clusters;
   }
 
   if (Date.now() - startTime > STAGE_BUDGET_MS) {
