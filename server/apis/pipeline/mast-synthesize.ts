@@ -42,6 +42,13 @@ const PAIR_CANDIDATES_CAP = 20;
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_ATTEMPTS = 2;
 
+// Cross-batch merge batching: 60 clusters × ~25 output tokens each ≈ 1 500
+// tokens, against MAX_OUTPUT_TOKENS of 4 096, leaving margin for longer labels.
+const MERGE_BATCH_SIZE = 60;
+
+// Maximum merge reduction rounds before accepting current cluster list.
+const MERGE_MAX_ROUNDS = 4;
+
 const SYNTH_CRITICAL_CAP = 5;
 const SYNTH_WARNING_CAP = 10;
 
@@ -262,6 +269,8 @@ async function stepA_cluster(
   model: string,
   findings: RawFinding[],
 ): Promise<Cluster[]> {
+  const stepAStart = Date.now();
+
   // ── Per-batch clustering ──────────────────────────────────────────
   interface BatchAssignment {
     index: number;
@@ -339,8 +348,11 @@ async function stepA_cluster(
     `${LOG_PREFIX} Step A per-batch: ${allBatchClusters.length} clusters from ${findings.length} findings.`,
   );
 
-  // ── Cross-batch merge ─────────────────────────────────────────────
+  // ── Cross-batch merge (multi-round batched reduction) ─────────────
   if (allBatchClusters.length <= 1) {
+    console.log(
+      `${LOG_PREFIX} MERGE_STATS rounds=0 finalClusters=${allBatchClusters.length} (skip: ≤1 cluster)`,
+    );
     return allBatchClusters.map((c, i) => ({
       id: i + 1,
       label: c.label,
@@ -349,15 +361,35 @@ async function stepA_cluster(
     }));
   }
 
-  // Ask LLM to merge clusters by label similarity
-  const mergeEntries = allBatchClusters.map((c, i) => ({
-    index: i + 1,
+  // Working list: each entry carries a label, members, and a stable internal id.
+  // Internal ids are never derived from model-supplied mergeGroup values.
+  let internalIdCounter = 0;
+  interface MergeEntry {
+    internalId: number;
+    label: string;
+    members: RawFinding[];
+  }
+  let currentList: MergeEntry[] = allBatchClusters.map((c) => ({
+    internalId: ++internalIdCounter,
     label: c.label,
-    memberCount: c.members.length,
-    sampleProposition: c.members[0]?.proposition.slice(0, 120) ?? "",
+    members: c.members,
   }));
 
-  const mergePrompt = `You are merging clusters of due diligence findings. Below are clusters identified from different batches. Some clusters describe the same underlying belief and should be merged.
+  interface MergeRoundStats {
+    round: number;
+    inputClusters: number;
+    batchCount: number;
+    mergesApplied: number;
+    failedBatches: number;
+  }
+  const roundStats: MergeRoundStats[] = [];
+  let totalFailedBatches = 0;
+
+  /**
+   * Build the merge prompt for a batch of clusters.
+   */
+  function buildMergePrompt(entries: { index: number; label: string; memberCount: number; sampleProposition: string }[]): string {
+    return `You are merging clusters of due diligence findings. Below are clusters identified from different batches. Some clusters describe the same underlying belief and should be merged.
 
 Rules:
 - Assign each cluster to a merge group.
@@ -368,71 +400,289 @@ Rules:
 Return a JSON array. Each element: {"index": <integer matching cluster>, "mergeGroup": <integer starting from 1>, "label": "<merge group label>"}. No prose. No markdown fences.
 
 --- CLUSTERS ---
-${mergeEntries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.g. "${c.sampleProposition}"`).join("\n")}
+${entries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.g. "${c.sampleProposition}"`).join("\n")}
 --- END CLUSTERS ---`;
+  }
 
-  const mergeRaw = await llmCall(ai, model, mergePrompt, "SYNTH-MERGE");
-  const mergeParsed = parseJsonArray<{
-    index: number;
-    mergeGroup: number;
-    label: string;
-  }>(mergeRaw);
-
-  if (!mergeParsed) {
-    console.log(
-      `${LOG_PREFIX} Cross-batch merge parse failed. Using per-batch clusters as-is.`,
-    );
-    return allBatchClusters.map((c, i) => ({
-      id: i + 1,
+  /**
+   * Issue a single merge call for a batch of MergeEntries.
+   * Returns the reduced list of MergeEntries on success, or null on hard failure.
+   */
+  async function mergeBatch(
+    batch: MergeEntry[],
+    roundNum: number,
+    batchIdx: number,
+  ): Promise<{ merged: MergeEntry[]; mergesApplied: number } | null> {
+    const entries = batch.map((c, i) => ({
+      index: i + 1,
       label: c.label,
-      members: c.members,
-      pairedContext: [],
+      memberCount: c.members.length,
+      sampleProposition: c.members[0]?.proposition.slice(0, 120) ?? "",
     }));
-  }
 
-  // Build merged clusters
-  const mergeGroupMap = new Map<
-    number,
-    { label: string; members: RawFinding[] }
-  >();
-  for (const m of mergeParsed) {
-    if (m.index < 1 || m.index > allBatchClusters.length) continue;
-    const source = allBatchClusters[m.index - 1];
-    let group = mergeGroupMap.get(m.mergeGroup);
-    if (!group) {
-      group = { label: m.label || `Group ${m.mergeGroup}`, members: [] };
-      mergeGroupMap.set(m.mergeGroup, group);
-    }
-    group.members.push(...source.members);
-  }
+    const prompt = buildMergePrompt(entries);
+    const label = `SYNTH-MERGE R${roundNum}B${batchIdx}`;
 
-  // Catch unmerged
-  const mergedIndices = new Set(
-    mergeParsed
-      .filter(
-        (m) => m.index >= 1 && m.index <= allBatchClusters.length,
-      )
-      .map((m) => m.index - 1),
-  );
-  for (let i = 0; i < allBatchClusters.length; i++) {
-    if (!mergedIndices.has(i)) {
-      const c = allBatchClusters[i];
-      const nextId =
-        Math.max(0, ...Array.from(mergeGroupMap.keys())) + 1;
-      mergeGroupMap.set(nextId, {
+    // Attempt the call with shrink-on-truncation.
+    // We manage attempts ourselves instead of relying on llmCall's retry
+    // because we need to detect truncation and split the batch.
+    let workQueue: MergeEntry[][] = [batch];
+    const allSegmentResults: { merged: MergeEntry[]; mergesApplied: number }[] = [];
+
+    while (workQueue.length > 0) {
+      const segment = workQueue.shift()!;
+
+      if (segment.length <= 1) {
+        // Single-cluster segment: no merge needed, pass through
+        allSegmentResults.push({ merged: segment, mergesApplied: 0 });
+        continue;
+      }
+
+      const segEntries = segment.map((c, i) => ({
+        index: i + 1,
         label: c.label,
-        members: c.members,
+        memberCount: c.members.length,
+        sampleProposition: c.members[0]?.proposition.slice(0, 120) ?? "",
+      }));
+      const segPrompt = buildMergePrompt(segEntries);
+      const segLabel = `${label}[${segment.length}]`;
+
+      let raw: string | null = null;
+      let truncated = false;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          const resp = await ai.apiRequest(
+            {
+              method: "POST",
+              path: "/v1/messages",
+              body: {
+                model,
+                max_tokens: MAX_OUTPUT_TOKENS,
+                messages: [{ role: "user", content: segPrompt }],
+              },
+            },
+            { response: MessageResponseSchema },
+            { label: `${segLabel} attempt ${attempt}` },
+          );
+
+          if (resp.stop_reason === "max_tokens") {
+            console.log(
+              `${LOG_PREFIX} ${segLabel}: truncated (attempt ${attempt}, ${segment.length} clusters).`,
+            );
+            truncated = true;
+            break; // Don't retry identical prompt — will shrink below
+          }
+
+          truncated = false;
+          raw = resp.content
+            .filter((c: { type: string }) => c.type === "text")
+            .map((c: { text: string }) => c.text)
+            .join("");
+          break; // Success
+        } catch (err) {
+          console.log(
+            `${LOG_PREFIX} ${segLabel}: LLM error (attempt ${attempt}): ${String(err)}`,
+          );
+        }
+      }
+
+      // Change 3: shrink on truncation — halve and re-queue
+      if (truncated) {
+        if (segment.length <= 1) {
+          // Single-cluster truncation: hard failure
+          console.log(
+            `${LOG_PREFIX} ${segLabel}: single-cluster segment truncated. Hard failure.`,
+          );
+          return null;
+        }
+        const mid = Math.ceil(segment.length / 2);
+        workQueue.push(segment.slice(0, mid));
+        workQueue.push(segment.slice(mid));
+        console.log(
+          `${LOG_PREFIX} ${segLabel}: splitting ${segment.length} → ${mid} + ${segment.length - mid} and retrying.`,
+        );
+        continue;
+      }
+
+      const parsed = parseJsonArray<{
+        index: number;
+        mergeGroup: number;
+        label: string;
+      }>(raw);
+
+      if (!parsed) {
+        console.log(
+          `${LOG_PREFIX} ${segLabel}: parse failed after ${MAX_ATTEMPTS} attempts.`,
+        );
+        return null; // Hard failure — feeds Change 2
+      }
+
+      // Apply merges using internal id counter (Change 4: no model-keyed map)
+      const groupMap = new Map<number, MergeEntry>();
+      const assignedIndices = new Set<number>();
+
+      for (const m of parsed) {
+        if (m.index < 1 || m.index > segment.length) continue;
+        assignedIndices.add(m.index - 1);
+        const source = segment[m.index - 1];
+        let group = groupMap.get(m.mergeGroup);
+        if (!group) {
+          group = {
+            internalId: ++internalIdCounter,
+            label: m.label || `Group ${m.mergeGroup}`,
+            members: [],
+          };
+          groupMap.set(m.mergeGroup, group);
+        }
+        group.members.push(...source.members);
+      }
+
+      // Catch unassigned entries — each becomes its own group
+      for (let j = 0; j < segment.length; j++) {
+        if (!assignedIndices.has(j)) {
+          const c = segment[j];
+          groupMap.set(-(++internalIdCounter), {
+            internalId: internalIdCounter,
+            label: c.label,
+            members: c.members,
+          });
+        }
+      }
+
+      const segMerged = Array.from(groupMap.values());
+      const mergesApplied = segment.length - segMerged.length;
+      allSegmentResults.push({ merged: segMerged, mergesApplied });
+    }
+
+    // Combine all segment results
+    const combinedMerged: MergeEntry[] = [];
+    let combinedMerges = 0;
+    for (const seg of allSegmentResults) {
+      combinedMerged.push(...seg.merged);
+      combinedMerges += seg.mergesApplied;
+    }
+    return { merged: combinedMerged, mergesApplied: combinedMerges };
+  }
+
+  // ── Merge rounds ──────────────────────────────────────────────────
+  for (let round = 1; round <= MERGE_MAX_ROUNDS; round++) {
+    // Change 5: budget check before each round
+    if (Date.now() - stepAStart > STAGE_BUDGET_MS) {
+      throw new Error(
+        `${LOG_PREFIX} Merge budget exceeded before round ${round}. ` +
+        `Current cluster count: ${currentList.length}. ` +
+        `Elapsed: ${((Date.now() - stepAStart) / 1000).toFixed(1)}s.`,
+      );
+    }
+
+    const inputCount = currentList.length;
+
+    // Partition into batches.
+    // Round 1: consecutive slicing.
+    // Round 2+: deterministic reshuffle — order by descending member count,
+    //           then assign round-robin to batches so clusters from different
+    //           prior batches can meet.
+    let batches: MergeEntry[][];
+    if (round === 1) {
+      batches = [];
+      for (let i = 0; i < currentList.length; i += MERGE_BATCH_SIZE) {
+        batches.push(currentList.slice(i, i + MERGE_BATCH_SIZE));
+      }
+    } else {
+      // Deterministic reshuffle: sort by descending member count, then
+      // by internalId for tiebreak stability.
+      const sorted = [...currentList].sort((a, b) => {
+        if (b.members.length !== a.members.length) return b.members.length - a.members.length;
+        return a.internalId - b.internalId;
       });
+      const batchCount = Math.ceil(sorted.length / MERGE_BATCH_SIZE);
+      batches = Array.from({ length: batchCount }, () => [] as MergeEntry[]);
+      for (let i = 0; i < sorted.length; i++) {
+        batches[i % batchCount].push(sorted[i]);
+      }
+    }
+
+    // If everything fits in one batch and no merges occurred in the
+    // previous round, stop early (checked after processing below).
+    const singleBatch = batches.length === 1;
+
+    let roundMerges = 0;
+    let roundFailedBatches = 0;
+    const roundResults: MergeEntry[] = [];
+
+    for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+      const result = await mergeBatch(batches[bIdx], round, bIdx);
+      if (result === null) {
+        // Change 2: fail closed — record failure
+        roundFailedBatches++;
+        console.log(
+          `${LOG_PREFIX} Merge round ${round} batch ${bIdx}: FAILED (${batches[bIdx].length} clusters).`,
+        );
+        continue;
+      }
+      roundResults.push(...result.merged);
+      roundMerges += result.mergesApplied;
+    }
+
+    totalFailedBatches += roundFailedBatches;
+
+    roundStats.push({
+      round,
+      inputClusters: inputCount,
+      batchCount: batches.length,
+      mergesApplied: roundMerges,
+      failedBatches: roundFailedBatches,
+    });
+
+    console.log(
+      `${LOG_PREFIX} Merge round ${round}: ${inputCount} → ${roundResults.length} clusters ` +
+      `(${roundMerges} merges, ${batches.length} batches, ${roundFailedBatches} failed).`,
+    );
+
+    currentList = roundResults;
+
+    // Stop conditions
+    if (roundMerges === 0) {
+      console.log(`${LOG_PREFIX} Merge stopping: round ${round} produced no merges.`);
+      break;
+    }
+    if (singleBatch) {
+      // Fits in one batch and merges were applied — check next round
+      // (but if round+1 also fits in one batch with 0 merges, we stop)
     }
   }
 
-  const merged = Array.from(mergeGroupMap.entries()).map(
-    ([id, group]) => ({
-      id,
-      label: group.label,
-      members: group.members,
-      pairedContext: [] as string[],
-    }),
+  // Change 2: fail closed — if any batch failed in any round, throw.
+  if (totalFailedBatches > 0) {
+    const failDetail = roundStats
+      .filter((r) => r.failedBatches > 0)
+      .map((r) => `round ${r.round}: ${r.failedBatches} failed of ${r.batchCount} batches (${r.inputClusters} input clusters)`)
+      .join("; ");
+    throw new Error(
+      `${LOG_PREFIX} Cross-batch merge failed. ${totalFailedBatches} batch(es) failed. ${failDetail}. ` +
+      `Fail-closed: not returning partially merged clusters.`,
+    );
+  }
+
+  // Change 4: assign final sequential ids from 1
+  const merged: Cluster[] = currentList.map((entry, i) => ({
+    id: i + 1,
+    label: entry.label,
+    members: entry.members,
+    pairedContext: [] as string[],
+  }));
+
+  // Change 6: report merge statistics via logging
+  // (return signature cannot change without touching the handler)
+  const mergeStatsObj = {
+    preMergeClusters: allBatchClusters.length,
+    finalClusters: merged.length,
+    roundsUsed: roundStats.length,
+    rounds: roundStats,
+  };
+  console.log(
+    `${LOG_PREFIX} MERGE_STATS ${JSON.stringify(mergeStatsObj)}`,
   );
 
   console.log(
