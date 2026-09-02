@@ -3122,7 +3122,7 @@ export default function DealDashboardPage() {
     if (dbRunningIds.length === 0) return;
 
     // Bail immediately if the poll has already been killed (ref persists across re-runs)
-    if (pollFailureCountRef.current >= 3) return;
+    if (pollFailureCountRef.current >= 4) return;
 
     let cancelled = false;
 
@@ -3178,23 +3178,12 @@ export default function DealDashboardPage() {
         }
       } catch {
         pollFailureCountRef.current++;
-        if (pollFailureCountRef.current >= 3) {
-          // Server unreachable — stop polling and clear running state to prevent infinite loop
-          console.warn(`[progress-poll] 3 consecutive failures — stopping poll and clearing running state`);
+        if (pollFailureCountRef.current >= 4) {
+          // Server unreachable after 4 consecutive failures — reload the tab
+          // to re-trigger the full initialization flow (docs, modules, resume)
+          console.warn(`[progress-poll] 4 consecutive failures — reloading tab`);
           cancelled = true;
-          for (const moduleId of dbRunningIds) {
-            killedModulesRef.current.add(moduleId);
-            setRunningModules((prev) => {
-              const next = new Set(prev);
-              next.delete(moduleId);
-              return next;
-            });
-            setProgressMap((prev) => {
-              const updated = { ...prev };
-              delete updated[moduleId];
-              return updated;
-            });
-          }
+          window.location.reload();
         }
       }
     };
