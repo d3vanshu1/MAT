@@ -49,6 +49,24 @@ interface ColumnInfo {
   isAnnual: boolean;
 }
 
+/**
+ * Normalise a col_headers value to an A/F flag.
+ * "actual" and "actuals" → actual.  "forecast" and "forecasts" → forecast.
+ * Everything else (ColN placeholders, empty strings, other text) → unknown.
+ */
+function normaliseAfFlag(raw: string): "actual" | "forecast" | "unknown" {
+  const v = raw.trim().toLowerCase();
+  if (v === "actual" || v === "actuals") return "actual";
+  if (v === "forecast" || v === "forecasts") return "forecast";
+  return "unknown";
+}
+
+/** Returns true if the value is a ColN placeholder or empty. */
+function isPlaceholderOrEmpty(raw: string): boolean {
+  const v = raw.trim();
+  return v === "" || /^Col\d+$/i.test(v);
+}
+
 // ---------------------------------------------------------------------------
 // Header scan result (per sheet)
 // ---------------------------------------------------------------------------
@@ -56,13 +74,19 @@ interface ColumnInfo {
 interface HeaderScanResult {
   recognized: boolean;
   reason?: string;
-  afRowIndex: number | null; // null if no Actual/Forecast row
+  afRowIndex: number | null; // null if no Actual/Forecast row in cells
+  colHeadersUsed: boolean;   // true when A/F flags came from data.col_headers
   fyRowIndex: number | null;
   monthRowIndex: number | null;
   columns: ColumnInfo[];
   annualCount: number;
   monthlyCount: number;
   annualColumns: { col: number; year: number; flag: string }[];
+  /** col_headers values on annual columns that were neither actual/forecast
+   *  nor ColN placeholders/empty.  Diagnostic: surface unexpected spellings. */
+  unmappedFlagValues: string[];
+  /** Per-flag counts across annual columns. */
+  annualFlagCounts: { actual: number; forecast: number; unknown: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -73,26 +97,22 @@ interface EmittedRow {
   sheet: string;
   hierarchyPath: string;
   rowLabel: string;
-  labelAddress: string; // A1-style
-  rowIndex: number;
+  /**
+   * Position of this row within the parsed table (zero-based index over
+   * non-empty data rows after the header).  This is NOT the source sheet
+   * row number — absolute row numbers were lost at ingestion because
+   * parseExcel consumes leading rows as CSV headers and filters blank
+   * rows before emitting positional indices.
+   */
+  rowIndexInTable: number;
   annualValues: { year: number; value: unknown; flag: string }[];
   hasAnyForecast: boolean;
   hasAnyActual: boolean;
+  /** Count of annual columns whose A/F flag is unknown for this row. */
+  unknownFlagCount: number;
 }
 
-// ---------------------------------------------------------------------------
-// A1 address helper
-// ---------------------------------------------------------------------------
 
-function toA1(row: number, col: number): string {
-  let colStr = "";
-  let c = col;
-  while (c >= 0) {
-    colStr = String.fromCharCode(65 + (c % 26)) + colStr;
-    c = Math.floor(c / 26) - 1;
-  }
-  return `${colStr}${row + 1}`;
-}
 
 // ---------------------------------------------------------------------------
 // Month-label fiscal-year-end detection
@@ -150,8 +170,9 @@ function detectFiscalYearEndMonth(columns: ColumnInfo[]): string | null {
 // ---------------------------------------------------------------------------
 
 function scanHeaders(sheet: LoadedSheet): HeaderScanResult {
-  const data = sheet.data as { cells?: Cell[] };
+  const data = sheet.data as { cells?: Cell[]; col_headers?: string[] };
   const cells = data?.cells ?? [];
+  const colHeaders: string[] | null = Array.isArray(data?.col_headers) ? data.col_headers : null;
 
   // Build a quick row-col lookup for the first 10 rows, col >= 6
   const headerCells = new Map<string, Cell>();
@@ -180,12 +201,15 @@ function scanHeaders(sheet: LoadedSheet): HeaderScanResult {
       recognized: false,
       reason: "No 'Financial year' cell found in column G (rows 0–9).",
       afRowIndex: null,
+      colHeadersUsed: colHeaders !== null,
       fyRowIndex: null,
       monthRowIndex: null,
       columns: [],
       annualCount: 0,
       monthlyCount: 0,
       annualColumns: [],
+      unmappedFlagValues: [],
+      annualFlagCounts: { actual: 0, forecast: 0, unknown: 0 },
     };
   }
 
@@ -208,12 +232,15 @@ function scanHeaders(sheet: LoadedSheet): HeaderScanResult {
       recognized: false,
       reason: `Found 'Financial year' at row ${fyRowIndex} but no 'Month' row immediately below.`,
       afRowIndex,
+      colHeadersUsed: colHeaders !== null,
       fyRowIndex,
       monthRowIndex: null,
       columns: [],
       annualCount: 0,
       monthlyCount: 0,
       annualColumns: [],
+      unmappedFlagValues: [],
+      annualFlagCounts: { actual: 0, forecast: 0, unknown: 0 },
     };
   }
 
@@ -239,15 +266,10 @@ function scanHeaders(sheet: LoadedSheet): HeaderScanResult {
 
     const monthLabel = monthCell ? String(monthCell.value ?? "").trim() : "";
 
-    // Determine actual/forecast flag
+    // Determine actual/forecast flag from col_headers (positionally aligned with c index)
     let flag: "actual" | "forecast" | "unknown" = "unknown";
-    if (afRowIndex !== null) {
-      const afCell = headerCells.get(`${afRowIndex},${col}`);
-      if (afCell) {
-        const afVal = String(afCell.value ?? "").trim().toLowerCase();
-        if (afVal === "actual") flag = "actual";
-        else if (afVal === "forecast") flag = "forecast";
-      }
+    if (colHeaders && col < colHeaders.length) {
+      flag = normaliseAfFlag(colHeaders[col]);
     }
 
     columns.push({
@@ -305,36 +327,47 @@ function scanHeaders(sheet: LoadedSheet): HeaderScanResult {
   const annualCols = columns.filter((c) => c.isAnnual);
   const monthlyCols = columns.filter((c) => !c.isAnnual);
 
-  // If no explicit A/F row, infer from year values.
-  // The most recent completed fiscal year (and all before) = actual.
-  // Current year and forward = forecast.
-  // We'll use today's date to determine the boundary.
-  if (afRowIndex === null && annualCols.length > 0) {
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const currentMonth = now.getMonth(); // 0-indexed (0 = Jan)
-
-    // Determine the fiscal year we are currently in.
-    // If FYE is March (month index 2), then April 2025 – March 2026 = FY2026.
-    // We need the FYE month index.
-    const fyeMonthIndex = fyeMonth ? monthNameToIndex(fyeMonth) : 2; // default March
-
-    // If current month > FYE month, we are in the FY = currentYear + 1.
-    // Otherwise we are in the FY = currentYear.
-    const currentFY = currentMonth > fyeMonthIndex ? currentYear + 1 : currentYear;
-
-    // Any FY < currentFY is actual; currentFY and above is forecast.
-    for (const ci of annualCols) {
-      ci.actualOrForecast = ci.financialYear < currentFY ? "actual" : "forecast";
+  // Collect unmapped flag values: col_headers entries on annual columns that
+  // are neither actual/forecast nor ColN placeholders/empty.
+  const unmappedFlagValues: string[] = [];
+  for (const ac of annualCols) {
+    if (ac.actualOrForecast === "unknown" && colHeaders && ac.col < colHeaders.length) {
+      const raw = colHeaders[ac.col].trim();
+      if (raw.length > 0 && !isPlaceholderOrEmpty(raw)) {
+        unmappedFlagValues.push(raw);
+      }
     }
-    for (const ci of monthlyCols) {
-      ci.actualOrForecast = ci.financialYear < currentFY ? "actual" : "forecast";
-    }
+  }
+
+  // Count flags across annual columns
+  const annualFlagCounts = { actual: 0, forecast: 0, unknown: 0 };
+  for (const ac of annualCols) {
+    annualFlagCounts[ac.actualOrForecast]++;
+  }
+
+  // If no annual column has a recognisable actual or forecast flag,
+  // mark the sheet unrecognized — we cannot classify without flags.
+  if (annualCols.length > 0 && annualFlagCounts.actual === 0 && annualFlagCounts.forecast === 0) {
+    return {
+      recognized: false,
+      reason: "no actual/forecast flags in col_headers",
+      afRowIndex,
+      colHeadersUsed: true,
+      fyRowIndex,
+      monthRowIndex,
+      columns: [],
+      annualCount: annualCols.length,
+      monthlyCount: monthlyCols.length,
+      annualColumns: [],
+      unmappedFlagValues,
+      annualFlagCounts,
+    };
   }
 
   return {
     recognized: true,
     afRowIndex,
+    colHeadersUsed: true,
     fyRowIndex,
     monthRowIndex,
     columns,
@@ -345,15 +378,9 @@ function scanHeaders(sheet: LoadedSheet): HeaderScanResult {
       year: c.financialYear,
       flag: c.actualOrForecast,
     })),
+    unmappedFlagValues,
+    annualFlagCounts,
   };
-}
-
-function monthNameToIndex(name: string): number {
-  const map: Record<string, number> = {
-    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
-  };
-  return map[name.slice(0, 3).toLowerCase()] ?? 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -470,15 +497,17 @@ function processSheet(
     // Skip rows with no annual values at all
     if (!hasAnyValue) continue;
 
+    const unknownFlagCount = annualValues.filter((v) => v.flag === "unknown").length;
+
     emitted.push({
       sheet: sheet.sheet_or_page,
       hierarchyPath,
       rowLabel,
-      labelAddress: toA1(r, labelCol),
-      rowIndex: r,
+      rowIndexInTable: r,
       annualValues,
       hasAnyForecast,
       hasAnyActual,
+      unknownFlagCount,
     });
   }
 
@@ -546,12 +575,16 @@ export default api({
       recognized: boolean;
       reason?: string;
       headerRows: { afRow: number | null; fyRow: number | null; monthRow: number | null };
+      colHeadersUsed: boolean;
       annualColumnCount: number;
       monthlyColumnCount: number;
       annualColumns: { col: number; year: number; flag: string }[];
+      annualFlagCounts: { actual: number; forecast: number; unknown: number };
+      unmappedFlagValues: string[];
       totalRowsEmitted: number;
       rowsWithForecast: number;
       rowsActualOnly: number;
+      rowsAllUnknown: number;
     }[] = [];
 
     const allEmitted: EmittedRow[] = [];
@@ -565,12 +598,16 @@ export default api({
           recognized: false,
           reason: headers.reason,
           headerRows: { afRow: null, fyRow: null, monthRow: null },
-          annualColumnCount: 0,
-          monthlyColumnCount: 0,
+          colHeadersUsed: headers.colHeadersUsed,
+          annualColumnCount: headers.annualCount,
+          monthlyColumnCount: headers.monthlyCount,
           annualColumns: [],
+          annualFlagCounts: headers.annualFlagCounts,
+          unmappedFlagValues: headers.unmappedFlagValues,
           totalRowsEmitted: 0,
           rowsWithForecast: 0,
           rowsActualOnly: 0,
+          rowsAllUnknown: 0,
         });
         continue;
       }
@@ -580,6 +617,7 @@ export default api({
 
       const withForecast = emitted.filter((e) => e.hasAnyForecast).length;
       const actualOnly = emitted.filter((e) => e.hasAnyActual && !e.hasAnyForecast).length;
+      const allUnknown = emitted.filter((e) => e.unknownFlagCount === e.annualValues.length).length;
 
       sheetResults.push({
         name: sheet.sheet_or_page,
@@ -589,12 +627,16 @@ export default api({
           fyRow: headers.fyRowIndex,
           monthRow: headers.monthRowIndex,
         },
+        colHeadersUsed: headers.colHeadersUsed,
         annualColumnCount: headers.annualCount,
         monthlyColumnCount: headers.monthlyCount,
         annualColumns: headers.annualColumns,
+        annualFlagCounts: headers.annualFlagCounts,
+        unmappedFlagValues: headers.unmappedFlagValues,
         totalRowsEmitted: emitted.length,
         rowsWithForecast: withForecast,
         rowsActualOnly: actualOnly,
+        rowsAllUnknown: allUnknown,
       });
 
       console.log(
@@ -613,22 +655,22 @@ export default api({
       sheet: e.sheet,
       hierarchyPath: e.hierarchyPath,
       rowLabel: e.rowLabel,
-      labelAddress: e.labelAddress,
-      rowIndex: e.rowIndex,
+      rowIndexInTable: e.rowIndexInTable,
       annualValues: e.annualValues,
       hasAnyForecast: e.hasAnyForecast,
       hasAnyActual: e.hasAnyActual,
+      unknownFlagCount: e.unknownFlagCount,
     }));
 
     const sampleRecentAcq = recentAcqRows.slice(0, 15).map((e) => ({
       sheet: e.sheet,
       hierarchyPath: e.hierarchyPath,
       rowLabel: e.rowLabel,
-      labelAddress: e.labelAddress,
-      rowIndex: e.rowIndex,
+      rowIndexInTable: e.rowIndexInTable,
       annualValues: e.annualValues,
       hasAnyForecast: e.hasAnyForecast,
       hasAnyActual: e.hasAnyActual,
+      unknownFlagCount: e.unknownFlagCount,
     }));
 
     // Overall totals
@@ -637,11 +679,13 @@ export default api({
     const totalRowsEmitted = allEmitted.length;
     const totalWithForecast = allEmitted.filter((e) => e.hasAnyForecast).length;
     const totalActualOnly = allEmitted.filter((e) => e.hasAnyActual && !e.hasAnyForecast).length;
+    const totalAllUnknown = allEmitted.filter((e) => e.unknownFlagCount === e.annualValues.length).length;
 
     console.log(
       `${LOG_PREFIX} TOTALS: sheets=${sheets.length}, recognized=${totalRecognized}, ` +
       `unrecognized=${totalUnrecognized}, rows=${totalRowsEmitted}, ` +
-      `withForecast=${totalWithForecast}, actualOnly=${totalActualOnly}`,
+      `withForecast=${totalWithForecast}, actualOnly=${totalActualOnly}, ` +
+      `allUnknown=${totalAllUnknown}`,
     );
 
     return {
@@ -663,6 +707,7 @@ export default api({
           totalRowsEmitted,
           rowsWithAnyForecast: totalWithForecast,
           rowsActualOnly: totalActualOnly,
+          rowsAllUnknown: totalAllUnknown,
         },
       },
     };
