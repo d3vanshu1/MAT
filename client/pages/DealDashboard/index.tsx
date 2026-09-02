@@ -2612,8 +2612,6 @@ export default function DealDashboardPage() {
           throw err;
         }
 
-        consecutiveOwnedElsewhere = 0; // reset on any non-owned response
-
         const stageLabel = result.stage
           ? (MAST_STAGE_LABELS[result.stage] ?? result.stage)
           : "initializing";
@@ -2631,6 +2629,7 @@ export default function DealDashboardPage() {
 
           case "advanced":
           case "stage_partial": {
+            consecutiveOwnedElsewhere = 0;
             const progress = result.resumePosition > 0 && result.itemsTotal > 0
               ? ` (${result.resumePosition}/${result.itemsTotal})`
               : "";
@@ -2647,6 +2646,9 @@ export default function DealDashboardPage() {
 
           case "owned_elsewhere": {
             consecutiveOwnedElsewhere++;
+            console.log(
+              `[MAST-POLL] OWNED_ELSEWHERE consecutive=${consecutiveOwnedElsewhere} of ${MAST_MAX_OWNED_ELSEWHERE}`,
+            );
             if (consecutiveOwnedElsewhere >= MAST_MAX_OWNED_ELSEWHERE) {
               terminal = true;
               setModuleProgress("model_assumptions_stress", {
@@ -2663,6 +2665,7 @@ export default function DealDashboardPage() {
           }
 
           default: {
+            consecutiveOwnedElsewhere = 0;
             setModuleProgress("model_assumptions_stress", {
               message: `${stageLabel}… (${result.status})`,
             });

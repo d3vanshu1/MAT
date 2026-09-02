@@ -14,6 +14,10 @@ import {
   type StageName,
   getStageHandler,
 } from "./mast-stages.js";
+import {
+  EFFECTIVE_CAP_MS,
+  PLATFORM_HEADROOM_MS,
+} from "./pipeline-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -35,8 +39,18 @@ function mastRandomUUID(): string {
   });
 }
 
-/** Staleness threshold for lock reclaim (ms). */
-const LOCK_STALENESS_MS = 300_000; // 300 seconds
+/**
+ * Staleness threshold for lock reclaim (ms).
+ *
+ * Must exceed the longest possible legitimate invocation so a concurrent
+ * poll never claims a still-running lock.  Same reasoning as
+ * STALENESS_THRESHOLD_MINUTES in pipeline-config.ts: effective cap plus
+ * a generous grace margin for clock skew and DB latency.
+ *
+ * Formula: EFFECTIVE_CAP_MS + (PLATFORM_HEADROOM_MS × 2)
+ *          = 300 000 + 60 000 = 360 000 ms (6 min) at the current cap.
+ */
+const LOCK_STALENESS_MS = EFFECTIVE_CAP_MS + (PLATFORM_HEADROOM_MS * 2);
 
 // ---------------------------------------------------------------------------
 // Row schemas
