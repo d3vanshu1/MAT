@@ -2,11 +2,17 @@
  * mast-contract.ts
  *
  * Leaf module — imports nothing from any other MAST file.
+ * Imports ONLY from pipeline-config.ts (which imports nothing from mast-*).
  *
  * Contains the canonical stage list, types, and constants shared across
  * the MAST pipeline. Extracted from mast-stages.ts to break the import
  * cycle between the stage registry and handler modules.
  */
+import {
+  EFFECTIVE_CAP_MS,
+  PLATFORM_HEADROOM_MS,
+  MIN_VIABLE_LLM_BUDGET_MS,
+} from "./pipeline-config.js";
 
 // ---------------------------------------------------------------------------
 // Stage list — the canonical pipeline sequence
@@ -54,11 +60,30 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
 
 /**
  * Budget (ms) for loop stages — stop starting new items past this.
- * 55s gives ample margin before the 120s language-step platform kill.
- * The orchestrator will be re-invoked by the frontend poll loop and
- * resume from the saved checkpoint.
+ *
+ * Derivation:
+ *   EFFECTIVE_CAP_MS          — platform hard-kill (300 000 ms at 5-min quota)
+ * − PLATFORM_HEADROOM_MS      — safety buffer for checkpoint writes (30 000 ms)
+ * − MIN_VIABLE_LLM_BUDGET_MS  — worst-case in-flight LLM call (60 000 ms)
+ * = STAGE_BUDGET_MS            (210 000 ms at current cap)
+ *
+ * Why subtract MIN_VIABLE_LLM_BUDGET_MS: MAST stage handlers check elapsed
+ * time BEFORE dispatching work but do not check remaining headroom once a
+ * call is in flight. The budget must therefore leave room for one worst-case
+ * LLM call that has already been dispatched when the budget check last passed.
+ *
+ * History: the previous value (55 000 ms) rested on a claim of a "120s
+ * language-step platform kill." That 120s figure had no documented source;
+ * it was confirmed fabricated on 2026-09-02. The actual platform cap is
+ * 300s (pipeline-config.ts, sourced from Superblocks rate-limits docs).
+ * BSS and ERO both use 240 000 ms against the same 300s cap.
  */
-export const STAGE_BUDGET_MS = 55_000;
+export const STAGE_BUDGET_MS = EFFECTIVE_CAP_MS - PLATFORM_HEADROOM_MS - MIN_VIABLE_LLM_BUDGET_MS;
+
+console.log(
+  `[MAST-CONTRACT] STAGE_BUDGET_MS=${STAGE_BUDGET_MS} ` +
+  `(EFFECTIVE_CAP=${EFFECTIVE_CAP_MS} − HEADROOM=${PLATFORM_HEADROOM_MS} − LLM_RESERVE=${MIN_VIABLE_LLM_BUDGET_MS})`,
+);
 
 // ---------------------------------------------------------------------------
 // Handler signature

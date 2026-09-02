@@ -82,6 +82,7 @@ export default api({
   }),
 
   async run(ctx, { runId: inputRunId, dealId }) {
+    const invocationStart = Date.now();
     const db = ctx.integrations.ic_diligence_db;
     const ai = ctx.integrations.ai;
 
@@ -178,15 +179,18 @@ export default api({
     );
 
     if (claimed.length === 0) {
-      console.log(`${LOG_PREFIX} Lock held by another invocation for run ${runId}.`);
-        return {
-          status: "owned_elsewhere" as const,
-          stage: null,
-          resumePosition: 0,
-          itemsTotal: 0,
-          message: "Lock held by another invocation.",
-          runId,
-        };
+      const elapsed = Date.now() - invocationStart;
+      console.log(
+        `${LOG_PREFIX} INVOCATION_ELAPSED stage=none status=owned_elsewhere elapsed_ms=${elapsed} resume_position=0`,
+      );
+      return {
+        status: "owned_elsewhere" as const,
+        stage: null,
+        resumePosition: 0,
+        itemsTotal: 0,
+        message: "Lock held by another invocation.",
+        runId,
+      };
     }
 
     // ── Helper: release lock (only if this invocation still owns it) ──
@@ -234,7 +238,10 @@ export default api({
 
       // All stages complete
       if (currentStage === null) {
-        console.log(`${LOG_PREFIX} All ${STAGES.length} stages complete for run ${runId}.`);
+        const elapsed = Date.now() - invocationStart;
+        console.log(
+          `${LOG_PREFIX} INVOCATION_ELAPSED stage=none status=done elapsed_ms=${elapsed} resume_position=0`,
+        );
         await releaseLock();
         return {
           status: "done" as const,
@@ -273,16 +280,22 @@ export default api({
 
       if (result.complete) {
         // ── Stage complete ────────────────────────────────────────────
+        const elapsed = Date.now() - invocationStart;
+
+        // Persist elapsed into the stage's payload under last_invocation_elapsed_ms
         await db.execute(
           `UPDATE mast_pipeline_state
-           SET status = 'complete', resume_position = $3, updated_at = now()
+           SET status = 'complete',
+               resume_position = $3,
+               payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('last_invocation_elapsed_ms', $4::int),
+               updated_at = now()
            WHERE run_id = $1::uuid AND stage = $2`,
-          [runId, currentStage, result.resumePosition],
+          [runId, currentStage, result.resumePosition, elapsed],
           { label: `MAST mark complete: ${currentStage}` },
         );
 
         console.log(
-          `${LOG_PREFIX} Stage ${currentStage} complete (${result.itemsDone}/${result.itemsTotal}).`,
+          `${LOG_PREFIX} INVOCATION_ELAPSED stage=${currentStage} status=advanced elapsed_ms=${elapsed} resume_position=${result.resumePosition}`,
         );
         await releaseLock();
         return {
@@ -296,16 +309,21 @@ export default api({
       }
 
       // ── Stage partial (loop stage hit budget) ───────────────────────
+      const elapsed = Date.now() - invocationStart;
+
+      // Persist elapsed into the stage's payload under last_invocation_elapsed_ms
       await db.execute(
         `UPDATE mast_pipeline_state
-         SET resume_position = $3, updated_at = now()
+         SET resume_position = $3,
+             payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object('last_invocation_elapsed_ms', $4::int),
+             updated_at = now()
          WHERE run_id = $1::uuid AND stage = $2`,
-        [runId, currentStage, result.resumePosition],
+        [runId, currentStage, result.resumePosition, elapsed],
         { label: `MAST persist partial: ${currentStage}` },
       );
 
       console.log(
-        `${LOG_PREFIX} Stage ${currentStage} partial: ${result.itemsDone}/${result.itemsTotal} (resume_position=${result.resumePosition}).`,
+        `${LOG_PREFIX} INVOCATION_ELAPSED stage=${currentStage} status=stage_partial elapsed_ms=${elapsed} resume_position=${result.resumePosition}`,
       );
       await releaseLock();
       return {
@@ -319,6 +337,10 @@ export default api({
     } catch (err) {
       // ── Error path: mark stage failed, release lock ─────────────────
       const msg = err instanceof Error ? err.message : String(err);
+      const elapsed = Date.now() - invocationStart;
+      console.log(
+        `${LOG_PREFIX} INVOCATION_ELAPSED stage=${activeStage ?? "none"} status=failed elapsed_ms=${elapsed} resume_position=0`,
+      );
       console.warn(`${LOG_PREFIX} Stage FAILED: ${msg}`);
 
       if (activeStage !== null) {
