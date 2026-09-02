@@ -599,6 +599,30 @@ const relianceLinks: StageHandler = async (
       `${LOG_PREFIX} Right-side index is empty. ${refDocs.length} reference docs examined, ` +
         `${docsWithNoTables} with no doc_tables. Returning complete with 0 links.`,
     );
+
+    // Persist payload (early return — counters not yet accumulated)
+    const emptyRightPayload = {
+      leftSideTotal: leftSide.length,
+      figuresProcessedThisInvocation: 0,
+      linksWritten: 0,
+      suppressedSmall: 0,
+      fanOutDiscarded: 0,
+      globalDiscarded: 0,
+      rightSideCells: 0,
+      refDocsCount: refDocs.length,
+    };
+    try {
+      await db.execute(
+        `UPDATE mast_pipeline_state
+         SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+         WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+        [runId, "reliance_links", JSON.stringify(emptyRightPayload)],
+        { label: `${LOG_PREFIX} persist stage summary (empty right side)` },
+      );
+    } catch (payloadErr) {
+      console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+    }
+
     return { complete: true, itemsDone: leftSide.length, itemsTotal: leftSide.length, resumePosition: 0 };
   }
 
@@ -734,6 +758,30 @@ const relianceLinks: StageHandler = async (
       `Right side: ${rightSideRaw.length} cells from ${refDocs.length} docs. ` +
       `Suppressed: ${suppressedSmall}. Fan-out discarded: ${fanOutDiscarded}. Global cap discarded: ${globalDiscarded}.`,
   );
+
+  // ── Persist stage payload ─────────────────────────────────────────
+  const linksPayload = {
+    leftSideTotal: leftSide.length,
+    figuresProcessedThisInvocation: figIdx - resumePosition,
+    linksWritten: written,
+    suppressedSmall,
+    fanOutDiscarded,
+    globalDiscarded,
+    existingLinkCount,
+    rightSideCells: rightSideRaw.length,
+    refDocsCount: refDocs.length,
+  };
+  try {
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [runId, "reliance_links", JSON.stringify(linksPayload)],
+      { label: `${LOG_PREFIX} persist stage summary` },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+  }
 
   return {
     complete: isComplete,

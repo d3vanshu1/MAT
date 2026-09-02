@@ -880,6 +880,27 @@ const emergentHandler: StageHandler = async (ctx: StageContext) => {
     (skipReasons.length > 0 ? `. Skips: ${skipReasons.join("; ")}` : ""),
   );
 
+  // ── Persist stage payload ───────────────────────────────────────────
+  const emergentPayload = {
+    e1Count,
+    e2Count,
+    e3Count,
+    e4Count,
+    total,
+    skipReasons,
+  };
+  try {
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [runId, "emergent", JSON.stringify(emergentPayload)],
+      { label: `${LOG_PREFIX} persist stage summary` },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+  }
+
   return {
     complete: true,
     itemsDone: total,

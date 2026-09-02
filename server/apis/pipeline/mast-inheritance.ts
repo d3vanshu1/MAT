@@ -714,6 +714,36 @@ const inheritance: StageHandler = async (
     );
   }
 
+  // ── Persist stage payload ───────────────────────────────────────────
+  const inheritancePayload = {
+    workListLength: workList.length,
+    usingFallback,
+    itemsProcessedThisInvocation: itemIdx - resumePosition,
+    totalAccepted,
+    totalInputTokens,
+    totalOutputTokens,
+    rejectEmptyJudgment,
+    rejectShortJudgment,
+    rejectEmptyQuote,
+    rejectShortQuote,
+    rejectQuoteNotFound,
+    itemsAllCallsFailed,
+    itemsAllParsesFailed,
+    itemsTruncated,
+    itemsNoContext,
+  };
+  try {
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [runId, "inheritance", JSON.stringify(inheritancePayload)],
+      { label: `${LOG_PREFIX} persist stage summary` },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+  }
+
   return {
     complete: isComplete,
     itemsDone: itemIdx,
