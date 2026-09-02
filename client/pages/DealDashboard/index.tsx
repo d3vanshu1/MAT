@@ -2687,10 +2687,11 @@ export default function DealDashboardPage() {
 
   const handleRunModule = useCallback(
     async (moduleId: string, resumeRunId?: string) => {
-      // Hard kill — never resume a module that was explicitly killed this session
-      if (killedModulesRef.current.has(moduleId)) {
-        console.warn(`[handleRunModule] ${moduleId} is killed — ignoring`);
-        return;
+      // If a user explicitly clicks Re-run on a killed module, clear the kill flag
+      // so the run proceeds. The kill ref only blocks automated resume loops (watchdog).
+      if (killedModulesRef.current.has(moduleId) && !resumeRunId) {
+        console.log(`[handleRunModule] ${moduleId} was killed — clearing kill flag for manual re-run`);
+        killedModulesRef.current.delete(moduleId);
       }
 
       // Skip the "already running" guard when resuming — we're reconnecting to an existing run
@@ -2871,17 +2872,9 @@ export default function DealDashboardPage() {
 
                 // If handleRunModule returned without throw, it's either running or heartbeat handles it
               } catch (backoffErr) {
-                // Final attempt also failed — now permanently kill
-                console.error(`[handleRunModule] ${moduleId}: post-backoff resume also failed — permanently killing`, backoffErr);
-                killedModulesRef.current.add(moduleId);
-                toast.error(`[${MODULE_MAP[moduleId]?.displayName ?? moduleId}] Server stalled after backoff retry — stopped. Refresh to retry.`);
-                setRunningModules((prev) => {
-                  const next = new Set(prev);
-                  next.delete(moduleId);
-                  return next;
-                });
-                clearModuleProgress(moduleId);
-                pipelinePollingActive.current.delete(moduleId);
+                // Final attempt also failed — reload the tab for a fresh start
+                console.error(`[handleRunModule] ${moduleId}: post-backoff resume also failed — reloading tab`, backoffErr);
+                window.location.reload();
               }
             }, 120_000); // 2-minute backoff
 
@@ -3293,19 +3286,13 @@ export default function DealDashboardPage() {
             lastKnownProgressRef.current[moduleId] = currentProgress;
 
             if (flatAttempts > MAX_FLAT_RESUME_ATTEMPTS) {
+              // Pipeline genuinely stalled — reload the tab to get a fresh start
+              // instead of permanently killing the module
               console.warn(
-                `[watchdog] ${moduleId}: ${flatAttempts} flat-progress attempts — pipeline appears genuinely stalled. Stopping.`
+                `[watchdog] ${moduleId}: ${flatAttempts} flat-progress attempts — reloading tab`
               );
-              killedModulesRef.current.add(moduleId);
-              setRunningModules((prev) => {
-                const next = new Set(prev);
-                next.delete(moduleId);
-                return next;
-              });
-              toast.error(
-                `[${MODULE_MAP[moduleId]?.displayName ?? moduleId}] Pipeline stalled (no progress for ~${flatAttempts} minutes). Refresh to retry.`
-              );
-              continue;
+              window.location.reload();
+              return; // won't execute, but satisfies control flow
             }
 
             console.log(

@@ -445,18 +445,35 @@ const registerMemo: StageHandler = async (
     );
   }
 
-  // All chunks processed — fail closed if zero accepted
+  // All chunks processed — fail closed if zero accepted CUMULATIVELY.
+  // On resumed runs, totalAccepted only counts this invocation. Prior
+  // invocations may have inserted propositions, so check the DB total.
   if (totalAccepted === 0) {
-    throw new Error(
-      `${LOG_PREFIX} All ${totalChunks} memo chunks processed but zero propositions accepted. ` +
-      `Extraction is broken. Rejections: empty_proposition=${rejectEmptyProposition}, ` +
-      `short_proposition=${rejectShortProposition}, empty_quote=${rejectEmptyQuote}, ` +
-      `short_quote=${rejectShortQuote}, quote_not_found=${rejectQuoteNotFound}.`,
+    const CountSchema = z.object({ cnt: z.coerce.number() });
+    const [{ cnt: dbTotal }] = await db.query(
+      `SELECT COUNT(*)::int AS cnt FROM mast_assumptions
+       WHERE run_id = $1::uuid AND origin_type = 'memo_prose'`,
+      CountSchema,
+      [runId],
+      { label: "MAST-MEMO: check cumulative proposition count" },
+    );
+
+    if (dbTotal === 0) {
+      throw new Error(
+        `${LOG_PREFIX} All ${totalChunks} memo chunks processed but zero propositions accepted (cumulative). ` +
+        `Extraction is broken. Rejections: empty_proposition=${rejectEmptyProposition}, ` +
+        `short_proposition=${rejectShortProposition}, empty_quote=${rejectEmptyQuote}, ` +
+        `short_quote=${rejectShortQuote}, quote_not_found=${rejectQuoteNotFound}.`,
+      );
+    }
+
+    console.log(
+      `${LOG_PREFIX} This invocation accepted 0 propositions, but ${dbTotal} exist from prior invocations. Proceeding.`,
     );
   }
 
   console.log(
-    `${LOG_PREFIX} register_memo complete: ${totalAccepted} propositions across ${totalChunks} chunks.`,
+    `${LOG_PREFIX} register_memo complete: ${totalAccepted} propositions this invocation across ${totalChunks} chunks.`,
   );
   return {
     complete: true,
