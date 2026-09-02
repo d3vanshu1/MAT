@@ -3133,7 +3133,7 @@ export default function DealDashboardPage() {
           // Skip if the pipeline polling loop is now providing real-time progress
           if (pipelinePollingActive.current.has(moduleId)) continue;
 
-          const run = runs.find((r: { moduleId: string; status: string; analysisCheckpointCount?: number; mergeCheckpointCount?: number }) => r.moduleId === moduleId && r.status === "running");
+          const run = runs.find((r: { moduleId: string; status: string; analysisCheckpointCount?: number; mergeCheckpointCount?: number; stageCheckpointCount?: number }) => r.moduleId === moduleId && r.status === "running");
           if (!run) {
             // Run is no longer "running" in DB — it completed or failed while
             // we were polling. Refetch module results to get the final output.
@@ -3153,12 +3153,19 @@ export default function DealDashboardPage() {
 
           // Derive progress from checkpoint counts
           let message: string;
-          if (run.mergeCheckpointCount && run.mergeCheckpointCount > 0) {
+          const MAST_TOTAL_STAGES = 16;
+          if (moduleId === "model_assumptions_stress" && run.stageCheckpointCount != null && run.stageCheckpointCount > 0) {
+            // MAST uses stage checkpoints, not analysis/merge checkpoints
+            const completed = Math.min(run.stageCheckpointCount, MAST_TOTAL_STAGES);
+            message = `MAST analysis: ${completed}/${MAST_TOTAL_STAGES} stages complete (server-side)…`;
+          } else if (run.mergeCheckpointCount && run.mergeCheckpointCount > 0) {
             message = `Merge phase: ${run.mergeCheckpointCount} nodes merged (server-side)…`;
           } else if (run.analysisCheckpointCount && run.analysisCheckpointCount > 0) {
             message = `Analysis phase: ${run.analysisCheckpointCount} chunks completed (server-side)…`;
           } else if (moduleId === "diligence_completeness" && dcsEvidenceCount > 0) {
             message = `DCS extraction: ${dcsEvidenceCount} evidence rows written…`;
+          } else if (moduleId === "model_assumptions_stress") {
+            message = `MAST analysis: initializing (server-side)…`;
           } else if (extractionCount > 0) {
             message = `Preparing analysis: ${extractionCount} extractions available (server-side)…`;
           } else {
