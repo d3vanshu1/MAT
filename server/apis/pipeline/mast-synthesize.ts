@@ -557,13 +557,20 @@ ${entries.map((c) => `${c.index}. "${c.label}" (${c.memberCount} members) — e.
 
   // ── Merge rounds ──────────────────────────────────────────────────
   for (let round = 1; round <= MERGE_MAX_ROUNDS; round++) {
-    // Change 5: budget check before each round
+    // Change 5: budget check before each round — return best result so far
+    // instead of throwing, so the handler can checkpoint and resume
     if (Date.now() - stepAStart > STAGE_BUDGET_MS) {
-      throw new Error(
-        `${LOG_PREFIX} Merge budget exceeded before round ${round}. ` +
-        `Current cluster count: ${currentList.length}. ` +
+      console.log(
+        `${LOG_PREFIX} Merge budget reached before round ${round}. ` +
+        `Returning ${currentList.length} clusters from prior rounds. ` +
         `Elapsed: ${((Date.now() - stepAStart) / 1000).toFixed(1)}s.`,
       );
+      return currentList.map((entry, i) => ({
+        id: i + 1,
+        label: entry.label,
+        members: entry.members,
+        pairedContext: [] as string[],
+      }));
     }
 
     const inputCount = currentList.length;
