@@ -45,6 +45,11 @@ const MAX_ATTEMPTS = 2;
 const SYNTH_CRITICAL_CAP = 5;
 const SYNTH_WARNING_CAP = 10;
 
+// COMPOSE_CANDIDATE_CAP = SYNTH_CRITICAL_CAP + SYNTH_WARNING_CAP + margin.
+// The margin exists because stepD_severityCorrection can demote a critical to
+// warning after composition, which pre-compose ranking cannot anticipate.
+const COMPOSE_CANDIDATE_CAP = 40;
+
 // ---------------------------------------------------------------------------
 // Banned phrases — same list as mast-fragility.ts (return-figure prohibition)
 // ---------------------------------------------------------------------------
@@ -601,14 +606,36 @@ interface ComposeResult {
   contradiction: string | null;
 }
 
+interface ComposeOutput {
+  results: Map<number, ComposeResult>;
+  /** Index of the first cluster NOT composed (equals clusters.length if all done). */
+  stoppedAtIndex: number;
+  budgetExhausted: boolean;
+}
+
 async function stepC_compose(
   ai: StageContext["ai"],
   model: string,
   clusters: Cluster[],
-): Promise<Map<number, ComposeResult>> {
-  const results = new Map<number, ComposeResult>();
+  startTime: number,
+  budgetMs: number,
+  resumeFrom: number = 0,
+  priorResults?: Map<number, ComposeResult>,
+): Promise<ComposeOutput> {
+  const results = priorResults
+    ? new Map<number, ComposeResult>(priorResults)
+    : new Map<number, ComposeResult>();
 
-  for (const cluster of clusters) {
+  for (let i = resumeFrom; i < clusters.length; i++) {
+    // Budget guard: check elapsed time BEFORE dispatching the LLM call
+    if (Date.now() - startTime > budgetMs) {
+      console.log(
+        `${LOG_PREFIX} Step C budget exhausted after composing ${results.size} of ${clusters.length} clusters.`,
+      );
+      return { results, stoppedAtIndex: i, budgetExhausted: true };
+    }
+
+    const cluster = clusters[i];
     const prompt = buildComposePrompt(cluster);
     const raw = await llmCall(
       ai,
@@ -682,7 +709,7 @@ async function stepC_compose(
     }
   }
 
-  return results;
+  return { results, stoppedAtIndex: clusters.length, budgetExhausted: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +773,8 @@ const synthesize: StageHandler = async (
   let resumedClusters: Cluster[] | null = null;
   let resumedTotalEligible: number | null = null;
   let resumedCappedCount = 0;
+  let resumedComposeResults: Map<number, ComposeResult> | null = null;
+  let resumedComposeOffset = 0;
 
   if (resumePosition >= 1) {
     console.log(
@@ -774,6 +803,27 @@ const synthesize: StageHandler = async (
         console.log(
           `${LOG_PREFIX} Restored ${resumedClusters.length} clusters from checkpoint.`,
         );
+
+        // Restore partial compose results if resuming into Step C (resumePosition >= 3)
+        if (
+          resumePosition >= 3 &&
+          existing.composePartial &&
+          Array.isArray(existing.composePartial.entries)
+        ) {
+          resumedComposeResults = new Map<number, ComposeResult>();
+          for (const e of existing.composePartial.entries as any[]) {
+            resumedComposeResults.set(e.clusterId, {
+              title: e.title,
+              body: e.body,
+              supportSummary: e.supportSummary,
+              contradiction: e.contradiction ?? null,
+            });
+          }
+          resumedComposeOffset = resumePosition - 3;
+          console.log(
+            `${LOG_PREFIX} Restored ${resumedComposeResults.size} compose results, resuming from offset ${resumedComposeOffset}.`,
+          );
+        }
       } else {
         console.log(
           `${LOG_PREFIX} No usable cluster data in checkpoint payload. Starting from scratch.`,
@@ -968,21 +1018,136 @@ const synthesize: StageHandler = async (
     };
   }
 
-  // ── Step C: Compose ───────────────────────────────────────────────
-  console.log(
-    `${LOG_PREFIX} Step C: Composing findings for ${clusters.length} clusters...`,
-  );
-  const composeResults = await stepC_compose(ai, model, clusters);
+  // ── Rank before compose ─────────────────────────────────────────
+  //    Sort clusters using the same ordering Step D applies: severity
+  //    from clusterSeverity, criticals first, then by memberCount desc.
+  //    Take the top COMPOSE_CANDIDATE_CAP so we only compose clusters
+  //    that have a realistic chance of surviving the Step D caps.
+  const sevOrder: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+
+  const rankedClusters = [...clusters].sort((a, b) => {
+    const sa = sevOrder[clusterSeverity(a.members)] ?? 2;
+    const sb = sevOrder[clusterSeverity(b.members)] ?? 2;
+    if (sa !== sb) return sa - sb;
+    return b.members.length - a.members.length;
+  });
+
+  const composeCandidates = rankedClusters.slice(0, COMPOSE_CANDIDATE_CAP);
+
+  const selectedCriticals = composeCandidates.filter(
+    (c) => clusterSeverity(c.members) === "critical",
+  ).length;
+  const selectedWarnings = composeCandidates.filter(
+    (c) => clusterSeverity(c.members) === "warning",
+  ).length;
 
   console.log(
-    `${LOG_PREFIX} Step C complete. ${composeResults.size} of ${clusters.length} clusters composed.`,
+    `${LOG_PREFIX} COMPOSE_RANK total=${clusters.length} selected=${composeCandidates.length}` +
+    ` criticals_selected=${selectedCriticals} warnings_selected=${selectedWarnings}`,
+  );
+
+  // ── Step C: Compose ───────────────────────────────────────────────
+  //    Skip if resumed past compose; resume at offset if partially done.
+  const composeResumeFrom =
+    resumedComposeResults && resumePosition >= 3
+      ? resumedComposeOffset
+      : 0;
+
+  if (resumedComposeResults && resumePosition >= 3) {
+    console.log(
+      `${LOG_PREFIX} Step C: Resuming compose from offset ${composeResumeFrom} ` +
+      `(${resumedComposeResults.size} already composed).`,
+    );
+  } else {
+    console.log(
+      `${LOG_PREFIX} Step C: Composing findings for ${composeCandidates.length} clusters...`,
+    );
+  }
+
+  const composeOutput = await stepC_compose(
+    ai,
+    model,
+    composeCandidates,
+    startTime,
+    STAGE_BUDGET_MS,
+    composeResumeFrom,
+    resumedComposeResults ?? undefined,
+  );
+
+  const composeResults = composeOutput.results;
+
+  if (composeOutput.budgetExhausted) {
+    console.log(
+      `${LOG_PREFIX} Step C partial: ${composeResults.size} of ${composeCandidates.length} composed. Pausing.`,
+    );
+
+    // Serialize compose results for resumption
+    const composePartialEntries = Array.from(composeResults.entries()).map(
+      ([clusterId, cr]) => ({
+        clusterId,
+        title: cr.title,
+        body: cr.body,
+        supportSummary: cr.supportSummary,
+        contradiction: cr.contradiction,
+      }),
+    );
+
+    const partialPayload = {
+      findings: [],
+      clusters: clusters.map((c) => ({
+        id: c.id,
+        label: c.label,
+        members: c.members,
+        pairedContext: c.pairedContext,
+      })),
+      composePartial: {
+        entries: composePartialEntries,
+      },
+      stats: {
+        inputFindings: effectiveTotalEligible,
+        inputCapped: effectiveCappedCount,
+        clustersFormed: clusters.length,
+        composeCandidates: composeCandidates.length,
+        composedSoFar: composeResults.size,
+        composeStoppedAtIndex: composeOutput.stoppedAtIndex,
+        findingsProduced: 0,
+        severityCorrections: 0,
+        partialStop: "during_compose",
+      },
+    };
+
+    try {
+      await db.execute(
+        `UPDATE mast_pipeline_state
+         SET payload = $3::jsonb
+         WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+        [runId, "synthesize", JSON.stringify(partialPayload)],
+        { label: "MAST-SYNTH: persist partial payload (mid-compose)" },
+      );
+    } catch (_) {
+      /* best effort */
+    }
+
+    // resumePosition = 3 + composedCount so the next invocation
+    // knows how many clusters to skip in the composeCandidates array.
+    return {
+      complete: false,
+      itemsDone: composeResults.size,
+      itemsTotal: composeCandidates.length,
+      resumePosition: 3 + composeOutput.stoppedAtIndex,
+    };
+  }
+
+  console.log(
+    `${LOG_PREFIX} Step C complete. ${composeResults.size} of ${composeCandidates.length} clusters composed.`,
   );
 
   // ── Step D: Severity correction + assembly ────────────────────────
+  //    Iterate only over composeCandidates (the ranked subset).
   const synthesized: SynthesizedFinding[] = [];
   let severityCorrections = 0;
 
-  for (const cluster of clusters) {
+  for (const cluster of composeCandidates) {
     const composed = composeResults.get(cluster.id);
     if (!composed) continue;
 
@@ -1010,11 +1175,6 @@ const synthesize: StageHandler = async (
 
   // Sort: criticals first, then warnings, then by memberCount desc
   synthesized.sort((a, b) => {
-    const sevOrder: Record<string, number> = {
-      critical: 0,
-      warning: 1,
-      info: 2,
-    };
     const sa = sevOrder[a.severity] ?? 2;
     const sb = sevOrder[b.severity] ?? 2;
     if (sa !== sb) return sa - sb;
@@ -1027,6 +1187,14 @@ const synthesize: StageHandler = async (
   const cappedCriticals = criticals.slice(0, SYNTH_CRITICAL_CAP);
   const cappedWarnings = warnings.slice(0, SYNTH_WARNING_CAP);
   const finalFindings = [...cappedCriticals, ...cappedWarnings];
+
+  const correctionMargin = COMPOSE_CANDIDATE_CAP - SYNTH_CRITICAL_CAP - SYNTH_WARNING_CAP;
+  const marginExhausted = severityCorrections > correctionMargin;
+
+  console.log(
+    `${LOG_PREFIX} CORRECTION_MARGIN corrections=${severityCorrections}` +
+    ` margin=${correctionMargin} exhausted=${marginExhausted}`,
+  );
 
   console.log(
     `${LOG_PREFIX} Step D complete. ${synthesized.length} synthesized findings. ` +
@@ -1047,7 +1215,8 @@ const synthesize: StageHandler = async (
       warningProduced: cappedWarnings.length,
       totalComposed: composeResults.size,
       severityCorrections,
-      composeFailures: clusters.length - composeResults.size,
+      composeCandidates: composeCandidates.length,
+      composeFailures: composeCandidates.length - composeResults.size,
     },
   };
 
