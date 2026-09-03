@@ -170,6 +170,7 @@ import RunMigration041 from './pipeline/run-migration-041.js';
 import MastRunPipeline from './pipeline/mast-run-pipeline.js';
 import MastResetPipeline from './pipeline/mast-reset-pipeline.js';
 import MastPurgeRun from './pipeline/mast-purge-run.js';
+import MastResetStage from './pipeline/mast-reset-stage.js';
 import MastDiagRetrievalProbe from './pipeline/mast-diag-retrieval-probe.js';
 import MastDiagSweepProbe from './pipeline/mast-diag-sweep-probe.js';
 import MastDiagLabelProbe from './pipeline/mast-diag-label-probe.js';
@@ -316,7 +317,7 @@ const apis = {
   // DCS rebuild
   DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic, RunCurationFixtures, DcsComputeDimensionRationales, DcsPersistRationalesOneshot, DcsRepublishV2,
   // MAST v2 pipeline
-  MastRunPipeline, MastResetPipeline, MastPurgeRun, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
+  MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
