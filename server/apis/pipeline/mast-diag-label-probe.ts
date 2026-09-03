@@ -6,6 +6,9 @@
  * labelling result for offline analysis.
  *
  * Uses the cached-system-block pattern from mast-support-search.ts.
+ *
+ * Resumable by offset: pass offset to skip rows already processed.
+ * Budget-aware: stops after 200s and reports nextOffset.
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { getModuleModel } from "./model-config.js";
@@ -18,6 +21,7 @@ const MODULE_ID = "mast_v2";
 const MAX_OUTPUT_TOKENS = 4096;
 const MAX_ATTEMPTS = 2;
 const BATCH_SIZE = 25;
+const BUDGET_MS = 200_000;
 
 const VALID_LABELS = new Set([
   "exit_multiple",
@@ -52,18 +56,28 @@ const AssumptionRow = z.object({
   dependence_tier: z.string().nullable(),
 });
 
-const RunIdRow = z.object({
-  id: z.string(),
-});
-
-const TotalCountRow = z.object({
-  cnt: z.coerce.number(),
-});
+const RunIdRow = z.object({ id: z.string() });
+const TotalCountRow = z.object({ cnt: z.coerce.number() });
 
 const FindingSeverityRow = z.object({
   assumption_id: z.string(),
   severity: z.string(),
 });
+
+// ---------------------------------------------------------------------------
+// Failure detail types
+// ---------------------------------------------------------------------------
+
+interface BatchFailureDetail {
+  batchIndex: number;
+  cause: "timeout_or_abort" | "http_error" | "truncation" | "parse_failure";
+  attempt: number;
+  elapsedMs: number;
+  errorMessage?: string;
+  httpStatus?: number;
+  rawResponseHead?: string;
+  assumptions: Array<{ id: string; propositionHead: string }>;
+}
 
 // ---------------------------------------------------------------------------
 // Prompt
@@ -108,19 +122,25 @@ export default api({
   input: z.object({
     dealId: z.string().uuid(),
     limit: z.number().int().min(1).max(1000).default(200),
+    offset: z.number().int().min(0).default(0),
   }),
 
   output: z.object({
     runId: z.string(),
     totalCanonical: z.number(),
+    offset: z.number(),
+    limit: z.number(),
     sampled: z.number(),
     batchCount: z.number(),
+    batchesCompleted: z.number(),
+    stoppedEarly: z.boolean(),
+    nextOffset: z.number().nullable(),
     labelCounts: z.record(z.string(), z.number()),
     labelRejected: z.number(),
     rejectedValues: z.array(z.string()),
     unmentioned: z.number(),
     batchFailed: z.number(),
-    batchFailedIndices: z.array(z.array(z.number())),
+    batchFailedDetails: z.array(z.any()),
     labelled: z.array(z.object({
       index: z.number(),
       assumptionId: z.string(),
@@ -134,10 +154,11 @@ export default api({
     totalOutputTokens: z.number(),
   }),
 
-  async run(ctx, { dealId, limit }) {
+  async run(ctx, { dealId, limit, offset }) {
     const db = ctx.integrations.ic_diligence_db;
     const ai = ctx.integrations.ai;
     const model = getModuleModel(MODULE_ID);
+    const handlerStart = Date.now();
 
     // ── 1. Find most recent completed MAST run ──────────────────────
     const runs = await db.query(
@@ -163,20 +184,23 @@ export default api({
       { label: `${LOG_PREFIX} count canonical` },
     );
 
-    // ── 3. Load assumptions ─────────────────────────────────────────
+    // ── 3. Load assumptions with offset ─────────────────────────────
     const allRows = await db.query(
       `SELECT id, proposition, dependence_tier
        FROM mast_assumptions
        WHERE run_id = $1::uuid AND dedup_group_id = id
        ORDER BY id
-       LIMIT $2`,
+       OFFSET $2
+       LIMIT $3`,
       AssumptionRow,
-      [runId, limit],
-      { label: `${LOG_PREFIX} load canonical assumptions` },
+      [runId, offset, limit],
+      { label: `${LOG_PREFIX} load canonical assumptions (offset=${offset}, limit=${limit})` },
     );
 
     const sampled = allRows.length;
-    console.log(`${LOG_PREFIX} Run ${runId}: ${totalCanonical} canonical, ${sampled} sampled.`);
+    console.log(
+      `${LOG_PREFIX} Run ${runId}: ${totalCanonical} canonical, offset=${offset}, limit=${limit}, sampled=${sampled}.`,
+    );
 
     // ── 4. Load severity for each assumption ────────────────────────
     const severityRows = await db.query(
@@ -196,7 +220,7 @@ export default api({
     const batches: Array<Array<{ index: number; id: string; proposition: string; dependenceTier: string | null }>> = [];
     for (let i = 0; i < sampled; i += BATCH_SIZE) {
       const batch = allRows.slice(i, i + BATCH_SIZE).map((row, j) => ({
-        index: i + j + 1,
+        index: offset + i + j + 1,
         id: row.id,
         proposition: row.proposition,
         dependenceTier: row.dependence_tier,
@@ -218,9 +242,11 @@ export default api({
     const rejectedValues: string[] = [];
     let unmentioned = 0;
     let batchFailed = 0;
-    const batchFailedIndices: number[][] = [];
+    const batchFailedDetails: BatchFailureDetail[] = [];
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let batchesCompleted = 0;
+    let stoppedEarly = false;
 
     const labelled: Array<{
       index: number;
@@ -233,6 +259,15 @@ export default api({
     }> = [];
 
     for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+      // ── Budget check ──────────────────────────────────────────────
+      if (Date.now() - handlerStart > BUDGET_MS) {
+        stoppedEarly = true;
+        console.log(
+          `${LOG_PREFIX} Budget exceeded at batch ${bIdx + 1}/${batchCount} after ${Date.now() - handlerStart}ms. Stopping.`,
+        );
+        break;
+      }
+
       const batch = batches[bIdx];
 
       // Build user prompt with numbered assumptions
@@ -246,16 +281,11 @@ export default api({
       let parsed: RawEntry[] = [];
       let batchSuccess = false;
       let attempts = 0;
-      let lastWasError = false;
-      let lastWasParseFailure = false;
-      let lastWasTruncated = false;
+      let lastFailure: BatchFailureDetail | null = null;
 
       while (attempts < MAX_ATTEMPTS) {
-        if (attempts > 0 && !lastWasError && !lastWasParseFailure && !lastWasTruncated) break;
         attempts++;
-        lastWasError = false;
-        lastWasParseFailure = false;
-        lastWasTruncated = false;
+        const callStart = Date.now();
 
         try {
           const llmResponse = await ai.apiRequest(
@@ -276,32 +306,49 @@ export default api({
             { label: `${LOG_PREFIX} batch ${bIdx + 1}/${batchCount} attempt ${attempts}` },
           );
 
+          const callElapsed = Date.now() - callStart;
           totalInputTokens += llmResponse.usage.input_tokens;
           totalOutputTokens += llmResponse.usage.output_tokens;
 
           console.log(
-            `${LOG_PREFIX} CACHE batch=${bIdx + 1} ` +
+            `${LOG_PREFIX} CACHE batch=${bIdx + 1} attempt=${attempts} elapsed=${callElapsed}ms ` +
             `created=${llmResponse.usage.cache_creation_input_tokens ?? 0} ` +
             `read=${llmResponse.usage.cache_read_input_tokens ?? 0} ` +
             `input=${llmResponse.usage.input_tokens}`,
           );
 
           if (llmResponse.stop_reason === "max_tokens") {
-            lastWasTruncated = true;
-            console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: TRUNCATED (attempt ${attempts}).`);
+            lastFailure = {
+              batchIndex: bIdx,
+              cause: "truncation",
+              attempt: attempts,
+              elapsedMs: callElapsed,
+              assumptions: batch.map((a) => ({ id: a.id, propositionHead: a.proposition.slice(0, 60) })),
+            };
+            console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: TRUNCATED (attempt ${attempts}, ${callElapsed}ms).`);
             continue;
           }
 
-          const responseText = llmResponse.content
+          let responseText = llmResponse.content
             .filter((c: any) => c.type === "text")
             .map((c: any) => c.text)
             .join("");
 
+          // Strip markdown fences — model sometimes wraps JSON in ```json ... ```
+          responseText = responseText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+
           try {
             const arr = JSON.parse(responseText);
             if (!Array.isArray(arr)) {
-              lastWasParseFailure = true;
-              console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: not an array (attempt ${attempts}).`);
+              lastFailure = {
+                batchIndex: bIdx,
+                cause: "parse_failure",
+                attempt: attempts,
+                elapsedMs: callElapsed,
+                rawResponseHead: responseText.slice(0, 300),
+                assumptions: batch.map((a) => ({ id: a.id, propositionHead: a.proposition.slice(0, 60) })),
+              };
+              console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: not an array (attempt ${attempts}, ${callElapsed}ms).`);
               continue;
             }
             parsed = arr.filter(
@@ -315,21 +362,53 @@ export default api({
             batchSuccess = true;
             break;
           } catch {
-            lastWasParseFailure = true;
-            console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: JSON parse failure (attempt ${attempts}).`);
+            lastFailure = {
+              batchIndex: bIdx,
+              cause: "parse_failure",
+              attempt: attempts,
+              elapsedMs: callElapsed,
+              rawResponseHead: responseText.slice(0, 300),
+              assumptions: batch.map((a) => ({ id: a.id, propositionHead: a.proposition.slice(0, 60) })),
+            };
+            console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: JSON parse failure (attempt ${attempts}, ${callElapsed}ms).`);
             continue;
           }
         } catch (err) {
-          lastWasError = true;
-          console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: LLM call failed (attempt ${attempts}): ${String(err)}`);
+          const callElapsed = Date.now() - callStart;
+          const errMsg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message)
+            : String(err);
+
+          // Distinguish timeout/abort from HTTP errors
+          const isTimeout = /timeout|abort|cancel|ECONNRESET|socket hang up/i.test(errMsg);
+          const httpStatusMatch = errMsg.match(/status[:\s]+(\d{3})/i);
+          const httpStatus = httpStatusMatch ? parseInt(httpStatusMatch[1], 10) : undefined;
+
+          lastFailure = {
+            batchIndex: bIdx,
+            cause: isTimeout ? "timeout_or_abort" : "http_error",
+            attempt: attempts,
+            elapsedMs: callElapsed,
+            errorMessage: errMsg.slice(0, 500),
+            httpStatus,
+            assumptions: batch.map((a) => ({ id: a.id, propositionHead: a.proposition.slice(0, 60) })),
+          };
+          console.log(
+            `${LOG_PREFIX} Batch ${bIdx + 1}: ${lastFailure.cause} (attempt ${attempts}, ${callElapsed}ms): ${errMsg.slice(0, 200)}`,
+          );
           continue;
         }
       }
 
       if (!batchSuccess) {
         batchFailed++;
-        batchFailedIndices.push(batch.map((a) => a.index));
-        console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: FAILED after ${attempts} attempts.`);
+        if (lastFailure) {
+          batchFailedDetails.push(lastFailure);
+        }
+        console.log(`${LOG_PREFIX} Batch ${bIdx + 1}: FAILED after ${attempts} attempts. Cause: ${lastFailure?.cause ?? "unknown"}`);
+        // Count all assumptions in the failed batch as neither labelled nor unmentioned
+        // — they are tracked in batchFailedDetails
+        batchesCompleted++;
         continue;
       }
 
@@ -369,25 +448,41 @@ export default api({
           unmentioned++;
         }
       }
+
+      batchesCompleted++;
     }
 
+    // Compute nextOffset
+    const rowsConsumed = stoppedEarly
+      ? batchesCompleted * BATCH_SIZE
+      : sampled;
+    const nextOffset = (offset + rowsConsumed < totalCanonical)
+      ? offset + rowsConsumed
+      : null;
+
     console.log(
-      `${LOG_PREFIX} Complete. Labels: ${JSON.stringify(labelCounts)}. ` +
+      `${LOG_PREFIX} Done. Labels: ${JSON.stringify(labelCounts)}. ` +
       `labelRejected=${labelRejected}, unmentioned=${unmentioned}, batchFailed=${batchFailed}. ` +
-      `Tokens: ${totalInputTokens} in / ${totalOutputTokens} out.`,
+      `stoppedEarly=${stoppedEarly}, nextOffset=${nextOffset}. ` +
+      `Tokens: ${totalInputTokens} in / ${totalOutputTokens} out. Elapsed: ${Date.now() - handlerStart}ms.`,
     );
 
     return {
       runId,
       totalCanonical,
+      offset,
+      limit,
       sampled,
       batchCount,
+      batchesCompleted,
+      stoppedEarly,
+      nextOffset,
       labelCounts,
       labelRejected,
       rejectedValues,
       unmentioned,
       batchFailed,
-      batchFailedIndices,
+      batchFailedDetails,
       labelled,
       totalInputTokens,
       totalOutputTokens,
