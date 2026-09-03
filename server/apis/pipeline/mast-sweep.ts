@@ -287,6 +287,7 @@ const sweep: StageHandler = async (
   let search_remappedChunkLabel = seedNum(priorPayload, "search_remappedChunkLabel");
   let search_callFailures = seedNum(priorPayload, "search_callFailures");
   let search_batchesParseFailed = seedNum(priorPayload, "search_batchesParseFailed");
+  let search_insertFailures = seedNum(priorPayload, "search_insertFailures");
   let search_rejectBadRelation = seedNum(priorPayload, "search_rejectBadRelation");
   let search_truncations = seedNum(priorPayload, "search_truncations");
   let search_totalInputTokens = seedNum(priorPayload, "search_totalInputTokens");
@@ -344,6 +345,7 @@ const sweep: StageHandler = async (
     search_remappedChunkLabel,
     search_callFailures,
     search_batchesParseFailed,
+    search_insertFailures,
     search_rejectBadRelation,
     search_truncations,
     search_totalInputTokens,
@@ -504,16 +506,20 @@ const sweep: StageHandler = async (
               const fenceMatch = responseText.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
               if (fenceMatch) responseText = fenceMatch[1];
 
+              // ── Parse LLM response ──
+              let parsedHits: RawHit[] = [];
               try {
                 const parsed = JSON.parse(responseText);
                 if (!Array.isArray(parsed)) { lastWasParse = true; continue; }
 
-                const hits: RawHit[] = parsed.filter(
+                parsedHits = parsed.filter(
                   (el: any) => el && typeof el === "object" && typeof el.chunk === "number" && typeof el.index === "number" && typeof el.quote === "string" && typeof el.kind === "string",
                 );
+              } catch { lastWasParse = true; search_batchesParseFailed++; continue; }
 
-                // Process hits through gate
-                for (const hit of hits) {
+              // ── Process hits through gate and INSERT ──
+              try {
+                for (const hit of parsedHits) {
                   search_totalHitsReturned++;
 
                   // Validate chunk label
@@ -574,8 +580,16 @@ const sweep: StageHandler = async (
                   );
                 }
 
-                break; // success
-              } catch { lastWasParse = true; search_batchesParseFailed++; continue; }
+                break; // success — parse + inserts all succeeded
+              } catch (insertErr: unknown) {
+                search_insertFailures++;
+                const errMsg = insertErr instanceof Error ? insertErr.message : String(insertErr);
+                const firstHit = parsedHits[0];
+                console.error(`${LOG_PREFIX} INSERT failed (batch globalIdx=${globalBatch}): ${errMsg}`);
+                console.error(`${LOG_PREFIX}   first hit values: chunk=${firstHit?.chunk}, index=${firstHit?.index}, kind=${firstHit?.kind}, relation=${firstHit?.relation}, quote=${firstHit?.quote?.slice(0, 80)}`);
+                // Do NOT retry — a failing INSERT will fail identically on retry
+                break;
+              }
             } catch { lastWasErr = true; search_callFailures++; continue; }
           }
 
