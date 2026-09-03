@@ -736,6 +736,8 @@ const sweep: StageHandler = async (
   let search_rejectBadIndex = seedNum(priorPayload, "search_rejectBadIndex");
   let search_remappedChunkLabel = seedNum(priorPayload, "search_remappedChunkLabel");
   let search_callFailures = seedNum(priorPayload, "search_callFailures");
+  let search_batchesParseFailed = seedNum(priorPayload, "search_batchesParseFailed");
+  let search_rejectBadRelation = seedNum(priorPayload, "search_rejectBadRelation");
   let search_truncations = seedNum(priorPayload, "search_truncations");
   let search_totalInputTokens = seedNum(priorPayload, "search_totalInputTokens");
   let search_totalOutputTokens = seedNum(priorPayload, "search_totalOutputTokens");
@@ -801,6 +803,8 @@ const sweep: StageHandler = async (
     search_rejectBadIndex,
     search_remappedChunkLabel,
     search_callFailures,
+    search_batchesParseFailed,
+    search_rejectBadRelation,
     search_truncations,
     search_totalInputTokens,
     search_totalOutputTokens,
@@ -1214,8 +1218,6 @@ const sweep: StageHandler = async (
       const batchesPerPass = Math.ceil(allChunks.length / CHUNKS_PER_CALL);
       const totalBatches = passGroups.length * batchesPerPass;
 
-      let batchGlobalIdx = phaseCursor;
-
       for (let passIdx = 0; passIdx < passGroups.length; passIdx++) {
         const passAssumptions = passGroups[passIdx];
         const cachedPrefix = buildCachedPrefix(passAssumptions);
@@ -1331,27 +1333,36 @@ const sweep: StageHandler = async (
                   const kind = hit.kind;
                   search_hitsByKind[kind] = (search_hitsByKind[kind] ?? 0) + 1;
 
+                  // Enum check on relation
+                  const VALID_RELATIONS = ["supports", "undermines", "constrains", "defines"];
+                  const relation = typeof hit.relation === "string" && VALID_RELATIONS.includes(hit.relation)
+                    ? hit.relation
+                    : null;
+                  if (relation === null && hit.relation !== undefined) {
+                    search_rejectBadRelation++;
+                  }
+
                   // Write evidence row
                   const sourceChunk = chunkBatch[resolvedChunkLabel - 1];
                   await db.execute(
                     `INSERT INTO mast_support_evidence (
                        run_id, assumption_id, doc_id, locator, verbatim,
-                       statement_type, confidence
-                     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, NULL)`,
+                       statement_type, confidence, relation
+                     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, NULL, $7)`,
                     [runId, assumptionId, sourceChunk.document_id,
                      `${sourceChunk.file_name}:chunk_${sourceChunk.chunk_index}`,
-                     hit.quote, kind],
+                     hit.quote, kind, relation],
                     { label: `${LOG_PREFIX} insert evidence` },
                   );
                 }
 
-                search_chunksProcessed += chunkBatch.length;
                 break; // success
-              } catch { lastWasParse = true; continue; }
+              } catch { lastWasParse = true; search_batchesParseFailed++; continue; }
             } catch { lastWasErr = true; search_callFailures++; continue; }
           }
 
-          batchGlobalIdx++;
+          // Increment chunk count once per batch regardless of parse outcome
+          search_chunksProcessed += chunkBatch.length;
         }
       }
 
