@@ -664,7 +664,7 @@ const inheritance: StageHandler = async (
         let rowOriginLocator = originLocator;
         // originLocator is already set above
 
-        await db.execute(
+        const insertedRows = await db.query(
           `INSERT INTO mast_assumptions (
              run_id, deal_id, proposition, origin_type, origin_doc_id,
              origin_locator, verbatim, quantified, value, unit, period,
@@ -673,13 +673,24 @@ const inheritance: StageHandler = async (
              $1::uuid, $2::uuid, $3, 'inherited', $4::uuid,
              $5, $6, false, NULL, NULL, NULL,
              NULL, $7, 1
-           )`,
+           ) RETURNING id`,
+          z.object({ id: z.string() }),
           [
             runId, dealId, j.judgment, docId,
             rowOriginLocator, j.quote, relianceLinkId,
           ],
           { label: `${LOG_PREFIX} insert inherited judgment from ${itemLabel}` },
         );
+
+        // Set dedup_group_id = id (self-referencing canonical) so downstream
+        // stages (severity, synthesize, render) include this row.
+        if (insertedRows.length > 0) {
+          await db.execute(
+            `UPDATE mast_assumptions SET dedup_group_id = id WHERE id = $1::uuid`,
+            [insertedRows[0].id],
+            { label: `${LOG_PREFIX} set dedup_group_id = id for ${insertedRows[0].id}` },
+          );
+        }
       }
     }
 
