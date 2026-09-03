@@ -38,14 +38,19 @@ import registerMemo from "./mast-register-memo.js";
 import registerAssemble from "./mast-register-assemble.js";
 // Retained for possible reinstatement — currently merged into extract.
 import extract from "./mast-extract.js";
+// Retained for possible reinstatement — currently merged into sweep.
 import relianceLinks from "./mast-reliance-links.js";
+// Retained for possible reinstatement — currently merged into sweep.
 import inheritance from "./mast-inheritance.js";
 // Retained for possible reinstatement — currently not in STAGES.
 import emergent from "./mast-emergent.js";
 // Retained for possible reinstatement — currently not in STAGES.
 import propositionalize from "./mast-propositionalize.js";
+// Retained for possible reinstatement — currently merged into sweep.
 import supportSearch from "./mast-support-search.js";
+// Retained for possible reinstatement — currently merged into sweep.
 import forecastRecursion from "./mast-forecast-recursion.js";
+import sweep from "./mast-sweep.js";
 import dependence from "./mast-dependence.js";
 import severity from "./mast-severity.js";
 import fragility from "./mast-fragility.js";
@@ -80,10 +85,8 @@ const HANDLER_MAP: Partial<Record<StageName, StageHandler>> = {
   // removed from STAGES — handlers retained in imports for reinstatement.
   // register_memo, register_assemble: merged into extract.
   extract: extract,
-  reliance_links: relianceLinks,
-  inheritance: inheritance,
-  support_search: supportSearch,
-  forecast_recursion: forecastRecursion,
+  // reliance_links, inheritance, support_search, forecast_recursion: merged into sweep.
+  sweep: sweep,
   // lineage: removed — orchestrator auto-completes handler-less stages.
   dependence: dependence,
   severity: severity,

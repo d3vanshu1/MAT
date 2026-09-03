@@ -24,11 +24,9 @@ export const STAGES = [
   "extract",
   // propositionalize — removed: rewrote model_explicit/model_implicit text; no model rows to rewrite.
   // register_memo, register_assemble — merged into extract.
-  "reliance_links",
-  "inheritance",
+  "sweep",
+  // reliance_links, inheritance, support_search, forecast_recursion — merged into sweep.
   // emergent — removed: detects emergent properties from model_explicit drivers; no drivers.
-  "support_search",
-  "forecast_recursion",
   "lineage",
   "dependence",
   "severity",
@@ -50,10 +48,8 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
   "extract",
   // register_memo, register_assemble — merged into extract.
   // propositionalize — removed (see STAGES comment)
-  "reliance_links",
-  "inheritance",
-  "support_search",
-  "forecast_recursion",
+  "sweep",
+  // reliance_links, inheritance, support_search, forecast_recursion — merged into sweep.
   "lineage",
   "fragility",
   "synthesize",
