@@ -78,6 +78,8 @@ const PayloadRow = z.object({
   payload: z.any().nullable(),
 });
 
+const CountRow = z.object({ cnt: z.coerce.number() });
+
 // ---------------------------------------------------------------------------
 // Normalization — local copy from mast-register-memo.ts
 // ---------------------------------------------------------------------------
@@ -329,7 +331,6 @@ const supportSearch: StageHandler = async (
       }
     }
   }
-  const assumptionsHit = new Set<number>();
 
   while (passIdx < passGroups.length) {
     const passGroup = passGroups[passIdx];
@@ -348,8 +349,22 @@ const supportSearch: StageHandler = async (
           `${LOG_PREFIX} Budget exceeded at pass ${passIdx}, batch ${batchIdx}. Pausing at position ${encodedPos}.`,
         );
 
+        // Compute distinctAssumptionsHit from DB (exact across all invocations)
+        let distinctAssumptionsHitBudget: number | undefined;
+        try {
+          const [{ cnt }] = await db.query(
+            `SELECT COUNT(DISTINCT assumption_id)::int AS cnt FROM mast_support_evidence WHERE run_id = $1::uuid`,
+            CountRow,
+            [runId],
+            { label: "MAST-SWEEP: count distinct assumptions with evidence (budget path)" },
+          );
+          distinctAssumptionsHitBudget = cnt;
+        } catch (countErr) {
+          console.log(`${LOG_PREFIX} Failed to count distinct assumptions: ${String(countErr)}`);
+        }
+
         // Persist payload before returning
-        await persistPayload(db, runId, {
+        const budgetPayload: Record<string, unknown> = {
           chunksProcessed,
           totalHitsReturned,
           hitsPassedGate,
@@ -358,7 +373,6 @@ const supportSearch: StageHandler = async (
           rejectBadIndex,
           remappedChunkLabel,
           hitsByKind,
-          distinctAssumptionsHit: assumptionsHit.size,
           callFailures,
           truncations,
           totalInputTokens,
@@ -367,7 +381,11 @@ const supportSearch: StageHandler = async (
           totalCacheReadTokens,
           invocationCount,
           countersCumulative: true,
-        });
+        };
+        if (distinctAssumptionsHitBudget !== undefined) {
+          budgetPayload.distinctAssumptionsHit = distinctAssumptionsHitBudget;
+        }
+        await persistPayload(db, runId, budgetPayload);
 
         return {
           complete: false,
@@ -548,7 +566,6 @@ const supportSearch: StageHandler = async (
         // Passed all gates — write to mast_support_evidence
         hitsPassedGate++;
         hitsByKind[hit.kind] = (hitsByKind[hit.kind] || 0) + 1;
-        assumptionsHit.add(hit.index);
 
         const assumptionId = assumptionIdByIndex.get(hit.index);
         const chunkData = chunkBatch[resolvedChunkLabel - 1];
@@ -592,12 +609,26 @@ const supportSearch: StageHandler = async (
     `hitsPassedGate=${hitsPassedGate}, rejectQuoteTooShort=${rejectQuoteTooShort}, ` +
     `rejectPrefixNotFound=${rejectPrefixNotFound}, rejectBadIndex=${rejectBadIndex}, remappedChunkLabel=${remappedChunkLabel}, ` +
     `callFailures=${callFailures}, truncations=${truncations}, ` +
-    `distinctAssumptionsHit=${assumptionsHit.size}/${numberedAssumptions.length}. ` +
+    `distinctAssumptionsHit=<computed from DB>/${numberedAssumptions.length}. ` +
     `hitsByKind=${JSON.stringify(hitsByKind)}. ` +
     `totalCacheCreationTokens=${totalCacheCreationTokens}, totalCacheReadTokens=${totalCacheReadTokens}.`,
   );
 
-  await persistPayload(db, runId, {
+  // Compute distinctAssumptionsHit from DB (exact across all invocations)
+  let distinctAssumptionsHitFinal: number | undefined;
+  try {
+    const [{ cnt }] = await db.query(
+      `SELECT COUNT(DISTINCT assumption_id)::int AS cnt FROM mast_support_evidence WHERE run_id = $1::uuid`,
+      CountRow,
+      [runId],
+      { label: "MAST-SWEEP: count distinct assumptions with evidence (completion)" },
+    );
+    distinctAssumptionsHitFinal = cnt;
+  } catch (countErr) {
+    console.log(`${LOG_PREFIX} Failed to count distinct assumptions: ${String(countErr)}`);
+  }
+
+  const finalPayload: Record<string, unknown> = {
     chunksProcessed,
     totalHitsReturned,
     hitsPassedGate,
@@ -606,7 +637,6 @@ const supportSearch: StageHandler = async (
     rejectBadIndex,
     remappedChunkLabel,
     hitsByKind,
-    distinctAssumptionsHit: assumptionsHit.size,
     callFailures,
     truncations,
     totalInputTokens,
@@ -615,7 +645,11 @@ const supportSearch: StageHandler = async (
     totalCacheReadTokens,
     invocationCount,
     countersCumulative: true,
-  });
+  };
+  if (distinctAssumptionsHitFinal !== undefined) {
+    finalPayload.distinctAssumptionsHit = distinctAssumptionsHitFinal;
+  }
+  await persistPayload(db, runId, finalPayload);
 
   return {
     complete: true,
