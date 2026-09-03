@@ -412,29 +412,11 @@ const render: StageHandler = async (
   // Section 4 (Silent Assumptions) removed — model_implicit rows no longer
   // enter the register, so this section would always be empty.
 
-  // ── Section 4: Inherited Assumptions ──────────────────────────────
-  sections.push("## 4. Inherited Assumptions\n");
-  const inheritedFindings = filteredFindings.filter(
-    (f) => f.origin_type === "inherited" || (f.recursion_depth !== null && f.recursion_depth >= 1),
-  );
+  // Section 4 (Inherited Assumptions) removed — inheritance phase has been
+  // removed from the sweep, so this section would always be empty.
 
-  if (inheritedFindings.length === 0) {
-    sections.push("No inherited assumptions were identified.\n");
-  } else {
-    sections.push(
-      `${inheritedFindings.length} assumptions were adopted from external reports ` +
-      `without being restated in the memo. These did not appear in the memo.\n\n`,
-    );
-    for (const f of inheritedFindings) {
-      const support = extractSupportState(f.severity_basis);
-      const tier = f.dependence_tier ?? "low";
-      const loc = f.origin_locator ? ` (${f.origin_locator})` : "";
-      sections.push(`- ${f.proposition} [${f.severity}, dependence: ${tier}, support: ${support}]${loc}\n`);
-    }
-  }
-
-  // ── Section 5: Coverage and Limitations ───────────────────────────
-  sections.push("\n## 5. Coverage and Limitations\n");
+  // ── Section 4: Coverage and Limitations ───────────────────────────
+  sections.push("\n## 4. Coverage and Limitations\n");
 
   // 6a. Sweep ran?
   const sevPayload = payloadMap.get("severity") as any;
@@ -465,6 +447,12 @@ const render: StageHandler = async (
   sections.push(
     "The lineage stage did not run in this build, so the report does not trace how " +
     "an assumption changed as it moved between documents.\n\n",
+  );
+
+  // 5d. Inherited assumptions
+  sections.push(
+    "The tool does not currently identify assumptions adopted from external reports " +
+    "without restatement (inherited assumptions). This capability is not in this build.\n\n",
   );
 
   // 6d. No return impact
@@ -526,12 +514,12 @@ const render: StageHandler = async (
       `${synthInputCount} register rows were synthesized into ` +
       `${synthCriticalCount + synthWarningCount} findings ` +
       `(${synthCriticalCount} critical, ${synthWarningCount} warning). ` +
-      `The full register is preserved in section 6.\n\n`,
+      `The full register is preserved in section 5.\n\n`,
     );
   }
 
-  // ── Section 6: Full Register Appendix ─────────────────────────────
-  sections.push("## 6. Full Register\n\n");
+  // ── Section 5: Full Register Appendix ─────────────────────────────
+  sections.push("## 5. Full Register\n\n");
   sections.push("| # | Proposition | Dependence | Support | Severity |\n");
   sections.push("|---|-------------|------------|---------|----------|\n");
 
@@ -577,7 +565,7 @@ const render: StageHandler = async (
     warningOmitted: useSynthesized ? 0 : Math.max(0, sevCounts.warning - WARNING_CAP),
     info: sevCounts.info,
     silent: 0, // Section removed — model_implicit no longer in register
-    inherited: inheritedFindings.length,
+    inherited: 0, // inheritance phase removed from sweep
     registerRows: sorted.length,
     documentsRead: documentRows.length,
     documentsWithTables: documentRows.filter((d) => d.table_count > 0).length,
