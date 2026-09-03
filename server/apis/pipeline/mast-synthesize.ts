@@ -108,6 +108,7 @@ const FindingInputRow = z.object({
   proposition: z.string(),
   dependence_tier: z.string().nullable(),
   dependence_basis: z.string().nullable(),
+  assumption_label: z.string().nullable(),
   support_state: z.string(),
   falsification_condition: z.string().nullable(),
   origin_type: z.string(),
@@ -118,6 +119,7 @@ const RegisterRow = z.object({
   proposition: z.string(),
   dependence_tier: z.string().nullable(),
   dependence_basis: z.string().nullable(),
+  assumption_label: z.string().nullable(),
   origin_type: z.string(),
   verbatim: z.string().nullable(),
 });
@@ -134,6 +136,7 @@ interface RawFinding {
   proposition: string;
   dependence_tier: string | null;
   dependence_basis: string | null;
+  assumption_label: string | null;
   support_state: string;
   falsification_condition: string | null;
   origin_type: string;
@@ -801,7 +804,7 @@ async function stepB_pair(
     try {
       const related = await db.query(
         `SELECT a.id AS assumption_id, a.proposition, a.dependence_tier,
-                a.dependence_basis, a.origin_type, a.verbatim
+                a.dependence_basis, a.assumption_label, a.origin_type, a.verbatim
          FROM mast_assumptions a
          WHERE a.run_id = $1::uuid
            AND a.dedup_group_id = a.id
@@ -1033,20 +1036,34 @@ async function stepC_compose(
 // Step D: Severity correction
 // ---------------------------------------------------------------------------
 
+// Phrases that identify return-figure restatements (ported from DEPENDENCE_RULE_TABLE
+// return_metric rule, plus mom and x mom).
+const RETURN_FIGURE_PHRASES = ["irr", "moic", "money multiple", "mom", "x mom"];
+
+function containsReturnFigure(proposition: string): boolean {
+  const norm = proposition
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return RETURN_FIGURE_PHRASES.some((p) => norm.includes(p));
+}
+
 function stepD_severityCorrection(
   cluster: Cluster,
   originalSeverity: string,
 ): { severity: string; corrected: boolean; reason: string | null } {
-  // If every member's dependence_basis = 'return_metric' AND support = 'nothing',
+  // If every member has assumption_label = 'exit_multiple' AND its proposition
+  // contains an IRR/MoM-style return figure, AND support = 'nothing',
   // the finding is "not externally verifiable" — cap at warning.
-  const allReturnMetric = cluster.members.every(
-    (m) => m.dependence_basis === "return_metric",
+  const allExitMultipleWithReturnFigure = cluster.members.every(
+    (m) => m.assumption_label === "exit_multiple" && containsReturnFigure(m.proposition),
   );
   const allNothingSupport = cluster.members.every(
     (m) => extractSupportState(m.severity_basis) === "nothing",
   );
 
-  if (allReturnMetric && allNothingSupport && originalSeverity === "critical") {
+  if (allExitMultipleWithReturnFigure && allNothingSupport && originalSeverity === "critical") {
     return {
       severity: "warning",
       corrected: true,
@@ -1173,6 +1190,7 @@ const synthesize: StageHandler = async (
        a.proposition,
        a.dependence_tier,
        a.dependence_basis,
+       a.assumption_label,
        CASE
          WHEN f.severity_basis LIKE '%support=measured%' THEN 'measured'
          WHEN f.severity_basis LIKE '%support=forecast%' THEN 'forecast'
