@@ -74,6 +74,10 @@ const ChunkRow = z.object({
   file_name: z.string(),
 });
 
+const PayloadRow = z.object({
+  payload: z.any().nullable(),
+});
+
 // ---------------------------------------------------------------------------
 // Normalization — local copy from mast-register-memo.ts
 // ---------------------------------------------------------------------------
@@ -277,20 +281,54 @@ const supportSearch: StageHandler = async (
   }
 
   // ── 7. Sweep ──────────────────────────────────────────────────────
-  let totalHitsReturned = 0;
-  let hitsPassedGate = 0;
-  let rejectQuoteTooShort = 0;
-  let rejectPrefixNotFound = 0;
-  let rejectBadIndex = 0;
-  let remappedChunkLabel = 0;
-  let callFailures = 0;
-  let truncations = 0;
-  let chunksProcessed = 0;
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
-  let totalCacheCreationTokens = 0;
-  let totalCacheReadTokens = 0;
+  // ── Seed counters: cumulative across invocations ────────────────
+  //   On resume (resumePosition > 0), read the prior payload and add
+  //   to it.  On fresh start (resumePosition === 0), begin at zero.
+  let priorPayload: Record<string, any> = {};
+  if (resumePosition > 0) {
+    try {
+      const rows = await db.query(
+        `SELECT payload FROM mast_pipeline_state
+         WHERE run_id = $1::uuid AND stage = 'support_search' AND stage != '_lock'
+         LIMIT 1`,
+        PayloadRow,
+        [runId],
+        { label: "MAST-SWEEP: read prior payload for counter seeding" },
+      );
+      if (rows.length > 0 && rows[0].payload && typeof rows[0].payload === "object") {
+        priorPayload = rows[0].payload as Record<string, any>;
+      }
+    } catch (seedErr) {
+      console.log(`${LOG_PREFIX} Failed to read prior payload for seeding: ${String(seedErr)}`);
+    }
+  }
+
+  const seedNum = (key: string): number =>
+    typeof priorPayload[key] === "number" ? priorPayload[key] : 0;
+
+  let totalHitsReturned = seedNum("totalHitsReturned");
+  let hitsPassedGate = seedNum("hitsPassedGate");
+  let rejectQuoteTooShort = seedNum("rejectQuoteTooShort");
+  let rejectPrefixNotFound = seedNum("rejectPrefixNotFound");
+  let rejectBadIndex = seedNum("rejectBadIndex");
+  let remappedChunkLabel = seedNum("remappedChunkLabel");
+  let callFailures = seedNum("callFailures");
+  let truncations = seedNum("truncations");
+  let chunksProcessed = seedNum("chunksProcessed");
+  let totalInputTokens = seedNum("totalInputTokens");
+  let totalOutputTokens = seedNum("totalOutputTokens");
+  let totalCacheCreationTokens = seedNum("totalCacheCreationTokens");
+  let totalCacheReadTokens = seedNum("totalCacheReadTokens");
+  let invocationCount = seedNum("invocationCount") + 1;
   const hitsByKind: Record<string, number> = {};
+  // Seed hitsByKind from prior payload, merging key-by-key
+  if (priorPayload.hitsByKind && typeof priorPayload.hitsByKind === "object") {
+    for (const [k, v] of Object.entries(priorPayload.hitsByKind)) {
+      if (typeof v === "number") {
+        hitsByKind[k] = v;
+      }
+    }
+  }
   const assumptionsHit = new Set<number>();
 
   while (passIdx < passGroups.length) {
@@ -327,6 +365,8 @@ const supportSearch: StageHandler = async (
           totalOutputTokens,
           totalCacheCreationTokens,
           totalCacheReadTokens,
+          invocationCount,
+          countersCumulative: true,
         });
 
         return {
@@ -564,6 +604,7 @@ const supportSearch: StageHandler = async (
     rejectQuoteTooShort,
     rejectPrefixNotFound,
     rejectBadIndex,
+    remappedChunkLabel,
     hitsByKind,
     distinctAssumptionsHit: assumptionsHit.size,
     callFailures,
@@ -572,6 +613,8 @@ const supportSearch: StageHandler = async (
     totalOutputTokens,
     totalCacheCreationTokens,
     totalCacheReadTokens,
+    invocationCount,
+    countersCumulative: true,
   });
 
   return {
