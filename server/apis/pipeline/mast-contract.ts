@@ -28,7 +28,8 @@ export const STAGES = [
   // reliance_links, inheritance, support_search, forecast_recursion — merged into sweep.
   // emergent — removed: detects emergent properties from model_explicit drivers; no drivers.
   "lineage",
-  "dependence",
+  "label",
+  // dependence — removed from STAGES; replaced by label. Handler retained on disk.
   "severity",
   "fragility",
   "synthesize",
@@ -51,6 +52,7 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
   "sweep",
   // reliance_links, inheritance, support_search, forecast_recursion — merged into sweep.
   "lineage",
+  "label",
   "fragility",
   "synthesize",
 ]);

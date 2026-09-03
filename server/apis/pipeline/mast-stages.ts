@@ -51,7 +51,9 @@ import supportSearch from "./mast-support-search.js";
 // Retained for possible reinstatement — currently merged into sweep.
 import forecastRecursion from "./mast-forecast-recursion.js";
 import sweep from "./mast-sweep.js";
+// Retained but no longer in STAGES — replaced by label.
 import dependence from "./mast-dependence.js";
+import label from "./mast-label.js";
 import severity from "./mast-severity.js";
 import fragility from "./mast-fragility.js";
 import synthesize from "./mast-synthesize.js";
@@ -88,7 +90,8 @@ const HANDLER_MAP: Partial<Record<StageName, StageHandler>> = {
   // reliance_links, inheritance, support_search, forecast_recursion: merged into sweep.
   sweep: sweep,
   // lineage: removed — orchestrator auto-completes handler-less stages.
-  dependence: dependence,
+  // dependence: removed from STAGES — replaced by label. Handler retained on disk.
+  label: label,
   severity: severity,
   fragility: fragility,
   synthesize: synthesize,
