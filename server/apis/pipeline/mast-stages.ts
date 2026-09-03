@@ -36,6 +36,8 @@ import registerModelDrivers from "./mast-register-model-drivers.js";
 import registerSilent from "./mast-register-silent.js";
 import registerMemo from "./mast-register-memo.js";
 import registerAssemble from "./mast-register-assemble.js";
+// Retained for possible reinstatement — currently merged into extract.
+import extract from "./mast-extract.js";
 import relianceLinks from "./mast-reliance-links.js";
 import inheritance from "./mast-inheritance.js";
 // Retained for possible reinstatement — currently not in STAGES.
@@ -76,8 +78,8 @@ function singleShotStub(_ctx: StageContext): Promise<StageResult> {
 const HANDLER_MAP: Partial<Record<StageName, StageHandler>> = {
   // register_model_drivers, register_silent, propositionalize, emergent:
   // removed from STAGES — handlers retained in imports for reinstatement.
-  register_memo: registerMemo,
-  register_assemble: registerAssemble,
+  // register_memo, register_assemble: merged into extract.
+  extract: extract,
   reliance_links: relianceLinks,
   inheritance: inheritance,
   support_search: supportSearch,

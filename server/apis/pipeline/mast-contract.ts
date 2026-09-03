@@ -21,9 +21,9 @@ import {
 export const STAGES = [
   // register_model_drivers — removed: model-derived rows no longer enter the register.
   // register_silent — removed: same reason.
-  "register_memo",
+  "extract",
   // propositionalize — removed: rewrote model_explicit/model_implicit text; no model rows to rewrite.
-  "register_assemble",
+  // register_memo, register_assemble — merged into extract.
   "reliance_links",
   "inheritance",
   // emergent — removed: detects emergent properties from model_explicit drivers; no drivers.
@@ -47,7 +47,8 @@ export type StageName = (typeof STAGES)[number];
 export const LOOP_STAGES: ReadonlySet<string> = new Set([
   // register_model_drivers — removed (see STAGES comment)
   // register_silent — removed (see STAGES comment)
-  "register_memo",
+  "extract",
+  // register_memo, register_assemble — merged into extract.
   // propositionalize — removed (see STAGES comment)
   "reliance_links",
   "inheritance",
