@@ -571,8 +571,8 @@ const sweep: StageHandler = async (
                   await db.execute(
                     `INSERT INTO mast_support_evidence (
                        run_id, assumption_id, doc_id, locator, verbatim,
-                       statement_type, confidence, relation
-                     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, NULL, $7)`,
+                       statement_type, classifier_reason, spawned_assumption_id, relation
+                     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, NULL, NULL, $7)`,
                     [runId, assumptionId, sourceChunk.document_id,
                      `${sourceChunk.file_name}:chunk_${sourceChunk.chunk_index}`,
                      hit.quote, kind, relation],
