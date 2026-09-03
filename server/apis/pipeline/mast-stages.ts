@@ -30,13 +30,17 @@ import type { StageName, StageContext, StageResult, StageHandler } from "./mast-
 // Handler imports — static top-level, no circular risk because handlers
 // import from mast-contract.ts (the leaf), not from this file.
 // ---------------------------------------------------------------------------
+// Retained for possible reinstatement — currently not in STAGES.
 import registerModelDrivers from "./mast-register-model-drivers.js";
+// Retained for possible reinstatement — currently not in STAGES.
 import registerSilent from "./mast-register-silent.js";
 import registerMemo from "./mast-register-memo.js";
 import registerAssemble from "./mast-register-assemble.js";
 import relianceLinks from "./mast-reliance-links.js";
 import inheritance from "./mast-inheritance.js";
+// Retained for possible reinstatement — currently not in STAGES.
 import emergent from "./mast-emergent.js";
+// Retained for possible reinstatement — currently not in STAGES.
 import propositionalize from "./mast-propositionalize.js";
 import supportSearch from "./mast-support-search.js";
 import forecastRecursion from "./mast-forecast-recursion.js";
@@ -70,19 +74,15 @@ function singleShotStub(_ctx: StageContext): Promise<StageResult> {
 // ---------------------------------------------------------------------------
 
 const HANDLER_MAP: Partial<Record<StageName, StageHandler>> = {
-  register_model_drivers: registerModelDrivers,
-  register_silent: registerSilent,
+  // register_model_drivers, register_silent, propositionalize, emergent:
+  // removed from STAGES — handlers retained in imports for reinstatement.
   register_memo: registerMemo,
   register_assemble: registerAssemble,
-  propositionalize: propositionalize,
   reliance_links: relianceLinks,
   inheritance: inheritance,
-  emergent: emergent,
   support_search: supportSearch,
   forecast_recursion: forecastRecursion,
-  // lineage: removed — stage still in STAGES/LOOP_STAGES (mast-contract.ts)
-  // but has no handler. getStageHandler will return undefined; orchestrator
-  // must skip stages with no handler until the contract arrays are pruned.
+  // lineage: removed — orchestrator auto-completes handler-less stages.
   dependence: dependence,
   severity: severity,
   fragility: fragility,

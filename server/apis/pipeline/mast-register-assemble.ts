@@ -30,8 +30,9 @@
  *   trim).  Exact match → group.  Canonical = lowest origin_locator.
  *
  * ── FAIL CLOSED ─────────────────────────────────────────────────────────────
- *   If any of the three origin_types (model_explicit, model_implicit,
- *   memo_prose) has zero rows, throw naming the missing type.
+ *   memo_prose must have rows — throws if zero.
+ *   model_explicit and model_implicit may be zero (model side removed);
+ *   logged but not fatal.
  */
 
 import { z } from "@superblocksteam/sdk-api";
@@ -158,16 +159,18 @@ const registerAssemble: StageHandler = async (
     `${LOG_PREFIX} model_explicit=${modelExplicit.length}  model_implicit=${modelImplicit.length}  memo_prose=${memoProse.length}`,
   );
 
-  // ── Fail closed: every expected origin_type must have rows ─────────
-  const missingTypes: string[] = [];
-  if (modelExplicit.length === 0) missingTypes.push("model_explicit");
-  if (modelImplicit.length === 0) missingTypes.push("model_implicit");
-  if (memoProse.length === 0) missingTypes.push("memo_prose");
-  if (missingTypes.length > 0) {
+  // ── Fail closed: memo_prose is required; model types may be absent ──
+  if (memoProse.length === 0) {
     throw new Error(
-      `${LOG_PREFIX} Fail-closed: origin_type(s) with zero rows: ${missingTypes.join(", ")}. ` +
-        `Cannot assemble dedup groups without all three origin types.`,
+      `${LOG_PREFIX} Fail-closed: memo_prose has zero rows. ` +
+        `Cannot assemble dedup groups without memo-derived assumptions.`,
     );
+  }
+  if (modelExplicit.length === 0) {
+    console.log(`${LOG_PREFIX} model_explicit has zero rows (model side removed — expected).`);
+  }
+  if (modelImplicit.length === 0) {
+    console.log(`${LOG_PREFIX} model_implicit has zero rows (model side removed — expected).`);
   }
 
   // ── Map: rowId → assigned groupId ──────────────────────────────────
@@ -420,6 +423,31 @@ const registerAssemble: StageHandler = async (
       `Rule A=${ruleAGroupCount} Rule B=${ruleBGroupCount} Rule D=${ruleDGroupCount}. ` +
       `Largest group: ${largestGroupSize} rows (canonical: ${largestLocator}).`,
   );
+
+  // Persist row counts per origin_type into stage payload
+  try {
+    const payloadData = {
+      rowCountByOriginType: {
+        model_explicit: modelExplicit.length,
+        model_implicit: modelImplicit.length,
+        memo_prose: memoProse.length,
+      },
+      ruleAGroups: ruleAGroupCount,
+      ruleBGroups: ruleBGroupCount,
+      ruleDGroups: ruleDGroupCount,
+      totalRows: allRows.length,
+      canonicalGroups: canonicalCount,
+    };
+    await db.execute(
+      `UPDATE mast_pipeline_state
+       SET payload = COALESCE(payload, '{}'::jsonb) || $3::jsonb
+       WHERE run_id = $1::uuid AND stage = $2 AND stage != '_lock'`,
+      [runId, "register_assemble", JSON.stringify(payloadData)],
+      { label: "MAST-ASSEMBLE: persist stage summary" },
+    );
+  } catch (payloadErr) {
+    console.log(`${LOG_PREFIX} Failed to persist payload: ${String(payloadErr)}`);
+  }
 
   return {
     complete: true,

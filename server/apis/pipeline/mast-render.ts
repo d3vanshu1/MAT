@@ -409,42 +409,11 @@ const render: StageHandler = async (
     }
   }
 
-  // ── Section 4: Silent Assumptions ─────────────────────────────────
-  sections.push("\n## 4. Silent Assumptions\n");
-  const silentFindings = filteredFindings.filter((f) => f.origin_type === "model_implicit");
+  // Section 4 (Silent Assumptions) removed — model_implicit rows no longer
+  // enter the register, so this section would always be empty.
 
-  if (silentFindings.length === 0) {
-    sections.push("No silent assumptions were detected in this model.\n");
-  } else {
-    // Group by detector
-    const byDetector = new Map<string, typeof silentFindings>();
-    for (const f of silentFindings) {
-      const det = f.detector ?? "unknown";
-      let list = byDetector.get(det);
-      if (!list) {
-        list = [];
-        byDetector.set(det, list);
-      }
-      list.push(f);
-    }
-
-    sections.push(
-      `${silentFindings.length} assumptions were never written down explicitly. ` +
-      `These were detected by automated analysis of the model structure.\n\n`,
-    );
-
-    for (const [detector, findings] of byDetector) {
-      sections.push(`**Detector: ${detector}** (${findings.length})\n\n`);
-      for (const f of findings) {
-        const support = extractSupportState(f.severity_basis);
-        sections.push(`- ${f.proposition} [${f.severity}, support: ${support}]\n`);
-      }
-      sections.push("\n");
-    }
-  }
-
-  // ── Section 5: Inherited Assumptions ──────────────────────────────
-  sections.push("## 5. Inherited Assumptions\n");
+  // ── Section 4: Inherited Assumptions ──────────────────────────────
+  sections.push("## 4. Inherited Assumptions\n");
   const inheritedFindings = filteredFindings.filter(
     (f) => f.origin_type === "inherited" || (f.recursion_depth !== null && f.recursion_depth >= 1),
   );
@@ -464,8 +433,8 @@ const render: StageHandler = async (
     }
   }
 
-  // ── Section 6: Coverage and Limitations ───────────────────────────
-  sections.push("\n## 6. Coverage and Limitations\n");
+  // ── Section 5: Coverage and Limitations ───────────────────────────
+  sections.push("\n## 5. Coverage and Limitations\n");
 
   // 6a. Sweep ran?
   const sevPayload = payloadMap.get("severity") as any;
@@ -557,12 +526,12 @@ const render: StageHandler = async (
       `${synthInputCount} register rows were synthesized into ` +
       `${synthCriticalCount + synthWarningCount} findings ` +
       `(${synthCriticalCount} critical, ${synthWarningCount} warning). ` +
-      `The full register is preserved in section 7.\n\n`,
+      `The full register is preserved in section 6.\n\n`,
     );
   }
 
-  // ── Section 7: Full Register Appendix ─────────────────────────────
-  sections.push("## 7. Full Register\n\n");
+  // ── Section 6: Full Register Appendix ─────────────────────────────
+  sections.push("## 6. Full Register\n\n");
   sections.push("| # | Proposition | Dependence | Support | Severity |\n");
   sections.push("|---|-------------|------------|---------|----------|\n");
 
@@ -607,7 +576,7 @@ const render: StageHandler = async (
     warningRendered: useSynthesized ? synthWarningCount : Math.min(sevCounts.warning, WARNING_CAP),
     warningOmitted: useSynthesized ? 0 : Math.max(0, sevCounts.warning - WARNING_CAP),
     info: sevCounts.info,
-    silent: silentFindings.length,
+    silent: 0, // Section removed — model_implicit no longer in register
     inherited: inheritedFindings.length,
     registerRows: sorted.length,
     documentsRead: documentRows.length,

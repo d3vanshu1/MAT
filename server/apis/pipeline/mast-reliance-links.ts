@@ -457,8 +457,8 @@ const relianceLinks: StageHandler = async (
     `SELECT id, origin_type, origin_doc_id, origin_locator, proposition, verbatim, value
        FROM mast_assumptions
       WHERE run_id = $1
-        AND origin_type IN ('model_explicit', 'memo_prose')
-      ORDER BY origin_type ASC, origin_locator ASC`,
+        AND origin_type = 'memo_prose'
+      ORDER BY origin_locator ASC`,
     AssumptionLeftSchema,
     [runId],
     { label: `${LOG_PREFIX} load left-side assumptions` },
@@ -503,7 +503,7 @@ const relianceLinks: StageHandler = async (
   if (leftSide.length === 0) {
     throw new Error(
       `${LOG_PREFIX} Fail-closed: left-side list is empty. ` +
-        `No model_explicit with value or memo_prose with extractable figures. ` +
+        `No memo_prose rows with extractable figures. ` +
         `Register stages may not have run.`,
     );
   }
