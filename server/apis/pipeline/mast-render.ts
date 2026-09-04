@@ -443,12 +443,6 @@ const render: StageHandler = async (
     "matched no rule and therefore defaulted to low.\n\n",
   );
 
-  // 6c. Lineage
-  sections.push(
-    "The lineage stage did not run in this build, so the report does not trace how " +
-    "an assumption changed as it moved between documents.\n\n",
-  );
-
   // 5d. Inherited assumptions
   sections.push(
     "The tool does not currently identify assumptions adopted from external reports " +

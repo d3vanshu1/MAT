@@ -63,20 +63,6 @@ import render from "./mast-render.js";
 // Stub handlers
 // ---------------------------------------------------------------------------
 
-/**
- * Single-shot stub: returns immediately, reports 0 items, complete.
- * Used for stages that are NOT in LOOP_STAGES.
- */
-function singleShotStub(_ctx: StageContext): Promise<StageResult> {
-  // STUB — replaced in a later packet
-  return Promise.resolve({
-    complete: true,
-    itemsDone: 0,
-    itemsTotal: 0,
-    resumePosition: 0,
-  });
-}
-
 
 // ---------------------------------------------------------------------------
 // Handler registry
@@ -89,7 +75,7 @@ const HANDLER_MAP: Partial<Record<StageName, StageHandler>> = {
   extract: extract,
   // reliance_links, inheritance, support_search, forecast_recursion: merged into sweep.
   sweep: sweep,
-  // lineage: removed — orchestrator auto-completes handler-less stages.
+  // lineage: removed from STAGES — all reference docs are PDFs, drift detection is inert.
   // dependence: removed from STAGES — replaced by label. Handler retained on disk.
   label: label,
   severity: severity,

@@ -27,7 +27,7 @@ export const STAGES = [
   "sweep",
   // reliance_links, inheritance, support_search, forecast_recursion — merged into sweep.
   // emergent — removed: detects emergent properties from model_explicit drivers; no drivers.
-  "lineage",
+  // lineage — removed: all reference docs are PDFs (no doc_tables rows), so drift detection is inert.
   "label",
   // dependence — removed from STAGES; replaced by label. Handler retained on disk.
   "severity",
@@ -51,7 +51,7 @@ export const LOOP_STAGES: ReadonlySet<string> = new Set([
   // propositionalize — removed (see STAGES comment)
   "sweep",
   // reliance_links, inheritance, support_search, forecast_recursion — merged into sweep.
-  "lineage",
+  // lineage — removed (see STAGES comment).
   "label",
   "fragility",
   "synthesize",

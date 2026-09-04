@@ -572,10 +572,10 @@ const sweep: StageHandler = async (
                     `INSERT INTO mast_support_evidence (
                        run_id, assumption_id, doc_id, locator, verbatim,
                        statement_type, classifier_reason, spawned_assumption_id, relation
-                     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, NULL, NULL, $7)`,
+                     ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, NULL, $8)`,
                     [runId, assumptionId, sourceChunk.document_id,
                      `${sourceChunk.file_name}:chunk_${sourceChunk.chunk_index}`,
-                     hit.quote, kind, relation],
+                     hit.quote, kind, `pass_${passIdx}_batch_${globalBatch}`, relation],
                     { label: `${LOG_PREFIX} insert evidence` },
                   );
                 }
