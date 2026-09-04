@@ -46,16 +46,10 @@ const FindingJoinedRow = z.object({
   assumption_id: z.string(),
   severity: z.string(),
   severity_basis: z.string(),
-  title: z.string(),
   falsification_condition: z.string().nullable(),
   monitoring_trigger: z.string().nullable(),
   dependence_tier: z.string().nullable(),
   dependence_basis: z.string().nullable(),
-  origin_type: z.string(),
-  origin_locator: z.string().nullable(),
-  verbatim: z.string().nullable(),
-  detector: z.string().nullable(),
-  recursion_depth: z.coerce.number().nullable(),
   proposition: z.string(),
 });
 
@@ -116,16 +110,10 @@ const render: StageHandler = async (
        f.assumption_id,
        f.severity,
        f.severity_basis,
-       f.title,
        f.falsification_condition,
        f.monitoring_trigger,
        a.dependence_tier,
        a.dependence_basis,
-       a.origin_type,
-       a.origin_locator,
-       a.verbatim,
-       a.detector,
-       a.recursion_depth,
        a.proposition
      FROM mast_findings f
      JOIN mast_assumptions a ON a.id = f.assumption_id
@@ -554,7 +542,7 @@ const render: StageHandler = async (
       `${synthInputCount} register rows were synthesized into ` +
       `${synthCriticalCount + synthWarningCount} findings ` +
       `(${synthCriticalCount} critical, ${synthWarningCount} warning). ` +
-      `The full register is preserved in section 5.\n\n`,
+      `The full register is retained in the database.\n\n`,
     );
   }
 
@@ -590,33 +578,6 @@ const render: StageHandler = async (
     }
   }
 
-  // ── Section 5: Full Register Appendix ─────────────────────────────
-  sections.push("## 5. Full Register\n\n");
-  sections.push("| # | Proposition | Dependence | Support | Severity |\n");
-  sections.push("|---|-------------|------------|---------|----------|\n");
-
-  // Sort all findings by dependence tier then severity
-  const sorted = [...filteredFindings].sort((a, b) => {
-    const ta = TIER_ORDER[a.dependence_tier ?? "low"] ?? 3;
-    const tb = TIER_ORDER[b.dependence_tier ?? "low"] ?? 3;
-    if (ta !== tb) return ta - tb;
-    // Within same tier, sort by severity
-    const sevOrder: Record<string, number> = { critical: 0, warning: 1, info: 2 };
-    const sa = sevOrder[a.severity] ?? 2;
-    const sb = sevOrder[b.severity] ?? 2;
-    if (sa !== sb) return sa - sb;
-    return a.assumption_id.localeCompare(b.assumption_id);
-  });
-
-  for (let i = 0; i < sorted.length; i++) {
-    const f = sorted[i];
-    const support = extractSupportState(f.severity_basis);
-    const tier = f.dependence_tier ?? "low";
-    // Escape pipes in proposition for markdown table
-    const prop = f.proposition.replace(/\|/g, "\\|").replace(/\n/g, " ");
-    sections.push(`| ${i + 1} | ${prop} | ${tier} | ${support} | ${f.severity} |\n`);
-  }
-
   // ── 7. Assemble report ────────────────────────────────────────────
   const report = sections.join("");
 
@@ -638,7 +599,7 @@ const render: StageHandler = async (
     info: sevCounts.info,
     silent: 0, // Section removed — model_implicit no longer in register
     inherited: 0, // inheritance phase removed from sweep
-    registerRows: sorted.length,
+    registerRows: totalFindings,
     documentsRead: documentRows.length,
     documentsWithTables: documentRows.filter((d) => d.table_count > 0).length,
     documentsWithNoAssumptions: documentRows.filter((d) => !referencedDocIds.has(d.doc_id)).length,
