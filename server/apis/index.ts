@@ -185,6 +185,9 @@ import EroTestDealProfile from './pipeline/ero-test-deal-profile.js';
 import EroDiagPhase2Export from './pipeline/ero-diag-phase2-export.js';
 import EroPurgeDealState from './pipeline/ero-purge-deal-state.js';
 import RunMigration042 from './pipeline/run-migration-042.js';
+import SriRunPipeline from './pipeline/sri-run-pipeline.js';
+import SriGetActiveRun from './pipeline/sri-get-active-run.js';
+import SriPurgeDealState from './pipeline/sri-purge-deal-state.js';
 import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import EroTestRanking from './pipeline/ero-test-ranking.js';
 import EroTestSourceTiers from './pipeline/ero-test-source-tiers.js';
@@ -318,6 +321,8 @@ const apis = {
   DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic, RunCurationFixtures, DcsComputeDimensionRationales, DcsPersistRationalesOneshot, DcsRepublishV2,
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
+  // SRI v2 pipeline
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
