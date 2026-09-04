@@ -221,7 +221,17 @@ export default api({
     // NOTE: stages_completed is written only by stage handlers, not by the orchestrator.
     // Each handler appends its own marker after all writes succeed. Stub handlers do not
     // write it, so stages_completed remains empty until real handlers are implemented.
-    if (result.status === "not_implemented" || result.status === "complete") {
+    // not_implemented halts the pipeline at the current stage. It does not advance.
+    // Once a real handler replaces the stub, the next invocation will run it.
+    // Without this guard, stub stages would let a run advance through six no-ops
+    // and terminate as complete having done one stage of work.
+    if (result.status === "not_implemented") {
+      await db.execute(
+        "UPDATE sri_pipeline_state SET stage_status = 'pending', updated_at = now() WHERE run_id = $1",
+        [runId],
+        { label: stageToRun + " not_implemented — halt at current stage" },
+      );
+    } else if (result.status === "complete") {
       var stageIdx = SRI_STAGES.indexOf(stageToRun);
       if (stageIdx < SRI_STAGES.length - 1) {
         var nextStage = SRI_STAGES[stageIdx + 1];
