@@ -443,29 +443,6 @@ async function stepA_cluster(
   } // end: skip clustering if resuming from merge phase
 
   _stepA_batchClustersAccumulated = allBatchClusters.length;
-  console.log(
-    `${LOG_PREFIX} Step A per-batch: ${allBatchClusters.length} clusters from ${findings.length} findings.`,
-  );
-
-  // ── Cross-batch merge (multi-round batched reduction) ─────────────
-  if (allBatchClusters.length <= 1) {
-    console.log(
-      `STEPA_TRACE early-return: allBatchClusters.length=${allBatchClusters.length}, taking <=1 path`,
-    );
-    console.log(
-      `${LOG_PREFIX} MERGE_STATS rounds=0 finalClusters=${allBatchClusters.length} (skip: ≤1 cluster)`,
-    );
-    return {
-      complete: true,
-      clusters: allBatchClusters.map((c, i) => ({
-        id: i + 1,
-        label: c.label,
-        members: c.members,
-        pairedContext: [],
-      })),
-      checkpoint: null,
-    };
-  }
 
   // Working list: each entry carries a label, members, and a stable internal id.
   // Internal ids are never derived from model-supplied mergeGroup values.
@@ -473,16 +450,48 @@ async function stepA_cluster(
   let currentList: MergeEntry[];
   let mergeRoundStart = 1;
 
-  // Restore merge-phase checkpoint if present
+  // Restore merge-phase checkpoint if present.
+  // When phase === "merging", allBatchClusters is empty (the clustering loop
+  // was skipped) and the checkpoint's currentList carries the clusters.
+  // We must NOT reach the ≤1 early return on this path.
   if (resumeCheckpoint && resumeCheckpoint.phase === "merging") {
     internalIdCounter = resumeCheckpoint.internalIdCounter;
     currentList = resumeCheckpoint.currentList!;
     mergeRoundStart = resumeCheckpoint.mergeRound;
     console.log(
+      `STEPA_TRACE merge-resume: currentList.length=${currentList.length}, ` +
+      `mergeRoundStart=${mergeRoundStart}, internalIdCounter=${internalIdCounter}`,
+    );
+    console.log(
       `${LOG_PREFIX} Step A resume: merge phase, round ${mergeRoundStart}, ` +
       `${currentList.length} clusters, idCounter=${internalIdCounter}.`,
     );
   } else {
+    // Fresh clustering pass or clustering-phase resume: allBatchClusters is populated.
+    console.log(
+      `${LOG_PREFIX} Step A per-batch: ${allBatchClusters.length} clusters from ${findings.length} findings.`,
+    );
+
+    // ── Early return: ≤1 cluster means nothing to merge ──────────────
+    if (allBatchClusters.length <= 1) {
+      console.log(
+        `STEPA_TRACE early-return: allBatchClusters.length=${allBatchClusters.length}, taking <=1 path`,
+      );
+      console.log(
+        `${LOG_PREFIX} MERGE_STATS rounds=0 finalClusters=${allBatchClusters.length} (skip: ≤1 cluster)`,
+      );
+      return {
+        complete: true,
+        clusters: allBatchClusters.map((c, i) => ({
+          id: i + 1,
+          label: c.label,
+          members: c.members,
+          pairedContext: [],
+        })),
+        checkpoint: null,
+      };
+    }
+
     currentList = allBatchClusters.map((c) => ({
       internalId: ++internalIdCounter,
       label: c.label,
@@ -1071,8 +1080,9 @@ async function stepC_compose(
 // ---------------------------------------------------------------------------
 
 // Phrases that identify return-figure restatements (ported from DEPENDENCE_RULE_TABLE
-// return_metric rule, plus mom and x mom).
-const RETURN_FIGURE_PHRASES = ["irr", "moic", "money multiple", "mom", "x mom"];
+// return_metric rule, plus "x mom"). Standalone "mom" is excluded because it
+// matches inside "momentum"; all actual MoM references use "Nx MoM" → "x mom".
+const RETURN_FIGURE_PHRASES = ["irr", "moic", "money multiple", "x mom"];
 
 function containsReturnFigure(proposition: string): boolean {
   const norm = proposition
