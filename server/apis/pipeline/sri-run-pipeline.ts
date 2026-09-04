@@ -6,7 +6,7 @@ import {
   type StageHandler,
   type StageResult,
 } from "./sri-stage-contract.js";
-import { buildEntityManifest } from "./sri-entity-manifest.js";
+
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -32,12 +32,8 @@ function makeStub(stage: SriStageName): StageHandler {
 }
 
 var DISPATCH: Record<SriStageName, StageHandler> = {
-  build_entity_manifest: buildEntityManifest,
   build_claim_register: makeStub("build_claim_register"),
-  plan_research: makeStub("plan_research"),
-  research_execution: makeStub("research_execution"),
-  adjudicate_findings: makeStub("adjudicate_findings"),
-  claim_confrontation: makeStub("claim_confrontation"),
+  verify_claims: makeStub("verify_claims"),
   render: makeStub("render"),
 };
 

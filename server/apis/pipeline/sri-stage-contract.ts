@@ -7,12 +7,8 @@
 
 // ── Stage sequence (order matters) ──────────────────────────────────
 export const SRI_STAGES = [
-  "build_entity_manifest",
   "build_claim_register",
-  "plan_research",
-  "research_execution",
-  "adjudicate_findings",
-  "claim_confrontation",
+  "verify_claims",
   "render",
 ] as const;
 
