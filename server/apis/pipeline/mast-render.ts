@@ -321,7 +321,6 @@ const render: StageHandler = async (
           block += `- *Severity adjusted: ${sf.correctionReason}*\n`;
         }
         block += `- *Synthesized from ${sf.memberCount} register entries (cluster: "${sf.clusterLabel}")*\n`;
-        block += `- *Search scope: ${sweepDocNames.length} reference document${sweepDocNames.length === 1 ? "" : "s"}, ${(sweepPayload?.search_chunksProcessed ?? 0).toLocaleString()} passages examined*\n`;
         sections.push(block + "\n");
       }
     }
@@ -386,8 +385,7 @@ const render: StageHandler = async (
         if (sf.contradiction) {
           line += ` Contradiction: ${sf.contradiction}`;
         }
-        line += ` *(${sf.memberCount} register entries, evidence: ${sf.supportSummary}`;
-        line += `, search: ${sweepDocNames.length} docs / ${(sweepPayload?.search_chunksProcessed ?? 0).toLocaleString()} passages)*`;
+        line += ` *(${sf.memberCount} register entries, evidence: ${sf.supportSummary})*`;
         if (sf.severityCorrected) {
           line += ` [severity adjusted: ${sf.correctionReason}]`;
         }
@@ -463,14 +461,19 @@ const render: StageHandler = async (
     scopeParagraph += `, examining ${chunksProcessed.toLocaleString()} passages in total. ` +
       `${hitsPassedGate} passages yielded evidence that passed quality gates.`;
 
-    const failures = callFailures + batchesParseFailed + insertFailures + truncations;
-    if (failures > 0) {
-      const parts: string[] = [];
-      if (callFailures > 0) parts.push(`${callFailures} call failure${callFailures === 1 ? "" : "s"}`);
-      if (batchesParseFailed > 0) parts.push(`${batchesParseFailed} batch${batchesParseFailed === 1 ? "" : "es"} failed to parse`);
-      if (insertFailures > 0) parts.push(`${insertFailures} insert failure${insertFailures === 1 ? "" : "s"}`);
-      if (truncations > 0) parts.push(`${truncations} truncation${truncations === 1 ? "" : "s"}`);
-      scopeParagraph += ` ${parts.join(", ")} occurred during the sweep.`;
+    const failureParts: string[] = [];
+    if (callFailures === 1) failureParts.push("One call failed");
+    else if (callFailures > 1) failureParts.push(`${callFailures} calls failed`);
+    if (batchesParseFailed === 1) failureParts.push("one batch failed to parse");
+    else if (batchesParseFailed > 1) failureParts.push(`${batchesParseFailed} batches failed to parse`);
+    if (insertFailures === 1) failureParts.push("one insert failed");
+    else if (insertFailures > 1) failureParts.push(`${insertFailures} inserts failed`);
+    if (truncations === 1) failureParts.push("one response was truncated");
+    else if (truncations > 1) failureParts.push(`${truncations} responses were truncated`);
+    if (failureParts.length > 0) {
+      // Capitalise the first part if it starts lowercase
+      failureParts[0] = failureParts[0].charAt(0).toUpperCase() + failureParts[0].slice(1);
+      scopeParagraph += ` ${failureParts.join("; ")} during the sweep.`;
     }
 
     sections.push(scopeParagraph + "\n\n");
