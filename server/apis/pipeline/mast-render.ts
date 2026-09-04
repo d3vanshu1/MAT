@@ -467,15 +467,32 @@ const render: StageHandler = async (
     sections.push(scopeParagraph + "\n\n");
   }
 
-  // 6b. Dependence rule table
-  const depPayload = payloadMap.get("dependence") as any;
-  const ruleTableDefaultCount = depPayload?.ruleTableDefaultCount ?? 0;
-  sections.push(
-    "Dependence tiers were assigned by a keyword rule table rather than computed " +
-    "from the financial model, because the model's formulas do not survive document " +
-    `ingestion. ${ruleTableDefaultCount} assumption${ruleTableDefaultCount === 1 ? "" : "s"} ` +
-    "matched no rule and therefore defaulted to low.\n\n",
-  );
+  // 6b. Label classification summary
+  const labelPayload = payloadMap.get("label") as any;
+  const labelCounts: Record<string, number> = labelPayload?.labelCounts ?? {};
+  const labelUnmentioned: number = labelPayload?.unmentioned ?? 0;
+  const labelBatchFailed: number = labelPayload?.batchFailed ?? 0;
+  const noUsableLabel =
+    (labelCounts.unclassified ?? 0) + labelUnmentioned + labelBatchFailed;
+
+  if (labelPayload) {
+    const parts: string[] = [];
+    for (const [lbl, count] of Object.entries(labelCounts)) {
+      if (lbl !== "unclassified" && (count as number) > 0) {
+        parts.push(`${count as number} ${lbl.replace(/_/g, " ")}`);
+      }
+    }
+    sections.push(
+      "Each assumption was classified by model into one of five topic labels: " +
+      "exit multiple, revenue growth, financing, operational, and unclassified. " +
+      `The classification assigned ${parts.join(", ")}` +
+      `${noUsableLabel > 0 ? `; ${noUsableLabel} received no usable label` : ""}.\n\n`,
+    );
+  } else {
+    sections.push(
+      "Label classification did not run for this analysis.\n\n",
+    );
+  }
 
   // 5d. Inherited assumptions
   sections.push(
@@ -605,7 +622,7 @@ const render: StageHandler = async (
     documentsWithNoAssumptions: documentRows.filter((d) => !referencedDocIds.has(d.doc_id)).length,
     evidenceRowsLoaded: evidenceRows.length,
     sweepRan,
-    ruleTableDefaultCount,
+    noUsableLabel,
     reportLength: report.length,
     nothingCount: supportCounts.nothing,
     unrewrittenExcluded: unrewrittenCount,
