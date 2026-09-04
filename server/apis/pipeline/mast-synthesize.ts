@@ -12,9 +12,10 @@
  *      evidence, context) that give the finding meaning.
  *   C  Compose — write one synthesized finding per cluster with title,
  *      body (<=120 words), supportSummary, and optional contradiction.
- *   D  Severity correction — if every member's dependence_basis is
- *      return_metric AND support is nothing, cap severity at warning
- *      (not externally verifiable).
+ *   D  Cluster scoring — assign severity via band rules based on member
+ *      count, dominant label, and evidence availability. Apply floor
+ *      (< 3 members → info) and correction D (exit_multiple return
+ *      figures with no support → cap at warning).
  *
  * Storage: mast_pipeline_state payload for the 'synthesize' stage,
  * key = 'findings'. No writes to mast_findings, mast_assumptions,
@@ -112,6 +113,8 @@ const FindingInputRow = z.object({
   support_state: z.string(),
   falsification_condition: z.string().nullable(),
   origin_type: z.string(),
+  has_any_evidence: z.boolean(),
+  has_contradicting_evidence: z.boolean(),
 });
 
 const RegisterRow = z.object({
@@ -140,6 +143,8 @@ interface RawFinding {
   support_state: string;
   falsification_condition: string | null;
   origin_type: string;
+  has_any_evidence: boolean;
+  has_contradicting_evidence: boolean;
 }
 
 interface Cluster {
@@ -186,6 +191,32 @@ interface SynthesizedFinding {
   memberCount: number;
   severityCorrected: boolean;
   correctionReason: string | null;
+  dominantLabel: string;
+  hasContradictingEvidence: boolean;
+  hasAnyEvidence: boolean;
+  bandFired: string;
+  flooredByMemberCount: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Cluster scoring — band definitions and tie-break order
+// ---------------------------------------------------------------------------
+
+const LABEL_TIE_ORDER: string[] = [
+  "exit_multiple",
+  "revenue_growth",
+  "financing",
+  "operational",
+  "unclassified",
+];
+
+interface ClusterScoreResult {
+  severity: string;
+  bandFired: string;
+  dominantLabel: string;
+  hasContradictingEvidence: boolean;
+  hasAnyEvidence: boolean;
+  flooredByMemberCount: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,14 +1150,73 @@ function stepD_severityCorrection(
 }
 
 // ---------------------------------------------------------------------------
-// Determine cluster severity from members
+// Cluster score: band-based severity from member signals
 // ---------------------------------------------------------------------------
 
-function clusterSeverity(members: RawFinding[]): string {
-  // Highest severity wins: critical > warning > info
-  if (members.some((m) => m.severity === "critical")) return "critical";
-  if (members.some((m) => m.severity === "warning")) return "warning";
-  return "info";
+function clusterScore(members: RawFinding[]): ClusterScoreResult {
+  const memberCount = members.length;
+
+  // ── Label mix and dominant label ──
+  const labelCounts = new Map<string, number>();
+  for (const m of members) {
+    const label = m.assumption_label ?? "unclassified";
+    labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  }
+
+  let maxCount = 0;
+  let dominantLabel = "unclassified";
+  for (const tieLabel of LABEL_TIE_ORDER) {
+    const count = labelCounts.get(tieLabel) ?? 0;
+    if (count > maxCount) {
+      maxCount = count;
+      dominantLabel = tieLabel;
+    }
+  }
+
+  // ── Evidence booleans — aggregated across members ──
+  const hasContradictingEvidence = members.some((m) => m.has_contradicting_evidence);
+  const hasAnyEvidence = members.some((m) => m.has_any_evidence);
+
+  // ── Band evaluation, first match wins ──
+  const isExitOrRevenue =
+    dominantLabel === "exit_multiple" || dominantLabel === "revenue_growth";
+  const isExitRevenueOrFinancing = isExitOrRevenue || dominantLabel === "financing";
+
+  let severity: string;
+  let bandFired: string;
+
+  if (memberCount >= 10 && isExitOrRevenue) {
+    severity = "critical";
+    bandFired = "critical_scale";
+  } else if (memberCount >= 5 && isExitOrRevenue && hasContradictingEvidence) {
+    severity = "critical";
+    bandFired = "critical_contradicted";
+  } else if (memberCount >= 5 && isExitRevenueOrFinancing) {
+    severity = "warning";
+    bandFired = "warning_returns";
+  } else if (memberCount >= 3 && hasContradictingEvidence) {
+    severity = "warning";
+    bandFired = "warning_contradicted";
+  } else {
+    severity = "info";
+    bandFired = "info_default";
+  }
+
+  // ── Floor: memberCount < 3 → info ──
+  let flooredByMemberCount = false;
+  if (memberCount < 3 && severity !== "info") {
+    severity = "info";
+    flooredByMemberCount = true;
+  }
+
+  return {
+    severity,
+    bandFired,
+    dominantLabel,
+    hasContradictingEvidence,
+    hasAnyEvidence,
+    flooredByMemberCount,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,7 +1332,12 @@ const synthesize: StageHandler = async (
          ELSE 'nothing'
        END AS support_state,
        f.falsification_condition,
-       a.origin_type
+       a.origin_type,
+       EXISTS (SELECT 1 FROM mast_support_evidence e
+               WHERE e.assumption_id = a.id AND e.run_id = f.run_id) AS has_any_evidence,
+       EXISTS (SELECT 1 FROM mast_support_evidence e
+               WHERE e.assumption_id = a.id AND e.run_id = f.run_id
+               AND e.relation IN ('undermines', 'constrains')) AS has_contradicting_evidence
      FROM mast_findings f
      JOIN mast_assumptions a ON a.id = f.assumption_id
      WHERE f.run_id = $1::uuid
@@ -1466,15 +1561,20 @@ const synthesize: StageHandler = async (
   }
 
   // ── Rank before compose ─────────────────────────────────────────
-  //    Sort clusters using the same ordering Step D applies: severity
-  //    from clusterSeverity, criticals first, then by memberCount desc.
-  //    Take the top COMPOSE_CANDIDATE_CAP so we only compose clusters
-  //    that have a realistic chance of surviving the Step D caps.
+  //    Sort clusters using clusterScore bands (critical > warning > info),
+  //    then by memberCount desc. Take the top COMPOSE_CANDIDATE_CAP so
+  //    we only compose clusters that survive the Step D caps.
   const sevOrder: Record<string, number> = { critical: 0, warning: 1, info: 2 };
 
+  // Pre-compute cluster scores for ranking and Step D
+  const scoreCache = new Map<number, ClusterScoreResult>();
+  for (const c of clusters) {
+    scoreCache.set(c.id, clusterScore(c.members));
+  }
+
   const rankedClusters = [...clusters].sort((a, b) => {
-    const sa = sevOrder[clusterSeverity(a.members)] ?? 2;
-    const sb = sevOrder[clusterSeverity(b.members)] ?? 2;
+    const sa = sevOrder[scoreCache.get(a.id)!.severity] ?? 2;
+    const sb = sevOrder[scoreCache.get(b.id)!.severity] ?? 2;
     if (sa !== sb) return sa - sb;
     if (b.members.length !== a.members.length) return b.members.length - a.members.length;
     return a.id - b.id;
@@ -1483,10 +1583,10 @@ const synthesize: StageHandler = async (
   const composeCandidates = rankedClusters.slice(0, COMPOSE_CANDIDATE_CAP);
 
   const selectedCriticals = composeCandidates.filter(
-    (c) => clusterSeverity(c.members) === "critical",
+    (c) => scoreCache.get(c.id)!.severity === "critical",
   ).length;
   const selectedWarnings = composeCandidates.filter(
-    (c) => clusterSeverity(c.members) === "warning",
+    (c) => scoreCache.get(c.id)!.severity === "warning",
   ).length;
 
   console.log(
@@ -1604,10 +1704,10 @@ const synthesize: StageHandler = async (
     const composed = composeResults.get(cluster.id);
     if (!composed) continue;
 
-    const rawSev = clusterSeverity(cluster.members);
+    const score = scoreCache.get(cluster.id) ?? clusterScore(cluster.members);
     const { severity, corrected, reason } = stepD_severityCorrection(
       cluster,
-      rawSev,
+      score.severity,
     );
 
     if (corrected) severityCorrections++;
@@ -1623,6 +1723,11 @@ const synthesize: StageHandler = async (
       memberCount: cluster.members.length,
       severityCorrected: corrected,
       correctionReason: reason,
+      dominantLabel: score.dominantLabel,
+      hasContradictingEvidence: score.hasContradictingEvidence,
+      hasAnyEvidence: score.hasAnyEvidence,
+      bandFired: score.bandFired,
+      flooredByMemberCount: score.flooredByMemberCount,
     });
   }
 
@@ -1670,6 +1775,12 @@ const synthesize: StageHandler = async (
       severityCorrections,
       composeCandidates: composeCandidates.length,
       composeFailures: composeCandidates.length - composeResults.size,
+      band_critical_scale: synthesized.filter((f) => f.bandFired === "critical_scale").length,
+      band_critical_contradicted: synthesized.filter((f) => f.bandFired === "critical_contradicted").length,
+      band_warning_returns: synthesized.filter((f) => f.bandFired === "warning_returns").length,
+      band_warning_contradicted: synthesized.filter((f) => f.bandFired === "warning_contradicted").length,
+      band_info_default: synthesized.filter((f) => f.bandFired === "info_default").length,
+      flooredByMemberCount: synthesized.filter((f) => f.flooredByMemberCount).length,
       stepA_findingsReceived: _stepA_findingsReceived,
       stepA_batchesAttempted: _stepA_batchesAttempted,
       stepA_llmNulls: _stepA_llmNulls,
