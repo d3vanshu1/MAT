@@ -74,6 +74,8 @@ const StagePayloadRow = z.object({
 const DocumentRow = z.object({
   doc_id: z.string(),
   file_name: z.string(),
+  document_tag: z.string().nullable(),
+  chunk_count: z.coerce.number(),
   table_count: z.coerce.number(),
 });
 
@@ -212,11 +214,14 @@ const render: StageHandler = async (
 
   // ── 4. Load documents for this deal ───────────────────────────────
   const documentRows = await db.query(
-    `SELECT d.id AS doc_id, d.file_name, COUNT(dt.id)::int AS table_count
+    `SELECT d.id AS doc_id, d.file_name, d.document_tag,
+            COUNT(DISTINCT dc.id)::int AS chunk_count,
+            COUNT(DISTINCT dt.id)::int AS table_count
      FROM documents d
+     LEFT JOIN document_chunks dc ON dc.document_id = d.id
      LEFT JOIN doc_tables dt ON dt.document_id = d.id
      WHERE d.deal_id = $1::uuid
-     GROUP BY d.id, d.file_name`,
+     GROUP BY d.id, d.file_name, d.document_tag`,
     DocumentRow,
     [dealId],
     { label: "MAST-RENDER: load deal documents" },
@@ -287,6 +292,13 @@ const render: StageHandler = async (
     );
   }
 
+  // ── Pre-compute sweep scope for per-finding lines ─────────────────
+  const sweepPayload = payloadMap.get("sweep") as any;
+  const sweepDocs = documentRows.filter(
+    (d) => d.document_tag != null && !(["financial_model", "ic_memo"].includes(d.document_tag!)),
+  );
+  const sweepDocNames = sweepDocs.map((d) => d.file_name);
+
   // ── Section 2: Critical List ──────────────────────────────────────
   sections.push("## 2. Critical Findings\n");
 
@@ -309,6 +321,7 @@ const render: StageHandler = async (
           block += `- *Severity adjusted: ${sf.correctionReason}*\n`;
         }
         block += `- *Synthesized from ${sf.memberCount} register entries (cluster: "${sf.clusterLabel}")*\n`;
+        block += `- *Search scope: ${sweepDocNames.length} reference document${sweepDocNames.length === 1 ? "" : "s"}, ${(sweepPayload?.search_chunksProcessed ?? 0).toLocaleString()} passages examined*\n`;
         sections.push(block + "\n");
       }
     }
@@ -373,7 +386,8 @@ const render: StageHandler = async (
         if (sf.contradiction) {
           line += ` Contradiction: ${sf.contradiction}`;
         }
-        line += ` *(${sf.memberCount} register entries, evidence: ${sf.supportSummary})*`;
+        line += ` *(${sf.memberCount} register entries, evidence: ${sf.supportSummary}`;
+        line += `, search: ${sweepDocNames.length} docs / ${(sweepPayload?.search_chunksProcessed ?? 0).toLocaleString()} passages)*`;
         if (sf.severityCorrected) {
           line += ` [severity adjusted: ${sf.correctionReason}]`;
         }
@@ -431,6 +445,35 @@ const render: StageHandler = async (
       "The corpus support sweep did not run for this analysis. Every assumption in this " +
       "report reads as unsupported for that reason and not because the corpus lacks support.\n\n",
     );
+  }
+
+  // 6a-ii. Search scope paragraph (Change 1)
+  if (sweepRan && sweepPayload) {
+    const chunksProcessed: number = sweepPayload.search_chunksProcessed ?? 0;
+    const hitsPassedGate: number = sweepPayload.search_hitsPassedGate ?? 0;
+    const callFailures: number = sweepPayload.search_callFailures ?? 0;
+    const batchesParseFailed: number = sweepPayload.search_batchesParseFailed ?? 0;
+    const insertFailures: number = sweepPayload.search_insertFailures ?? 0;
+    const truncations: number = sweepPayload.search_truncations ?? 0;
+
+    let scopeParagraph = `The sweep searched ${sweepDocs.length} reference document${sweepDocs.length === 1 ? "" : "s"}`;
+    if (sweepDocNames.length > 0) {
+      scopeParagraph += ` (${sweepDocNames.join("; ")})`;
+    }
+    scopeParagraph += `, examining ${chunksProcessed.toLocaleString()} passages in total. ` +
+      `${hitsPassedGate} passages yielded evidence that passed quality gates.`;
+
+    const failures = callFailures + batchesParseFailed + insertFailures + truncations;
+    if (failures > 0) {
+      const parts: string[] = [];
+      if (callFailures > 0) parts.push(`${callFailures} call failure${callFailures === 1 ? "" : "s"}`);
+      if (batchesParseFailed > 0) parts.push(`${batchesParseFailed} batch${batchesParseFailed === 1 ? "" : "es"} failed to parse`);
+      if (insertFailures > 0) parts.push(`${insertFailures} insert failure${insertFailures === 1 ? "" : "s"}`);
+      if (truncations > 0) parts.push(`${truncations} truncation${truncations === 1 ? "" : "s"}`);
+      scopeParagraph += ` ${parts.join(", ")} occurred during the sweep.`;
+    }
+
+    sections.push(scopeParagraph + "\n\n");
   }
 
   // 6b. Dependence rule table
@@ -510,6 +553,38 @@ const render: StageHandler = async (
       `(${synthCriticalCount} critical, ${synthWarningCount} warning). ` +
       `The full register is preserved in section 5.\n\n`,
     );
+  }
+
+  // 6i. Extraction gap (Change 3)
+  const extractPayload = payloadMap.get("extract") as any;
+  if (extractPayload) {
+    const chunksAllParsesFailed: number = extractPayload.chunksAllParsesFailed ?? 0;
+    if (chunksAllParsesFailed > 0) {
+      const memoChunkCount = documentRows
+        .filter((d) => d.document_tag === "ic_memo")
+        .reduce((sum, d) => sum + d.chunk_count, 0);
+      sections.push(
+        `${chunksAllParsesFailed} memo chunk${chunksAllParsesFailed === 1 ? "" : "s"} ` +
+        `out of ${memoChunkCount} processed failed to yield any propositions ` +
+        `because every extraction attempt returned unparseable output.\n\n`,
+      );
+    }
+  }
+
+  // 6j. Compose gap (Change 4)
+  if (useSynthesized && synthPayload?.stats) {
+    const clustersFormed: number = synthPayload.stats.clustersFormed ?? 0;
+    const composeFailures: number = synthPayload.stats.composeFailures ?? 0;
+    const findingsProduced: number = synthPayload.stats.findingsProduced ?? 0;
+    const composed = clustersFormed - composeFailures;
+    const excluded = composed - findingsProduced;
+    if (clustersFormed > 0) {
+      sections.push(
+        `${clustersFormed} clusters were formed from the register. ` +
+        `${composed} produced findings; ${composeFailures > 0 ? `${composeFailures} failed to compose` : "none failed to compose"}. ` +
+        `${excluded > 0 ? `${excluded} composed findings were excluded by report severity caps or scored below the reporting threshold.` : ""}\n\n`,
+      );
+    }
   }
 
   // ── Section 5: Full Register Appendix ─────────────────────────────
