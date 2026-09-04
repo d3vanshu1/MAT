@@ -20,18 +20,14 @@ export default api({
     dealId: z.string(),
     before: z.object({
       runs: z.number(),
-      entities: z.number(),
       claims: z.number(),
-      research_plan: z.number(),
       evidence: z.number(),
       findings: z.number(),
     }),
     deletedRuns: z.number(),
     after: z.object({
       runs: z.number(),
-      entities: z.number(),
       claims: z.number(),
-      research_plan: z.number(),
       evidence: z.number(),
       findings: z.number(),
     }),
@@ -50,30 +46,22 @@ export default api({
       var ids = runIds.map(function (r) { return r.run_id; });
 
       var runs = runIds.length;
-      var entities = 0;
       var claims = 0;
-      var research_plan = 0;
       var evidence = 0;
       var findings = 0;
 
       if (ids.length > 0) {
-        var eRows = await db.query("SELECT count(*)::int AS cnt FROM sri_entities WHERE run_id = ANY($1::uuid[])", CountRow, [ids], { label: label + ": entities" });
-        entities = eRows[0]?.cnt ?? 0;
-
         var cRows = await db.query("SELECT count(*)::int AS cnt FROM sri_claims WHERE run_id = ANY($1::uuid[])", CountRow, [ids], { label: label + ": claims" });
         claims = cRows[0]?.cnt ?? 0;
 
-        var rpRows = await db.query("SELECT count(*)::int AS cnt FROM sri_research_plan WHERE run_id = ANY($1::uuid[])", CountRow, [ids], { label: label + ": research_plan" });
-        research_plan = rpRows[0]?.cnt ?? 0;
-
-        var evRows = await db.query("SELECT count(*)::int AS cnt FROM sri_evidence WHERE plan_id IN (SELECT plan_id FROM sri_research_plan WHERE run_id = ANY($1::uuid[]))", CountRow, [ids], { label: label + ": evidence" });
+        var evRows = await db.query("SELECT count(*)::int AS cnt FROM sri_evidence WHERE claim_id IN (SELECT claim_id FROM sri_claims WHERE run_id = ANY($1::uuid[]))", CountRow, [ids], { label: label + ": evidence" });
         evidence = evRows[0]?.cnt ?? 0;
 
         var fRows = await db.query("SELECT count(*)::int AS cnt FROM sri_findings WHERE run_id = ANY($1::uuid[])", CountRow, [ids], { label: label + ": findings" });
         findings = fRows[0]?.cnt ?? 0;
       }
 
-      return { runs: runs, entities: entities, claims: claims, research_plan: research_plan, evidence: evidence, findings: findings };
+      return { runs: runs, claims: claims, evidence: evidence, findings: findings };
     }
 
     var before = await countAll("Before purge");
