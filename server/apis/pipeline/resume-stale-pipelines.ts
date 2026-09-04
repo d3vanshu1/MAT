@@ -34,6 +34,9 @@ import { STALENESS_THRESHOLD_MINUTES, RESUME_JOB_TIME_BUDGET_MS } from "./pipeli
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
+// These modules run on v2 orchestrators and must never be routed to runPipelineCore.
+const RESUME_EXCLUDED_MODULE_IDS = ["model_assumptions_stress", "external_risk_overlay", "social_reputation"];
+
 const StaleRunSchema = z.object({
   id: z.string(),
   deal_id: z.string(),
@@ -54,6 +57,10 @@ export default api({
   output: z.object({
     found: z.number(),
     mastRunsExcluded: z.number(),
+    excludedByModule: z.array(z.object({
+      module_id: z.string(),
+      cnt: z.number(),
+    })),
     processed: z.array(z.object({
       runId: z.string(),
       moduleId: z.string(),
@@ -66,12 +73,13 @@ export default api({
     const timeRemaining = () => RESUME_JOB_TIME_BUDGET_MS - (Date.now() - jobStart);
 
     // Find all stale runs: status='running' and triggered_at older than threshold
-    // Excludes runs with active recovery claims (unexpired claimed_by on any checkpoint)
+    // Excludes v2-orchestrated modules and runs with active recovery claims
+    const excludedList = RESUME_EXCLUDED_MODULE_IDS.map((_, i) => `$${i + 1}`).join(", ");
     const staleRuns = await ctx.integrations.db.query(
       `SELECT mr.id, mr.deal_id, mr.module_id
        FROM module_runs mr
        WHERE mr.status = 'running'::module_status
-         AND mr.module_id != 'model_assumptions_stress'
+         AND mr.module_id NOT IN (${excludedList})
          AND mr.triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'
          AND NOT EXISTS (
            SELECT 1 FROM merge_checkpoints mc
@@ -82,31 +90,34 @@ export default api({
        ORDER BY mr.triggered_at ASC
        LIMIT 10`,
       StaleRunSchema,
-      [],
-      { label: "Find stale running pipelines (excludes MAST)" }
+      RESUME_EXCLUDED_MODULE_IDS,
+      { label: "Find stale running pipelines (excludes v2 modules)" }
     );
 
     // -----------------------------------------------------------------------
-    // MAST exclusion diagnostic — log how many MAST runs were skipped so
-    // operators can confirm the filter is working and no MAST run is stuck.
+    // Exclusion diagnostic — count stale runs per excluded module so
+    // operators can confirm the filter is working and no v2 run is stuck.
     // -----------------------------------------------------------------------
-    const mastExcluded = await ctx.integrations.db.query(
-      `SELECT count(*)::int AS cnt
+    const excludedDiag = await ctx.integrations.db.query(
+      `SELECT mr.module_id, count(*)::int AS cnt
        FROM module_runs mr
        WHERE mr.status = 'running'::module_status
-         AND mr.module_id = 'model_assumptions_stress'
-         AND mr.triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'`,
-      z.object({ cnt: z.number() }),
-      [],
-      { label: "Count excluded MAST stale runs" }
+         AND mr.module_id IN (${excludedList})
+         AND mr.triggered_at < now() - interval '${STALENESS_THRESHOLD_MINUTES} minutes'
+       GROUP BY mr.module_id`,
+      z.object({ module_id: z.string(), cnt: z.number() }),
+      RESUME_EXCLUDED_MODULE_IDS,
+      { label: "Count excluded stale runs by module" }
     );
-    const mastRunsExcluded = mastExcluded[0]?.cnt ?? 0;
-    if (mastRunsExcluded > 0) {
-      console.log(`[RESUME] MAST_EXCLUDED count=${mastRunsExcluded}`);
+    const excludedByModule = excludedDiag;
+    const mastRunsExcluded =
+      excludedDiag.find((r) => r.module_id === "model_assumptions_stress")?.cnt ?? 0;
+    if (excludedDiag.length > 0) {
+      console.log(`[RESUME] EXCLUDED ${JSON.stringify(excludedDiag)}`);
     }
 
     if (staleRuns.length === 0) {
-      return { found: 0, processed: [], mastRunsExcluded };
+      return { found: 0, processed: [], mastRunsExcluded, excludedByModule };
     }
 
     const processed: Array<{ runId: string; moduleId: string; outcome: string }> = [];
@@ -201,6 +212,7 @@ export default api({
     return {
       found: staleRuns.length,
       mastRunsExcluded,
+      excludedByModule,
       processed,
     };
   },
