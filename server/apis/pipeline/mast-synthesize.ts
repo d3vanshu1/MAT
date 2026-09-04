@@ -1761,9 +1761,25 @@ const synthesize: StageHandler = async (
     `${severityCorrections} severity corrections applied.`,
   );
 
+  // ── Build excluded list: composed findings that didn't survive caps ──
+  const finalIds = new Set(finalFindings.map((f) => f.clusterId));
+  const excluded = synthesized
+    .filter((f) => !finalIds.has(f.clusterId))
+    .map((f) => ({
+      clusterId: f.clusterId,
+      clusterLabel: f.clusterLabel,
+      memberCount: f.memberCount,
+      dominantLabel: f.dominantLabel,
+      bandFired: f.bandFired,
+      severity: f.severity,
+      hasContradictingEvidence: f.hasContradictingEvidence,
+      flooredByMemberCount: f.flooredByMemberCount,
+    }));
+
   // ── Persist payload ───────────────────────────────────────────────
   const payload = {
     findings: finalFindings,
+    excluded,
     stats: {
       inputFindings: effectiveTotalEligible,
       inputCapped: effectiveCappedCount,
