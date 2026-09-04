@@ -293,6 +293,13 @@ ${list}
 --- END ENTRIES ---`;
 }
 
+// stepA trace counters — written by stepA_cluster, read by the handler for payload persistence.
+let _stepA_findingsReceived = 0;
+let _stepA_batchesAttempted = 0;
+let _stepA_llmNulls = 0;
+let _stepA_parseNulls = 0;
+let _stepA_batchClustersAccumulated = 0;
+
 async function stepA_cluster(
   ai: StageContext["ai"],
   model: string,
@@ -301,6 +308,21 @@ async function stepA_cluster(
   budgetMs: number,
   resumeCheckpoint?: StepACheckpoint,
 ): Promise<StepAResult> {
+  // Reset trace counters
+  _stepA_findingsReceived = findings.length;
+  _stepA_batchesAttempted = 0;
+  _stepA_llmNulls = 0;
+  _stepA_parseNulls = 0;
+  _stepA_batchClustersAccumulated = 0;
+
+  const loopStartIndex = (resumeCheckpoint?.phase === "clustering" ? resumeCheckpoint.clusterBatchIndex : 0) * CLUSTER_BATCH_SIZE;
+  console.log(
+    `STEPA_TRACE entry: findings.length=${findings.length}, ` +
+    `resumeCheckpoint=${resumeCheckpoint === undefined ? "undefined" : resumeCheckpoint.phase}, ` +
+    `clusterBatchStart=${resumeCheckpoint?.phase === "clustering" ? resumeCheckpoint.clusterBatchIndex : 0}, ` +
+    `loopStartIndex=${loopStartIndex}`,
+  );
+
   // ── Per-batch clustering ──────────────────────────────────────────
   interface BatchAssignment {
     index: number;
@@ -360,9 +382,16 @@ async function stepA_cluster(
       support: extractSupportState(f.severity_basis),
     }));
 
+    const batchIndex = Math.floor(i / CLUSTER_BATCH_SIZE);
+    console.log(`STEPA_TRACE pre-llm: batchIndex=${batchIndex}, batch.length=${batch.length}`);
+    _stepA_batchesAttempted++;
+
     const prompt = buildClusterPrompt(entries);
     const raw = await llmCall(ai, model, prompt, `SYNTH-CLUSTER batch@${i}`);
+    if (raw === null) _stepA_llmNulls++;
     const parsed = parseJsonArray<BatchAssignment>(raw);
+    if (parsed === null) _stepA_parseNulls++;
+    console.log(`STEPA_TRACE post-parse: raw=${raw === null ? "null" : `string(${raw.length})`}, parsed=${parsed === null ? "null" : `array(${parsed.length})`}`);
 
     if (!parsed) {
       // Fallback: each finding is its own cluster
@@ -409,15 +438,20 @@ async function stepA_cluster(
     for (const entry of batchMap.values()) {
       allBatchClusters.push(entry);
     }
+    console.log(`STEPA_TRACE end-batch: allBatchClusters.length=${allBatchClusters.length}`);
   }
   } // end: skip clustering if resuming from merge phase
 
+  _stepA_batchClustersAccumulated = allBatchClusters.length;
   console.log(
     `${LOG_PREFIX} Step A per-batch: ${allBatchClusters.length} clusters from ${findings.length} findings.`,
   );
 
   // ── Cross-batch merge (multi-round batched reduction) ─────────────
   if (allBatchClusters.length <= 1) {
+    console.log(
+      `STEPA_TRACE early-return: allBatchClusters.length=${allBatchClusters.length}, taking <=1 path`,
+    );
     console.log(
       `${LOG_PREFIX} MERGE_STATS rounds=0 finalClusters=${allBatchClusters.length} (skip: ≤1 cluster)`,
     );
@@ -1230,6 +1264,11 @@ const synthesize: StageHandler = async (
         clustersFormed: 0,
         findingsProduced: 0,
         severityCorrections: 0,
+        stepA_findingsReceived: 0,
+        stepA_batchesAttempted: 0,
+        stepA_llmNulls: 0,
+        stepA_parseNulls: 0,
+        stepA_batchClustersAccumulated: 0,
       },
     };
 
@@ -1289,6 +1328,11 @@ const synthesize: StageHandler = async (
           inputFindings: effectiveTotalEligible,
           inputCapped: effectiveCappedCount,
           partialStop: `during_stepA_${stepAResult.checkpoint!.phase}`,
+          stepA_findingsReceived: _stepA_findingsReceived,
+          stepA_batchesAttempted: _stepA_batchesAttempted,
+          stepA_llmNulls: _stepA_llmNulls,
+          stepA_parseNulls: _stepA_parseNulls,
+          stepA_batchClustersAccumulated: _stepA_batchClustersAccumulated,
         },
       };
       try {
@@ -1331,6 +1375,11 @@ const synthesize: StageHandler = async (
         findingsProduced: 0,
         severityCorrections: 0,
         partialStop: "after_clustering",
+        stepA_findingsReceived: _stepA_findingsReceived,
+        stepA_batchesAttempted: _stepA_batchesAttempted,
+        stepA_llmNulls: _stepA_llmNulls,
+        stepA_parseNulls: _stepA_parseNulls,
+        stepA_batchClustersAccumulated: _stepA_batchClustersAccumulated,
       },
     };
     try {
@@ -1380,6 +1429,11 @@ const synthesize: StageHandler = async (
         findingsProduced: 0,
         severityCorrections: 0,
         partialStop: "after_pairing",
+        stepA_findingsReceived: _stepA_findingsReceived,
+        stepA_batchesAttempted: _stepA_batchesAttempted,
+        stepA_llmNulls: _stepA_llmNulls,
+        stepA_parseNulls: _stepA_parseNulls,
+        stepA_batchClustersAccumulated: _stepA_batchClustersAccumulated,
       },
     };
     try {
@@ -1497,6 +1551,11 @@ const synthesize: StageHandler = async (
         findingsProduced: 0,
         severityCorrections: 0,
         partialStop: "during_compose",
+        stepA_findingsReceived: _stepA_findingsReceived,
+        stepA_batchesAttempted: _stepA_batchesAttempted,
+        stepA_llmNulls: _stepA_llmNulls,
+        stepA_parseNulls: _stepA_parseNulls,
+        stepA_batchClustersAccumulated: _stepA_batchClustersAccumulated,
       },
     };
 
@@ -1601,6 +1660,11 @@ const synthesize: StageHandler = async (
       severityCorrections,
       composeCandidates: composeCandidates.length,
       composeFailures: composeCandidates.length - composeResults.size,
+      stepA_findingsReceived: _stepA_findingsReceived,
+      stepA_batchesAttempted: _stepA_batchesAttempted,
+      stepA_llmNulls: _stepA_llmNulls,
+      stepA_parseNulls: _stepA_parseNulls,
+      stepA_batchClustersAccumulated: _stepA_batchClustersAccumulated,
     },
   };
 
