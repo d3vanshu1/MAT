@@ -98,6 +98,9 @@ export type NumericModuleId = (typeof NUMERIC_MODULE_IDS)[number];
 /** Pre-built Set for O(1) membership checks */
 export const NUMERIC_MODULES = new Set<string>(NUMERIC_MODULE_IDS);
 
+// social_reputation is being rebuilt on the SRI v2 orchestrator and has no working run path until that divert lands.
+export const DISABLED_MODULE_IDS = new Set<string>(["social_reputation"]);
+
 export const MODULE_MAP = Object.fromEntries(
   MODULES.map((m) => [m.id, m]),
 );

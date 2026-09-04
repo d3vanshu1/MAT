@@ -17,7 +17,6 @@ import AnalyzeChunk from './modules/analyze-chunk.js';
 import UniversalExtract from './modules/universal-extract.js';
 import MergeFindings from './modules/merge-findings.js';
 import FormatReport from './modules/format-report.js';
-import WebResearch from './modules/web-research.js';
 import SaveModuleResult from './modules/save-module-result.js';
 import LoadModuleResults from './modules/load-module-results.js';
 import GetRunnableRuns from './modules/get-runnable-runs.js';
@@ -185,6 +184,10 @@ import EroTestEntityManifest from './pipeline/ero-test-entity-manifest.js';
 import EroTestDealProfile from './pipeline/ero-test-deal-profile.js';
 import EroDiagPhase2Export from './pipeline/ero-diag-phase2-export.js';
 import EroPurgeDealState from './pipeline/ero-purge-deal-state.js';
+import RunMigration042 from './pipeline/run-migration-042.js';
+import SriRunPipeline from './pipeline/sri-run-pipeline.js';
+import SriGetActiveRun from './pipeline/sri-get-active-run.js';
+import SriPurgeDealState from './pipeline/sri-purge-deal-state.js';
 import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import EroTestRanking from './pipeline/ero-test-ranking.js';
 import EroTestSourceTiers from './pipeline/ero-test-source-tiers.js';
@@ -302,7 +305,7 @@ import FramingPatternAudit from './audit/framing-pattern-audit.js';
 
 const apis = {
   // AI pipeline
-  AnalyzeChunk, UniversalExtract, MergeFindings, FormatReport, WebResearch,
+  AnalyzeChunk, UniversalExtract, MergeFindings, FormatReport,
   SaveModuleResult, LoadModuleResults, GetRunnableRuns, GetRunHistory, GetRunOutput,
   // Server-side pipeline
   RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagMergeMetrics, DiagConsolidationFailure, DiagConsolidationDryrun, DiagOaIdentityFit, DiagModelGrouper, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,     ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact,
@@ -313,7 +316,7 @@ const apis = {
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
   DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query, DiagSnippetMatchHarness,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, RunMigration030, RunMigration031, RunMigration032,   RunMigration033, RunMigration034, RunMigration035, RunMigration036, RunMigration037, RunMigration038, RunMigration039, RunMigration040, RunMigration041, PromoteClaimsLedger, BssRunPipeline, BssGetFindings, BuildStructuralProfile, BssGenerateBlindCandidates, BssAbsenceSweep, BssLlmAdjudication, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate, DiagResumeCcRun, DiagTestResumeQuery, DiagDeleteCheckpointRow, PreserveArtifactSnapshot,
   // ERO v2 pipeline
-  EroGetActiveRun, EroRunPipeline, EroDiagState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish, EroTestDedup,
+  EroGetActiveRun, EroRunPipeline, EroDiagState, RunMigration042, SriRunPipeline, SriGetActiveRun, SriPurgeDealState, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish, EroTestDedup,
   // DCS rebuild
   DcsExtractPresence, DcsComputeVerdicts, DcsComputeSummary, DcsRenderReport, DcsComputeMaterialityOverlay, DcsRunPipeline, DcsPreflightDiagnostic, RunCurationFixtures, DcsComputeDimensionRationales, DcsPersistRationalesOneshot, DcsRepublishV2,
   // MAST v2 pipeline

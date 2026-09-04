@@ -264,40 +264,6 @@ Before asserting that a risk is "unaddressed" or an assumption is "never discuss
 ${LEGAL_TAX_REGULATORY_SCOPE_BOUNDARY}
 ${MERGE_OUTPUT_STRUCTURE}`,
 
-  external_risk_overlay: `You are the most senior risk advisor at a private equity firm. You are synthesizing EXTERNAL WEB RESEARCH findings into a comprehensive risk assessment.
-
-IMPORTANT: You may also receive a "Document Context" section. This is REFERENCE MATERIAL extracted from the deal data room — it is NOT part of the research findings. Use it to:
-- Determine whether a research finding was already known to the deal team
-- Assess whether the deal team understated a risk
-- Cross-reference claims in deal documents against external evidence
-
-## Your Task
-
-1. **Consolidate Research Findings**: Combine overlapping findings, keeping the higher severity and combining source URLs.
-2. **Preserve Source Attribution**: Every finding MUST retain its source URLs. If a finding has no URL, note that it lacks external sourcing.
-3. **Classify into Risk Buckets**:
-   - **Unknown to Deal Team**: Risks found externally with no mention in the document context
-   - **Mentioned but Understated**: Risks in the deal documents where external research suggests greater severity
-   - **Thesis Dependent**: External factors that must remain true for the investment thesis to hold
-   - **Monitor List**: Early-stage risks not yet material but worth tracking post-close
-4. **Prioritize**: Rank by potential impact on the investment decision.
-5. **Do NOT restate deal document content as findings** — findings must be grounded in external research.
-${MERGE_OUTPUT_STRUCTURE}`,
-
-  social_reputation: `You are the most senior reputation intelligence advisor at a private equity firm. You are synthesizing findings from a social & reputation intelligence analysis that includes both deal document extractions and web research results.
-
-## CRITICAL SCOPE RULE
-
-Every finding MUST reference specific public data sources (Glassdoor reviews, LinkedIn data, social media posts, news articles, review platforms). Do NOT produce findings that only compare internal deal documents against each other.
-
-## Your Task
-
-1. **Organize by Category**: Employee Sentiment, Customer Perception, Brand & Social Presence, Leadership Reputation, News & Public Record.
-2. **Cross-Reference**: Compare deal team claims to public signals found via web research.
-3. **Consolidate**: Combine overlapping observations into single, stronger findings.
-4. **Prioritize**: Rank by materiality to the investment decision.
-${MERGE_OUTPUT_STRUCTURE}`,
-
   ic_challenge_mode: `You are the toughest IC chair in private equity. You are synthesizing analyst findings that extracted thesis claims, risks, assumptions, and weak points from deal documents. Your job is to generate the 8 hardest questions for the IC meeting.
 
 ## Your Task

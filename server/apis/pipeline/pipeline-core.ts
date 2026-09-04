@@ -76,7 +76,6 @@ import { runClaimsExtraction, type ClaimsLedger } from "./claims-extraction.js";
 import { runReconciliation, validateSupersessionProof, type ReconciliationResult, type ReconciliationFinding, type SupersessionCandidate } from "./claims-reconciliation.js";
 import { runReconciliationPipeline, type ReconciliationPipelineResult } from "./reconciliation-pipeline.js";
 import { runCleanParsedTextPhase } from "./clean-parsed-text.js";
-import { runWebResearchPhase } from "./web-research-phase.js";
 import { upsertModuleOutput } from "../modules/upsert-module-output.js";
 import { loadCheckpointStatus } from "./canonical-finalizer.js";
 import { getModuleModel, SONNET_MODEL } from "./model-config.js";
@@ -142,8 +141,6 @@ const ABSENCE_VERIFICATION_MIN_BUDGET_MS = 120_000; // Need at least 120s — 2 
 const FORMAT_REPORT_MAX_TOKENS = 12000;
 const FORMAT_REPORT_MODEL = SONNET_MODEL; // Always Sonnet — report formatting is quality-critical
 
-/** Modules that go through the web research phase instead of direct analysis */
-const WEB_RESEARCH_MODULES = new Set(["external_risk_overlay", "social_reputation"]);
 
 // ---------------------------------------------------------------------------
 // Mode-B Shared Helper: Append code-verified reconciliation findings
@@ -3849,98 +3846,9 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
     originMapPersistedThisRun = true;
   }
 
-  // --- Step 1.5: Web Research Phase (for web research modules only) ---
-  // Runs the iterative web search loop server-side with checkpointing.
-  // If incomplete (budget exhausted), returns in_progress with phase "web_research".
-  // If complete, iterations are loaded later and converted to analysis-compatible format.
-  if (WEB_RESEARCH_MODULES.has(moduleId)) {
-    const webResearchResult = await runWebResearchPhase(
-      ctx,
-      dealId,
-      moduleId,
-      runId,
-      startTime,
-      TIME_BUDGET_MS,
-      routed
-    );
-
-    if (webResearchResult.needed && !webResearchResult.completed) {
-      // Time budget consumed — return in_progress so caller re-invokes
-      return {
-        status: "in_progress",
-        runId,
-        phase: "web_research",
-        progress: {
-          analysisTotal: webResearchResult.totalIterations,
-          analysisCompleted: webResearchResult.iterationCount,
-          mergeRound: 0,
-          mergeTotal: 0,
-        },
-        result: null,
-        firstError: webResearchResult.firstError,
-      };
-    }
-    // If completed, fall through — inject iterations as synthetic analysis checkpoints
-    // so the merge step picks them up identically to normal analysis results.
-    const iterRows = await ctx.integrations.db.query(
-      `SELECT iteration, query, finding, confidence, platform, category, sources, materiality
-       FROM web_research_iterations
-       WHERE run_id = $1 AND status = 'completed'
-       ORDER BY iteration`,
-      z.object({
-        iteration: z.coerce.number(),
-        query: z.string().nullable(),
-        finding: z.string().nullable(),
-        confidence: z.coerce.number().nullable(),
-        platform: z.string().nullable(),
-        category: z.string().nullable(),
-        sources: z.any().nullable(),
-        materiality: z.string().nullable(),
-      }),
-      [runId],
-      { label: "Load completed iterations for merge injection" }
-    );
-
-    // Check if analysis checkpoints already exist (idempotent resume)
-    const existingAnalysis = await ctx.integrations.db.query(
-      `SELECT chunk_index FROM pipeline_analysis WHERE run_id = $1 LIMIT 1`,
-      z.object({ chunk_index: z.coerce.number() }),
-      [runId],
-      { label: "Check if iteration analysis already injected" }
-    );
-
-    if (existingAnalysis.length === 0 && iterRows.length > 0) {
-      // Inject each iteration as a synthetic analysis checkpoint
-      for (const row of iterRows) {
-        const label = `${moduleId} iteration ${row.iteration}: ${row.query ?? "research"}`;
-        const extraction = [
-          `### Web Research Finding (Iteration ${row.iteration})`,
-          "",
-          `**Query:** ${row.query ?? "research"}`,
-          row.category ? `**Category:** ${row.category}` : (row.platform ? `**Platform:** ${row.platform}` : ""),
-          row.materiality ? `**Materiality:** ${row.materiality}` : "",
-          `**Confidence:** ${row.confidence ?? 0}/10`,
-          row.sources ? `**Sources:** ${(Array.isArray(row.sources) ? row.sources : []).join(", ")}` : "",
-          "",
-          row.finding ?? "No finding recorded",
-        ].filter(Boolean).join("\n");
-
-        await ctx.integrations.db.execute(
-          `INSERT INTO pipeline_analysis (run_id, chunk_index, result_json, model_used, prompt_version)
-           VALUES ($1, $2, $3::jsonb, $4, $5)
-           ON CONFLICT (run_id, chunk_index) DO UPDATE SET result_json = $3::jsonb, model_used = $4, prompt_version = $5`,
-          [runId, row.iteration - 1, JSON.stringify({ label, extraction, chunkIndex: row.iteration - 1 }), getModuleModel(moduleId), getPipelineVersion()],
-          { label: `Inject iteration ${row.iteration} as analysis` }
-        );
-      }
-      console.log(`[WebResearch] Injected ${iterRows.length} iterations as analysis checkpoints`);
-    }
-  }
 
   // --- Step 2: Sub-agent analysis (with checkpointing) ---
   enterPhase("analysis_execution");
-  // For web research modules, iterations have already been injected as analysis
-  // checkpoints above — this step will see them all as "already analyzed" and skip.
   const currentVersion = getPipelineVersion();
   const analyzedRows = await ctx.integrations.db.query(
     `SELECT chunk_index,
@@ -4030,11 +3938,7 @@ async function _runPipelineCoreInner(ctx: PipelineContext, input: PipelineInput)
     console.log(`[pipeline:Fix8A] Rejected ${legacyCheckpointsRejected} legacy analysis checkpoint(s) without content hash identity — will rerun`);
   }
 
-  // For web research modules, analysis is synthetic (injected from iterations).
-  // Skip the normal sub-agent loop entirely — pendingChunks is empty.
-  const pendingChunks = WEB_RESEARCH_MODULES.has(moduleId)
-    ? []
-    : routed.filter((_, i) => !analyzedSet.has(i));
+  const pendingChunks = routed.filter((_, i) => !analyzedSet.has(i));
   let analysisCompleted = analyzedSet.size;
   let failedChunks = 0;
   let truncatedChunks = 0;

@@ -6,7 +6,7 @@ import { useApiData } from "@/hooks/useApiData.js";
 import { executeApi } from "@/lib/executeApi.js";
 import { processAllFiles, extractTextFromFile, parseExcelToTables, parseCsvToTable } from "@/lib/pdfProcessor";
 import type { DocumentChunk, ProcessedFileInfo, ExcludedFile, StructuredCell } from "@/lib/pdfProcessor";
-import { MODULE_DEFINITIONS, MODULE_MAP, NUMERIC_MODULES } from "@/lib/moduleConfig";
+import { MODULE_DEFINITIONS, MODULE_MAP, NUMERIC_MODULES, DISABLED_MODULE_IDS } from "@/lib/moduleConfig";
 import { CHUNK_CHARS, CHUNK_CONCURRENCY, EXTRACTION_MODEL, isSpreadsheetFile } from "@/lib/pipelineConfig";
 import { getExtractionsForModule } from "@/lib/chunkRouting";
 import type { TaggedExtraction } from "@/lib/chunkRouting";
@@ -2687,6 +2687,12 @@ export default function DealDashboardPage() {
 
   const handleRunModule = useCallback(
     async (moduleId: string, resumeRunId?: string) => {
+      // Gate disabled modules — no working run path
+      if (DISABLED_MODULE_IDS.has(moduleId)) {
+        toast.error("Social and Reputation Intelligence is being rebuilt and is temporarily unavailable.");
+        return;
+      }
+
       // If a user explicitly clicks Re-run on a killed module, clear the kill flag
       // so the run proceeds. The kill ref only blocks automated resume loops (watchdog).
       if (killedModulesRef.current.has(moduleId) && !resumeRunId) {
@@ -2999,7 +3005,7 @@ export default function DealDashboardPage() {
 
     // Launch all non-executive-summary modules simultaneously
     const modulesToRun = MODULE_DEFINITIONS.filter(
-      (m) => m.id !== "executive_summary" && !runningModules.has(m.id)
+      (m) => m.id !== "executive_summary" && !runningModules.has(m.id) && !DISABLED_MODULE_IDS.has(m.id)
     );
 
     if (modulesToRun.length === 0) {
