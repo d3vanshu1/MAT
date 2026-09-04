@@ -227,18 +227,31 @@ const severity: StageHandler = async (
     { label: "MAST-SEV: delete existing findings for idempotency" },
   );
 
-  // ── 5. Insert findings ────────────────────────────────────────────
-  for (const f of findings) {
+  // ── 5. Insert findings (batched, 200 rows per statement) ─────────
+  const INSERT_BATCH_SIZE = 200;
+  const COLS_PER_ROW = 6; // assumption_id, title, severity, severity_basis + run_id, deal_id are shared but passed per row for placeholder simplicity
+
+  for (let batchStart = 0; batchStart < findings.length; batchStart += INSERT_BATCH_SIZE) {
+    const batch = findings.slice(batchStart, batchStart + INSERT_BATCH_SIZE);
+    const valueClauses: string[] = [];
+    const params: unknown[] = [];
+
+    for (let r = 0; r < batch.length; r++) {
+      const f = batch[r];
+      const offset = r * COLS_PER_ROW;
+      valueClauses.push(
+        `(gen_random_uuid(), $${offset + 1}::uuid, $${offset + 2}::uuid, $${offset + 3}::uuid, $${offset + 4}, $${offset + 5}, $${offset + 6}, NULL, NULL, false)`,
+      );
+      params.push(runId, dealId, f.assumption_id, f.title, f.sev, f.basis);
+    }
+
     await db.execute(
       `INSERT INTO mast_findings (
          id, run_id, deal_id, assumption_id, title, severity, severity_basis,
          falsification_condition, monitoring_trigger, fragility_generated
-       ) VALUES (
-         gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, $4, $5, $6,
-         NULL, NULL, false
-       )`,
-      [runId, dealId, f.assumption_id, f.title, f.sev, f.basis],
-      { label: `MAST-SEV: insert finding for ${f.assumption_id}` },
+       ) VALUES ${valueClauses.join(", ")}`,
+      params,
+      { label: `MAST-SEV: insert findings batch ${batchStart / INSERT_BATCH_SIZE + 1} (${batch.length} rows)` },
     );
   }
 
