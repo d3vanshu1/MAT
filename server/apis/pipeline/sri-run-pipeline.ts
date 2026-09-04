@@ -218,14 +218,10 @@ export default api({
     }
 
     // 9. Process result
+    // NOTE: stages_completed is written only by stage handlers, not by the orchestrator.
+    // Each handler appends its own marker after all writes succeed. Stub handlers do not
+    // write it, so stages_completed remains empty until real handlers are implemented.
     if (result.status === "not_implemented" || result.status === "complete") {
-      // Record stage completion
-      await db.execute(
-        "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2) WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
-        [runId, stageToRun],
-        { label: "Record " + stageToRun + " in stages_completed" },
-      );
-
       var stageIdx = SRI_STAGES.indexOf(stageToRun);
       if (stageIdx < SRI_STAGES.length - 1) {
         var nextStage = SRI_STAGES[stageIdx + 1];
