@@ -35,7 +35,8 @@ const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
 // These modules run on v2 orchestrators and must never be routed to runPipelineCore.
-const RESUME_EXCLUDED_MODULE_IDS = ["model_assumptions_stress", "external_risk_overlay", "social_reputation"];
+// test_checkpoint is a non-module leftover that can never resolve a prompt and must not be routed.
+const RESUME_EXCLUDED_MODULE_IDS = ["model_assumptions_stress", "external_risk_overlay", "social_reputation", "test_checkpoint"];
 
 const StaleRunSchema = z.object({
   id: z.string(),
