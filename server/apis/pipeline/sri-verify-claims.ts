@@ -3,14 +3,14 @@
  *
  * Stage 2 of 3 — verify_claims
  *
- * For each claim in sri_claims, search a fixed set of public platforms
- * determined by claim_type, retain real URLs from web_search_result
- * blocks, and write a verdict to sri_findings.
+ * For each claim in sri_claims, search public platforms determined by
+ * claim_type using domain-constrained web search, judge per-URL relevance
+ * with a structured model call, and compute verdicts from counted stances.
  *
  * Anti-fabrication: URLs come from server-authoritative web_search_result
- * blocks only. Snippets from citations cited_text. Never accept a URL
- * the model typed into prose. Reject any evidence row whose URL does not
- * yield a non-empty host.
+ * blocks only. Domain backstop rejects off-platform URLs. Per-URL stance
+ * requires a verbatim quote substring from the snippet. Verdict is computed
+ * in code from stance counts, never from model prose.
  */
 
 import { z } from "@superblocksteam/sdk-api";
@@ -21,6 +21,7 @@ var STAGE_NAME = "verify_claims";
 var LOG_PREFIX = "[SRI verify_claims]";
 var SEARCH_MODEL = "claude-sonnet-4-6";
 var SEARCH_MAX_TOKENS = 4096;
+var JUDGMENT_MAX_TOKENS = 2048;
 var WEB_SEARCH_MAX_USES = 3;
 
 // ── Platform routing (code-side, no model involvement) ──────────────
@@ -35,15 +36,26 @@ var PLATFORM_ROUTING: Record<string, string[]> = {
   award: ["news"],
 };
 
-// ── Severity assignment (code-side, never model-asserted) ───────────
-function assignSeverity(verdict: string, thesisDependence: string, evidenceCount: number): string {
-  if (verdict === "contradicted" && thesisDependence === "high" && evidenceCount >= 2) return "critical";
-  if (verdict === "contradicted" && thesisDependence === "high" && evidenceCount === 1) return "warning";
+// ── Allowed domains per platform (for web_search tool config) ───────
+var PLATFORM_ALLOWED_DOMAINS: Record<string, string[]> = {
+  glassdoor: ["glassdoor.com", "glassdoor.co.uk"],
+  indeed: ["indeed.com", "uk.indeed.com"],
+  linkedin: ["linkedin.com"],
+  trustpilot: ["trustpilot.com", "uk.trustpilot.com"],
+  g2: ["g2.com"],
+  // news: no allowed_domains — legitimately open web
+};
+
+// ── Severity (code-assigned, never model-asserted) ──────────────────
+function assignSeverity(verdict: string, thesisDependence: string, contradictCount: number): string {
+  if (verdict === "contradicted" && thesisDependence === "high" && contradictCount >= 2) return "critical";
+  if (verdict === "contradicted" && thesisDependence === "high" && contradictCount === 1) return "warning";
   if (verdict === "contradicted" && thesisDependence === "medium") return "warning";
+  if (verdict === "mixed" && thesisDependence === "high") return "warning";
   return "info";
 }
 
-// ── extractHost equivalent (inline implementation) ─────────────────
+// ── extractHost (inline implementation) ─────────────────────────────
 function extractHost(url: string): string {
   if (!url || typeof url !== "string") return "";
   var s = url.trim().toLowerCase();
@@ -59,6 +71,11 @@ function extractHost(url: string): string {
   return s;
 }
 
+// ── Whitespace normalization for quote gate ──────────────────────────
+function normalizeWs(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
 // ── Zod schemas ─────────────────────────────────────────────────────
 var StagesCompletedRow = z.object({ stages_completed: z.array(z.string()) });
 var LockRow = z.object({ locked: z.boolean() });
@@ -72,7 +89,7 @@ var ClaimRow = z.object({
 var FindingExistsRow = z.object({ cnt: z.coerce.number() });
 var CountRow = z.object({ cnt: z.coerce.number() });
 
-// ── Web search response schema (loose, for web_search tool-use) ────
+// ── Web search response schema ──────────────────────────────────────
 var WebSearchResponseSchema = z.object({
   id: z.string(),
   type: z.literal("message"),
@@ -97,17 +114,34 @@ var WebSearchResponseSchema = z.object({
   }),
 });
 
+// ── Judgment response schema ────────────────────────────────────────
+var JudgmentResponseSchema = z.object({
+  id: z.string(),
+  type: z.literal("message"),
+  role: z.literal("assistant"),
+  content: z.array(
+    z.object({
+      type: z.string(),
+      text: z.string().optional(),
+    }),
+  ),
+  usage: z.object({
+    input_tokens: z.number(),
+    output_tokens: z.number(),
+  }),
+});
+
 // ── Evidence extraction from web search response ────────────────────
-interface EvidenceItem {
+interface HarvestedItem {
   url: string;
   domain: string;
   snippet: string;
 }
 
-function extractEvidenceFromSearchResponse(
+function extractHarvestedItems(
   response: z.infer<typeof WebSearchResponseSchema>,
-): { items: EvidenceItem[]; urlsRejectedNoHost: number } {
-  var items: EvidenceItem[] = [];
+): { items: HarvestedItem[]; urlsRejectedNoHost: number } {
+  var items: HarvestedItem[] = [];
   var urlsRejectedNoHost = 0;
   var seenUrls = new Set<string>();
 
@@ -146,16 +180,10 @@ function extractEvidenceFromSearchResponse(
   rawResults.forEach(function (raw, url) {
     if (seenUrls.has(url)) return;
     seenUrls.add(url);
-
     var host = extractHost(url);
-    if (!host) {
-      urlsRejectedNoHost++;
-      return;
-    }
-
+    if (!host) { urlsRejectedNoHost++; return; }
     var citation = citationsByUrl.get(url);
     var snippet = citation || raw.title || "(no snippet available)";
-
     items.push({ url: url, domain: host, snippet: snippet.slice(0, 2000) });
   });
 
@@ -163,17 +191,135 @@ function extractEvidenceFromSearchResponse(
   citationsByUrl.forEach(function (citedText, url) {
     if (seenUrls.has(url)) return;
     seenUrls.add(url);
-
     var host = extractHost(url);
-    if (!host) {
-      urlsRejectedNoHost++;
-      return;
-    }
-
+    if (!host) { urlsRejectedNoHost++; return; }
     items.push({ url: url, domain: host, snippet: citedText.slice(0, 2000) });
   });
 
   return { items: items, urlsRejectedNoHost: urlsRejectedNoHost };
+}
+
+// ── Per-URL relevance judgment ───────────────────────────────────────
+interface JudgedItem {
+  url: string;
+  domain: string;
+  snippet: string;
+  stance: "supports" | "contradicts";
+  quote: string;
+}
+
+var VALID_STANCES = new Set(["supports", "contradicts", "irrelevant"]);
+
+async function judgeRelevance(
+  claude: any,
+  claimText: string,
+  items: HarvestedItem[],
+  label: string,
+): Promise<{ retained: JudgedItem[]; quoteGateFailed: number; irrelevantCount: number }> {
+  if (items.length === 0) return { retained: [], quoteGateFailed: 0, irrelevantCount: 0 };
+
+  // Build numbered list of url + snippet
+  var itemList = "";
+  for (var i = 0; i < items.length; i++) {
+    itemList += (i + 1) + ". URL: " + items[i].url + "\nSnippet: " + items[i].snippet.slice(0, 500) + "\n\n";
+  }
+
+  var judgmentPrompt = "You are evaluating whether web search results are relevant to a specific claim.\n\nClaim: \"" + claimText + "\"\n\nSearch results:\n" + itemList + "For each result, determine its stance toward the claim. Return ONLY a JSON array, no prose. Each element must have:\n- \"index\": the 1-based result number\n- \"stance\": exactly one of \"supports\", \"contradicts\", or \"irrelevant\"\n- \"quote\": a verbatim span copied exactly from that result's Snippet text that justifies the stance\n\nRules:\n- \"supports\" means the snippet provides evidence consistent with the claim\n- \"contradicts\" means the snippet provides evidence that disputes or undermines the claim\n- \"irrelevant\" means the snippet has no bearing on the claim\n- The quote MUST be an exact substring of the snippet text. Do not paraphrase or rearrange.";
+
+  try {
+    var response = await claude.apiRequest(
+      {
+        method: "POST",
+        path: "/v1/messages",
+        body: {
+          model: SEARCH_MODEL,
+          max_tokens: JUDGMENT_MAX_TOKENS,
+          messages: [{ role: "user", content: judgmentPrompt }],
+        },
+      },
+      { response: JudgmentResponseSchema },
+      { label: label },
+    );
+
+    // Extract JSON from response text
+    var responseText = "";
+    for (var ri = 0; ri < response.content.length; ri++) {
+      if (response.content[ri].type === "text" && response.content[ri].text) {
+        responseText += response.content[ri].text;
+      }
+    }
+
+    // Strip markdown fences if present
+    responseText = responseText.trim();
+    if (responseText.startsWith("```json")) {
+      responseText = responseText.slice(7);
+    } else if (responseText.startsWith("```")) {
+      responseText = responseText.slice(3);
+    }
+    if (responseText.endsWith("```")) {
+      responseText = responseText.slice(0, -3);
+    }
+    responseText = responseText.trim();
+
+    var judgments: any[];
+    try {
+      judgments = JSON.parse(responseText);
+    } catch (parseErr) {
+      // If parse fails, treat all as irrelevant
+      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length };
+    }
+
+    if (!Array.isArray(judgments)) {
+      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length };
+    }
+
+    var retained: JudgedItem[] = [];
+    var quoteGateFailed = 0;
+    var irrelevantCount = 0;
+
+    for (var ji = 0; ji < judgments.length; ji++) {
+      var j = judgments[ji];
+      var idx = (typeof j.index === "number" ? j.index : 0) - 1;
+      if (idx < 0 || idx >= items.length) continue;
+
+      var stance = String(j.stance || "").toLowerCase().trim();
+      var quote = String(j.quote || "");
+
+      // Gate (a): stance must be one of the three literals
+      if (!VALID_STANCES.has(stance)) {
+        stance = "irrelevant";
+      }
+
+      if (stance === "irrelevant") {
+        irrelevantCount++;
+        continue;
+      }
+
+      // Gate (b): quote must be exact substring of snippet after whitespace normalization
+      var normQuote = normalizeWs(quote);
+      var normSnippet = normalizeWs(items[idx].snippet);
+      if (normQuote.length === 0 || normSnippet.indexOf(normQuote) === -1) {
+        // Downgrade to irrelevant
+        quoteGateFailed++;
+        irrelevantCount++;
+        continue;
+      }
+
+      // Retained: supports or contradicts with valid quote
+      retained.push({
+        url: items[idx].url,
+        domain: items[idx].domain,
+        snippet: items[idx].snippet,
+        stance: stance as "supports" | "contradicts",
+        quote: quote,
+      });
+    }
+
+    return { retained: retained, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount };
+  } catch (err) {
+    console.log(LOG_PREFIX + " Judgment call failed: " + String(err));
+    return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length };
+  }
 }
 
 // ── Stage handler ───────────────────────────────────────────────────
@@ -184,6 +330,7 @@ var verifyClaims: StageHandler = async function (
 ): Promise<StageResult> {
   var db = ctx.integrations.db;
   var claude = ctx.integrations.claude;
+  var claimLimit: number | null = typeof ctx._claimLimit === "number" ? ctx._claimLimit : null;
 
   // ══ Marker guard — FIRST database operation ═══════════════════════
   var completedRows = await db.query(
@@ -260,11 +407,16 @@ var verifyClaims: StageHandler = async function (
   }
 
   try {
-    // ── Inline ALTER for resume cursor ──────────────────────────────
+    // ── Inline ALTERs ───────────────────────────────────────────────
     await db.execute(
       "ALTER TABLE sri_pipeline_state ADD COLUMN IF NOT EXISTS verify_claim_cursor INT NOT NULL DEFAULT 0",
       [],
       { label: LOG_PREFIX + " ensure verify_claim_cursor column" },
+    );
+    await db.execute(
+      "ALTER TABLE sri_evidence ADD COLUMN IF NOT EXISTS stance TEXT",
+      [],
+      { label: LOG_PREFIX + " ensure stance column on sri_evidence" },
     );
 
     // ── Get deal name for subject fallback ──────────────────────────
@@ -276,13 +428,15 @@ var verifyClaims: StageHandler = async function (
     );
     var dealName = dealRows.length > 0 ? dealRows[0].name : "Unknown";
 
-    // ── Stage-start diagnostics (committed immediately, outside transaction) ──
+    // ── Stage-start diagnostics (committed immediately) ─────────────
     try {
       await db.execute(
         "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb)",
         [runId, "verify_claims_start", JSON.stringify({
-          claimsToProcess: 0, // will be updated below
+          claimsToProcess: 0,
+          claimLimit: claimLimit,
           platformRouting: PLATFORM_ROUTING,
+          allowedDomains: PLATFORM_ALLOWED_DOMAINS,
           timestamp: new Date().toISOString(),
           dealName: dealName,
         })],
@@ -300,7 +454,7 @@ var verifyClaims: StageHandler = async function (
       { label: LOG_PREFIX + " load claims" },
     );
 
-    // Update start diagnostics with actual claim count
+    // Update start diagnostics with actual count
     try {
       await db.execute(
         "UPDATE sri_stage_diagnostics SET payload = jsonb_set(payload, '{claimsToProcess}', $2::text::jsonb) WHERE run_id = $1 AND stage = 'verify_claims_start' AND payload->>'claimsToProcess' = '0'",
@@ -311,11 +465,14 @@ var verifyClaims: StageHandler = async function (
 
     // ── Counters ────────────────────────────────────────────────────
     var claimsProcessed = 0;
+    var claimsNewlyProcessed = 0;
     var pairsAttempted = 0;
     var pairsWithEvidence = 0;
     var pairsNoEvidence = 0;
     var evidenceRowsWritten = 0;
     var urlsRejectedNoHost = 0;
+    var domainMismatchDropped = 0;
+    var quoteGateFailed = 0;
     var subjectFallbackCount = 0;
     var verdictDistribution: Record<string, number> = {};
     var severityDistribution: Record<string, number> = {};
@@ -324,6 +481,11 @@ var verifyClaims: StageHandler = async function (
 
     // ── Process claims sequentially ─────────────────────────────────
     for (var idx = 0; idx < claims.length; idx++) {
+      // ── claimLimit check ──────────────────────────────────────────
+      if (claimLimit !== null && claimsNewlyProcessed >= claimLimit) {
+        break;
+      }
+
       var claim = claims[idx];
 
       // ── Skip already-processed claims (resume support) ────────────
@@ -341,13 +503,13 @@ var verifyClaims: StageHandler = async function (
       // ── Determine platforms ───────────────────────────────────────
       var platforms = PLATFORM_ROUTING[claim.claim_type] || [];
       if (platforms.length === 0) {
-        // not_searched verdict
         await db.execute(
           "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, created_at) VALUES (gen_random_uuid(), $1, $2, 'not_searched', 'info', $3, $4, now())",
           [runId, claim.claim_id, "No platform routing for " + claim.claim_type, "Claim type has no configured search platforms."],
           { label: LOG_PREFIX + " insert not_searched finding" },
         );
         claimsProcessed++;
+        claimsNewlyProcessed++;
         verdictDistribution["not_searched"] = (verdictDistribution["not_searched"] || 0) + 1;
         severityDistribution["info"] = (severityDistribution["info"] || 0) + 1;
         continue;
@@ -363,8 +525,8 @@ var verifyClaims: StageHandler = async function (
       }
 
       // ── Search each platform ──────────────────────────────────────
-      var claimEvidenceCount = 0;
-      var claimHasContradiction = false;
+      var claimSupportsCount = 0;
+      var claimContradictsCount = 0;
       var claimEvidenceUrls: string[] = [];
 
       for (var pi = 0; pi < platforms.length; pi++) {
@@ -376,16 +538,19 @@ var verifyClaims: StageHandler = async function (
         }
         perPlatformCounts[platform].attempted++;
 
-        // ── Build search prompt ─────────────────────────────────────
-        var platformLabel = platform;
-        if (platform === "glassdoor") platformLabel = "Glassdoor";
-        else if (platform === "indeed") platformLabel = "Indeed";
-        else if (platform === "linkedin") platformLabel = "LinkedIn";
-        else if (platform === "trustpilot") platformLabel = "Trustpilot";
-        else if (platform === "g2") platformLabel = "G2";
-        else if (platform === "news") platformLabel = "news articles and press coverage";
+        // ── Build search prompt (no platform name in text) ──────────
+        var searchPrompt = "Search for information about " + searchSubject + " related to this claim: \"" + claim.claim_text + "\"\n\nReturn what you find. Report the facts as they appear in search results.";
 
-        var searchPrompt = "Search " + platformLabel + " for information about " + searchSubject + " related to this claim: \"" + claim.claim_text + "\"\n\nReturn what you find. Focus on whether the evidence supports or contradicts the claim. If you find nothing relevant, say so explicitly.";
+        // ── Build web_search tool config with allowed_domains ────────
+        var toolConfig: any = {
+          type: "web_search_20250305" as string,
+          name: "web_search",
+          max_uses: WEB_SEARCH_MAX_USES,
+        };
+        var allowedDomains = PLATFORM_ALLOWED_DOMAINS[platform];
+        if (allowedDomains) {
+          toolConfig.allowed_domains = allowedDomains;
+        }
 
         try {
           var searchResponse = await claude.apiRequest(
@@ -396,49 +561,69 @@ var verifyClaims: StageHandler = async function (
                 model: SEARCH_MODEL,
                 max_tokens: SEARCH_MAX_TOKENS,
                 messages: [{ role: "user", content: searchPrompt }],
-                tools: [
-                  {
-                    type: "web_search_20250305" as string,
-                    name: "web_search",
-                    max_uses: WEB_SEARCH_MAX_USES,
-                  },
-                ],
+                tools: [toolConfig],
               },
             },
             { response: WebSearchResponseSchema },
-            { label: LOG_PREFIX + " search " + platform + " for claim " + (idx + 1) },
+            { label: LOG_PREFIX + " search " + platform + " claim " + (idx + 1) },
           );
 
-          // ── Extract evidence ──────────────────────────────────────
-          var extracted = extractEvidenceFromSearchResponse(searchResponse);
+          // ── Extract harvested items ───────────────────────────────
+          var extracted = extractHarvestedItems(searchResponse);
           urlsRejectedNoHost += extracted.urlsRejectedNoHost;
 
-          if (extracted.items.length > 0) {
+          // ── Code-side domain backstop ─────────────────────────────
+          var domainFiltered: HarvestedItem[] = [];
+          if (allowedDomains) {
+            for (var di = 0; di < extracted.items.length; di++) {
+              var item = extracted.items[di];
+              var domainOk = false;
+              for (var ai = 0; ai < allowedDomains.length; ai++) {
+                if (item.domain === allowedDomains[ai] || item.domain.endsWith("." + allowedDomains[ai])) {
+                  domainOk = true;
+                  break;
+                }
+              }
+              if (domainOk) {
+                domainFiltered.push(item);
+              } else {
+                domainMismatchDropped++;
+              }
+            }
+          } else {
+            // news: open web, no domain filter
+            domainFiltered = extracted.items;
+          }
+
+          if (domainFiltered.length === 0) {
+            pairsNoEvidence++;
+            continue;
+          }
+
+          // ── Per-URL relevance judgment ─────────────────────────────
+          var judgment = await judgeRelevance(
+            claude,
+            claim.claim_text,
+            domainFiltered,
+            LOG_PREFIX + " judge " + platform + " claim " + (idx + 1),
+          );
+          quoteGateFailed += judgment.quoteGateFailed;
+
+          if (judgment.retained.length > 0) {
             pairsWithEvidence++;
             perPlatformCounts[platform].withEvidence++;
 
-            for (var ei = 0; ei < extracted.items.length; ei++) {
-              var ev = extracted.items[ei];
+            for (var ei = 0; ei < judgment.retained.length; ei++) {
+              var ev = judgment.retained[ei];
               await db.execute(
-                "INSERT INTO sri_evidence (evidence_id, claim_id, platform, url, domain, snippet, retrieved_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, now()) ON CONFLICT (claim_id, url) DO NOTHING",
-                [claim.claim_id, platform, ev.url, ev.domain, ev.snippet],
+                "INSERT INTO sri_evidence (evidence_id, claim_id, platform, url, domain, snippet, stance, retrieved_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, now()) ON CONFLICT (claim_id, url) DO NOTHING",
+                [claim.claim_id, platform, ev.url, ev.domain, ev.snippet, ev.stance],
                 { label: LOG_PREFIX + " insert evidence" },
               );
               evidenceRowsWritten++;
-              claimEvidenceCount++;
               claimEvidenceUrls.push(ev.url);
-            }
-
-            // ── Check model text for contradiction signal ───────────
-            var modelText = "";
-            for (var ti = 0; ti < searchResponse.content.length; ti++) {
-              if (searchResponse.content[ti].type === "text" && searchResponse.content[ti].text) {
-                modelText += " " + searchResponse.content[ti].text;
-              }
-            }
-            var contradictionSignals = /\bcontradict|disputes?|refutes?|denies?|negative\s+review|poor\s+rating|complaints?\b/i;
-            if (contradictionSignals.test(modelText)) {
-              claimHasContradiction = true;
+              if (ev.stance === "supports") claimSupportsCount++;
+              if (ev.stance === "contradicts") claimContradictsCount++;
             }
           } else {
             pairsNoEvidence++;
@@ -449,17 +634,21 @@ var verifyClaims: StageHandler = async function (
         }
       }
 
-      // ── Determine verdict ─────────────────────────────────────────
+      // ── Verdict from counted stances (Item 6) ─────────────────────
+      var s = claimSupportsCount;
+      var c = claimContradictsCount;
       var verdict: string;
-      if (claimEvidenceCount === 0) {
+      if (c === 0 && s === 0) {
         verdict = "unverifiable";
-      } else if (claimHasContradiction) {
+      } else if (c === 0 && s >= 1) {
+        verdict = "corroborated";
+      } else if (c >= 1 && c >= 2 * s) {
         verdict = "contradicted";
       } else {
-        verdict = "corroborated";
+        verdict = "mixed";
       }
 
-      var severity = assignSeverity(verdict, claim.thesis_dependence, claimEvidenceCount);
+      var severity = assignSeverity(verdict, claim.thesis_dependence, c);
 
       verdictDistribution[verdict] = (verdictDistribution[verdict] || 0) + 1;
       severityDistribution[severity] = (severityDistribution[severity] || 0) + 1;
@@ -468,9 +657,11 @@ var verifyClaims: StageHandler = async function (
       var findingTitle = verdict === "unverifiable"
         ? "No public evidence found for claim"
         : verdict === "contradicted"
-          ? "Public evidence may contradict claim"
-          : "Public evidence corroborates claim";
-      var findingDetail = "Claim: " + claim.claim_text + "\nVerdict: " + verdict + " | Severity: " + severity + " | Evidence URLs: " + claimEvidenceCount;
+          ? "Public evidence contradicts claim"
+          : verdict === "mixed"
+            ? "Mixed public evidence for claim"
+            : "Public evidence corroborates claim";
+      var findingDetail = "Claim: " + claim.claim_text + "\nVerdict: " + verdict + " | Severity: " + severity + " | Supports: " + s + " | Contradicts: " + c;
 
       await db.execute(
         "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, now())",
@@ -486,6 +677,7 @@ var verifyClaims: StageHandler = async function (
       );
 
       claimsProcessed++;
+      claimsNewlyProcessed++;
 
       // ── Collect sample findings ───────────────────────────────────
       if (sampleFindings.length < 10) {
@@ -497,10 +689,39 @@ var verifyClaims: StageHandler = async function (
           thesis_dependence: claim.thesis_dependence,
           verdict: verdict,
           severity: severity,
+          supports: s,
+          contradicts: c,
           evidence_urls: claimEvidenceUrls,
-          evidence_count: claimEvidenceCount,
         });
       }
+    }
+
+    // ── If claimLimit hit, return in_progress without writing marker ─
+    if (claimLimit !== null && claimsNewlyProcessed >= claimLimit && claimsProcessed < claims.length) {
+      var partialData: Record<string, unknown> = {
+        claimsProcessed: claimsProcessed,
+        claimsNewlyProcessed: claimsNewlyProcessed,
+        claimLimit: claimLimit,
+        pairsAttempted: pairsAttempted,
+        pairsWithEvidence: pairsWithEvidence,
+        pairsNoEvidence: pairsNoEvidence,
+        evidenceRowsWritten: evidenceRowsWritten,
+        urlsRejectedNoHost: urlsRejectedNoHost,
+        domainMismatchDropped: domainMismatchDropped,
+        quoteGateFailed: quoteGateFailed,
+        subjectFallbackCount: subjectFallbackCount,
+        verdictDistribution: verdictDistribution,
+        severityDistribution: severityDistribution,
+        perPlatformCounts: perPlatformCounts,
+        sampleFindings: sampleFindings,
+      };
+
+      return {
+        stage: STAGE_NAME,
+        status: "in_progress",
+        message: "Scoped run: processed " + claimsNewlyProcessed + " of " + claims.length + " claims (limit " + claimLimit + ").",
+        stageData: partialData,
+      };
     }
 
     // ── Completion: diagnostics + marker in transaction ──────────────
@@ -511,6 +732,8 @@ var verifyClaims: StageHandler = async function (
       pairsNoEvidence: pairsNoEvidence,
       evidenceRowsWritten: evidenceRowsWritten,
       urlsRejectedNoHost: urlsRejectedNoHost,
+      domainMismatchDropped: domainMismatchDropped,
+      quoteGateFailed: quoteGateFailed,
       subjectFallbackCount: subjectFallbackCount,
       verdictDistribution: verdictDistribution,
       severityDistribution: severityDistribution,
@@ -520,7 +743,6 @@ var verifyClaims: StageHandler = async function (
 
     await db.execute("BEGIN", [], { label: LOG_PREFIX + " BEGIN completion transaction" });
     try {
-      // Persist diagnostics
       try {
         await db.execute(
           "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb)",
@@ -531,7 +753,6 @@ var verifyClaims: StageHandler = async function (
         console.log(LOG_PREFIX + " Failed to persist diagnostics (non-fatal): " + String(diagErr));
       }
 
-      // Completion marker
       await db.execute(
         "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2), updated_at = now() WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
         [runId, STAGE_NAME],
@@ -551,7 +772,6 @@ var verifyClaims: StageHandler = async function (
       stageData: stageData,
     };
   } finally {
-    // ── Always release advisory lock ────────────────────────────────
     try {
       await db.execute(
         "SELECT pg_advisory_unlock(hashtext($1::text)::bigint)",

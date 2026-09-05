@@ -54,6 +54,7 @@ export default api({
   input: z.object({
     dealId: z.string(),
     runId: z.string().nullable().optional(),
+    claimLimit: z.number().int().positive().nullable().optional(),
   }),
 
   output: z.object({
@@ -65,8 +66,12 @@ export default api({
     stageData: z.record(z.unknown()).nullable(),
   }),
 
-  async run(ctx, { dealId, runId }) {
+  async run(ctx, { dealId, runId, claimLimit }) {
     var db = ctx.integrations.db;
+    // Pass claimLimit to handlers via ctx
+    if (typeof claimLimit === "number") {
+      (ctx as any)._claimLimit = claimLimit;
+    }
     var invocationStart = Date.now();
 
     // 1. Resume or create run

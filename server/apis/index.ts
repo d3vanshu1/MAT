@@ -191,6 +191,7 @@ import SriGetActiveRun from './pipeline/sri-get-active-run.js';
 import SriPurgeDealState from './pipeline/sri-purge-deal-state.js';
 import RunMigration044 from './pipeline/run-migration-044.js';
 import SriTestMarkerGuard from './pipeline/sri-test-marker-guard.js';
+import SriResetVerify from './pipeline/sri-reset-verify.js';
 import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import EroTestRanking from './pipeline/ero-test-ranking.js';
 import EroTestSourceTiers from './pipeline/ero-test-source-tiers.js';
@@ -325,7 +326,7 @@ const apis = {
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // SRI v2 pipeline
-  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard,
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
