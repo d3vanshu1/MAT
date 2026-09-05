@@ -7,6 +7,7 @@ import {
   type StageResult,
 } from "./sri-stage-contract.js";
 import { buildClaimRegister } from "./sri-claim-register.js";
+import { verifyClaims } from "./sri-verify-claims.js";
 
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -34,7 +35,7 @@ function makeStub(stage: SriStageName): StageHandler {
 
 var DISPATCH: Record<SriStageName, StageHandler> = {
   build_claim_register: buildClaimRegister,
-  verify_claims: makeStub("verify_claims"),
+  verify_claims: verifyClaims,
   render: makeStub("render"),
 };
 
