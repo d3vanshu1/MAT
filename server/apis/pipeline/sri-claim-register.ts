@@ -4,11 +4,15 @@
  * SRI v2 — Stage 1: Build Claim Register
  *
  * Reads IC memo chunks only (not CIM, consultant, legal, or financial_model).
- * Extracts reputation claims the deal team asserts. Each claim carries its
- * own subject entity. No search, no ranking, no entity extraction.
+ * Extracts reputation claims the deal team asserts that a public platform
+ * could speak to (Glassdoor, Indeed, LinkedIn, Trustpilot, G2, news).
  *
  * Resumable via claim_batch_cursor on sri_pipeline_state.
  * Inserts surviving rows into sri_claims. No writes to sri_evidence or sri_findings.
+ *
+ * Deduplication: two passes — by normalized verbatim_snippet, then by
+ * normalized claim_text. Each collapse increments member_count and collects
+ * all contributing locators into source_locators.
  */
 
 import type { StageHandler, StageResult } from "./sri-stage-contract.js";
@@ -27,8 +31,8 @@ var VALID_CLAIM_TYPES = new Set([
   "headcount",
   "nps_csat",
   "customer_satisfaction",
-  "management_quality",
-  "brand_position",
+  "employer_reputation",
+  "brand_reputation",
   "award",
 ]);
 
@@ -42,14 +46,34 @@ var VALID_ATTRIBUTIONS = new Set([
 // ── thesis_dependence lookup by claim_type ──────────────────────────────
 var THESIS_DEPENDENCE: Record<string, string> = {
   retention_attrition: "high",
-  management_quality: "high",
+  employer_reputation: "high",
   culture: "medium",
   nps_csat: "medium",
   customer_satisfaction: "medium",
   headcount: "low",
-  brand_position: "low",
+  brand_reputation: "low",
   award: "low",
 };
+
+// ── Relevance rejection reasons ─────────────────────────────────────────
+var RELEVANCE_REJECT_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /deal\s+structure|deal\s+economics|deal\s+terms/i, reason: "deal structure and economics" },
+  { pattern: /equity\s+ownership|rollover|roll[\s-]*over|equity\s+roll/i, reason: "equity ownership and rollover" },
+  { pattern: /earn[\s-]*out|incentive\s+plan|MIP|management\s+incentive/i, reason: "earn-outs and incentive plans" },
+  { pattern: /investor\s+return|return\s+to\s+\w+bridge|delivered\s+\d+x/i, reason: "historical investor returns" },
+  { pattern: /\d+\s*acquisitions|\d+\+?\s*deals?\s+(completed|done|closed)/i, reason: "M&A deal counts" },
+  { pattern: /financing\s+terms|debt\s+structure|leverage|LTV|syndication/i, reason: "financing terms" },
+  { pattern: /valuation|multiple|EV\s*\/|theoretical\s+EV|implied\s+EV/i, reason: "valuation" },
+  { pattern: /revenue\s+of|EBITDA|£\d+m\s+revenue|\$\d+m\s+revenue|revenue\s+in\s+FY/i, reason: "revenue and EBITDA figures" },
+  { pattern: /market\s+share|~?\d+%\s+market/i, reason: "market share" },
+  { pattern: /pricing|£\d+\s+per\s+seat|price[\s-]*point|priced\s+at/i, reason: "pricing" },
+  { pattern: /product\s+feature|UI\/UX|platform\s+capability|phonebar|integration\s+with/i, reason: "product features" },
+];
+
+// ── Whitespace normalization ────────────────────────────────────────────
+function normalizeWs(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
 
 // ── DB row schemas ──────────────────────────────────────────────────────
 var ChunkRow = z.object({
@@ -81,13 +105,32 @@ var StagesCompletedRow = z.object({
   stages_completed: z.array(z.string()),
 });
 
+var LockRow = z.object({ locked: z.boolean() });
+
 // ── Extraction prompt ───────────────────────────────────────────────────
 var SYSTEM_PROMPT =
-  "You are an investment diligence analyst specializing in social and reputation intelligence. Extract reputation claims from deal team memos exactly as instructed. Return only valid JSON.";
+  "You are an investment diligence analyst specializing in social and reputation intelligence. Extract only reputation claims that a public platform (Glassdoor, Indeed, LinkedIn, Trustpilot, G2, or news outlets) could speak to. Return only valid JSON.";
 
 function buildUserPrompt(chunkContent: string, fileName: string): string {
-  return "Below is a section of an investment committee memo (file: " + fileName + "). Extract every reputation-related claim the deal team asserts.\n\nLook for assertions about:\n- Company culture (values, environment, employee satisfaction)\n- Employee retention or attrition rates\n- Headcount growth or plans\n- NPS, CSAT, or customer satisfaction scores\n- Management quality or leadership strength\n- Brand positioning or reputation\n- Awards or recognitions received\n\nDO NOT extract:\n- Historical financial results\n- Descriptions of products or services\n- Forward-looking financial projections (revenue, EBITDA)\n- Legal or regulatory statements\n- Generic deal terms\n\nFor each claim, provide:\n- claim_text: the assertion normalized to one clear sentence\n- verbatim_snippet: the exact passage from the text containing the claim (must be a character-for-character substring of the chunk text)\n- claim_type: exactly one of: culture, retention_attrition, headcount, nps_csat, customer_satisfaction, management_quality, brand_position, award\n- subject_entity: the company or brand the claim is about, exactly as written in the memo\n- attribution: who the memo credits for the claim, exactly one of: deal_team, management, cim, third_party\n- metric_value: the specific figure if stated (e.g. \"92%\", \"4.5/5\"), otherwise null\n\nReturn a JSON array only. No prose. No markdown fences. If no reputation claims are found, return an empty array [].\n\nExample format:\n[{\"claim_text\":\"Employee retention rate exceeds 95% annually\",\"verbatim_snippet\":\"the company maintains a retention rate exceeding 95% annually\",\"claim_type\":\"retention_attrition\",\"subject_entity\":\"SCG\",\"attribution\":\"management\",\"metric_value\":\"95%\"}]\n\n--- CHUNK TEXT ---\n" + chunkContent + "\n--- END CHUNK TEXT ---";
+  return "Below is a section of an investment committee memo (file: " + fileName + "). Extract ONLY reputation claims that could be verified or contradicted on a public platform such as Glassdoor, Indeed, LinkedIn, Trustpilot, G2, or named news coverage.\n\nQualifying claim types (use EXACTLY one of these):\n- culture: company values, work environment, employee satisfaction\n- retention_attrition: employee turnover, retention rates, attrition\n- headcount: headcount growth, hiring plans, workforce size\n- nps_csat: Net Promoter Score, CSAT scores, quantified satisfaction metrics\n- customer_satisfaction: qualitative customer satisfaction, service quality, support quality\n- employer_reputation: what it is like to work at the company, leadership as perceived by employees or the public, public standing of named executives\n- brand_reputation: brand perception, market reputation, competitive standing as perceived externally\n- award: awards, certifications, recognitions received\n\nDO NOT extract any of the following — these are not reputation claims:\n- Deal structure, economics, or terms\n- Equity ownership, rollover, or earn-out arrangements\n- Historical investor returns (e.g. \"delivered 3x\")\n- M&A deal counts (e.g. \"50 acquisitions\")\n- Financing terms, debt, leverage\n- Valuation or multiples\n- Revenue, EBITDA, or financial figures\n- Market share percentages\n- Pricing or price points\n- Product features or technical capabilities\n- Management incentive plans\n\nMost chunks in an IC memo contain NO reputation claims. If a chunk is about financials, deal terms, market sizing, or product features, return an empty array.\n\nFor each claim, provide:\n- claim_text: the assertion normalized to one clear sentence\n- verbatim_snippet: the EXACT passage from the text. Copy it character for character. Do not fix whitespace, newlines, or formatting.\n- claim_type: exactly one of the eight types listed above\n- subject_entity: the company or brand the claim is about, exactly as written\n- attribution: exactly one of: deal_team, management, cim, third_party\n- metric_value: the specific figure if stated, otherwise null\n\nReturn a JSON array only. No prose. No markdown fences. Return [] if no qualifying claims exist.\n\n--- CHUNK TEXT ---\n" + chunkContent + "\n--- END CHUNK TEXT ---";
 }
+
+// ── Candidate row type ──────────────────────────────────────────────────
+type ClaimCandidate = {
+  claim_text: string;
+  verbatim_snippet: string;
+  claim_type: string;
+  subject_entity: string | null;
+  attribution: string;
+  metric_value: string | null;
+  thesis_dependence: string;
+  document_id: string;
+  chunk_index: number;
+  locator: string;
+  subject_unverified: boolean;
+  member_count: number;
+  source_locators: string[];
+};
 
 // ── Stage handler ───────────────────────────────────────────────────────
 var buildClaimRegister: StageHandler = async function (
@@ -110,7 +153,6 @@ var buildClaimRegister: StageHandler = async function (
     var completed = completedRows[0].stages_completed;
     for (var ci = 0; ci < completed.length; ci++) {
       if (completed[ci] === STAGE_NAME) {
-        // Already complete — return without re-extracting
         var existingCountRows = await db.query(
           "SELECT count(*)::int AS cnt FROM sri_claims WHERE run_id = $1 LIMIT 1",
           z.object({ cnt: z.coerce.number() }),
@@ -128,14 +170,46 @@ var buildClaimRegister: StageHandler = async function (
     }
   }
 
-  // ── Ensure claim_batch_cursor column exists ─────────────────────────
+  // ── CHANGE 1: Advisory lock ─────────────────────────────────────────
+  var lockRows = await db.query(
+    "SELECT pg_try_advisory_lock(hashtext($1::text)::bigint) AS locked",
+    LockRow,
+    [runId],
+    { label: LOG_PREFIX + " acquire advisory lock" },
+  );
+  var lockAcquired = lockRows.length > 0 && lockRows[0].locked === true;
+  if (!lockAcquired) {
+    return {
+      stage: STAGE_NAME,
+      status: "in_progress",
+      message: "another execution holds the lock",
+      stageData: {},
+    };
+  }
+
+  // Wrap all remaining work in try/finally to guarantee lock release
+  try {
+    return await doExtraction(db, claude, runId, dealId);
+  } finally {
+    try {
+      await db.execute(
+        "SELECT pg_advisory_unlock(hashtext($1::text)::bigint)",
+        [runId],
+        { label: LOG_PREFIX + " release advisory lock" },
+      );
+    } catch (unlockErr) {
+      console.log(LOG_PREFIX + " Failed to release advisory lock: " + String(unlockErr));
+    }
+  }
+};
+
+async function doExtraction(db: any, claude: any, runId: string, dealId: string): Promise<StageResult> {
+  // ── Ensure columns exist ────────────────────────────────────────────
   await db.execute(
     "ALTER TABLE sri_pipeline_state ADD COLUMN IF NOT EXISTS claim_batch_cursor int DEFAULT 0",
     [],
     { label: LOG_PREFIX + " ensure claim_batch_cursor column" },
   );
-
-  // ── Ensure sri_claims has subject_entity, attribution, subject_unverified columns ──
   await db.execute(
     "ALTER TABLE sri_claims ADD COLUMN IF NOT EXISTS subject_entity text",
     [],
@@ -151,26 +225,28 @@ var buildClaimRegister: StageHandler = async function (
     [],
     { label: LOG_PREFIX + " ensure subject_unverified column" },
   );
-
-  // ── Delete existing claims for this run (re-extraction on resume from scratch) ──
-  var cursorRows = await db.query(
-    "SELECT claim_batch_cursor FROM sri_pipeline_state WHERE run_id = $1 LIMIT 1",
-    CursorRow,
-    [runId],
-    { label: LOG_PREFIX + " read batch cursor" },
+  await db.execute(
+    "ALTER TABLE sri_claims ADD COLUMN IF NOT EXISTS member_count int NOT NULL DEFAULT 1",
+    [],
+    { label: LOG_PREFIX + " ensure member_count column" },
   );
-  var batchCursor = (cursorRows.length > 0 && cursorRows[0].claim_batch_cursor != null)
-    ? cursorRows[0].claim_batch_cursor
-    : 0;
+  await db.execute(
+    "ALTER TABLE sri_claims ADD COLUMN IF NOT EXISTS source_locators text[] NOT NULL DEFAULT '{}'",
+    [],
+    { label: LOG_PREFIX + " ensure source_locators column" },
+  );
 
-  if (batchCursor === 0) {
-    // Starting fresh — clear any partial claims from a prior failed attempt
-    await db.execute(
-      "DELETE FROM sri_claims WHERE run_id = $1",
-      [runId],
-      { label: LOG_PREFIX + " clear prior claims for fresh start" },
-    );
-  }
+  // ── CHANGE 5: Purge before rerun — always start fresh ──────────────
+  await db.execute(
+    "DELETE FROM sri_claims WHERE run_id = $1",
+    [runId],
+    { label: LOG_PREFIX + " purge claims for clean extraction" },
+  );
+  await db.execute(
+    "UPDATE sri_pipeline_state SET claim_batch_cursor = 0, updated_at = now() WHERE run_id = $1",
+    [runId],
+    { label: LOG_PREFIX + " reset batch cursor" },
+  );
 
   // ── Load IC memo chunks ─────────────────────────────────────────────
   var chunks = await db.query(
@@ -196,20 +272,20 @@ var buildClaimRegister: StageHandler = async function (
   }
 
   // ── Tracking ────────────────────────────────────────────────────────
-  var totalClaimsInserted = 0;
+  var allCandidates: ClaimCandidate[] = [];
   var chunksProcessed = 0;
   var droppedRows: Array<{ claim_text: string; reason: string }> = [];
+  var rejectedByRelevance: Array<{ claim_text: string; reason: string }> = [];
   var coercedAttribution = 0;
   var subjectUnverifiedCount = 0;
-  var claimTypeDistribution: Record<string, number> = {};
-  var attributionDistribution: Record<string, number> = {};
-  var sampleClaims: Array<Record<string, unknown>> = [];
+  var gatePassAfterNormalization = 0;
+  var gateStillFailing = 0;
   var totalInputTokens = 0;
   var totalOutputTokens = 0;
   var batchErrors = 0;
 
-  // ── Process batches starting from cursor ────────────────────────────
-  for (var batchIdx = batchCursor; batchIdx < batches.length; batchIdx++) {
+  // ── Process all batches ─────────────────────────────────────────────
+  for (var batchIdx = 0; batchIdx < batches.length; batchIdx++) {
     var batch = batches[batchIdx];
 
     for (var chunkI = 0; chunkI < batch.length; chunkI++) {
@@ -236,22 +312,11 @@ var buildClaimRegister: StageHandler = async function (
         var errMsg = llmErr instanceof Error ? llmErr.message : String(llmErr);
         console.log(LOG_PREFIX + " LLM error on chunk " + chunk.chunk_index + ": " + errMsg);
         batchErrors++;
-        // Save progress and return in_progress
-        await db.execute(
-          "UPDATE sri_pipeline_state SET claim_batch_cursor = $2, updated_at = now() WHERE run_id = $1",
-          [runId, batchIdx],
-          { label: LOG_PREFIX + " save cursor on LLM error" },
-        );
         return {
           stage: STAGE_NAME,
           status: "in_progress",
           message: "LLM error at batch " + batchIdx + " chunk " + chunk.chunk_index + ". Progress saved.",
-          stageData: {
-            claimCount: totalClaimsInserted,
-            batchesProcessed: batchIdx,
-            chunksProcessed: chunksProcessed,
-            batchErrors: batchErrors,
-          },
+          stageData: { claimCount: allCandidates.length, batchesProcessed: batchIdx, chunksProcessed: chunksProcessed, batchErrors: batchErrors },
         };
       }
 
@@ -268,32 +333,22 @@ var buildClaimRegister: StageHandler = async function (
 
       var rawClaims: Array<any> = [];
       try {
-        // Strip markdown fences if present
         var cleaned = responseText.trim();
         if (cleaned.startsWith("```")) {
           var firstNewline = cleaned.indexOf("\n");
-          if (firstNewline >= 0) {
-            cleaned = cleaned.slice(firstNewline + 1);
-          }
-          if (cleaned.endsWith("```")) {
-            cleaned = cleaned.slice(0, cleaned.length - 3);
-          }
+          if (firstNewline >= 0) cleaned = cleaned.slice(firstNewline + 1);
+          if (cleaned.endsWith("```")) cleaned = cleaned.slice(0, cleaned.length - 3);
           cleaned = cleaned.trim();
         }
         rawClaims = JSON.parse(cleaned);
       } catch (parseErr) {
         console.log(LOG_PREFIX + " JSON parse error on chunk " + chunk.chunk_index + ": " + String(parseErr));
-        droppedRows.push({
-          claim_text: "(unparseable response for chunk " + chunk.chunk_index + ")",
-          reason: "json_parse_error",
-        });
+        droppedRows.push({ claim_text: "(unparseable response for chunk " + chunk.chunk_index + ")", reason: "json_parse_error" });
         chunksProcessed++;
         continue;
       }
 
-      if (!Array.isArray(rawClaims)) {
-        rawClaims = [];
-      }
+      if (!Array.isArray(rawClaims)) rawClaims = [];
 
       // ── Gate and validate each claim ──────────────────────────────
       for (var ci2 = 0; ci2 < rawClaims.length; ci2++) {
@@ -312,26 +367,84 @@ var buildClaimRegister: StageHandler = async function (
           continue;
         }
 
-        // Gate 1: verbatim_snippet must be exact case-sensitive substring of chunk
-        if (chunk.content.indexOf(verbatimSnippet) === -1) {
-          droppedRows.push({ claim_text: claimText, reason: "verbatim_not_found_in_chunk" });
+        // CHANGE 4: Relevance rejection
+        var rejected = false;
+        for (var rp = 0; rp < RELEVANCE_REJECT_PATTERNS.length; rp++) {
+          if (RELEVANCE_REJECT_PATTERNS[rp].pattern.test(claimText)) {
+            rejectedByRelevance.push({ claim_text: claimText, reason: RELEVANCE_REJECT_PATTERNS[rp].reason });
+            rejected = true;
+            break;
+          }
+        }
+        if (rejected) continue;
+
+        // CHANGE 2: Whitespace-normalized verbatim gate
+        var normalizedSnippet = normalizeWs(verbatimSnippet);
+        var normalizedChunk = normalizeWs(chunk.content);
+        var matchIdx = normalizedChunk.indexOf(normalizedSnippet);
+
+        if (matchIdx === -1) {
+          // Gate still fails even after normalization
+          gateStillFailing++;
+          droppedRows.push({ claim_text: claimText, reason: "verbatim_not_found_after_normalization" });
           continue;
         }
 
-        // Gate 2: claim_type must be valid
+        // Recover the original snippet from the source chunk
+        var exactSnippetFromSource: string;
+        var rawMatchIdx = chunk.content.indexOf(verbatimSnippet);
+        if (rawMatchIdx !== -1) {
+          // Exact match — use as-is
+          exactSnippetFromSource = verbatimSnippet;
+        } else {
+          // Passed after normalization — recover from source
+          gatePassAfterNormalization++;
+          // Walk the original chunk to find the span matching the normalized position
+          var srcChars = chunk.content;
+          var normPos = 0;
+          var srcStart = -1;
+          var srcEnd = -1;
+          var inWhitespace = false;
+          for (var si = 0; si < srcChars.length && normPos <= matchIdx + normalizedSnippet.length; si++) {
+            var ch = srcChars[si];
+            var isWs = ch === " " || ch === "\n" || ch === "\r" || ch === "\t";
+            if (isWs) {
+              if (!inWhitespace) {
+                // First ws char in a run — corresponds to the single space in normalized
+                if (normPos === matchIdx && srcStart === -1) srcStart = si;
+                normPos++;
+              }
+              inWhitespace = true;
+            } else {
+              if (normPos === matchIdx && srcStart === -1) srcStart = si;
+              normPos++;
+              inWhitespace = false;
+            }
+            if (normPos === matchIdx + normalizedSnippet.length && srcEnd === -1) {
+              srcEnd = si + 1;
+            }
+          }
+          if (srcStart >= 0 && srcEnd > srcStart) {
+            exactSnippetFromSource = srcChars.slice(srcStart, srcEnd);
+          } else {
+            exactSnippetFromSource = verbatimSnippet;
+          }
+        }
+
+        // Gate: claim_type must be valid
         if (!VALID_CLAIM_TYPES.has(claimType)) {
           droppedRows.push({ claim_text: claimText, reason: "invalid_claim_type: " + claimType });
           continue;
         }
 
-        // Gate 3: attribution — coerce if invalid
+        // Gate: attribution — coerce if invalid
         var subjectUnverified = false;
         if (!VALID_ATTRIBUTIONS.has(attribution)) {
           coercedAttribution++;
           attribution = "deal_team";
         }
 
-        // Gate 4: subject_entity must appear case-insensitive in chunk
+        // Gate: subject_entity must appear case-insensitive in chunk
         if (subjectEntity != null && subjectEntity.length > 0) {
           if (chunk.content.toLowerCase().indexOf(subjectEntity.toLowerCase()) === -1) {
             subjectEntity = null;
@@ -344,95 +457,143 @@ var buildClaimRegister: StageHandler = async function (
           subjectUnverifiedCount++;
         }
 
-        // Gate 5: thesis_dependence from lookup, not model
+        // thesis_dependence from lookup
         var thesisDependence = THESIS_DEPENDENCE[claimType] || "low";
-
-        // ── Build locator ───────────────────────────────────────────
         var locator = chunk.file_name + "::chunk_" + chunk.chunk_index;
 
-        // ── INSERT ──────────────────────────────────────────────────
-        await db.execute(
-          "INSERT INTO sri_claims (claim_id, run_id, claim_text, verbatim_snippet, claim_type, metric_value, thesis_dependence, document_id, chunk_index, locator, subject_entity, attribution, subject_unverified, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())",
-          [
-            runId,
-            claimText,
-            verbatimSnippet,
-            claimType,
-            metricValue,
-            thesisDependence,
-            chunk.document_id,
-            chunk.chunk_index,
-            locator,
-            subjectEntity,
-            attribution,
-            subjectUnverified,
-          ],
-          { label: LOG_PREFIX + " insert claim" },
-        );
-
-        totalClaimsInserted++;
-
-        // Track distributions
-        claimTypeDistribution[claimType] = (claimTypeDistribution[claimType] || 0) + 1;
-        attributionDistribution[attribution] = (attributionDistribution[attribution] || 0) + 1;
-
-        // Collect samples
-        if (sampleClaims.length < 10) {
-          sampleClaims.push({
-            claim_text: claimText,
-            verbatim_snippet: verbatimSnippet,
-            claim_type: claimType,
-            subject_entity: subjectEntity,
-            attribution: attribution,
-            metric_value: metricValue,
-            thesis_dependence: thesisDependence,
-            document_id: chunk.document_id,
-            chunk_index: chunk.chunk_index,
-            locator: locator,
-            subject_unverified: subjectUnverified,
-          });
-        }
+        allCandidates.push({
+          claim_text: claimText,
+          verbatim_snippet: exactSnippetFromSource,
+          claim_type: claimType,
+          subject_entity: subjectEntity,
+          attribution: attribution,
+          metric_value: metricValue,
+          thesis_dependence: thesisDependence,
+          document_id: chunk.document_id,
+          chunk_index: chunk.chunk_index,
+          locator: locator,
+          subject_unverified: subjectUnverified,
+          member_count: 1,
+          source_locators: [locator],
+        });
       }
 
       chunksProcessed++;
     }
+  }
 
-    // ── Persist cursor after each batch ─────────────────────────────
+  // ── CHANGE 3: Deduplication ─────────────────────────────────────────
+  var duplicatesCollapsedBySnippet = 0;
+  var duplicatesCollapsedByText = 0;
+
+  // Pass 1: collapse by normalized verbatim_snippet
+  var snippetMap = new Map<string, ClaimCandidate>();
+  for (var di = 0; di < allCandidates.length; di++) {
+    var cand = allCandidates[di];
+    var normSnip = normalizeWs(cand.verbatim_snippet).toLowerCase();
+    var existing = snippetMap.get(normSnip);
+    if (existing) {
+      existing.member_count += cand.member_count;
+      for (var sli = 0; sli < cand.source_locators.length; sli++) {
+        existing.source_locators.push(cand.source_locators[sli]);
+      }
+      duplicatesCollapsedBySnippet++;
+    } else {
+      snippetMap.set(normSnip, cand);
+    }
+  }
+  var afterSnippetDedup = Array.from(snippetMap.values());
+
+  // Pass 2: collapse by normalized claim_text
+  var textMap = new Map<string, ClaimCandidate>();
+  for (var ti = 0; ti < afterSnippetDedup.length; ti++) {
+    var cand2 = afterSnippetDedup[ti];
+    var normText = normalizeWs(cand2.claim_text).toLowerCase();
+    var existing2 = textMap.get(normText);
+    if (existing2) {
+      existing2.member_count += cand2.member_count;
+      for (var sli2 = 0; sli2 < cand2.source_locators.length; sli2++) {
+        existing2.source_locators.push(cand2.source_locators[sli2]);
+      }
+      duplicatesCollapsedByText++;
+    } else {
+      textMap.set(normText, cand2);
+    }
+  }
+  var dedupedCandidates = Array.from(textMap.values());
+
+  // ── Insert surviving rows ───────────────────────────────────────────
+  var claimTypeDistribution: Record<string, number> = {};
+  var attributionDistribution: Record<string, number> = {};
+  var sampleClaims: Array<Record<string, unknown>> = [];
+  var totalClaimsInserted = 0;
+
+  for (var ii = 0; ii < dedupedCandidates.length; ii++) {
+    var c = dedupedCandidates[ii];
     await db.execute(
-      "UPDATE sri_pipeline_state SET claim_batch_cursor = $2, updated_at = now() WHERE run_id = $1",
-      [runId, batchIdx + 1],
-      { label: LOG_PREFIX + " advance cursor to " + (batchIdx + 1) },
+      "INSERT INTO sri_claims (claim_id, run_id, claim_text, verbatim_snippet, claim_type, metric_value, thesis_dependence, document_id, chunk_index, locator, subject_entity, attribution, subject_unverified, member_count, source_locators, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text[], now())",
+      [
+        runId,
+        c.claim_text,
+        c.verbatim_snippet,
+        c.claim_type,
+        c.metric_value,
+        c.thesis_dependence,
+        c.document_id,
+        c.chunk_index,
+        c.locator,
+        c.subject_entity,
+        c.attribution,
+        c.subject_unverified,
+        c.member_count,
+        "{" + c.source_locators.map(function (s) { return "\"" + s.replace(/"/g, "\\\"") + "\""; }).join(",") + "}",
+      ],
+      { label: LOG_PREFIX + " insert claim " + (ii + 1) },
     );
+
+    totalClaimsInserted++;
+    claimTypeDistribution[c.claim_type] = (claimTypeDistribution[c.claim_type] || 0) + 1;
+    attributionDistribution[c.attribution] = (attributionDistribution[c.attribution] || 0) + 1;
+
+    if (sampleClaims.length < 10) {
+      sampleClaims.push({
+        claim_text: c.claim_text,
+        verbatim_snippet: c.verbatim_snippet,
+        claim_type: c.claim_type,
+        subject_entity: c.subject_entity,
+        attribution: c.attribution,
+        metric_value: c.metric_value,
+        thesis_dependence: c.thesis_dependence,
+        document_id: c.document_id,
+        chunk_index: c.chunk_index,
+        locator: c.locator,
+        subject_unverified: c.subject_unverified,
+        member_count: c.member_count,
+        source_locators: c.source_locators,
+      });
+    }
   }
 
   // ── Final result ──────────────────────────────────────────────────
-  // When resuming at cursor = total batches, no new claims are inserted
-  // this invocation. Check DB for existing claims before declaring failure.
   if (totalClaimsInserted === 0) {
-    var existingRows = await db.query(
-      "SELECT count(*)::int AS cnt FROM sri_claims WHERE run_id = $1 LIMIT 1",
-      z.object({ cnt: z.coerce.number() }),
-      [runId],
-      { label: LOG_PREFIX + " check existing claims after zero-insert loop" },
-    );
-    var existingTotal = existingRows.length > 0 ? existingRows[0].cnt : 0;
-    if (existingTotal === 0) {
-      return {
-        stage: STAGE_NAME,
-        status: "failed",
-        message: "Zero claims survived gates. Register is empty.",
-        stageData: {
-          claimCount: 0,
-          chunksProcessed: chunksProcessed,
-          batchesProcessed: batches.length,
-          droppedRows: droppedRows,
-          totalInputTokens: totalInputTokens,
-          totalOutputTokens: totalOutputTokens,
-        },
-      };
-    }
-    // Claims exist from prior batches — treat as complete
-    totalClaimsInserted = existingTotal;
+    return {
+      stage: STAGE_NAME,
+      status: "failed",
+      message: "Zero claims survived gates and deduplication. Register is empty.",
+      stageData: {
+        claimCount: 0,
+        chunksProcessed: chunksProcessed,
+        batchesProcessed: batches.length,
+        droppedRows: droppedRows,
+        rejectedByRelevance: rejectedByRelevance,
+        gatePassAfterNormalization: gatePassAfterNormalization,
+        gateStillFailing: gateStillFailing,
+        duplicatesCollapsedBySnippet: duplicatesCollapsedBySnippet,
+        duplicatesCollapsedByText: duplicatesCollapsedByText,
+        totalInputTokens: totalInputTokens,
+        totalOutputTokens: totalOutputTokens,
+      },
+    };
   }
 
   // ── Write completion marker (idempotent — skip if already present) ──
@@ -453,6 +614,11 @@ var buildClaimRegister: StageHandler = async function (
       subjectUnverifiedCount: subjectUnverifiedCount,
       coercedAttribution: coercedAttribution,
       droppedRows: droppedRows,
+      rejectedByRelevance: rejectedByRelevance,
+      gatePassAfterNormalization: gatePassAfterNormalization,
+      gateStillFailing: gateStillFailing,
+      duplicatesCollapsedBySnippet: duplicatesCollapsedBySnippet,
+      duplicatesCollapsedByText: duplicatesCollapsedByText,
       batchesProcessed: batches.length,
       chunksProcessed: chunksProcessed,
       sampleClaims: sampleClaims,
@@ -460,6 +626,6 @@ var buildClaimRegister: StageHandler = async function (
       totalOutputTokens: totalOutputTokens,
     },
   };
-};
+}
 
 export { buildClaimRegister };
