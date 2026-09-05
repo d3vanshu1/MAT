@@ -229,8 +229,8 @@ async function judgeRelevance(
   label: string,
   targetProfileText: string,
   platform: string,
-): Promise<{ retained: JudgedItem[]; dropped: DroppedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number }> {
-  if (items.length === 0) return { retained: [], dropped: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+): Promise<{ retained: JudgedItem[]; dropped: DroppedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number; rawResponse: string }> {
+  if (items.length === 0) return { retained: [], dropped: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0, rawResponse: "" };
 
   // Build numbered list of url + snippet
   var itemList = "";
@@ -238,12 +238,17 @@ async function judgeRelevance(
     itemList += (i + 1) + ". URL: " + items[i].url + "\nSnippet: " + items[i].snippet.slice(0, 500) + "\n\n";
   }
 
-  var entityBlock = "";
-  if (targetProfileText.length > 0) {
-    entityBlock = "\n\nTarget company profile:\n" + targetProfileText + "\n\nFor each result, in addition to stance and quote, you must also assess whether the page describes the same company as the target profile. Add these fields:\n- \"entity_match\": exactly one of \"confirmed\", \"ambiguous\", or \"mismatch\"\n- \"entity_reason\": one short sentence citing what in the page's own description drove the decision\n\nDefinitions:\n- \"confirmed\" means the page describes a company consistent with the profile on at least two independent attributes, such as sector plus geography, or products plus customer type.\n- \"ambiguous\" means the page gives too little identifying description to decide.\n- \"mismatch\" means the page describes a company contradicting the profile on any attribute.";
+  // ── Build judge prompt with separated stance and entity sections ──
+  var hasProfile = targetProfileText.length > 0;
+
+  var entityFields = "";
+  var entitySection = "";
+  if (hasProfile) {
+    entityFields = "\n- \"entity_match\": exactly one of \"confirmed\", \"ambiguous\", or \"mismatch\"\n- \"entity_reason\": one short sentence citing what in the page's own description drove the entity_match decision";
+    entitySection = "\n\nENTITY IDENTIFICATION (used only for entity_match, not for stance):\n" + targetProfileText + "\n\nDefinitions for entity_match:\n- \"confirmed\" means the page describes a company consistent with the profile on at least two independent attributes, such as sector plus geography, or products plus customer type.\n- \"ambiguous\" means the page gives too little identifying description to decide.\n- \"mismatch\" means the page describes a company contradicting the profile on any attribute.\n\nIMPORTANT: entity_match is a separate question from stance. A page about the wrong company can still have a stance toward the claim. Assess stance on content alone. Then assess entity_match on company identity alone. Do NOT use \"irrelevant\" to signal that the company may be wrong — use entity_match for that.";
   }
 
-  var judgmentPrompt = "You are evaluating whether web search results are relevant to a specific claim.\n\nClaim: \"" + claimText + "\"" + entityBlock + "\n\nSearch results:\n" + itemList + "For each result, determine its stance toward the claim. Return ONLY a JSON array, no prose. Each element must have:\n- \"index\": the 1-based result number\n- \"stance\": exactly one of \"supports\", \"contradicts\", or \"irrelevant\"\n- \"quote\": a verbatim span copied exactly from that result's Snippet text that justifies the stance" + (targetProfileText.length > 0 ? "\n- \"entity_match\": exactly one of \"confirmed\", \"ambiguous\", or \"mismatch\"\n- \"entity_reason\": one short sentence" : "") + "\n\nRules:\n- \"supports\" means the snippet provides evidence consistent with the claim\n- \"contradicts\" means the snippet provides evidence that disputes or undermines the claim\n- \"irrelevant\" means the snippet has no bearing on the claim\n- The quote MUST be an exact substring of the snippet text. Do not paraphrase or rearrange.";
+  var judgmentPrompt = "You are evaluating web search results. You must answer two independent questions for each result.\n\nQuestion 1 — STANCE: Does the page content support, contradict, or not address the claim? Assess stance based on content alone, regardless of which company the page describes.\n\nQuestion 2 — ENTITY: Does the page describe the same company as the target? This is answered separately via entity_match.\n\nClaim: \"" + claimText + "\"\n\nSearch results:\n" + itemList + "For each result, return a JSON object with these fields in this order:\n- \"index\": the 1-based result number\n- \"stance\": exactly one of \"supports\", \"contradicts\", or \"irrelevant\"\n- \"quote\": a verbatim span copied exactly from that result's Snippet text that justifies the stance" + entityFields + "\n\nReturn ONLY a JSON array, no prose.\n\nRules for stance:\n- \"supports\" means the snippet provides evidence consistent with the claim\n- \"contradicts\" means the snippet provides evidence that disputes or undermines the claim\n- \"irrelevant\" means the snippet has no bearing on the claim at all — the content does not address the topic\n- Do NOT mark a result \"irrelevant\" because it may be about the wrong company. If the content addresses the claim topic, assign \"supports\" or \"contradicts\" and record any company-identity doubt in entity_match.\n- The quote MUST be an exact substring of the snippet text. Do not paraphrase or rearrange." + entitySection;
 
   try {
     var response = await claude.apiRequest(
@@ -289,13 +294,13 @@ async function judgeRelevance(
     } catch (parseErr) {
       // Parse failed — treat every item as irrelevant
       var parseDrops: DroppedItem[] = items.map(function (it) { return { platform: platform, url: it.url, domain: it.domain, drop_stage: "judge_parse_failed", drop_reason: "JSON parse failed", entity_match: null }; });
-      return { retained: [], dropped: parseDrops, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+      return { retained: [], dropped: parseDrops, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0, rawResponse: responseText };
     }
 
     // The parsed value must be an array
     if (!Array.isArray(parsed)) {
       var parseDrops2: DroppedItem[] = items.map(function (it) { return { platform: platform, url: it.url, domain: it.domain, drop_stage: "judge_parse_failed", drop_reason: "Response not an array", entity_match: null }; });
-      return { retained: [], dropped: parseDrops2, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+      return { retained: [], dropped: parseDrops2, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0, rawResponse: responseText };
     }
 
     var retained: JudgedItem[] = [];
@@ -381,11 +386,11 @@ async function judgeRelevance(
       }
     }
 
-    return { retained: retained, dropped: allDropped, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict };
+    return { retained: retained, dropped: allDropped, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict, rawResponse: responseText };
   } catch (err) {
     console.log(LOG_PREFIX + " Judgment call failed: " + String(err));
     var catchDrops: DroppedItem[] = items.map(function (it) { return { platform: platform, url: it.url, domain: it.domain, drop_stage: "judge_parse_failed", drop_reason: "Judgment call exception: " + String(err), entity_match: null }; });
-    return { retained: [], dropped: catchDrops, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+    return { retained: [], dropped: catchDrops, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0, rawResponse: "" };
   }
 }
 
@@ -734,6 +739,26 @@ var verifyClaims: StageHandler = async function (
               { label: LOG_PREFIX + " drop: " + drop.drop_stage },
             );
             droppedEvidenceCount++;
+          }
+
+          // ── Persist raw judge response for diagnostics ──────────
+          if (judgment.rawResponse.length > 0) {
+            try {
+              await db.execute(
+                "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb)",
+                [runId, "verify_claims_judge", JSON.stringify({
+                  claim_index: idx + 1,
+                  platform: platform,
+                  retained_count: judgment.retained.length,
+                  dropped_count: judgment.dropped.length,
+                  raw_response: judgment.rawResponse.slice(0, 4000),
+                  timestamp: new Date().toISOString(),
+                })],
+                { label: LOG_PREFIX + " judge diagnostics " + platform + " claim " + (idx + 1) },
+              );
+            } catch (jdErr) {
+              console.log(LOG_PREFIX + " Judge diagnostics failed (non-fatal): " + String(jdErr));
+            }
           }
 
           if (judgment.retained.length > 0) {
