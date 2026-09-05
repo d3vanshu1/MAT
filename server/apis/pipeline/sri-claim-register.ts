@@ -7,12 +7,12 @@
  * Extracts reputation claims the deal team asserts that a public platform
  * could speak to (Glassdoor, Indeed, LinkedIn, Trustpilot, G2, news).
  *
- * Resumable via claim_batch_cursor on sri_pipeline_state.
- * Inserts surviving rows into sri_claims. No writes to sri_evidence or sri_findings.
+ * CHANGE 1 (2C): Marker guard is the FIRST statement — before lock, before purge.
+ * CHANGE 2 (2C): Purge only on genuinely fresh start (marker absent, cursor 0).
+ * CHANGE 3 (2C): Final inserts + marker in a single BEGIN/COMMIT transaction.
+ * CHANGE 4 (2C): Near-duplicate dedup pass using token-set overlap (0.85 threshold).
  *
- * Deduplication: two passes — by normalized verbatim_snippet, then by
- * normalized claim_text. Each collapse increments member_count and collects
- * all contributing locators into source_locators.
+ * Inserts surviving rows into sri_claims. No writes to sri_evidence or sri_findings.
  */
 
 import type { StageHandler, StageResult } from "./sri-stage-contract.js";
@@ -23,6 +23,7 @@ var MAX_OUTPUT_TOKENS = 4096;
 var BATCH_SIZE = 12;
 var STAGE_NAME = "build_claim_register";
 var MODEL = "claude-sonnet-4-6";
+var NEAR_DEDUP_THRESHOLD = 0.85;
 
 // ── Valid enum sets ─────────────────────────────────────────────────────
 var VALID_CLAIM_TYPES = new Set([
@@ -73,6 +74,22 @@ var RELEVANCE_REJECT_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 // ── Whitespace normalization ────────────────────────────────────────────
 function normalizeWs(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+// ── Token-set overlap for near-duplicate detection ──────────────────────
+function tokenSetOverlap(a: string, b: string): number {
+  var tokensA = a.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(function (t) { return t.length > 2; });
+  var tokensB = b.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(function (t) { return t.length > 2; });
+  if (tokensA.length === 0 || tokensB.length === 0) return 0;
+  var setA = new Set(tokensA);
+  var setB = new Set(tokensB);
+  var intersection = 0;
+  for (var ti = 0; ti < tokensA.length; ti++) {
+    if (setB.has(tokensA[ti])) intersection++;
+  }
+  var smaller = Math.min(setA.size, setB.size);
+  if (smaller === 0) return 0;
+  return intersection / smaller;
 }
 
 // ── DB row schemas ──────────────────────────────────────────────────────
@@ -141,12 +158,14 @@ var buildClaimRegister: StageHandler = async function (
   var db = ctx.integrations.db;
   var claude = ctx.integrations.claude;
 
-  // ── Completion guard: already done? ─────────────────────────────────
+  // ══ CHANGE 1: Marker guard is the FIRST database operation ══════════
+  // If build_claim_register is in stages_completed, return immediately.
+  // No lock, no purge, no extraction.
   var completedRows = await db.query(
     "SELECT stages_completed FROM sri_pipeline_state WHERE run_id = $1 LIMIT 1",
     StagesCompletedRow,
     [runId],
-    { label: LOG_PREFIX + " check stages_completed" },
+    { label: LOG_PREFIX + " check stages_completed (FIRST)" },
   );
 
   if (completedRows.length > 0) {
@@ -157,7 +176,7 @@ var buildClaimRegister: StageHandler = async function (
           "SELECT count(*)::int AS cnt FROM sri_claims WHERE run_id = $1 LIMIT 1",
           z.object({ cnt: z.coerce.number() }),
           [runId],
-          { label: LOG_PREFIX + " existing claim count" },
+          { label: LOG_PREFIX + " existing claim count (marker present)" },
         );
         var existingCount = existingCountRows.length > 0 ? existingCountRows[0].cnt : 0;
         return {
@@ -170,7 +189,7 @@ var buildClaimRegister: StageHandler = async function (
     }
   }
 
-  // ── CHANGE 1: Advisory lock ─────────────────────────────────────────
+  // ── Advisory lock ───────────────────────────────────────────────────
   var lockRows = await db.query(
     "SELECT pg_try_advisory_lock(hashtext($1::text)::bigint) AS locked",
     LockRow,
@@ -185,6 +204,40 @@ var buildClaimRegister: StageHandler = async function (
       message: "another execution holds the lock",
       stageData: {},
     };
+  }
+
+  // ── Re-check marker under lock (prevents TOCTOU race) ──────────────
+  var recheck = await db.query(
+    "SELECT stages_completed FROM sri_pipeline_state WHERE run_id = $1 LIMIT 1",
+    StagesCompletedRow,
+    [runId],
+    { label: LOG_PREFIX + " re-check marker under lock" },
+  );
+  if (recheck.length > 0) {
+    for (var rci = 0; rci < recheck[0].stages_completed.length; rci++) {
+      if (recheck[0].stages_completed[rci] === STAGE_NAME) {
+        // Release lock and return
+        try {
+          await db.execute(
+            "SELECT pg_advisory_unlock(hashtext($1::text)::bigint)",
+            [runId],
+            { label: LOG_PREFIX + " release lock (marker found on recheck)" },
+          );
+        } catch (e) { /* best effort */ }
+        var recheckCount = await db.query(
+          "SELECT count(*)::int AS cnt FROM sri_claims WHERE run_id = $1 LIMIT 1",
+          z.object({ cnt: z.coerce.number() }),
+          [runId],
+          { label: LOG_PREFIX + " count after recheck" },
+        );
+        return {
+          stage: STAGE_NAME,
+          status: "complete",
+          message: "Already complete (" + (recheckCount.length > 0 ? recheckCount[0].cnt : 0) + " claims). Skipped re-extraction.",
+          stageData: { claimCount: recheckCount.length > 0 ? recheckCount[0].cnt : 0, alreadyComplete: true },
+        };
+      }
+    }
   }
 
   // Wrap all remaining work in try/finally to guarantee lock release
@@ -236,17 +289,25 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
     { label: LOG_PREFIX + " ensure source_locators column" },
   );
 
-  // ── CHANGE 5: Purge before rerun — always start fresh ──────────────
-  await db.execute(
-    "DELETE FROM sri_claims WHERE run_id = $1",
+  // ══ CHANGE 2: Purge only on genuinely fresh start ══════════════════
+  var cursorRows = await db.query(
+    "SELECT claim_batch_cursor FROM sri_pipeline_state WHERE run_id = $1 LIMIT 1",
+    CursorRow,
     [runId],
-    { label: LOG_PREFIX + " purge claims for clean extraction" },
+    { label: LOG_PREFIX + " read batch cursor" },
   );
-  await db.execute(
-    "UPDATE sri_pipeline_state SET claim_batch_cursor = 0, updated_at = now() WHERE run_id = $1",
-    [runId],
-    { label: LOG_PREFIX + " reset batch cursor" },
-  );
+  var batchCursor = (cursorRows.length > 0 && cursorRows[0].claim_batch_cursor != null)
+    ? cursorRows[0].claim_batch_cursor
+    : 0;
+
+  if (batchCursor === 0) {
+    // Genuinely fresh start — clear any partial claims from a prior failed attempt
+    await db.execute(
+      "DELETE FROM sri_claims WHERE run_id = $1",
+      [runId],
+      { label: LOG_PREFIX + " purge claims for fresh start (cursor=0, marker absent)" },
+    );
+  }
 
   // ── Load IC memo chunks ─────────────────────────────────────────────
   var chunks = await db.query(
@@ -367,7 +428,7 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
           continue;
         }
 
-        // CHANGE 4: Relevance rejection
+        // Relevance rejection
         var rejected = false;
         for (var rp = 0; rp < RELEVANCE_REJECT_PATTERNS.length; rp++) {
           if (RELEVANCE_REJECT_PATTERNS[rp].pattern.test(claimText)) {
@@ -378,13 +439,12 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
         }
         if (rejected) continue;
 
-        // CHANGE 2: Whitespace-normalized verbatim gate
+        // Whitespace-normalized verbatim gate
         var normalizedSnippet = normalizeWs(verbatimSnippet);
         var normalizedChunk = normalizeWs(chunk.content);
         var matchIdx = normalizedChunk.indexOf(normalizedSnippet);
 
         if (matchIdx === -1) {
-          // Gate still fails even after normalization
           gateStillFailing++;
           droppedRows.push({ claim_text: claimText, reason: "verbatim_not_found_after_normalization" });
           continue;
@@ -394,12 +454,9 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
         var exactSnippetFromSource: string;
         var rawMatchIdx = chunk.content.indexOf(verbatimSnippet);
         if (rawMatchIdx !== -1) {
-          // Exact match — use as-is
           exactSnippetFromSource = verbatimSnippet;
         } else {
-          // Passed after normalization — recover from source
           gatePassAfterNormalization++;
-          // Walk the original chunk to find the span matching the normalized position
           var srcChars = chunk.content;
           var normPos = 0;
           var srcStart = -1;
@@ -410,7 +467,6 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
             var isWs = ch === " " || ch === "\n" || ch === "\r" || ch === "\t";
             if (isWs) {
               if (!inWhitespace) {
-                // First ws char in a run — corresponds to the single space in normalized
                 if (normPos === matchIdx && srcStart === -1) srcStart = si;
                 normPos++;
               }
@@ -482,9 +538,10 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
     }
   }
 
-  // ── CHANGE 3: Deduplication ─────────────────────────────────────────
+  // ── Deduplication ───────────────────────────────────────────────────
   var duplicatesCollapsedBySnippet = 0;
   var duplicatesCollapsedByText = 0;
+  var duplicatesCollapsedByNearText = 0;
 
   // Pass 1: collapse by normalized verbatim_snippet
   var snippetMap = new Map<string, ClaimCandidate>();
@@ -504,7 +561,7 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
   }
   var afterSnippetDedup = Array.from(snippetMap.values());
 
-  // Pass 2: collapse by normalized claim_text
+  // Pass 2: collapse by exact normalized claim_text (on post-snippet set)
   var textMap = new Map<string, ClaimCandidate>();
   for (var ti = 0; ti < afterSnippetDedup.length; ti++) {
     var cand2 = afterSnippetDedup[ti];
@@ -520,62 +577,51 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
       textMap.set(normText, cand2);
     }
   }
-  var dedupedCandidates = Array.from(textMap.values());
+  var afterTextDedup = Array.from(textMap.values());
 
-  // ── Insert surviving rows ───────────────────────────────────────────
+  // ══ CHANGE 4 (2C): Pass 3 — near-duplicate collapse by token-set overlap ══
+  // For claims sharing same claim_type AND same subject_entity, collapse
+  // pairs whose normalized claim_text overlap exceeds NEAR_DEDUP_THRESHOLD.
+  var nearDedupResult: ClaimCandidate[] = [];
+  var consumed = new Set<number>();
+
+  for (var ni = 0; ni < afterTextDedup.length; ni++) {
+    if (consumed.has(ni)) continue;
+    var survivor = afterTextDedup[ni];
+    var survivorNorm = normalizeWs(survivor.claim_text);
+
+    for (var nj = ni + 1; nj < afterTextDedup.length; nj++) {
+      if (consumed.has(nj)) continue;
+      var candidate = afterTextDedup[nj];
+
+      // Must share claim_type and subject_entity
+      if (candidate.claim_type !== survivor.claim_type) continue;
+      var sameEntity = (survivor.subject_entity || "") === (candidate.subject_entity || "");
+      if (!sameEntity) continue;
+
+      var candidateNorm = normalizeWs(candidate.claim_text);
+      var overlap = tokenSetOverlap(survivorNorm, candidateNorm);
+      if (overlap >= NEAR_DEDUP_THRESHOLD) {
+        survivor.member_count += candidate.member_count;
+        for (var slk = 0; slk < candidate.source_locators.length; slk++) {
+          survivor.source_locators.push(candidate.source_locators[slk]);
+        }
+        consumed.add(nj);
+        duplicatesCollapsedByNearText++;
+      }
+    }
+
+    nearDedupResult.push(survivor);
+  }
+  var dedupedCandidates = nearDedupResult;
+
+  // ══ CHANGE 3 (2C): Insert + marker in a single transaction ══════════
   var claimTypeDistribution: Record<string, number> = {};
   var attributionDistribution: Record<string, number> = {};
   var sampleClaims: Array<Record<string, unknown>> = [];
   var totalClaimsInserted = 0;
 
-  for (var ii = 0; ii < dedupedCandidates.length; ii++) {
-    var c = dedupedCandidates[ii];
-    await db.execute(
-      "INSERT INTO sri_claims (claim_id, run_id, claim_text, verbatim_snippet, claim_type, metric_value, thesis_dependence, document_id, chunk_index, locator, subject_entity, attribution, subject_unverified, member_count, source_locators, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text[], now())",
-      [
-        runId,
-        c.claim_text,
-        c.verbatim_snippet,
-        c.claim_type,
-        c.metric_value,
-        c.thesis_dependence,
-        c.document_id,
-        c.chunk_index,
-        c.locator,
-        c.subject_entity,
-        c.attribution,
-        c.subject_unverified,
-        c.member_count,
-        "{" + c.source_locators.map(function (s) { return "\"" + s.replace(/"/g, "\\\"") + "\""; }).join(",") + "}",
-      ],
-      { label: LOG_PREFIX + " insert claim " + (ii + 1) },
-    );
-
-    totalClaimsInserted++;
-    claimTypeDistribution[c.claim_type] = (claimTypeDistribution[c.claim_type] || 0) + 1;
-    attributionDistribution[c.attribution] = (attributionDistribution[c.attribution] || 0) + 1;
-
-    if (sampleClaims.length < 10) {
-      sampleClaims.push({
-        claim_text: c.claim_text,
-        verbatim_snippet: c.verbatim_snippet,
-        claim_type: c.claim_type,
-        subject_entity: c.subject_entity,
-        attribution: c.attribution,
-        metric_value: c.metric_value,
-        thesis_dependence: c.thesis_dependence,
-        document_id: c.document_id,
-        chunk_index: c.chunk_index,
-        locator: c.locator,
-        subject_unverified: c.subject_unverified,
-        member_count: c.member_count,
-        source_locators: c.source_locators,
-      });
-    }
-  }
-
-  // ── Final result ──────────────────────────────────────────────────
-  if (totalClaimsInserted === 0) {
+  if (dedupedCandidates.length === 0) {
     return {
       stage: STAGE_NAME,
       status: "failed",
@@ -590,41 +636,104 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
         gateStillFailing: gateStillFailing,
         duplicatesCollapsedBySnippet: duplicatesCollapsedBySnippet,
         duplicatesCollapsedByText: duplicatesCollapsedByText,
+        duplicatesCollapsedByNearText: duplicatesCollapsedByNearText,
+        nearDedupThreshold: NEAR_DEDUP_THRESHOLD,
         totalInputTokens: totalInputTokens,
         totalOutputTokens: totalOutputTokens,
       },
     };
   }
 
-  // ── Write completion marker (idempotent — skip if already present) ──
-  await db.execute(
-    "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2), updated_at = now() WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
-    [runId, STAGE_NAME],
-    { label: LOG_PREFIX + " mark stage complete (idempotent)" },
-  );
+  // BEGIN transaction
+  await db.execute("BEGIN", [], { label: LOG_PREFIX + " BEGIN insert+marker transaction" });
+
+  try {
+    for (var ii = 0; ii < dedupedCandidates.length; ii++) {
+      var c = dedupedCandidates[ii];
+      await db.execute(
+        "INSERT INTO sri_claims (claim_id, run_id, claim_text, verbatim_snippet, claim_type, metric_value, thesis_dependence, document_id, chunk_index, locator, subject_entity, attribution, subject_unverified, member_count, source_locators, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::text[], now())",
+        [
+          runId,
+          c.claim_text,
+          c.verbatim_snippet,
+          c.claim_type,
+          c.metric_value,
+          c.thesis_dependence,
+          c.document_id,
+          c.chunk_index,
+          c.locator,
+          c.subject_entity,
+          c.attribution,
+          c.subject_unverified,
+          c.member_count,
+          "{" + c.source_locators.map(function (s) { return "\"" + s.replace(/"/g, "\\\"") + "\""; }).join(",") + "}",
+        ],
+        { label: LOG_PREFIX + " insert claim " + (ii + 1) },
+      );
+
+      totalClaimsInserted++;
+      claimTypeDistribution[c.claim_type] = (claimTypeDistribution[c.claim_type] || 0) + 1;
+      attributionDistribution[c.attribution] = (attributionDistribution[c.attribution] || 0) + 1;
+
+      if (sampleClaims.length < 10) {
+        sampleClaims.push({
+          claim_text: c.claim_text,
+          verbatim_snippet: c.verbatim_snippet,
+          claim_type: c.claim_type,
+          subject_entity: c.subject_entity,
+          attribution: c.attribution,
+          metric_value: c.metric_value,
+          thesis_dependence: c.thesis_dependence,
+          document_id: c.document_id,
+          chunk_index: c.chunk_index,
+          locator: c.locator,
+          subject_unverified: c.subject_unverified,
+          member_count: c.member_count,
+          source_locators: c.source_locators,
+        });
+      }
+    }
+
+    // Completion marker — inside the same transaction
+    await db.execute(
+      "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2), updated_at = now() WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
+      [runId, STAGE_NAME],
+      { label: LOG_PREFIX + " mark stage complete (in transaction)" },
+    );
+
+    // COMMIT
+    await db.execute("COMMIT", [], { label: LOG_PREFIX + " COMMIT insert+marker transaction" });
+  } catch (txErr) {
+    try { await db.execute("ROLLBACK", [], { label: LOG_PREFIX + " ROLLBACK on error" }); } catch (rbErr) { /* best effort */ }
+    throw txErr;
+  }
+
+  var stageData = {
+    claimCount: totalClaimsInserted,
+    claimTypeDistribution: claimTypeDistribution,
+    attributionDistribution: attributionDistribution,
+    subjectUnverifiedCount: subjectUnverifiedCount,
+    coercedAttribution: coercedAttribution,
+    droppedRows: droppedRows,
+    rejectedByRelevance: rejectedByRelevance,
+    gatePassAfterNormalization: gatePassAfterNormalization,
+    gateStillFailing: gateStillFailing,
+    duplicatesCollapsedBySnippet: duplicatesCollapsedBySnippet,
+    duplicatesCollapsedByText: duplicatesCollapsedByText,
+    duplicatesCollapsedByNearText: duplicatesCollapsedByNearText,
+    nearDedupThreshold: NEAR_DEDUP_THRESHOLD,
+    batchesProcessed: batches.length,
+    chunksProcessed: chunksProcessed,
+    sampleClaims: sampleClaims,
+    totalInputTokens: totalInputTokens,
+    totalOutputTokens: totalOutputTokens,
+  };
 
   return {
     stage: STAGE_NAME,
     status: "complete",
     message: totalClaimsInserted + " claims extracted from " + chunksProcessed + " chunks across " + batches.length + " batches.",
-    stageData: {
-      claimCount: totalClaimsInserted,
-      claimTypeDistribution: claimTypeDistribution,
-      attributionDistribution: attributionDistribution,
-      subjectUnverifiedCount: subjectUnverifiedCount,
-      coercedAttribution: coercedAttribution,
-      droppedRows: droppedRows,
-      rejectedByRelevance: rejectedByRelevance,
-      gatePassAfterNormalization: gatePassAfterNormalization,
-      gateStillFailing: gateStillFailing,
-      duplicatesCollapsedBySnippet: duplicatesCollapsedBySnippet,
-      duplicatesCollapsedByText: duplicatesCollapsedByText,
-      batchesProcessed: batches.length,
-      chunksProcessed: chunksProcessed,
-      sampleClaims: sampleClaims,
-      totalInputTokens: totalInputTokens,
-      totalOutputTokens: totalOutputTokens,
-    },
+    stageData: stageData,
   };
 }
 
