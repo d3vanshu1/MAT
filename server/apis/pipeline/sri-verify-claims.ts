@@ -213,10 +213,13 @@ interface JudgedItem {
 const VALID_STANCES = new Set(["supports", "contradicts", "irrelevant"]);
 const VALID_ENTITY_MATCHES = new Set(["confirmed", "ambiguous", "mismatch"]);
 
-interface WrongEntityDrop {
+interface DroppedItem {
   platform: string;
   url: string;
-  entity_reason: string;
+  domain: string;
+  drop_stage: string;
+  drop_reason: string;
+  entity_match: string | null;
 }
 
 async function judgeRelevance(
@@ -226,8 +229,8 @@ async function judgeRelevance(
   label: string,
   targetProfileText: string,
   platform: string,
-): Promise<{ retained: JudgedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number; wrongEntityDropped: WrongEntityDrop[] }> {
-  if (items.length === 0) return { retained: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
+): Promise<{ retained: JudgedItem[]; dropped: DroppedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number }> {
+  if (items.length === 0) return { retained: [], dropped: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
 
   // Build numbered list of url + snippet
   var itemList = "";
@@ -285,18 +288,20 @@ async function judgeRelevance(
       parsed = JSON.parse(responseText);
     } catch (parseErr) {
       // Parse failed — treat every item as irrelevant
-      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
+      var parseDrops: DroppedItem[] = items.map(function (it) { return { platform: platform, url: it.url, domain: it.domain, drop_stage: "judge_parse_failed", drop_reason: "JSON parse failed", entity_match: null }; });
+      return { retained: [], dropped: parseDrops, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
     }
 
     // The parsed value must be an array
     if (!Array.isArray(parsed)) {
-      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
+      var parseDrops2: DroppedItem[] = items.map(function (it) { return { platform: platform, url: it.url, domain: it.domain, drop_stage: "judge_parse_failed", drop_reason: "Response not an array", entity_match: null }; });
+      return { retained: [], dropped: parseDrops2, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
     }
 
     var retained: JudgedItem[] = [];
+    var allDropped: DroppedItem[] = [];
     var quoteGateFailed = 0;
     var irrelevantCount = 0;
-    var wrongEntityDropped: WrongEntityDrop[] = [];
 
     // Track which items received a verdict
     var itemCovered = new Array(items.length).fill(false);
@@ -307,11 +312,13 @@ async function judgeRelevance(
       // Index must be an integer within range (1-based)
       if (typeof j.index !== "number" || !Number.isInteger(j.index)) {
         judgeIndexInvalid++;
+        allDropped.push({ platform: platform, url: "unknown", domain: "unknown", drop_stage: "judge_index_invalid", drop_reason: "Non-integer index", entity_match: null });
         continue;
       }
       var idx = j.index - 1;
       if (idx < 0 || idx >= items.length) {
         judgeIndexInvalid++;
+        allDropped.push({ platform: platform, url: "unknown", domain: "unknown", drop_stage: "judge_index_invalid", drop_reason: "Index out of range: " + j.index, entity_match: null });
         continue;
       }
 
@@ -327,6 +334,7 @@ async function judgeRelevance(
 
       if (stance === "irrelevant") {
         irrelevantCount++;
+        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "judge_irrelevant", drop_reason: "Judged irrelevant", entity_match: null });
         continue;
       }
 
@@ -334,9 +342,9 @@ async function judgeRelevance(
       var normQuote = normalizeWs(quote);
       var normSnippet = normalizeWs(items[idx].snippet);
       if (normQuote.length === 0 || normSnippet.indexOf(normQuote) === -1) {
-        // Downgrade to irrelevant
         quoteGateFailed++;
         irrelevantCount++;
+        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "quote_gate", drop_reason: "Quote not found in snippet", entity_match: null });
         continue;
       }
 
@@ -347,12 +355,12 @@ async function judgeRelevance(
         entityMatch = "mismatch";
       }
       if (entityMatch === "mismatch") {
-        wrongEntityDropped.push({ platform: platform, url: items[idx].url, entity_reason: entityReason });
+        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "entity_mismatch", drop_reason: entityReason, entity_match: "mismatch" });
         irrelevantCount++;
         continue;
       }
 
-      // Retained: supports or contradicts with valid quote and non-mismatch entity
+      // Retained: supports or contradicts with valid quote and confirmed or ambiguous entity
       retained.push({
         url: items[idx].url,
         domain: items[idx].domain,
@@ -369,13 +377,15 @@ async function judgeRelevance(
       if (!itemCovered[ic]) {
         judgeNoVerdict++;
         irrelevantCount++;
+        allDropped.push({ platform: platform, url: items[ic].url, domain: items[ic].domain, drop_stage: "judge_no_verdict", drop_reason: "No verdict returned by judge", entity_match: null });
       }
     }
 
-    return { retained: retained, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict, wrongEntityDropped: wrongEntityDropped };
+    return { retained: retained, dropped: allDropped, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict };
   } catch (err) {
     console.log(LOG_PREFIX + " Judgment call failed: " + String(err));
-    return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
+    var catchDrops: DroppedItem[] = items.map(function (it) { return { platform: platform, url: it.url, domain: it.domain, drop_stage: "judge_parse_failed", drop_reason: "Judgment call exception: " + String(err), entity_match: null }; });
+    return { retained: [], dropped: catchDrops, quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
   }
 }
 
@@ -485,6 +495,11 @@ var verifyClaims: StageHandler = async function (
       [],
       { label: LOG_PREFIX + " ensure entity_confidence column on sri_findings" },
     );
+    await db.execute(
+      "ALTER TABLE sri_findings ADD COLUMN IF NOT EXISTS pointer_text TEXT",
+      [],
+      { label: LOG_PREFIX + " ensure pointer_text column on sri_findings" },
+    );
 
     // ── Load target profile for entity matching ──────────────────
     var profileRows = await db.query(
@@ -552,7 +567,7 @@ var verifyClaims: StageHandler = async function (
     var judgeIndexInvalid = 0;
     var judgeNoVerdict = 0;
     var claimsSkippedNoSubject = 0;
-    var wrongEntityDroppedAll: WrongEntityDrop[] = [];
+    var droppedEvidenceCount = 0;
     var verdictDistribution: Record<string, number> = {};
     var severityDistribution: Record<string, number> = {};
     var perPlatformCounts: Record<string, { attempted: number; withEvidence: number }> = {};
@@ -678,6 +693,12 @@ var verifyClaims: StageHandler = async function (
                 domainFiltered.push(item);
               } else {
                 domainMismatchDropped++;
+                await db.execute(
+                  "INSERT INTO sri_dropped_evidence (run_id, claim_id, platform, url, domain, drop_stage, drop_reason, created_at) VALUES ($1, $2, $3, $4, $5, 'domain_backstop', $6, now())",
+                  [runId, claim.claim_id, platform, item.url, item.domain, "Domain " + item.domain + " not in allowed list for " + platform],
+                  { label: LOG_PREFIX + " drop: domain_backstop" },
+                );
+                droppedEvidenceCount++;
               }
             }
           } else {
@@ -703,8 +724,16 @@ var verifyClaims: StageHandler = async function (
           judgeParseFailed += judgment.judgeParseFailed;
           judgeIndexInvalid += judgment.judgeIndexInvalid;
           judgeNoVerdict += judgment.judgeNoVerdict;
-          for (var wdi = 0; wdi < judgment.wrongEntityDropped.length; wdi++) {
-            wrongEntityDroppedAll.push(judgment.wrongEntityDropped[wdi]);
+
+          // Write drop records for every dropped item
+          for (var dri = 0; dri < judgment.dropped.length; dri++) {
+            var drop = judgment.dropped[dri];
+            await db.execute(
+              "INSERT INTO sri_dropped_evidence (run_id, claim_id, platform, url, domain, drop_stage, drop_reason, entity_match, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())",
+              [runId, claim.claim_id, drop.platform, drop.url, drop.domain, drop.drop_stage, drop.drop_reason, drop.entity_match],
+              { label: LOG_PREFIX + " drop: " + drop.drop_stage },
+            );
+            droppedEvidenceCount++;
           }
 
           if (judgment.retained.length > 0) {
@@ -796,9 +825,15 @@ var verifyClaims: StageHandler = async function (
             : "Public evidence corroborates claim";
       var findingDetail = "Claim: " + claim.claim_text + "\nVerdict: " + verdict + " | Severity: " + severity + " | Entity confidence: " + entityConfidence + " | Supports: " + s + " | Contradicts: " + c;
 
+      // ── Pointer text for ambiguous/mixed_confidence findings ────
+      var pointerText: string | null = null;
+      if (entityConfidence === "ambiguous" || entityConfidence === "mixed_confidence") {
+        pointerText = "The claim \"" + claim.claim_text + "\" could not be independently confirmed as referring to the target company.";
+      }
+
       await db.execute(
-        "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, entity_confidence, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, now())",
-        [runId, claim.claim_id, verdict, severity, findingTitle, findingDetail, entityConfidence],
+        "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, entity_confidence, pointer_text, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, now())",
+        [runId, claim.claim_id, verdict, severity, findingTitle, findingDetail, entityConfidence, pointerText],
         { label: LOG_PREFIX + " insert finding for claim " + (idx + 1) },
       );
 
@@ -811,6 +846,26 @@ var verifyClaims: StageHandler = async function (
 
       claimsProcessed++;
       claimsNewlyProcessed++;
+
+      // ── Per-claim diagnostics (committed immediately) ─────────
+      try {
+        var claimDiag = {
+          claimsProcessed: claimsProcessed,
+          claimsNewlyProcessed: claimsNewlyProcessed,
+          evidenceRowsWritten: evidenceRowsWritten,
+          droppedEvidenceCount: droppedEvidenceCount,
+          verdictDistribution: verdictDistribution,
+          severityDistribution: severityDistribution,
+          timestamp: new Date().toISOString(),
+        };
+        await db.execute(
+          "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb) ON CONFLICT (run_id, stage) DO UPDATE SET payload = $3::jsonb",
+          [runId, STAGE_NAME, JSON.stringify(claimDiag)],
+          { label: LOG_PREFIX + " per-claim diagnostics " + (idx + 1) },
+        );
+      } catch (pcDiagErr) {
+        console.log(LOG_PREFIX + " Per-claim diagnostics failed (non-fatal): " + String(pcDiagErr));
+      }
 
       // ── Collect sample findings ───────────────────────────────────
       if (sampleFindings.length < 10) {
@@ -846,7 +901,7 @@ var verifyClaims: StageHandler = async function (
         judgeIndexInvalid: judgeIndexInvalid,
         judgeNoVerdict: judgeNoVerdict,
         claimsSkippedNoSubject: claimsSkippedNoSubject,
-        wrongEntityDropped: wrongEntityDroppedAll,
+        droppedEvidenceCount: droppedEvidenceCount,
         verdictDistribution: verdictDistribution,
         severityDistribution: severityDistribution,
         perPlatformCounts: perPlatformCounts,
@@ -861,7 +916,7 @@ var verifyClaims: StageHandler = async function (
       };
     }
 
-    // ── Completion: diagnostics + marker in transaction ──────────────
+    // ── Completion: diagnostics outside transaction, marker inside ───
     var stageData: Record<string, unknown> = {
       claimsProcessed: claimsProcessed,
       pairsAttempted: pairsAttempted,
@@ -875,24 +930,26 @@ var verifyClaims: StageHandler = async function (
       judgeIndexInvalid: judgeIndexInvalid,
       judgeNoVerdict: judgeNoVerdict,
       claimsSkippedNoSubject: claimsSkippedNoSubject,
-      wrongEntityDropped: wrongEntityDroppedAll,
+      droppedEvidenceCount: droppedEvidenceCount,
       verdictDistribution: verdictDistribution,
       severityDistribution: severityDistribution,
       perPlatformCounts: perPlatformCounts,
       sampleFindings: sampleFindings,
     };
 
+    // Diagnostics committed BEFORE the marker transaction
+    try {
+      await db.execute(
+        "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb) ON CONFLICT (run_id, stage) DO UPDATE SET payload = $3::jsonb",
+        [runId, STAGE_NAME, JSON.stringify(stageData)],
+        { label: LOG_PREFIX + " persist completion diagnostics" },
+      );
+    } catch (diagErr) {
+      console.log(LOG_PREFIX + " Failed to persist diagnostics (non-fatal): " + String(diagErr));
+    }
+
     await db.execute("BEGIN", [], { label: LOG_PREFIX + " BEGIN completion transaction" });
     try {
-      try {
-        await db.execute(
-          "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb)",
-          [runId, STAGE_NAME, JSON.stringify(stageData)],
-          { label: LOG_PREFIX + " persist completion diagnostics" },
-        );
-      } catch (diagErr) {
-        console.log(LOG_PREFIX + " Failed to persist diagnostics (non-fatal): " + String(diagErr));
-      }
 
       await db.execute(
         "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2), updated_at = now() WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
