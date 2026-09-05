@@ -701,8 +701,39 @@ async function doExtraction(db: any, claude: any, runId: string, dealId: string)
       { label: LOG_PREFIX + " mark stage complete (in transaction)" },
     );
 
+    // Persist diagnostics — inside the same transaction, best-effort
+    var txStageData = {
+      claimCount: totalClaimsInserted,
+      claimTypeDistribution: claimTypeDistribution,
+      attributionDistribution: attributionDistribution,
+      subjectUnverifiedCount: subjectUnverifiedCount,
+      coercedAttribution: coercedAttribution,
+      droppedRows: droppedRows,
+      rejectedByRelevance: rejectedByRelevance,
+      gatePassAfterNormalization: gatePassAfterNormalization,
+      gateStillFailing: gateStillFailing,
+      duplicatesCollapsedBySnippet: duplicatesCollapsedBySnippet,
+      duplicatesCollapsedByText: duplicatesCollapsedByText,
+      duplicatesCollapsedByNearText: duplicatesCollapsedByNearText,
+      nearDedupThreshold: NEAR_DEDUP_THRESHOLD,
+      batchesProcessed: batches.length,
+      chunksProcessed: chunksProcessed,
+      sampleClaims: sampleClaims,
+      totalInputTokens: totalInputTokens,
+      totalOutputTokens: totalOutputTokens,
+    };
+    try {
+      await db.execute(
+        "INSERT INTO sri_stage_diagnostics (run_id, stage, payload) VALUES ($1, $2, $3::jsonb)",
+        [runId, STAGE_NAME, JSON.stringify(txStageData)],
+        { label: LOG_PREFIX + " persist diagnostics" },
+      );
+    } catch (diagErr) {
+      console.log(LOG_PREFIX + " Failed to persist diagnostics (non-fatal): " + String(diagErr));
+    }
+
     // COMMIT
-    await db.execute("COMMIT", [], { label: LOG_PREFIX + " COMMIT insert+marker transaction" });
+    await db.execute("COMMIT", [], { label: LOG_PREFIX + " COMMIT insert+marker+diagnostics transaction" });
   } catch (txErr) {
     try { await db.execute("ROLLBACK", [], { label: LOG_PREFIX + " ROLLBACK on error" }); } catch (rbErr) { /* best effort */ }
     throw txErr;
