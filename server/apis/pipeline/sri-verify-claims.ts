@@ -215,8 +215,8 @@ async function judgeRelevance(
   claimText: string,
   items: HarvestedItem[],
   label: string,
-): Promise<{ retained: JudgedItem[]; quoteGateFailed: number; irrelevantCount: number }> {
-  if (items.length === 0) return { retained: [], quoteGateFailed: 0, irrelevantCount: 0 };
+): Promise<{ retained: JudgedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number }> {
+  if (items.length === 0) return { retained: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
 
   // Build numbered list of url + snippet
   var itemList = "";
@@ -261,26 +261,44 @@ async function judgeRelevance(
     }
     responseText = responseText.trim();
 
-    var judgments: any[];
+    var parsed: any;
+    var judgeParseFailed = 0;
+    var judgeIndexInvalid = 0;
+    var judgeNoVerdict = 0;
     try {
-      judgments = JSON.parse(responseText);
+      parsed = JSON.parse(responseText);
     } catch (parseErr) {
-      // If parse fails, treat all as irrelevant
-      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length };
+      // Parse failed — treat every item as irrelevant
+      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
     }
 
-    if (!Array.isArray(judgments)) {
-      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length };
+    // The parsed value must be an array
+    if (!Array.isArray(parsed)) {
+      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
     }
 
     var retained: JudgedItem[] = [];
     var quoteGateFailed = 0;
     var irrelevantCount = 0;
 
-    for (var ji = 0; ji < judgments.length; ji++) {
-      var j = judgments[ji];
-      var idx = (typeof j.index === "number" ? j.index : 0) - 1;
-      if (idx < 0 || idx >= items.length) continue;
+    // Track which items received a verdict
+    var itemCovered = new Array(items.length).fill(false);
+
+    for (var ji = 0; ji < parsed.length; ji++) {
+      var j = parsed[ji];
+
+      // Index must be an integer within range (1-based)
+      if (typeof j.index !== "number" || !Number.isInteger(j.index)) {
+        judgeIndexInvalid++;
+        continue;
+      }
+      var idx = j.index - 1;
+      if (idx < 0 || idx >= items.length) {
+        judgeIndexInvalid++;
+        continue;
+      }
+
+      itemCovered[idx] = true;
 
       var stance = String(j.stance || "").toLowerCase().trim();
       var quote = String(j.quote || "");
@@ -315,10 +333,18 @@ async function judgeRelevance(
       });
     }
 
-    return { retained: retained, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount };
+    // Items receiving no entry are treated as irrelevant
+    for (var ic = 0; ic < itemCovered.length; ic++) {
+      if (!itemCovered[ic]) {
+        judgeNoVerdict++;
+        irrelevantCount++;
+      }
+    }
+
+    return { retained: retained, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict };
   } catch (err) {
     console.log(LOG_PREFIX + " Judgment call failed: " + String(err));
-    return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length };
+    return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
   }
 }
 
@@ -473,6 +499,9 @@ var verifyClaims: StageHandler = async function (
     var urlsRejectedNoHost = 0;
     var domainMismatchDropped = 0;
     var quoteGateFailed = 0;
+    var judgeParseFailed = 0;
+    var judgeIndexInvalid = 0;
+    var judgeNoVerdict = 0;
     var subjectFallbackCount = 0;
     var verdictDistribution: Record<string, number> = {};
     var severityDistribution: Record<string, number> = {};
@@ -574,7 +603,10 @@ var verifyClaims: StageHandler = async function (
 
           // ── Code-side domain backstop ─────────────────────────────
           var domainFiltered: HarvestedItem[] = [];
-          if (allowedDomains) {
+          if (platform === "news") {
+            // news: legitimately open web, no domain filter
+            domainFiltered = extracted.items;
+          } else if (allowedDomains) {
             for (var di = 0; di < extracted.items.length; di++) {
               var item = extracted.items[di];
               var domainOk = false;
@@ -591,8 +623,8 @@ var verifyClaims: StageHandler = async function (
               }
             }
           } else {
-            // news: open web, no domain filter
-            domainFiltered = extracted.items;
+            // Unknown platform with no allowed_domains — fail loud
+            throw new Error("Platform '" + platform + "' has no PLATFORM_ALLOWED_DOMAINS entry and is not 'news'. This is a configuration error.");
           }
 
           if (domainFiltered.length === 0) {
@@ -608,6 +640,9 @@ var verifyClaims: StageHandler = async function (
             LOG_PREFIX + " judge " + platform + " claim " + (idx + 1),
           );
           quoteGateFailed += judgment.quoteGateFailed;
+          judgeParseFailed += judgment.judgeParseFailed;
+          judgeIndexInvalid += judgment.judgeIndexInvalid;
+          judgeNoVerdict += judgment.judgeNoVerdict;
 
           if (judgment.retained.length > 0) {
             pairsWithEvidence++;
@@ -709,6 +744,9 @@ var verifyClaims: StageHandler = async function (
         urlsRejectedNoHost: urlsRejectedNoHost,
         domainMismatchDropped: domainMismatchDropped,
         quoteGateFailed: quoteGateFailed,
+        judgeParseFailed: judgeParseFailed,
+        judgeIndexInvalid: judgeIndexInvalid,
+        judgeNoVerdict: judgeNoVerdict,
         subjectFallbackCount: subjectFallbackCount,
         verdictDistribution: verdictDistribution,
         severityDistribution: severityDistribution,
@@ -734,6 +772,9 @@ var verifyClaims: StageHandler = async function (
       urlsRejectedNoHost: urlsRejectedNoHost,
       domainMismatchDropped: domainMismatchDropped,
       quoteGateFailed: quoteGateFailed,
+      judgeParseFailed: judgeParseFailed,
+      judgeIndexInvalid: judgeIndexInvalid,
+      judgeNoVerdict: judgeNoVerdict,
       subjectFallbackCount: subjectFallbackCount,
       verdictDistribution: verdictDistribution,
       severityDistribution: severityDistribution,
