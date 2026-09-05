@@ -332,6 +332,11 @@ async function judgeRelevance(
       var stance = String(j.stance || "").toLowerCase().trim();
       var quote = String(j.quote || "");
 
+      // Extract entity_match early so it can be carried on all drop records
+      var entityMatch = String(j.entity_match || "").toLowerCase().trim();
+      var entityReason = String(j.entity_reason || "");
+      var earlyEntityMatch: string | null = VALID_ENTITY_MATCHES.has(entityMatch) ? entityMatch : null;
+
       // Gate (a): stance must be one of the three literals
       if (!VALID_STANCES.has(stance)) {
         stance = "irrelevant";
@@ -339,7 +344,7 @@ async function judgeRelevance(
 
       if (stance === "irrelevant") {
         irrelevantCount++;
-        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "judge_irrelevant", drop_reason: "Judged irrelevant", entity_match: null });
+        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "judge_irrelevant", drop_reason: "Judged irrelevant", entity_match: earlyEntityMatch });
         continue;
       }
 
@@ -349,13 +354,11 @@ async function judgeRelevance(
       if (normQuote.length === 0 || normSnippet.indexOf(normQuote) === -1) {
         quoteGateFailed++;
         irrelevantCount++;
-        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "quote_gate", drop_reason: "Quote not found in snippet", entity_match: null });
+        allDropped.push({ platform: platform, url: items[idx].url, domain: items[idx].domain, drop_stage: "quote_gate", drop_reason: "Quote not found in snippet", entity_match: earlyEntityMatch });
         continue;
       }
 
       // Entity match gate
-      var entityMatch = String(j.entity_match || "").toLowerCase().trim();
-      var entityReason = String(j.entity_reason || "");
       if (!VALID_ENTITY_MATCHES.has(entityMatch)) {
         entityMatch = "mismatch";
       }
