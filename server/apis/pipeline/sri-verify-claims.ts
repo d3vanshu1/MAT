@@ -17,15 +17,15 @@ import { z } from "@superblocksteam/sdk-api";
 import type { StageHandler, StageResult } from "./sri-stage-contract.js";
 
 // ── Constants ───────────────────────────────────────────────────────
-var STAGE_NAME = "verify_claims";
-var LOG_PREFIX = "[SRI verify_claims]";
-var SEARCH_MODEL = "claude-sonnet-4-6";
-var SEARCH_MAX_TOKENS = 4096;
-var JUDGMENT_MAX_TOKENS = 2048;
-var WEB_SEARCH_MAX_USES = 3;
+const STAGE_NAME = "verify_claims";
+const LOG_PREFIX = "[SRI verify_claims]";
+const SEARCH_MODEL = "claude-sonnet-4-6";
+const SEARCH_MAX_TOKENS = 4096;
+const JUDGMENT_MAX_TOKENS = 2048;
+const WEB_SEARCH_MAX_USES = 3;
 
 // ── Platform routing (code-side, no model involvement) ──────────────
-var PLATFORM_ROUTING: Record<string, string[]> = {
+const PLATFORM_ROUTING: Record<string, string[]> = {
   culture: ["glassdoor", "indeed", "linkedin"],
   retention_attrition: ["glassdoor", "indeed", "linkedin"],
   headcount: ["glassdoor", "indeed", "linkedin"],
@@ -37,7 +37,7 @@ var PLATFORM_ROUTING: Record<string, string[]> = {
 };
 
 // ── Allowed domains per platform (for web_search tool config) ───────
-var PLATFORM_ALLOWED_DOMAINS: Record<string, string[]> = {
+const PLATFORM_ALLOWED_DOMAINS: Record<string, string[]> = {
   glassdoor: ["glassdoor.com", "glassdoor.co.uk"],
   indeed: ["indeed.com", "uk.indeed.com"],
   linkedin: ["linkedin.com"],
@@ -206,17 +206,28 @@ interface JudgedItem {
   snippet: string;
   stance: "supports" | "contradicts";
   quote: string;
+  entity_match: "confirmed" | "ambiguous" | "mismatch";
+  entity_reason: string;
 }
 
-var VALID_STANCES = new Set(["supports", "contradicts", "irrelevant"]);
+const VALID_STANCES = new Set(["supports", "contradicts", "irrelevant"]);
+const VALID_ENTITY_MATCHES = new Set(["confirmed", "ambiguous", "mismatch"]);
+
+interface WrongEntityDrop {
+  platform: string;
+  url: string;
+  entity_reason: string;
+}
 
 async function judgeRelevance(
   claude: any,
   claimText: string,
   items: HarvestedItem[],
   label: string,
-): Promise<{ retained: JudgedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number }> {
-  if (items.length === 0) return { retained: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+  targetProfileText: string,
+  platform: string,
+): Promise<{ retained: JudgedItem[]; quoteGateFailed: number; irrelevantCount: number; judgeParseFailed: number; judgeIndexInvalid: number; judgeNoVerdict: number; wrongEntityDropped: WrongEntityDrop[] }> {
+  if (items.length === 0) return { retained: [], quoteGateFailed: 0, irrelevantCount: 0, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
 
   // Build numbered list of url + snippet
   var itemList = "";
@@ -224,7 +235,12 @@ async function judgeRelevance(
     itemList += (i + 1) + ". URL: " + items[i].url + "\nSnippet: " + items[i].snippet.slice(0, 500) + "\n\n";
   }
 
-  var judgmentPrompt = "You are evaluating whether web search results are relevant to a specific claim.\n\nClaim: \"" + claimText + "\"\n\nSearch results:\n" + itemList + "For each result, determine its stance toward the claim. Return ONLY a JSON array, no prose. Each element must have:\n- \"index\": the 1-based result number\n- \"stance\": exactly one of \"supports\", \"contradicts\", or \"irrelevant\"\n- \"quote\": a verbatim span copied exactly from that result's Snippet text that justifies the stance\n\nRules:\n- \"supports\" means the snippet provides evidence consistent with the claim\n- \"contradicts\" means the snippet provides evidence that disputes or undermines the claim\n- \"irrelevant\" means the snippet has no bearing on the claim\n- The quote MUST be an exact substring of the snippet text. Do not paraphrase or rearrange.";
+  var entityBlock = "";
+  if (targetProfileText.length > 0) {
+    entityBlock = "\n\nTarget company profile:\n" + targetProfileText + "\n\nFor each result, in addition to stance and quote, you must also assess whether the page describes the same company as the target profile. Add these fields:\n- \"entity_match\": exactly one of \"confirmed\", \"ambiguous\", or \"mismatch\"\n- \"entity_reason\": one short sentence citing what in the page's own description drove the decision\n\nDefinitions:\n- \"confirmed\" means the page describes a company consistent with the profile on at least two independent attributes, such as sector plus geography, or products plus customer type.\n- \"ambiguous\" means the page gives too little identifying description to decide.\n- \"mismatch\" means the page describes a company contradicting the profile on any attribute.";
+  }
+
+  var judgmentPrompt = "You are evaluating whether web search results are relevant to a specific claim.\n\nClaim: \"" + claimText + "\"" + entityBlock + "\n\nSearch results:\n" + itemList + "For each result, determine its stance toward the claim. Return ONLY a JSON array, no prose. Each element must have:\n- \"index\": the 1-based result number\n- \"stance\": exactly one of \"supports\", \"contradicts\", or \"irrelevant\"\n- \"quote\": a verbatim span copied exactly from that result's Snippet text that justifies the stance" + (targetProfileText.length > 0 ? "\n- \"entity_match\": exactly one of \"confirmed\", \"ambiguous\", or \"mismatch\"\n- \"entity_reason\": one short sentence" : "") + "\n\nRules:\n- \"supports\" means the snippet provides evidence consistent with the claim\n- \"contradicts\" means the snippet provides evidence that disputes or undermines the claim\n- \"irrelevant\" means the snippet has no bearing on the claim\n- The quote MUST be an exact substring of the snippet text. Do not paraphrase or rearrange.";
 
   try {
     var response = await claude.apiRequest(
@@ -269,17 +285,18 @@ async function judgeRelevance(
       parsed = JSON.parse(responseText);
     } catch (parseErr) {
       // Parse failed — treat every item as irrelevant
-      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
     }
 
     // The parsed value must be an array
     if (!Array.isArray(parsed)) {
-      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+      return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 1, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
     }
 
     var retained: JudgedItem[] = [];
     var quoteGateFailed = 0;
     var irrelevantCount = 0;
+    var wrongEntityDropped: WrongEntityDrop[] = [];
 
     // Track which items received a verdict
     var itemCovered = new Array(items.length).fill(false);
@@ -323,13 +340,27 @@ async function judgeRelevance(
         continue;
       }
 
-      // Retained: supports or contradicts with valid quote
+      // Entity match gate
+      var entityMatch = String(j.entity_match || "").toLowerCase().trim();
+      var entityReason = String(j.entity_reason || "");
+      if (!VALID_ENTITY_MATCHES.has(entityMatch)) {
+        entityMatch = "mismatch";
+      }
+      if (entityMatch === "mismatch") {
+        wrongEntityDropped.push({ platform: platform, url: items[idx].url, entity_reason: entityReason });
+        irrelevantCount++;
+        continue;
+      }
+
+      // Retained: supports or contradicts with valid quote and non-mismatch entity
       retained.push({
         url: items[idx].url,
         domain: items[idx].domain,
         snippet: items[idx].snippet,
         stance: stance as "supports" | "contradicts",
         quote: quote,
+        entity_match: entityMatch as "confirmed" | "ambiguous",
+        entity_reason: entityReason,
       });
     }
 
@@ -341,10 +372,10 @@ async function judgeRelevance(
       }
     }
 
-    return { retained: retained, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict };
+    return { retained: retained, quoteGateFailed: quoteGateFailed, irrelevantCount: irrelevantCount, judgeParseFailed: judgeParseFailed, judgeIndexInvalid: judgeIndexInvalid, judgeNoVerdict: judgeNoVerdict, wrongEntityDropped: wrongEntityDropped };
   } catch (err) {
     console.log(LOG_PREFIX + " Judgment call failed: " + String(err));
-    return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0 };
+    return { retained: [], quoteGateFailed: 0, irrelevantCount: items.length, judgeParseFailed: 0, judgeIndexInvalid: 0, judgeNoVerdict: 0, wrongEntityDropped: [] };
   }
 }
 
@@ -444,15 +475,32 @@ var verifyClaims: StageHandler = async function (
       [],
       { label: LOG_PREFIX + " ensure stance column on sri_evidence" },
     );
-
-    // ── Get deal name for subject fallback ──────────────────────────
-    var dealRows = await db.query(
-      "SELECT name FROM deals WHERE id = $1 LIMIT 1",
-      z.object({ name: z.string() }),
-      [dealId],
-      { label: LOG_PREFIX + " get deal name" },
+    await db.execute(
+      "ALTER TABLE sri_evidence ADD COLUMN IF NOT EXISTS entity_match TEXT",
+      [],
+      { label: LOG_PREFIX + " ensure entity_match column on sri_evidence" },
     );
-    var dealName = dealRows.length > 0 ? dealRows[0].name : "Unknown";
+    await db.execute(
+      "ALTER TABLE sri_findings ADD COLUMN IF NOT EXISTS entity_confidence TEXT",
+      [],
+      { label: LOG_PREFIX + " ensure entity_confidence column on sri_findings" },
+    );
+
+    // ── Load target profile for entity matching ──────────────────
+    var profileRows = await db.query(
+      "SELECT identity_type, identity_value FROM sri_target_identity WHERE run_id = $1 AND identity_type IN ('profile_field', 'trading_name') ORDER BY identity_type, identity_value",
+      z.object({ identity_type: z.string(), identity_value: z.string() }),
+      [runId],
+      { label: LOG_PREFIX + " load target profile" },
+    );
+    var targetProfileText = "";
+    if (profileRows.length > 0) {
+      var profileLines: string[] = [];
+      for (var pi2 = 0; pi2 < profileRows.length; pi2++) {
+        profileLines.push(profileRows[pi2].identity_type + ": " + profileRows[pi2].identity_value);
+      }
+      targetProfileText = profileLines.join("\n");
+    }
 
     // ── Stage-start diagnostics (committed immediately) ─────────────
     try {
@@ -464,7 +512,8 @@ var verifyClaims: StageHandler = async function (
           platformRouting: PLATFORM_ROUTING,
           allowedDomains: PLATFORM_ALLOWED_DOMAINS,
           timestamp: new Date().toISOString(),
-          dealName: dealName,
+          hasTargetProfile: profileRows.length > 0,
+          profileFieldCount: profileRows.length,
         })],
         { label: LOG_PREFIX + " persist start diagnostics" },
       );
@@ -502,7 +551,8 @@ var verifyClaims: StageHandler = async function (
     var judgeParseFailed = 0;
     var judgeIndexInvalid = 0;
     var judgeNoVerdict = 0;
-    var subjectFallbackCount = 0;
+    var claimsSkippedNoSubject = 0;
+    var wrongEntityDroppedAll: WrongEntityDrop[] = [];
     var verdictDistribution: Record<string, number> = {};
     var severityDistribution: Record<string, number> = {};
     var perPlatformCounts: Record<string, { attempted: number; withEvidence: number }> = {};
@@ -544,19 +594,27 @@ var verifyClaims: StageHandler = async function (
         continue;
       }
 
-      // ── Search subject ────────────────────────────────────────────
+      // ── Search subject (no fallback — null subject → not_searched) ──
       var searchSubject = claim.subject_entity;
-      var usedFallback = false;
       if (!searchSubject) {
-        searchSubject = dealName;
-        usedFallback = true;
-        subjectFallbackCount++;
+        await db.execute(
+          "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, entity_confidence, created_at) VALUES (gen_random_uuid(), $1, $2, 'not_searched', 'info', $3, $4, 'none', now())",
+          [runId, claim.claim_id, "No subject entity on claim", "Claim has no subject_entity. Cannot search without an entity name."],
+          { label: LOG_PREFIX + " insert not_searched finding (no subject)" },
+        );
+        claimsProcessed++;
+        claimsNewlyProcessed++;
+        claimsSkippedNoSubject++;
+        verdictDistribution["not_searched"] = (verdictDistribution["not_searched"] || 0) + 1;
+        severityDistribution["info"] = (severityDistribution["info"] || 0) + 1;
+        continue;
       }
 
       // ── Search each platform ──────────────────────────────────────
       var claimSupportsCount = 0;
       var claimContradictsCount = 0;
       var claimEvidenceUrls: string[] = [];
+      var claimEntityMatches: string[] = [];
 
       for (var pi = 0; pi < platforms.length; pi++) {
         var platform = platforms[pi];
@@ -638,11 +696,16 @@ var verifyClaims: StageHandler = async function (
             claim.claim_text,
             domainFiltered,
             LOG_PREFIX + " judge " + platform + " claim " + (idx + 1),
+            targetProfileText,
+            platform,
           );
           quoteGateFailed += judgment.quoteGateFailed;
           judgeParseFailed += judgment.judgeParseFailed;
           judgeIndexInvalid += judgment.judgeIndexInvalid;
           judgeNoVerdict += judgment.judgeNoVerdict;
+          for (var wdi = 0; wdi < judgment.wrongEntityDropped.length; wdi++) {
+            wrongEntityDroppedAll.push(judgment.wrongEntityDropped[wdi]);
+          }
 
           if (judgment.retained.length > 0) {
             pairsWithEvidence++;
@@ -651,12 +714,13 @@ var verifyClaims: StageHandler = async function (
             for (var ei = 0; ei < judgment.retained.length; ei++) {
               var ev = judgment.retained[ei];
               await db.execute(
-                "INSERT INTO sri_evidence (evidence_id, claim_id, platform, url, domain, snippet, stance, retrieved_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, now()) ON CONFLICT (claim_id, url) DO NOTHING",
-                [claim.claim_id, platform, ev.url, ev.domain, ev.snippet, ev.stance],
+                "INSERT INTO sri_evidence (evidence_id, claim_id, platform, url, domain, snippet, stance, entity_match, retrieved_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, now()) ON CONFLICT (claim_id, url) DO NOTHING",
+                [claim.claim_id, platform, ev.url, ev.domain, ev.snippet, ev.stance, ev.entity_match],
                 { label: LOG_PREFIX + " insert evidence" },
               );
               evidenceRowsWritten++;
               claimEvidenceUrls.push(ev.url);
+              claimEntityMatches.push(ev.entity_match);
               if (ev.stance === "supports") claimSupportsCount++;
               if (ev.stance === "contradicts") claimContradictsCount++;
             }
@@ -683,7 +747,41 @@ var verifyClaims: StageHandler = async function (
         verdict = "mixed";
       }
 
-      var severity = assignSeverity(verdict, claim.thesis_dependence, c);
+      // ── Entity confidence from retained evidence ───────────────
+      var entityConfidence: string;
+      if (claimEntityMatches.length === 0) {
+        entityConfidence = "none";
+      } else {
+        var allConfirmed = true;
+        var allAmbiguous = true;
+        for (var eci = 0; eci < claimEntityMatches.length; eci++) {
+          if (claimEntityMatches[eci] !== "confirmed") allConfirmed = false;
+          if (claimEntityMatches[eci] !== "ambiguous") allAmbiguous = false;
+        }
+        if (allConfirmed) {
+          entityConfidence = "confirmed";
+        } else if (allAmbiguous) {
+          entityConfidence = "ambiguous";
+        } else {
+          entityConfidence = "mixed_confidence";
+        }
+      }
+
+      // ── Severity with entity confidence ceiling ─────────────────
+      var rawSeverity = assignSeverity(verdict, claim.thesis_dependence, c);
+      var severity = rawSeverity;
+      if (entityConfidence === "ambiguous") {
+        // All rows ambiguous → ceiling is info
+        if (severity === "critical" || severity === "warning") {
+          severity = "info";
+        }
+      } else if (entityConfidence === "mixed_confidence") {
+        // Some ambiguous → ceiling is warning (critical unreachable)
+        if (severity === "critical") {
+          severity = "warning";
+        }
+      }
+      // entityConfidence === "confirmed" → full range, no ceiling
 
       verdictDistribution[verdict] = (verdictDistribution[verdict] || 0) + 1;
       severityDistribution[severity] = (severityDistribution[severity] || 0) + 1;
@@ -696,11 +794,11 @@ var verifyClaims: StageHandler = async function (
           : verdict === "mixed"
             ? "Mixed public evidence for claim"
             : "Public evidence corroborates claim";
-      var findingDetail = "Claim: " + claim.claim_text + "\nVerdict: " + verdict + " | Severity: " + severity + " | Supports: " + s + " | Contradicts: " + c;
+      var findingDetail = "Claim: " + claim.claim_text + "\nVerdict: " + verdict + " | Severity: " + severity + " | Entity confidence: " + entityConfidence + " | Supports: " + s + " | Contradicts: " + c;
 
       await db.execute(
-        "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, now())",
-        [runId, claim.claim_id, verdict, severity, findingTitle, findingDetail],
+        "INSERT INTO sri_findings (finding_id, run_id, claim_id, verdict, severity, title, detail, entity_confidence, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, now())",
+        [runId, claim.claim_id, verdict, severity, findingTitle, findingDetail, entityConfidence],
         { label: LOG_PREFIX + " insert finding for claim " + (idx + 1) },
       );
 
@@ -719,11 +817,11 @@ var verifyClaims: StageHandler = async function (
         sampleFindings.push({
           claim_text: claim.claim_text,
           claim_type: claim.claim_type,
-          subject_entity: claim.subject_entity || dealName,
-          subject_fallback: usedFallback,
+          subject_entity: claim.subject_entity,
           thesis_dependence: claim.thesis_dependence,
           verdict: verdict,
           severity: severity,
+          entity_confidence: entityConfidence,
           supports: s,
           contradicts: c,
           evidence_urls: claimEvidenceUrls,
@@ -747,7 +845,8 @@ var verifyClaims: StageHandler = async function (
         judgeParseFailed: judgeParseFailed,
         judgeIndexInvalid: judgeIndexInvalid,
         judgeNoVerdict: judgeNoVerdict,
-        subjectFallbackCount: subjectFallbackCount,
+        claimsSkippedNoSubject: claimsSkippedNoSubject,
+        wrongEntityDropped: wrongEntityDroppedAll,
         verdictDistribution: verdictDistribution,
         severityDistribution: severityDistribution,
         perPlatformCounts: perPlatformCounts,
@@ -775,7 +874,8 @@ var verifyClaims: StageHandler = async function (
       judgeParseFailed: judgeParseFailed,
       judgeIndexInvalid: judgeIndexInvalid,
       judgeNoVerdict: judgeNoVerdict,
-      subjectFallbackCount: subjectFallbackCount,
+      claimsSkippedNoSubject: claimsSkippedNoSubject,
+      wrongEntityDropped: wrongEntityDroppedAll,
       verdictDistribution: verdictDistribution,
       severityDistribution: severityDistribution,
       perPlatformCounts: perPlatformCounts,
