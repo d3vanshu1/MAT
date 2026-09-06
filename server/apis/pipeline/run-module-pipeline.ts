@@ -143,7 +143,10 @@ export default api({
         runId,
         input.subjectDocumentIds || [],
       );
-      // Map OaPipelineResult → PipelineResult (cast through unknown)
+      // Map OaPipelineResult → PipelineResult
+      // The output schema requires progress.analysisTotal/analysisCompleted/mergeRound/mergeTotal
+      var totalStages = 9; // fact_norm through publish
+      var doneStages = oaResult.stagesComplete.length;
       return {
         status: oaResult.status === "complete" ? "completed" : oaResult.status,
         runId: oaResult.runId || runId,
@@ -152,9 +155,10 @@ export default api({
         message: oaResult.message,
         phase: oaResult.currentStage,
         progress: {
-          stagesComplete: oaResult.stagesComplete,
-          stagesFailed: oaResult.stagesFailed,
-          currentStage: oaResult.currentStage,
+          analysisTotal: totalStages,
+          analysisCompleted: doneStages,
+          mergeRound: 0,
+          mergeTotal: 0,
         },
         result: null,
       } as unknown as PipelineResult;
