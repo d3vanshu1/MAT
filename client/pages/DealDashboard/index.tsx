@@ -20,6 +20,7 @@ import StatsRow from "@/components/ic/stats/StatsRow";
 import AlertBanner from "@/components/ic/alerts/AlertBanner";
 import ModuleGrid from "@/components/ic/modules/ModuleGrid";
 import RunAllModal from "@/components/ic/modules/RunAllModal";
+import DocumentTagger from "@/components/ic/documents/DocumentTagger";
 // BSS v2 — lightweight types matching BssGetFindings API output (no UI dependency)
 interface BssFinding {
   candidate_id: string;
@@ -258,6 +259,7 @@ export default function DealDashboardPage() {
   const [rerunModal, setRerunModal] = useState<{ fileNames: string[]; suggestedIds: string[] } | null>(null);
   const [useOpus, setUseOpus] = useState(false);
   const [showReparseModal, setShowReparseModal] = useState(false);
+  const [showDocTagger, setShowDocTagger] = useState(false);
   // Subject memo selection — IDs of ic_memo docs chosen as "memo(s) under review"
   const [selectedSubjectIds, setSelectedSubjectIds] = useState<string[]>([]);
 
@@ -3575,6 +3577,16 @@ if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null &&
     [updateDocumentApi, docs]
   );
 
+  const handleBatchTagSave = useCallback(
+    (changes: Array<{ docId: string; tag: DocumentTag }>) => {
+      for (const change of changes) {
+        handleUpdateDocTag(change.docId, change.tag);
+      }
+      toast.success("Saved tags for " + changes.length + " document" + (changes.length !== 1 ? "s" : ""));
+    },
+    [handleUpdateDocTag]
+  );
+
   const handleUpdateDocSource = useCallback(
     (docId: string, source: DocumentSource) => {
       setDocs((prev) =>
@@ -3677,6 +3689,7 @@ if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null &&
         onUpdateSource={handleUpdateDocSource}
         onBack={() => navigate("/")}
         onReparse={() => setShowReparseModal(true)}
+        onTagDocuments={() => setShowDocTagger(true)}
       />
 
       {/* Main content */}
@@ -3764,6 +3777,13 @@ if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null &&
         dealId={dealId ?? ""}
         existingDocuments={docs.map((d) => ({ id: d.id, file_name: d.file_name }))}
         onCommitComplete={() => refetchDocs()}
+      />
+
+      <DocumentTagger
+        open={showDocTagger}
+        onClose={() => setShowDocTagger(false)}
+        documents={docs}
+        onSave={handleBatchTagSave}
       />
     </div>
   );

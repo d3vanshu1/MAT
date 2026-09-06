@@ -1,4 +1,4 @@
-import { ArrowLeft, CheckCircle2, Circle, RefreshCw } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Circle, RefreshCw, Tag } from "lucide-react";
 import type { Deal } from "@/types/deal";
 import type { Document, DocumentTag, DocumentSource } from "@/types/document";
 import { MODULE_DEFINITIONS } from "@/lib/moduleConfig";
@@ -21,6 +21,7 @@ interface SidebarProps {
   onUpdateSource: (docId: string, source: DocumentSource) => void;
   onBack: () => void;
   onReparse?: () => void;
+  onTagDocuments?: () => void;
 }
 
 export default function Sidebar({
@@ -36,6 +37,7 @@ export default function Sidebar({
   onUpdateSource,
   onBack,
   onReparse,
+  onTagDocuments,
 }: SidebarProps) {
   const progressPct = totalModules > 0 ? Math.round((completedModules.length / totalModules) * 100) : 0;
 
@@ -80,6 +82,12 @@ export default function Sidebar({
           />
           <div className="mt-3 space-y-2">
             <DocumentUpload onUpload={onUpload} />
+            {onTagDocuments && documents.length > 0 && (
+              <ICButton size="sm" variant="ghost" onClick={onTagDocuments} className="w-full text-[10px]">
+                <Tag className="w-3 h-3" />
+                Tag Documents
+              </ICButton>
+            )}
             {onReparse && documents.some((d) => d.file_type === "application/pdf" || d.file_name.toLowerCase().endsWith(".pdf")) && (
               <ICButton size="sm" variant="ghost" onClick={onReparse} className="w-full text-[10px]">
                 <RefreshCw className="w-3 h-3" />
