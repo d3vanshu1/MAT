@@ -49,20 +49,49 @@ const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
 
 // ---------------------------------------------------------------------------
-// Deal config (SCG) — stored here, not hard-coded in tier logic
+// Deal config — loaded from oa_deal_config at runtime. No hardcoded thresholds.
 // ---------------------------------------------------------------------------
-const DEAL_CONFIG = {
-  ev_gbp: 655_000_000,
-  ebitda_gbp: 55_000_000,
-  tier1_ev_pct: 0.01,        // 1% of EV = £6.55m
-  tier1_ebitda_pct: 0.05,    // 5% of EBITDA = £2.75m
-  tier2_low_pct: 0.0025,     // 0.25% of EV = £1.6375m
-  tier2_high_pct: 0.01,      // 1% of EV = £6.55m (same as tier1 threshold)
-} as const;
+interface DealConfig {
+  ev_gbp: number | null;
+  ebitda_gbp: number | null;
+  tier1_pct_of_ev: number;
+  tier2_lower_pct: number;
+  tier1_threshold_gbp: number | null;   // derived: ev_gbp * tier1_pct_of_ev
+  tier2_low_gbp: number | null;         // derived: ev_gbp * tier2_lower_pct
+}
 
-const TIER1_THRESHOLD_GBP = DEAL_CONFIG.ev_gbp * DEAL_CONFIG.tier1_ev_pct;     // £6.55m
-// EBITDA branch removed per user directive — EV threshold only
-const TIER2_LOW_GBP = DEAL_CONFIG.ev_gbp * DEAL_CONFIG.tier2_low_pct;          // £1.6375m
+const DealConfigRow = z.object({
+  enterprise_value_gbp: z.coerce.number().nullable(),
+  runrate_ebitda_gbp: z.coerce.number().nullable(),
+  tier1_pct_of_ev: z.coerce.number(),
+  tier2_lower_pct: z.coerce.number(),
+});
+
+async function loadDealConfig(db: any, dealId: string): Promise<DealConfig> {
+  const rows = await db.query(
+    "SELECT enterprise_value_gbp, runrate_ebitda_gbp, tier1_pct_of_ev, tier2_lower_pct FROM oa_deal_config WHERE deal_id = $1 LIMIT 1",
+    DealConfigRow,
+    [dealId],
+    { label: "Load deal config for materiality" },
+  );
+  if (rows.length === 0) {
+    throw new Error(
+      "No oa_deal_config row for deal " + dealId + ". " +
+      "Materiality cannot run without deal-level thresholds. " +
+      "Insert a row with enterprise_value_gbp and runrate_ebitda_gbp."
+    );
+  }
+  const r = rows[0];
+  const ev = r.enterprise_value_gbp;
+  return {
+    ev_gbp: ev,
+    ebitda_gbp: r.runrate_ebitda_gbp,
+    tier1_pct_of_ev: r.tier1_pct_of_ev,
+    tier2_lower_pct: r.tier2_lower_pct,
+    tier1_threshold_gbp: ev != null ? ev * r.tier1_pct_of_ev : null,
+    tier2_low_gbp: ev != null ? ev * r.tier2_lower_pct : null,
+  };
+}
 
 // Budget guard constants
 const HARD_KILL_MS = 200_000;
@@ -107,65 +136,59 @@ function buildMaterialityPrompt(
   gapKind: string,
   referenceEvidence: Array<{ fact_id?: string; predicate?: string; value?: string }>,
   narrative: string | null,
+  dealCfg: DealConfig,
 ): string {
   const evidenceLines = (referenceEvidence || []).slice(0, 50).map((e: any, i: number) =>
     `  [${i}] fact_id=${e?.fact_id ?? "NULL"} | predicate=${e?.predicate ?? "NULL"} | value=${e?.value ?? "NULL"}`
   ).join("\n");
 
-  return `You are checking whether any cited evidence contains a monetary figure that quantifies THIS due-diligence gap.
+  const evLabel = dealCfg.ev_gbp != null ? (dealCfg.ev_gbp / 1_000_000).toFixed(0) + "m" : "not available";
+  const t1Label = dealCfg.tier1_threshold_gbp != null ? (dealCfg.tier1_threshold_gbp / 1_000_000).toFixed(2) + "m" : "N/A (no EV)";
+  const t2LowLabel = dealCfg.tier2_low_gbp != null ? (dealCfg.tier2_low_gbp / 1_000_000).toFixed(4) + "m" : "N/A (no EV)";
 
-DEAL CONTEXT:
-- Enterprise Value: £655m
-- Tier 1 threshold: verified quantified impact >= £6.55m (1% of EV)
-- Tier 2 threshold: £1.6375m to £6.55m (0.25% to 1% of EV)
-- Tier 3: below £1.6375m or no quantifying figure
-
-FINDING:
-- Topic: ${topicId}
-- Gap kind: ${gapKind}
-- Narrative: ${narrative ?? "N/A"}
-
-CITED EVIDENCE (each has a fact_id):
-${evidenceLines || "  (none)"}
-
-TASK: Identify whether the cited evidence contains a monetary figure that quantifies THIS gap.
-
-Do NOT estimate. Do NOT infer. Do NOT compute. Do NOT aggregate figures.
-Do NOT apply a percentage to enterprise value or EBITDA.
-Do NOT add figures together. Do NOT subtract one figure from another.
-
-Return a figure ONLY if it appears in the text of a cited fact AND that
-figure describes the exposure created by this specific gap.
-
-You must return the fact_id you took it from.
-
-If no cited fact carries a figure that quantifies this gap, return
-estimated_impact_gbp: null and impact_basis: "no quantifying figure in
-evidence". That is a correct and expected answer.
-
-A figure that appears on this topic but describes a different matter is NOT
-a quantification of this gap. Do not use it.
-
-Respond with JSON:
-{
-  "estimated_impact_gbp": <number or null if no qualifying figure>,
-  "source_fact_id": "<uuid of the fact containing the figure, or null>",
-  "impact_basis": "<one sentence: either cite the fact text or state 'no quantifying figure in evidence'>",
-  "tier_recommendation": 1 | 2 | 3,
-  "basis": "<one sentence explaining the tier assignment>"
-}
-
-Rules:
-- No quantifying figure → estimated_impact_gbp: null, tier_recommendation: 3
-- Verified figure >= £6.55m → tier_recommendation: 1
-- Verified figure £1.6375m to £6.55m → tier_recommendation: 2
-- Verified figure below £1.6375m → tier_recommendation: 3
-- Be conservative: if uncertain whether a figure describes THIS gap, return null
-- Return ONLY valid JSON. No markdown fences.
-
-SCOPE CONSTRAINT:
-You see only the facts assigned to THIS topic. Never assert that the memos are
-silent on a subject or that a matter is absent from the memos entirely.`;
+  var prompt = "You are checking whether any cited evidence contains a monetary figure that quantifies THIS due-diligence gap.\n\n" +
+    "DEAL CONTEXT:\n" +
+    "- Enterprise Value: " + evLabel + "\n" +
+    "- Tier 1 threshold: verified quantified impact >= " + t1Label + " (" + (dealCfg.tier1_pct_of_ev * 100).toFixed(0) + "% of EV)\n" +
+    "- Tier 2 threshold: " + t2LowLabel + " to " + t1Label + " (" + (dealCfg.tier2_lower_pct * 100).toFixed(2) + "% to " + (dealCfg.tier1_pct_of_ev * 100).toFixed(0) + "% of EV)\n" +
+    "- Tier 3: below Tier 2 threshold or no quantifying figure\n\n" +
+    "FINDING:\n" +
+    "- Topic: " + topicId + "\n" +
+    "- Gap kind: " + gapKind + "\n" +
+    "- Narrative: " + (narrative ?? "N/A") + "\n\n" +
+    "CITED EVIDENCE (each has a fact_id):\n" +
+    (evidenceLines || "  (none)") + "\n\n" +
+    "TASK: Identify whether the cited evidence contains a monetary figure that quantifies THIS gap.\n\n" +
+    "Do NOT estimate. Do NOT infer. Do NOT compute. Do NOT aggregate figures.\n" +
+    "Do NOT apply a percentage to enterprise value or EBITDA.\n" +
+    "Do NOT add figures together. Do NOT subtract one figure from another.\n\n" +
+    "Return a figure ONLY if it appears in the text of a cited fact AND that\n" +
+    "figure describes the exposure created by this specific gap.\n\n" +
+    "You must return the fact_id you took it from.\n\n" +
+    "If no cited fact carries a figure that quantifies this gap, return\n" +
+    "estimated_impact_gbp: null and impact_basis: \"no quantifying figure in\n" +
+    "evidence\". That is a correct and expected answer.\n\n" +
+    "A figure that appears on this topic but describes a different matter is NOT\n" +
+    "a quantification of this gap. Do not use it.\n\n" +
+    "Respond with JSON:\n" +
+    "{\n" +
+    "  \"estimated_impact_gbp\": <number or null if no qualifying figure>,\n" +
+    "  \"source_fact_id\": \"<uuid of the fact containing the figure, or null>\",\n" +
+    "  \"impact_basis\": \"<one sentence: either cite the fact text or state 'no quantifying figure in evidence'>\",\n" +
+    "  \"tier_recommendation\": 1 | 2 | 3,\n" +
+    "  \"basis\": \"<one sentence explaining the tier assignment>\"\n" +
+    "}\n\n" +
+    "Rules:\n" +
+    "- No quantifying figure -> estimated_impact_gbp: null, tier_recommendation: 3\n" +
+    "- Verified figure >= " + t1Label + " -> tier_recommendation: 1\n" +
+    "- Verified figure " + t2LowLabel + " to " + t1Label + " -> tier_recommendation: 2\n" +
+    "- Verified figure below " + t2LowLabel + " -> tier_recommendation: 3\n" +
+    "- Be conservative: if uncertain whether a figure describes THIS gap, return null\n" +
+    "- Return ONLY valid JSON. No markdown fences.\n\n" +
+    "SCOPE CONSTRAINT:\n" +
+    "You see only the facts assigned to THIS topic. Never assert that the memos are\n" +
+    "silent on a subject or that a matter is absent from the memos entirely.";
+  return prompt;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +213,7 @@ interface TierOutput {
   basis: string;
 }
 
-function assignTier(input: TierInput): TierOutput {
+function assignTier(input: TierInput, dealCfg: DealConfig): TierOutput {
   const {
     topicId, gapKind, absenceBasis, obligationClass,
     adviserSeverityMax, hasForInfoOnly, probeRan,
@@ -206,7 +229,7 @@ function assignTier(input: TierInput): TierOutput {
   const adviserLow = adviserSeverityMax === "low";
   if (adviserLow) {
     // Override: 'low' may exceed Tier 3 ONLY if independently satisfies Tier 1 rule 2 (EV only)
-    if (estimatedImpact != null && estimatedImpact >= TIER1_THRESHOLD_GBP) {
+    if (estimatedImpact != null && dealCfg.tier1_threshold_gbp != null && estimatedImpact >= dealCfg.tier1_threshold_gbp) {
       return { tier: 1, basis: "adviser_low_overridden_by_quantified_impact" };
     }
     // Otherwise, 'low' (regardless of FIO) is capped at Tier 3
@@ -227,9 +250,9 @@ function assignTier(input: TierInput): TierOutput {
     return { tier: 1, basis: `adviser_severity=high with verified quantified_impact £${(estimatedImpact / 1_000_000).toFixed(2)}m` };
   }
 
-  // Rule 2: Verified quantified impact >= £6.55m (EV threshold only)
-  if (estimatedImpact != null && estimatedImpact >= TIER1_THRESHOLD_GBP) {
-    return { tier: 1, basis: `quantified_impact £${(estimatedImpact / 1_000_000).toFixed(2)}m exceeds Tier 1 EV threshold (£6.55m)` };
+  // Rule 2: Verified quantified impact >= Tier 1 EV threshold
+  if (estimatedImpact != null && dealCfg.tier1_threshold_gbp != null && estimatedImpact >= dealCfg.tier1_threshold_gbp) {
+    return { tier: 1, basis: "quantified_impact exceeds Tier 1 EV threshold (" + (dealCfg.tier1_threshold_gbp / 1_000_000).toFixed(2) + "m)" };
   }
 
   // Rule 3: required + not_disclosed + probe ran and returned nothing
@@ -249,15 +272,15 @@ function assignTier(input: TierInput): TierOutput {
   if (adviserSeverityMax === "medium") {
     // Medium floors at 2 but the quantified impact may have been below tier 1
     // Check if quantified puts it in tier 2 range
-    if (estimatedImpact != null && estimatedImpact >= TIER2_LOW_GBP) {
-      return { tier: 2, basis: `adviser_severity=medium, quantified impact £${(estimatedImpact / 1_000_000).toFixed(2)}m in Tier 2 range` };
+    if (estimatedImpact != null && dealCfg.tier2_low_gbp != null && estimatedImpact >= dealCfg.tier2_low_gbp) {
+      return { tier: 2, basis: "adviser_severity=medium, quantified impact in Tier 2 range" };
     }
     return { tier: 2, basis: "adviser_severity=medium — floors at Tier 2" };
   }
 
   // Rule 2: Quantified impact in Tier 2 range
-  if (estimatedImpact != null && estimatedImpact >= TIER2_LOW_GBP && estimatedImpact < TIER1_THRESHOLD_GBP) {
-    return { tier: 2, basis: `quantified_impact £${(estimatedImpact / 1_000_000).toFixed(2)}m in Tier 2 range (0.25%-1% of EV)` };
+  if (estimatedImpact != null && dealCfg.tier2_low_gbp != null && dealCfg.tier1_threshold_gbp != null && estimatedImpact >= dealCfg.tier2_low_gbp && estimatedImpact < dealCfg.tier1_threshold_gbp) {
+    return { tier: 2, basis: "quantified_impact in Tier 2 range (" + (dealCfg.tier2_lower_pct * 100).toFixed(2) + "%-" + (dealCfg.tier1_pct_of_ev * 100).toFixed(0) + "% of EV)" };
   }
 
   // Rule 3: conditional + not_disclosed (requires ≥3 reference facts)
@@ -314,6 +337,12 @@ export default api({
   async run(ctx, { dealId, runId, reset }) {
     const { db } = ctx.integrations;
     const aiFn: AiFn = ctx.integrations.ai.apiRequest.bind(ctx.integrations.ai) as any;
+
+    // ─── LOAD DEAL CONFIG (fail loudly if missing) ──────────────────────
+    const dealCfg = await loadDealConfig(db, dealId);
+    if (dealCfg.ev_gbp == null) {
+      console.warn("[P7] EV is null for deal " + dealId + " — quantified-impact tiering disabled (degraded mode). Findings tier on adviser severity, obligation class, and gap kind only.");
+    }
 
     // ─── RESET ────────────────────────────────────────────────────────────
     if (reset) {
@@ -505,6 +534,7 @@ export default api({
         finding.gap_kind,
         refFacts as Array<{ fact_id?: string; predicate?: string; value?: string }>,
         finding.narrative,
+        dealCfg,
       );
 
       const response = await aiFn(
@@ -608,7 +638,7 @@ export default api({
         llmTier: materialityResult.tier_recommendation,
         estimatedImpact: verifiedImpact,
         referenceFactCount,
-      });
+      }, dealCfg);
 
       const finalTier = tierResult.tier;
       const finalBasis = tierResult.basis;
