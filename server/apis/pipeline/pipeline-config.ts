@@ -206,3 +206,12 @@ export interface PipelineContext {
     };
   };
 }
+
+// ===========================================================================
+// Feature Flags
+// ===========================================================================
+
+/** When true, RunModulePipeline routes omission_audit through the v2
+ *  orchestrator (oa-orchestrator.ts) instead of the v1 pipeline-core path.
+ *  Leave FALSE until regression on Saint is verified. */
+export const OA_V2_ENABLED = false;

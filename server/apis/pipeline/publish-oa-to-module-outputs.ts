@@ -155,26 +155,50 @@ export default api({
       const gapLabel = renderGapKind(f.gap_kind);
       let detail: string;
       if (f.narrative) {
-        // Extract the core claim from the narrative's second paragraph (the "However" paragraph)
-        // which states the gap. If not found, use the first sentence of the first paragraph.
+        // Extract the gap-stating paragraph from the narrative.
+        // Gap paragraphs follow patterns like:
+        //   "However, ..."
+        //   "What the facts on this topic do not include..."
+        //   "The memos do not disclose..."
+        //   "The IC memos do not address..."
+        //   "What is not disclosed..."
+        //   "What is absent..."
+        // We search all paragraphs (not just the second) for these markers.
         const paragraphs = f.narrative.split(/\n\n+/);
         let coreClaim = "";
-        // Look for the "However" or contradiction paragraph
-        const gapPara = paragraphs.find((p: string) => /^however[, ]/i.test(p.trim()));
+        const GAP_PATTERNS = [
+          /^however[, ]/i,
+          /^what the facts.*do not include/i,
+          /^what is not disclosed/i,
+          /^what is absent/i,
+          /^the (IC )?memos? do not (disclose|address|discuss|include|reconcile)/i,
+          /do not include, however,/i,
+        ];
+        const gapPara = paragraphs.find((p: string) => {
+          const trimmed = p.trim();
+          for (var pi = 0; pi < GAP_PATTERNS.length; pi++) {
+            if (GAP_PATTERNS[pi].test(trimmed)) return true;
+          }
+          return false;
+        });
         if (gapPara) {
           // Take first sentence of the gap paragraph
           const firstSentence = gapPara.trim().split(/(?<=[.])\s+/).slice(0, 1).join(" ");
-          // Limit to ~200 chars
-          coreClaim = firstSentence.length > 250 ? firstSentence.slice(0, 247) + "…" : firstSentence;
+          coreClaim = firstSentence.length > 300 ? firstSentence.slice(0, 297) + "…" : firstSentence;
+        } else if (paragraphs.length > 1) {
+          // Fallback: take first sentence of the SECOND paragraph (skip the context paragraph)
+          const secondPara = paragraphs[1].trim();
+          const firstSentence = secondPara.split(/(?<=[.])\s+/).slice(0, 1).join(" ");
+          coreClaim = firstSentence.length > 300 ? firstSentence.slice(0, 297) + "…" : firstSentence;
         } else if (paragraphs.length > 0) {
-          // Fallback: last sentence of first paragraph or first sentence
+          // Single paragraph: take last sentence (least likely to be context)
           const sentences = paragraphs[0].trim().split(/(?<=[.])\s+/);
           const last = sentences[sentences.length - 1];
-          coreClaim = last.length > 250 ? last.slice(0, 247) + "…" : last;
+          coreClaim = last.length > 300 ? last.slice(0, 297) + "…" : last;
         }
-        detail = coreClaim ? `${coreClaim} ${gapLabel}.` : `${gapLabel}.`;
+        detail = coreClaim || gapLabel + ".";
       } else {
-        detail = `${gapLabel}. Narrative withheld on quote validation.`;
+        detail = gapLabel + ". Narrative withheld on quote validation.";
       }
 
       // SPEC 2: full_analysis — narrative + evidence block + adviser rating as rendered

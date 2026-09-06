@@ -1,5 +1,7 @@
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { runPipelineCore, type PipelineResult } from "./pipeline-core.js";
+import { OA_V2_ENABLED } from "./pipeline-config.js";
+import { runOaPipeline } from "./oa-orchestrator.js";
 
 // ---------------------------------------------------------------------------
 // Integrations
@@ -83,6 +85,31 @@ export default api({
   }),
 
   async run(ctx, input): Promise<PipelineResult> {
+    // ── OA v2 orchestrator route ──────────────────────────────────────
+    if (input.moduleId === "omission_audit" && OA_V2_ENABLED) {
+      var oaResult = await runOaPipeline(
+        ctx as any,
+        input.dealId,
+        input.runId || "",
+        input.subjectDocumentIds || [],
+      );
+      // Map OaPipelineResult → PipelineResult (cast through unknown)
+      return {
+        status: oaResult.status === "complete" ? "completed" : oaResult.status,
+        runId: oaResult.runId,
+        moduleId: input.moduleId,
+        dealId: input.dealId,
+        message: oaResult.message,
+        phase: oaResult.currentStage,
+        progress: {
+          stagesComplete: oaResult.stagesComplete,
+          stagesFailed: oaResult.stagesFailed,
+          currentStage: oaResult.currentStage,
+        },
+        result: null,
+      } as unknown as PipelineResult;
+    }
+
     return runPipelineCore(ctx, {
       dealId: input.dealId,
       moduleId: input.moduleId,
