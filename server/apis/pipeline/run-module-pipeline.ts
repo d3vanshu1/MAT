@@ -85,12 +85,34 @@ export default api({
   }),
 
   async run(ctx, input): Promise<PipelineResult> {
-    // ── OA v2 orchestrator route ──────────────────────────────────────
+    // ── OA v2: extraction through v1, then post-extraction through v2 ──
     if (input.moduleId === "omission_audit" && OA_V2_ENABLED) {
+      // Step 1: Run extraction through v1 pipeline-core.
+      // pipeline-core handles chunk analysis, merges, and finalization.
+      // It returns "completed" when extraction is done.
+      var v1Result = await runPipelineCore(ctx, {
+        dealId: input.dealId,
+        moduleId: input.moduleId,
+        runId: input.runId,
+        useOpus: input.useOpus,
+        subjectDocumentIds: input.subjectDocumentIds,
+        numericReport: input.numericReport,
+        numericPartial: input.numericPartial,
+        diagnosticOnly: input.diagnosticOnly,
+        ownerToken: input.ownerToken,
+      });
+
+      // If extraction is still in progress, return so the client re-invokes
+      if (v1Result.status !== "completed") {
+        return v1Result;
+      }
+
+      // Step 2: Extraction complete — hand off to v2 orchestrator for
+      // fact_normalization → publish
       var oaResult = await runOaPipeline(
         ctx as any,
         input.dealId,
-        input.runId || "",
+        v1Result.runId || input.runId || "",
         input.subjectDocumentIds || [],
       );
       // Map OaPipelineResult → PipelineResult (cast through unknown)
