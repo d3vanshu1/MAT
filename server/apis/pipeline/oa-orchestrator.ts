@@ -103,9 +103,9 @@ async function isStageComplete(db: any, runId: string, dealId: string, stage: Oa
       );
       if (cpRows[0].cnt === 0) return false;
       const unassigned = await db.query(
-        "SELECT count(*)::int AS cnt FROM oa_facts f WHERE f.run_id = $1::uuid AND NOT EXISTS (SELECT 1 FROM oa_topic_facts tf WHERE tf.fact_id = f.fact_id AND tf.run_id = f.run_id)",
+        "SELECT count(*)::int AS cnt FROM oa_facts f WHERE f.deal_id = $1::uuid AND NOT EXISTS (SELECT 1 FROM oa_topic_facts tf WHERE tf.fact_id = f.fact_id)",
         z.object({ cnt: z.coerce.number() }),
-        [runId],
+        [dealId],
         { label: "Orch: unassigned facts" },
       );
       return unassigned[0].cnt === 0;
