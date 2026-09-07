@@ -182,11 +182,35 @@ function parseFiguresResponse(text: string): ExtractedFigure[] {
   // Strip markdown code fence if present
   var cleaned = text.trim();
   if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+    // Strip opening fence: ```json or ``` followed by whitespace/newlines
+    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "");
+    // Strip closing fence: ``` at end (possibly with trailing whitespace)
+    cleaned = cleaned.replace(/\n?\s*```\s*$/, "");
   }
 
   try {
-    var parsed = JSON.parse(cleaned);
+    var parsed: any;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      // JSON may be truncated (max_tokens hit). Try to salvage by closing the array.
+      // Find the last complete object (ends with })
+      var lastBrace = cleaned.lastIndexOf("}");
+      if (lastBrace > 0) {
+        var salvaged = cleaned.slice(0, lastBrace + 1) + "]";
+        // Make sure it starts with [
+        if (!salvaged.trimStart().startsWith("[")) salvaged = "[" + salvaged;
+        try {
+          parsed = JSON.parse(salvaged);
+          console.log("[EXCEL-EXTRACT] Salvaged truncated JSON: " + (Array.isArray(parsed) ? parsed.length : 0) + " figures recovered");
+        } catch {
+          console.log("[EXCEL-EXTRACT] Could not salvage truncated JSON, length=" + cleaned.length);
+          return [];
+        }
+      } else {
+        return [];
+      }
+    }
     if (!Array.isArray(parsed)) return [];
 
     var figures: ExtractedFigure[] = [];
