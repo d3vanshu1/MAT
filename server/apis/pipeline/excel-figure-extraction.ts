@@ -14,7 +14,7 @@
  * Checkpoint: keyed by "excel_figure_extraction" on the module_run_id.
  */
 import { z } from "@superblocksteam/sdk-api";
-import { callLLMWithHeadroom, type LLMResponse } from "./call-llm.js";
+import { MessageResponseSchema, type LLMResponse } from "./call-llm.js";
 import { HAIKU_MODEL } from "./model-config.js";
 import type { PipelineContext } from "./pipeline-config.js";
 
@@ -381,11 +381,10 @@ async function extractFiguresBatch(
     ],
   };
 
-  var response: LLMResponse = await callLLMWithHeadroom(
-    ctx,
-    llmBody,
-    "EXCEL-EXTRACT: " + sheetNames.join(", ").slice(0, 80),
-    { pipelineStartTime: pipelineStartTime, maxPerCallTimeout: 60_000, retries: 2 },
+  var response: LLMResponse = await ctx.integrations.ai.apiRequest(
+    { method: "POST", path: "/v1/messages", body: llmBody },
+    { response: MessageResponseSchema },
+    { label: "EXCEL-EXTRACT: " + sheetNames.join(", ").slice(0, 80) },
   );
 
   var responseText = response.content[0]?.text ?? "";
@@ -515,11 +514,10 @@ export async function extractFiguresFromDdReports(
           ],
         };
 
-        var response: LLMResponse = await callLLMWithHeadroom(
-          ctx,
-          llmBody,
-          "DD-EXTRACT: " + chunkLabel,
-          { pipelineStartTime: pipelineStartTime, maxPerCallTimeout: 60_000, retries: 2 },
+        var response: LLMResponse = await ctx.integrations.ai.apiRequest(
+          { method: "POST", path: "/v1/messages", body: llmBody },
+          { response: MessageResponseSchema },
+          { label: "DD-EXTRACT: " + chunkLabel },
         );
 
         var responseText = response.content[0]?.text ?? "";
