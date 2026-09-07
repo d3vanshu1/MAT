@@ -483,6 +483,24 @@ export function normalizePeriod(period: string): string {
  * excluded from contradiction matching — they represent conditional cases).
  * All parts are lowercased and trimmed.
  */
+/**
+ * Normalize scope qualifiers for fuzzy matching.
+ * Strips common noise words so "Total Group Revenue" matches "Total Revenue".
+ */
+export function normalizeScope(scope: string): string {
+  var s = scope.toLowerCase().trim();
+  // Remove common prefix/suffix noise
+  s = s.replace(/\b(total|group|consolidated|net|aggregate)\s+/g, "");
+  s = s.replace(/\s+(total|group|consolidated|net|aggregate)\b/g, "");
+  // Normalize "revenue from X" → "X revenue"
+  s = s.replace(/^revenue from\s+/i, "");
+  // Normalize "adjusted X" ↔ "X"
+  s = s.replace(/^adjusted\s+/i, "");
+  // Collapse whitespace
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
 export function coordKey(
   metric: string,
   scope: string,
@@ -490,13 +508,32 @@ export function coordKey(
   basis: string | null = null,
   scenario: string | null = null,
 ): string | null {
-  // U7 guard: scenario-tagged claims (conditional parameters like CAGR variants,
-  // M&A assumptions) are excluded from reconciliation. Without this guard,
-  // e.g. twelve "Organic Cash EBITDA" claims at FY31F under different CAGR
-  // assumptions all collapse to one coordinate with £70m–£131m spread.
-  if (scenario) return null;
+  // U7 guard: scenario-tagged claims are excluded ONLY when scenario is non-null
+  // and explicitly a sensitivity/conditional variant (CAGR, M&A assumption).
+  // Simple scenario labels like "base case", "management case" are now included.
+  if (scenario) {
+    var scenarioLower = scenario.toLowerCase();
+    // Only exclude if scenario contains sensitivity-specific language
+    var isSensitivity = scenarioLower.includes("cagr") ||
+      scenarioLower.includes("assumption") ||
+      scenarioLower.includes("sensitivity") ||
+      scenarioLower.includes("upside") ||
+      scenarioLower.includes("downside") ||
+      scenarioLower.includes("bear") ||
+      scenarioLower.includes("bull");
+    if (isSensitivity) return null;
+    // Non-sensitivity scenarios (base case, management case, etc.) proceed
+  }
   const basisPart = basis ? basis.toLowerCase().trim() : "";
-  return `${metric.toLowerCase().trim()}|${scope.toLowerCase().trim()}|${basisPart}|${normalizePeriod(period)}`;
+  return `${metric.toLowerCase().trim()}|${normalizeScope(scope)}|${basisPart}|${normalizePeriod(period)}`;
+}
+
+/**
+ * Build a relaxed lookup key: metric + period only (no scope, no basis).
+ * Used for scope-fuzzy matching when exact coordKey misses.
+ */
+function relaxedMetricPeriodKey(metric: string, period: string): string {
+  return `${metric.toLowerCase().trim()}|${normalizePeriod(period)}`;
 }
 
 /**
@@ -1210,51 +1247,118 @@ export async function runReconciliation(
         const fuzzyMatches = fuzzyPeriodLookup(figureIndex, claim.metric, claim.scope_qualifier, claim.period);
 
         if (fuzzyMatches.length === 0) {
-          // --- U7: Near-miss pass — same metric + same period, any scope ---
-          const nearMissCandidates: Array<{ nf: NormalizedFigure; scopeDelta: string }> = [];
+          // --- Pass 2d: Scope-fuzzy matching ---
+          // Match by metric+period across ALL scopes, then pick the closest figure
+          // by normalized scope similarity. Promotes near-misses to actual matches
+          // when normalized scopes overlap (e.g., "Total Group Revenue" ≈ "Revenue").
+          const claimVal = normalizeClaimValue(claim);
+          const normalizedClaimScope = normalizeScope(claim.scope_qualifier);
           const claimUnitFamily = classifyClaimUnit(claim.unit);
+          const scopeFuzzyCandidates: Array<{ nf: NormalizedFigure; scopeSim: number }> = [];
           let nearMissUnitRejected = 0;
+
           for (const [fkey, nfs] of figureIndex.entries()) {
             const [fm, _fs, _fb, fp] = fkey.split("|");
             if (fm === claim.metric.toLowerCase().trim() && fp === normalizedClaimPeriod) {
               for (const nf of nfs) {
-                if (nf.scope_qualifier.toLowerCase() !== claim.scope_qualifier.toLowerCase()) {
-                  // Unit compatibility gate: percentage claims never match £ figures
-                  const modelUnitFamily = classifyModelFigureUnit(nf.raw);
-                  if (!unitsAreCompatible(claimUnitFamily, modelUnitFamily)) {
-                    nearMissUnitRejected++;
-                    continue;
-                  }
-                  nearMissCandidates.push({ nf, scopeDelta: nf.scope_qualifier });
+                // Unit compatibility gate
+                const modelUnitFamily = classifyModelFigureUnit(nf.raw);
+                if (!unitsAreCompatible(claimUnitFamily, modelUnitFamily)) {
+                  nearMissUnitRejected++;
+                  continue;
                 }
+                // Compute scope similarity: normalized scope containment
+                const normalizedFigScope = normalizeScope(nf.scope_qualifier);
+                var scopeSim = 0;
+                if (normalizedClaimScope === normalizedFigScope) {
+                  scopeSim = 1.0; // Exact match after normalization
+                } else if (normalizedFigScope.includes(normalizedClaimScope) || normalizedClaimScope.includes(normalizedFigScope)) {
+                  scopeSim = 0.8; // One contains the other
+                } else {
+                  // Check word overlap
+                  const claimWords = new Set(normalizedClaimScope.split(/\s+/));
+                  const figWords = new Set(normalizedFigScope.split(/\s+/));
+                  var overlap = 0;
+                  for (const w of claimWords) { if (figWords.has(w)) overlap++; }
+                  const unionSize = new Set([...claimWords, ...figWords]).size;
+                  scopeSim = unionSize > 0 ? overlap / unionSize : 0;
+                }
+                scopeFuzzyCandidates.push({ nf, scopeSim });
               }
             }
           }
           near_miss_unit_rejected_total += nearMissUnitRejected;
 
-          if (nearMissCandidates.length > 0) {
-            // Order by absolute delta ascending, cap at 3
-            const claimVal = normalizeClaimValue(claim);
-            const sorted = nearMissCandidates.sort((a, b) =>
-              Math.abs(claimVal - a.nf.raw.value) - Math.abs(claimVal - b.nf.raw.value)
-            );
-            const capped = sorted.slice(0, 3);
-            const suppressedCount = sorted.length - capped.length;
+          // Sort by scope similarity descending, then by value proximity
+          scopeFuzzyCandidates.sort((a, b) => {
+            if (b.scopeSim !== a.scopeSim) return b.scopeSim - a.scopeSim;
+            return Math.abs(claimVal - a.nf.raw.value) - Math.abs(claimVal - b.nf.raw.value);
+          });
 
-            for (const { nf, scopeDelta } of capped) {
+          // If best candidate has high scope similarity (≥0.5), treat as a soft match
+          if (scopeFuzzyCandidates.length > 0 && scopeFuzzyCandidates[0].scopeSim >= 0.5) {
+            const bestMatch = scopeFuzzyCandidates[0];
+            const modelFig = bestMatch.nf.raw;
+            const deltaAbs = Math.abs(claimVal - modelFig.value);
+            const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
+
+            // If delta is significant (>2% or >£500k), flag as data_divergence
+            if (deltaPct > 0.02 || deltaAbs > 500_000) {
+              var severity: "critical" | "warning" | "info" = "info";
+              if (deltaPct > 0.10 || deltaAbs > 5_000_000) severity = "warning";
+              if (deltaPct > 0.20 || deltaAbs > 10_000_000) severity = "critical";
+
+              findings.push({
+                finding_kind: "data_divergence",
+                severity: severity,
+                title: `${claim.scope_qualifier} (${claim.period}): memo says ${formatValue(claim)}, model shows ${(modelFig.value / 1_000_000).toFixed(1)}m`,
+                detail: `IC memo cites ${claim.scope_qualifier}: ${formatValue(claim)} (${claim.period}). ` +
+                  `Financial model figure "${bestMatch.nf.scope_qualifier}" at same period: ` +
+                  `$${(modelFig.value / 1_000_000).toFixed(1)}m. ` +
+                  `Delta: $${(deltaAbs / 1_000_000).toFixed(1)}m (${(deltaPct * 100).toFixed(1)}%). ` +
+                  `Scope matched via normalization (similarity: ${(bestMatch.scopeSim * 100).toFixed(0)}%).`,
+                full_analysis: `[SCOPE_FUZZY_MATCH] Claim: "${claim.verbatim_snippet}" (${claim.scope_qualifier}). ` +
+                  `Matched to model figure "${bestMatch.nf.scope_qualifier}" via scope normalization ` +
+                  `(claim scope "${claim.scope_qualifier}" → "${normalizedClaimScope}", ` +
+                  `figure scope "${bestMatch.nf.scope_qualifier}" → "${normalizeScope(bestMatch.nf.scope_qualifier)}"). ` +
+                  `Claim value: ${claimVal}, Model value: ${modelFig.value}. ` +
+                  `Delta: ${deltaAbs} (${(deltaPct * 100).toFixed(1)}%).`,
+                severity_anchor: deltaAbs,
+                source_docs: [claim.source_doc],
+                claim,
+                model_figure: modelFig,
+                delta_abs: deltaAbs,
+                delta_pct: deltaPct,
+              });
+              reconciled_count++;
+            } else {
+              // Within tolerance — no finding needed
+              within_tolerance_count++;
+            }
+            continue;
+          }
+
+          // Low scope similarity — true near-miss
+          if (scopeFuzzyCandidates.length > 0) {
+            const capped = scopeFuzzyCandidates.slice(0, 3);
+            const suppressedCount = scopeFuzzyCandidates.length - capped.length;
+
+            for (const { nf, scopeSim } of capped) {
               const modelFig = nf.raw;
               const deltaAbs = Math.abs(claimVal - modelFig.value);
               const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
               findings.push({
                 finding_kind: "scope_mismatch",
                 severity: "info",
-                title: `${claim.scope_qualifier} (${claim.period}): near-miss — model has "${scopeDelta}"`,
+                title: `${claim.scope_qualifier} (${claim.period}): near-miss — model has "${nf.scope_qualifier}"`,
                 detail: `Memo cites ${claim.scope_qualifier}: ${formatValue(claim)}. ` +
-                  `Model has "${nf.raw.name}" (scope: ${scopeDelta}) at ${nf.raw.period}: ` +
-                  `£${(modelFig.value / 1_000_000).toFixed(1)}m. Delta: £${(deltaAbs / 1_000_000).toFixed(1)}m (${(deltaPct * 100).toFixed(1)}%).` +
+                  `Model has "${nf.raw.name}" (scope: ${nf.scope_qualifier}) at ${nf.raw.period}: ` +
+                  `$${(modelFig.value / 1_000_000).toFixed(1)}m. Delta: $${(deltaAbs / 1_000_000).toFixed(1)}m (${(deltaPct * 100).toFixed(1)}%). ` +
+                  `Scope similarity: ${(scopeSim * 100).toFixed(0)}%.` +
                   (suppressedCount > 0 ? ` [${suppressedCount} additional candidate(s) suppressed]` : ""),
                 full_analysis: `[NEAR_MISS] Claim: "${claim.verbatim_snippet}" (${claim.scope_qualifier}). ` +
-                  `Model has figure at same metric+period but different scope: "${scopeDelta}". ` +
+                  `Model has figure at same metric+period but different scope: "${nf.scope_qualifier}". ` +
+                  `Scope similarity: ${(scopeSim * 100).toFixed(0)}%. ` +
                   `Not confirmed to be the same measure — no contradiction asserted.`,
                 severity_anchor: null,
                 source_docs: [claim.source_doc],
@@ -1585,13 +1689,36 @@ function isHistoricalActualPeriod(period: string): boolean {
 }
 
 export function normalizeClaimValue(claim: Claim): number {
-  // Convert claim value to the same units as model figures (raw £)
-  switch (claim.unit) {
-    case "£m": return claim.value * 1_000_000;
-    case "£k": return claim.value * 1_000;
-    case "£": return claim.value;
-    default: return claim.value * 1_000_000; // Default assumption: £m for financial claims
+  // Convert claim value to the same units as model figures (raw absolute value).
+  // Claims may use £m, $m, £k, etc. — the currency symbol doesn't matter
+  // for variance detection since we're comparing magnitudes within the same deal.
+  var unit = (claim.unit || "").trim().toLowerCase();
+  // Millions: £m, $m, m, €m, MM, etc.
+  if (unit === "£m" || unit === "$m" || unit === "m" || unit === "€m" || unit === "mm") {
+    return claim.value * 1_000_000;
   }
+  // Thousands: £k, $k, k
+  if (unit === "£k" || unit === "$k" || unit === "k") {
+    return claim.value * 1_000;
+  }
+  // Billions: £bn, $bn, bn, b
+  if (unit === "£bn" || unit === "$bn" || unit === "bn" || unit === "b") {
+    return claim.value * 1_000_000_000;
+  }
+  // Percentages and ratios: keep as-is (not monetary)
+  if (unit === "%" || unit === "bps" || unit === "pp" || unit === "x" || unit === "turns") {
+    return claim.value;
+  }
+  // Raw currency symbols without multiplier
+  if (unit === "£" || unit === "$" || unit === "€") {
+    return claim.value;
+  }
+  // Other/count units: keep as-is
+  if (unit === "#" || unit === "headcount" || unit === "units" || unit === "other") {
+    return claim.value;
+  }
+  // Default assumption: millions for financial claims
+  return claim.value * 1_000_000;
 }
 
 function formatValue(claim: Claim): string {
