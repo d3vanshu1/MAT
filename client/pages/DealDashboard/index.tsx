@@ -3211,13 +3211,36 @@ export default function DealDashboardPage() {
             continue;
           }
 
-          // Derive progress from checkpoint counts
+          // Derive progress from checkpoint counts — v2 pipelines first
           let message: string;
+          let progressDetail: { current: number; total: number; phase: "analyzing" | "synthesizing" | "researching" | "done" } | null = null;
+          const OA_TOTAL = 9;
+          const CC_TOTAL = 4;
           const MAST_TOTAL_STAGES = 16;
-if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null && run.mastStagesComplete > 0) {
-  // MAST tracks progress in mast_pipeline_state, not pipeline_checkpoints
-  const completed = Math.min(run.mastStagesComplete, MAST_TOTAL_STAGES);
-  message = `MAST analysis: ${completed}/${MAST_TOTAL_STAGES} stages complete (server-side)…`;
+
+          if (moduleId === "omission_audit" && run.oaV2StagesComplete != null && run.oaV2StagesComplete > 0) {
+            // OA v2 progress from oa_stage_checkpoints
+            const stageName = run.oaV2CurrentStage ?? "processing";
+            const stageLabel = OA_V2_STAGE_LABELS.find((s) => s.key === stageName)?.label ?? stageName;
+            message = `${stageLabel}… (${run.oaV2StagesComplete}/${OA_TOTAL} stages)`;
+            progressDetail = { current: run.oaV2StagesComplete, total: OA_TOTAL, phase: "analyzing" };
+          } else if (moduleId === "contradiction_check" && run.ccV2StagesComplete != null && run.ccV2StagesComplete > 0) {
+            // CC v2 progress from pipeline_checkpoints
+            const ccStageName = run.ccV2CurrentStage ?? "processing";
+            const ccStageLabel = CC_V2_STAGE_LABELS.find((s) => s.key === ccStageName)?.label ?? ccStageName;
+            message = `${ccStageLabel}… (${run.ccV2StagesComplete}/${CC_TOTAL} stages)`;
+            progressDetail = { current: run.ccV2StagesComplete, total: CC_TOTAL, phase: "synthesizing" };
+          } else if (moduleId === "omission_audit") {
+            // OA v2 with 0 orchestrator stages yet — still in first stage
+            message = `Normalizing extracted facts… (0/${OA_TOTAL} stages)`;
+            progressDetail = { current: 0, total: OA_TOTAL, phase: "analyzing" };
+          } else if (moduleId === "contradiction_check") {
+            // CC v2 with 0 completed stages — still in claims extraction
+            message = `Extracting claims from IC memos… (0/${CC_TOTAL} stages)`;
+            progressDetail = { current: 0, total: CC_TOTAL, phase: "synthesizing" };
+          } else if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null && run.mastStagesComplete > 0) {
+            const completed = Math.min(run.mastStagesComplete, MAST_TOTAL_STAGES);
+            message = `MAST analysis: ${completed}/${MAST_TOTAL_STAGES} stages complete (server-side)…`;
           } else if (run.mergeCheckpointCount && run.mergeCheckpointCount > 0) {
             message = `Merge phase: ${run.mergeCheckpointCount} nodes merged (server-side)…`;
           } else if (run.analysisCheckpointCount && run.analysisCheckpointCount > 0) {
@@ -3233,7 +3256,7 @@ if (moduleId === "model_assumptions_stress" && run.mastStagesComplete != null &&
           }
 
           setProgressMap((prev) => {
-            return { ...prev, [moduleId]: { message, detail: null, chunkErrors: [] } };
+            return { ...prev, [moduleId]: { message, detail: progressDetail, chunkErrors: [] } };
           });
         }
       } catch {

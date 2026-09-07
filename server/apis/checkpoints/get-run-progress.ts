@@ -56,6 +56,12 @@ export default api({
         stageCheckpointCount: z.number(),
         // MAST-specific: completed stages from mast_pipeline_state (0 for non-MAST)
         mastStagesComplete: z.number(),
+        // OA v2 stage progress
+        oaV2StagesComplete: z.number(),
+        oaV2CurrentStage: z.string().nullable(),
+        // CC v2 stage progress
+        ccV2StagesComplete: z.number(),
+        ccV2CurrentStage: z.string().nullable(),
         // Errors surfaced from checkpoint JSONB (if any)
         checkpointErrors: z.array(z.string()),
       })
@@ -157,6 +163,55 @@ export default api({
         }
       }
 
+      // OA v2: count orchestrator-level stage checkpoints
+      let oaV2StagesComplete = 0;
+      let oaV2CurrentStage: string | null = null;
+      if (run.module_id === "omission_audit") {
+        try {
+          const oaStageOrder = ["fact_normalization", "topic_assignment", "index_assembly", "absence_probe", "gap_comparison", "materiality", "finding_assembly", "render", "publish"];
+          const oaRows = await ctx.integrations.db.query(
+            "SELECT unit_key FROM oa_stage_checkpoints WHERE run_id = $1::uuid AND stage = 'orchestrator' AND status = 'complete'",
+            z.object({ unit_key: z.string() }),
+            [run.id],
+            { label: "OA v2: count orchestrator stages" },
+          );
+          const completedSet = new Set(oaRows.map((r: { unit_key: string }) => r.unit_key));
+          oaV2StagesComplete = completedSet.size;
+          for (const stage of oaStageOrder) {
+            if (!completedSet.has(stage)) {
+              oaV2CurrentStage = stage;
+              break;
+            }
+          }
+          if (!oaV2CurrentStage && oaV2StagesComplete > 0) oaV2CurrentStage = "publish";
+        } catch { /* table may not exist */ }
+      }
+
+      // CC v2: count completed pipeline checkpoint stages
+      let ccV2StagesComplete = 0;
+      let ccV2CurrentStage: string | null = null;
+      if (run.module_id === "contradiction_check") {
+        try {
+          const ccStageOrder = ["claims_ledger", "figure_extraction", "reconciliation", "canonical_finalize_done"];
+          const ccStageLabels = ["claims_extraction", "figure_extraction", "reconciliation", "finalization"];
+          const ccRows = await ctx.integrations.db.query(
+            "SELECT checkpoint_key, status FROM pipeline_checkpoints WHERE module_run_id = $1 AND checkpoint_key IN ('claims_ledger', 'figure_extraction', 'reconciliation', 'canonical_finalize_done') AND status = 'complete'",
+            z.object({ checkpoint_key: z.string(), status: z.string() }),
+            [run.id],
+            { label: "CC v2: count stage checkpoints" },
+          );
+          const ccCompleted = new Set(ccRows.map((r: { checkpoint_key: string }) => r.checkpoint_key));
+          ccV2StagesComplete = ccCompleted.size;
+          for (let si = 0; si < ccStageOrder.length; si++) {
+            if (!ccCompleted.has(ccStageOrder[si])) {
+              ccV2CurrentStage = ccStageLabels[si];
+              break;
+            }
+          }
+          if (!ccV2CurrentStage && ccV2StagesComplete > 0) ccV2CurrentStage = "finalization";
+        } catch { /* table may not exist */ }
+      }
+
       // Surface errors from merge checkpoint JSONB
       const errorRows = await ctx.integrations.db.query(
         `SELECT merged_json->>'error' AS error_text
@@ -184,6 +239,10 @@ export default api({
         mergeCheckpointCount: ckptRows[0]?.cnt ?? 0,
         stageCheckpointCount,
         mastStagesComplete,
+        oaV2StagesComplete,
+        oaV2CurrentStage,
+        ccV2StagesComplete,
+        ccV2CurrentStage,
         checkpointErrors: errorRows
           .map((r) => r.error_text)
           .filter((e): e is string => e !== null),
