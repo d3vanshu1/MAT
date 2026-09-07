@@ -88,7 +88,10 @@ function isTransientError(errMsg: string): boolean {
     || errMsg.indexOf("ECONNRESET") !== -1
     || errMsg.indexOf("ETIMEDOUT") !== -1
     || errMsg.indexOf("failed during \"query\"") !== -1
-    || errMsg.indexOf("connection") !== -1;
+    || errMsg.indexOf("connection") !== -1
+    || errMsg.indexOf("Headroom exhausted") !== -1
+    || errMsg.indexOf("timed out") !== -1
+    || errMsg.indexOf("LLM call timed out") !== -1;
 }
 
 // ── Main orchestrator ────────────────────────────────────────────
