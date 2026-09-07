@@ -752,7 +752,7 @@ export function appendReconciliationFindings(
 // Order: suppression → Layer-1 numeric validation → consolidation →
 //        reconciliation append → absence gate → independent override → materiality gate.
 // ---------------------------------------------------------------------------
-interface PostMergePipelineInput {
+export interface PostMergePipelineInput {
   findings: MergedFinding[];
   housekeepingFindings: MergedFinding[];
   numericReport: { figures: any[]; discrepancies: any[] } | null;
@@ -769,12 +769,12 @@ interface PostMergePipelineInput {
   runId?: string;
 }
 
-interface PostMergePipelineResult {
+export interface PostMergePipelineResult {
   findings: MergedFinding[];
   housekeepingFindings: MergedFinding[];
 }
 
-async function runPostMergePipeline(input: PostMergePipelineInput): Promise<PostMergePipelineResult> {
+export async function runPostMergePipeline(input: PostMergePipelineInput): Promise<PostMergePipelineResult> {
   const invocationStart = Date.now(); // MG-4: track for materiality tiering time budget
   let { findings, housekeepingFindings } = input;
   const { numericReport, claimsReconciliation, fileTagMap, moduleId, queryFn, dealId, aiFn, runId } = input;

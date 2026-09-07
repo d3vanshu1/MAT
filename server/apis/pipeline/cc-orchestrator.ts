@@ -22,6 +22,7 @@ import { runReconciliationPipeline } from "./reconciliation-pipeline.js";
 import type { ReconciliationResult } from "./claims-reconciliation.js";
 import { runPostMergeFinalizationStages } from "./post-merge-finalization.js";
 import { getPipelineVersion } from "./pipeline-version.js";
+import { runPostMergePipeline } from "./pipeline-core.js";
 
 // ── Budget constants ─────────────────────────────────────────────
 const TOTAL_BUDGET_MS = 450_000;
@@ -334,7 +335,7 @@ export async function runCcPipeline(
       subjectDocumentIds: subjectIds,
       useOpus: false,
       sourceManifestHash: null,
-      runPostMergePipeline: undefined as any,
+      runPostMergePipeline: runPostMergePipeline,
       runAbsenceVerificationPhase: undefined as any,
     });
 
