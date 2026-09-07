@@ -6,8 +6,9 @@
  *
  * Stages:
  *   1. claims_extraction  — Extract numeric claims from IC memos
- *   2. reconciliation     — Match claims against numeric report, run quality gates
- *   3. finalization       — Post-merge finding filter + canonical publish
+ *   2. figure_extraction  — Extract reference figures from Excel doc_tables + DD reports
+ *   3. reconciliation     — Match claims against reference figures, run quality gates
+ *   4. finalization       — Post-merge finding filter + canonical publish
  *
  * Extraction (chunk analysis) is handled by the v1 pipeline-core BEFORE
  * this orchestrator is entered — same pattern as OA v2.
@@ -18,6 +19,7 @@ import { z } from "@superblocksteam/sdk-api";
 import type { PipelineContext } from "./pipeline-config.js";
 import { runClaimsExtraction } from "./claims-extraction.js";
 import type { ClaimsLedger } from "./claims-extraction.js";
+import { runFigureExtraction, type ExcelExtractionResult } from "./excel-figure-extraction.js";
 import { runReconciliationPipeline } from "./reconciliation-pipeline.js";
 import type { ReconciliationResult } from "./claims-reconciliation.js";
 import { runPostMergeFinalizationStages } from "./post-merge-finalization.js";
@@ -31,6 +33,7 @@ const STAGE_SAFETY_MARGIN_MS = 15_000;
 // ── Stage sequence ───────────────────────────────────────────────
 const CC_STAGES = [
   "claims_extraction",
+  "figure_extraction",
   "reconciliation",
   "finalization",
 ] as const;
@@ -190,7 +193,59 @@ export async function runCcPipeline(
     }
   }
 
-  // ── Stage 2: Reconciliation ────────────────────────────────────
+  // ── Stage 2: Figure Extraction (Excel + DD reports) ────────────
+  var figExtractionCp = await loadCheckpoint(db, runId, "figure_extraction");
+  if (figExtractionCp && figExtractionCp.status === "complete") {
+    stagesComplete.push("figure_extraction");
+    var figPayload = figExtractionCp.payload as ExcelExtractionResult;
+    console.log("[CC-ORCH] figure_extraction already complete: " + figPayload.figuresInserted + " figures inserted");
+  } else {
+    if (budgetRemaining() < STAGE_SAFETY_MARGIN_MS) {
+      return {
+        status: "in_progress",
+        runId: runId,
+        currentStage: "figure_extraction",
+        stagesComplete: stagesComplete,
+        stagesFailed: stagesFailed,
+        message: "Budget exhausted before figure_extraction.",
+      };
+    }
+
+    console.log("[CC-ORCH] Entering figure_extraction (" + budgetRemaining() + "ms remaining)");
+    try {
+      var figTimeBudget = Math.min(120000, Math.max(0, budgetRemaining() - 30000));
+      var figResult = await runFigureExtraction(
+        ctx, dealId, runId, startTime, figTimeBudget,
+      );
+
+      await saveCheckpoint(db, runId, "figure_extraction", figResult, "complete");
+      stagesComplete.push("figure_extraction");
+      console.log(
+        "[CC-ORCH] figure_extraction complete: " + figResult.figuresInserted + " figures, " +
+        figResult.tablesProcessed + " tables, " + figResult.narrativesProcessed + " narratives"
+      );
+    } catch (err: unknown) {
+      var figErrMsg = err instanceof Error ? err.message : String(err);
+      if (isTransientError(figErrMsg)) {
+        console.log("[CC-ORCH] figure_extraction transient error: " + figErrMsg.slice(0, 200));
+        return {
+          status: "in_progress",
+          runId: runId,
+          currentStage: "figure_extraction",
+          stagesComplete: stagesComplete,
+          stagesFailed: stagesFailed,
+          message: "Transient error in figure_extraction, will retry.",
+        };
+      }
+      // Figure extraction failure is non-fatal — reconciliation can still run
+      // against any existing reference_figures (or produce 0 findings)
+      console.log("[CC-ORCH] figure_extraction FAILED (non-fatal): " + figErrMsg.slice(0, 200));
+      await saveCheckpoint(db, runId, "figure_extraction", { error: figErrMsg.slice(0, 500) }, "failed");
+      stagesComplete.push("figure_extraction"); // Mark as done so we proceed
+    }
+  }
+
+  // ── Stage 3: Reconciliation ────────────────────────────────────
   var reconciliation: ReconciliationResult | null = null;
 
   var reconCp = await loadCheckpoint(db, runId, "reconciliation");
@@ -213,10 +268,10 @@ export async function runCcPipeline(
     if (!claimsLedger || claimsLedger.claims.length === 0) {
       console.log("[CC-ORCH] No claims to reconcile — skipping reconciliation");
       stagesComplete.push("reconciliation");
-    } else if (!numericReport) {
-      console.log("[CC-ORCH] No numeric report provided — skipping reconciliation");
-      stagesComplete.push("reconciliation");
     } else {
+      // Reconciliation now always runs — figure_extraction populates reference_figures
+      // from Excel doc_tables and DD reports even when numericReport is absent.
+      // baseFigures/discrepancies from NumericVerify are additive; empty is fine.
       console.log("[CC-ORCH] Entering reconciliation (" + budgetRemaining() + "ms remaining)");
       try {
         var reconTimeBudget = Math.min(90000, Math.max(0, budgetRemaining() - 15000));
@@ -224,8 +279,8 @@ export async function runCcPipeline(
           ctx: ctx,
           dealId: dealId,
           ledger: claimsLedger,
-          baseFigures: numericReport.figures || [],
-          discrepancies: numericReport.discrepancies || [],
+          baseFigures: (numericReport && numericReport.figures) ? numericReport.figures : [],
+          discrepancies: (numericReport && numericReport.discrepancies) ? numericReport.discrepancies : [],
           queryFn: function(sql: string, schema: any, params: any[], meta: any) {
             return ctx.integrations.db.query(sql, schema, params, meta);
           },
@@ -279,7 +334,7 @@ export async function runCcPipeline(
     }
   }
 
-  // ── Stage 3: Finalization (post-merge + canonical finalize) ────
+  // ── Stage 4: Finalization (post-merge + canonical finalize) ────
   if (budgetRemaining() < STAGE_SAFETY_MARGIN_MS) {
     return {
       status: "in_progress",
