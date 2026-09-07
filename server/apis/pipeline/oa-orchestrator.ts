@@ -29,7 +29,7 @@ import { z } from "@superblocksteam/sdk-api";
 import type { PipelineContext } from "./pipeline-config.js";
 
 // ── Budget constants ─────────────────────────────────────────────
-const STAGE_SAFETY_MARGIN_MS = 60_000;   // do not START a stage inside this window
+const STAGE_SAFETY_MARGIN_MS = 15_000;   // do not START a stage inside this window
 const TOTAL_BUDGET_MS = 450_000;         // conservative total — below platform kill
 
 // ── Stage definitions ────────────────────────────────────────────
