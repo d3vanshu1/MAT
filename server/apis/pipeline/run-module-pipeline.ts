@@ -191,7 +191,7 @@ export default api({
         });
       }
 
-      // Resolve runId if not provided
+      // Resolve runId: use provided, find in-progress, or create fresh row
       var ccRunId = input.runId || "";
       if (!ccRunId) {
         var ccActiveRuns = await ctx.integrations.db.query(
@@ -202,6 +202,18 @@ export default api({
         );
         if (ccActiveRuns.length > 0) {
           ccRunId = ccActiveRuns[0].id;
+        } else {
+          // No running run found — create a fresh module_runs row
+          var newRunRows = await ctx.integrations.db.query(
+            "INSERT INTO module_runs (id, deal_id, module_id, status, triggered_at) " +
+            "VALUES (gen_random_uuid(), $1, 'contradiction_check', 'running', now()) " +
+            "RETURNING id",
+            z.object({ id: z.string() }),
+            [input.dealId],
+            { label: "CC v2: create new module_run row" },
+          );
+          ccRunId = newRunRows[0].id;
+          console.log("[CC v2] Created new module_run: " + ccRunId);
         }
       }
 
@@ -213,7 +225,22 @@ export default api({
         input.numericReport || null,
       );
 
-      var ccTotalStages = 3;
+      // Update module_runs status to match orchestrator result
+      if (ccResult.status === "complete") {
+        await ctx.integrations.db.execute(
+          "UPDATE module_runs SET status = 'completed', completed_at = now() WHERE id = $1",
+          [ccRunId],
+          { label: "CC v2: mark run completed" },
+        );
+      } else if (ccResult.status === "failed") {
+        await ctx.integrations.db.execute(
+          "UPDATE module_runs SET status = 'failed', completed_at = now() WHERE id = $1",
+          [ccRunId],
+          { label: "CC v2: mark run failed" },
+        );
+      }
+
+      var ccTotalStages = 4;
       var ccDoneStages = ccResult.stagesComplete.length;
       return {
         status: ccResult.status === "complete" ? "completed" : ccResult.status,
