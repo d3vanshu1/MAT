@@ -409,10 +409,29 @@ export async function runOaPipeline(
       }
     } catch (err: unknown) {
       var errMsg = err instanceof Error ? err.message : String(err);
+      // Detect transient errors — return in_progress instead of failing permanently
+      var isTransient = errMsg.indexOf("overloaded") !== -1
+        || errMsg.indexOf("529") !== -1
+        || errMsg.indexOf("503") !== -1
+        || errMsg.indexOf("ECONNRESET") !== -1
+        || errMsg.indexOf("ETIMEDOUT") !== -1
+        || errMsg.indexOf("failed during \"query\"") !== -1
+        || errMsg.indexOf("connection") !== -1;
+      if (isTransient) {
+        console.log("[OA-ORCH] Stage " + stageName + " hit transient error, will retry on next invocation: " + errMsg.slice(0, 200));
+        return {
+          status: "in_progress" as const,
+          runId: runId,
+          currentStage: stageName,
+          stagesComplete: stagesComplete,
+          stagesFailed: stagesFailed,
+          message: "Transient error in " + stageName + ", will retry. " + stagesComplete.length + " stages complete.",
+        };
+      }
+      // Non-transient error — mark as failed
       await writeOrchestratorCheckpoint(db, runId, stageName, "failed", errMsg.slice(0, 500));
       stagesFailed.push(stageName);
       console.log("[OA-ORCH] Stage " + stageName + " THREW: " + errMsg.slice(0, 200));
-      // Check if this is a hard dependency for remaining stages — if so, they'll be skipped in the loop
     }
   }
 
