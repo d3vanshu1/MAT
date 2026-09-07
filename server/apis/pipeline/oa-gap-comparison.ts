@@ -197,15 +197,19 @@ export default api({
         ? unitDurations.reduce((a, b) => a + b, 0) / unitDurations.length
         : DEFAULT_UNIT_DURATION_MS;
 
+    // Load all existing checkpoints in one query to avoid N+1
+    const existingCps = await db.query(
+      "SELECT unit_key FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'gap_comparison'",
+      z.object({ unit_key: z.string() }),
+      [runId],
+      { label: "Load all gap_comparison checkpoints" },
+    );
+    const completedSet = new Set(existingCps.map((r: { unit_key: string }) => r.unit_key));
+    console.log("[P6] " + completedSet.size + " topics already checkpointed — skipping in-memory");
+
     for (const topic of topics) {
-      // Check checkpoint
-      const cp = await db.query(
-        `SELECT 1 FROM oa_stage_checkpoints WHERE run_id = $1 AND stage = 'gap_comparison' AND unit_key = $2`,
-        z.any(),
-        [runId, topic.topic_id],
-        { label: `Check checkpoint ${topic.topic_id}` }
-      );
-      if (cp.length > 0) {
+      // Check checkpoint in-memory
+      if (completedSet.has(topic.topic_id)) {
         topicsSkipped++;
         continue;
       }
