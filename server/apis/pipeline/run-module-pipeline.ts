@@ -1,7 +1,8 @@
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { runPipelineCore, type PipelineResult } from "./pipeline-core.js";
-import { OA_V2_ENABLED } from "./pipeline-config.js";
+import { OA_V2_ENABLED, CC_V2_ENABLED } from "./pipeline-config.js";
 import { runOaPipeline } from "./oa-orchestrator.js";
+import { runCcPipeline } from "./cc-orchestrator.js";
 
 // ---------------------------------------------------------------------------
 // Integrations
@@ -157,6 +158,73 @@ export default api({
         progress: {
           analysisTotal: totalStages,
           analysisCompleted: doneStages,
+          mergeRound: 0,
+          mergeTotal: 0,
+        },
+        result: null,
+      } as unknown as PipelineResult;
+    }
+
+    // ── CC v2 path ──────────────────────────────────────────────────
+    if (input.moduleId === "contradiction_check" && CC_V2_ENABLED) {
+      // Check if extraction is complete (universal_extractions exist)
+      var ccExtRows = await ctx.integrations.db.query(
+        "SELECT count(*)::int AS cnt FROM universal_extractions WHERE deal_id = $1 LIMIT 1",
+        z.object({ cnt: z.coerce.number() }),
+        [input.dealId],
+        { label: "CC v2: check extraction complete" },
+      );
+      var ccExtCount = ccExtRows[0]?.cnt || 0;
+
+      if (ccExtCount === 0) {
+        // Extraction not done — run through v1 pipeline-core
+        return runPipelineCore(ctx, {
+          dealId: input.dealId,
+          moduleId: input.moduleId,
+          runId: input.runId,
+          useOpus: input.useOpus,
+          subjectDocumentIds: input.subjectDocumentIds,
+          numericReport: input.numericReport,
+          numericPartial: input.numericPartial,
+          diagnosticOnly: input.diagnosticOnly,
+          ownerToken: input.ownerToken,
+        });
+      }
+
+      // Resolve runId if not provided
+      var ccRunId = input.runId || "";
+      if (!ccRunId) {
+        var ccActiveRuns = await ctx.integrations.db.query(
+          "SELECT id FROM module_runs WHERE deal_id = $1 AND module_id = 'contradiction_check' AND status = 'running' ORDER BY triggered_at DESC LIMIT 1",
+          z.object({ id: z.string() }),
+          [input.dealId],
+          { label: "CC v2: find active run" },
+        );
+        if (ccActiveRuns.length > 0) {
+          ccRunId = ccActiveRuns[0].id;
+        }
+      }
+
+      var ccResult = await runCcPipeline(
+        ctx as any,
+        input.dealId,
+        ccRunId,
+        input.subjectDocumentIds || [],
+        input.numericReport || null,
+      );
+
+      var ccTotalStages = 3;
+      var ccDoneStages = ccResult.stagesComplete.length;
+      return {
+        status: ccResult.status === "complete" ? "completed" : ccResult.status,
+        runId: ccResult.runId || ccRunId,
+        moduleId: input.moduleId,
+        dealId: input.dealId,
+        message: ccResult.message,
+        phase: ccResult.currentStage,
+        progress: {
+          analysisTotal: ccTotalStages,
+          analysisCompleted: ccDoneStages,
           mergeRound: 0,
           mergeTotal: 0,
         },

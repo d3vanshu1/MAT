@@ -215,3 +215,4 @@ export interface PipelineContext {
  *  orchestrator (oa-orchestrator.ts) instead of the v1 pipeline-core path.
  *  Leave FALSE until regression on Saint is verified. */
 export const OA_V2_ENABLED = true;
+export const CC_V2_ENABLED = true;
