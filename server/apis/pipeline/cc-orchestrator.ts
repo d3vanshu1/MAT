@@ -214,9 +214,24 @@ export async function runCcPipeline(
       };
     }
 
+    // Figure extraction needs substantial budget for LLM calls (65 tables + DD reports).
+    // If less than 60s remains, defer to next invocation to avoid 0-table extractions.
+    var figBudgetAvailable = budgetRemaining() - STAGE_SAFETY_MARGIN_MS;
+    if (figBudgetAvailable < 60_000) {
+      console.log("[CC-ORCH] Deferring figure_extraction — only " + Math.round(figBudgetAvailable / 1000) + "s remaining, need 60s+");
+      return {
+        status: "in_progress",
+        runId: runId,
+        currentStage: "figure_extraction",
+        stagesComplete: stagesComplete,
+        stagesFailed: stagesFailed,
+        message: "Budget too low for figure_extraction, deferring to next invocation.",
+      };
+    }
+
     console.log("[CC-ORCH] Entering figure_extraction (" + budgetRemaining() + "ms remaining)");
     try {
-      var figTimeBudget = Math.min(120000, Math.max(0, budgetRemaining() - 30000));
+      var figTimeBudget = Math.min(180000, Math.max(0, budgetRemaining() - 30000));
       var figResult = await runFigureExtraction(
         ctx, dealId, runId, startTime, figTimeBudget,
       );
