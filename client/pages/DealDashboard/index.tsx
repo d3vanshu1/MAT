@@ -196,6 +196,27 @@ const RECON_STAGE_LABELS: ReadonlyArray<{ key: string; label: string }> = [
   { key: "canonical_finalize", label: "Finalizing report" },
 ] as const;
 
+/** CC v2 pipeline stage labels — displayed in the progress UI */
+const CC_V2_STAGE_LABELS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "claims_extraction", label: "Extracting claims from IC memos" },
+  { key: "figure_extraction", label: "Extracting figures from Excel & DD reports" },
+  { key: "reconciliation", label: "Reconciling claims against figures" },
+  { key: "finalization", label: "Finalizing report" },
+] as const;
+
+/** OA v2 pipeline stage labels — displayed in the progress UI */
+const OA_V2_STAGE_LABELS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "fact_normalization", label: "Normalizing extracted facts" },
+  { key: "topic_assignment", label: "Assigning topics" },
+  { key: "index_assembly", label: "Assembling topic index" },
+  { key: "absence_probe", label: "Probing for absent coverage" },
+  { key: "gap_comparison", label: "Comparing coverage gaps" },
+  { key: "materiality", label: "Scoring materiality" },
+  { key: "finding_assembly", label: "Assembling findings" },
+  { key: "render", label: "Rendering report" },
+  { key: "publish", label: "Publishing results" },
+] as const;
+
 /**
  * Fix 3 — `diagnosticOnly` operator affordance.
  *
@@ -1791,14 +1812,46 @@ export default function DealDashboardPage() {
             message: `Merging findings (server)… round ${prog.mergeRound}/${prog.mergeTotal}${groupInfo}`,
             detail: { current: prog.mergeRound, total: prog.mergeTotal, phase: "synthesizing" },
           });
+        } else if (phase.startsWith("oa_v2_")) {
+          // OA v2 pipeline stages. Server emits `oa_v2_<stage>` where <stage> is
+          // one of the 9 OA orchestrator stages.
+          // progress.analysisCompleted = stages done, progress.analysisTotal = 9.
+          const oaStageKey = phase.slice("oa_v2_".length);
+          const oaStageIdx = OA_V2_STAGE_LABELS.findIndex((s) => s.key === oaStageKey);
+          const oaTotal = OA_V2_STAGE_LABELS.length;
+          const oaDone = prog.analysisCompleted;
+          if (oaStageIdx >= 0) {
+            setModuleProgress(moduleId, {
+              message: `${OA_V2_STAGE_LABELS[oaStageIdx].label}… (${oaDone}/${oaTotal} stages)`,
+              detail: { current: oaDone, total: oaTotal, phase: "analyzing" },
+            });
+          } else {
+            setModuleProgress(moduleId, {
+              message: `Omission Audit in progress… (${oaDone}/${oaTotal} stages)`,
+              detail: { current: oaDone, total: oaTotal, phase: "analyzing" },
+            });
+          }
+        } else if (phase.startsWith("cc_v2_")) {
+          // CC v2 pipeline stages. Server emits `cc_v2_<stage>` where <stage> is
+          // one of: claims_extraction, figure_extraction, reconciliation, finalization.
+          // progress.analysisCompleted = stages done, progress.analysisTotal = 4.
+          const stageKey = phase.slice("cc_v2_".length);
+          const stageIdx = CC_V2_STAGE_LABELS.findIndex((s) => s.key === stageKey);
+          const total = CC_V2_STAGE_LABELS.length;
+          const done = prog.analysisCompleted;
+          if (stageIdx >= 0) {
+            setModuleProgress(moduleId, {
+              message: `${CC_V2_STAGE_LABELS[stageIdx].label}… (${done}/${total} stages)`,
+              detail: { current: done, total, phase: "synthesizing" },
+            });
+          } else {
+            setModuleProgress(moduleId, {
+              message: `Contradiction Check in progress… (${done}/${total} stages)`,
+              detail: { current: done, total, phase: "synthesizing" },
+            });
+          }
         } else if (phase.startsWith("cc_reconciliation")) {
-          // CC reconciliation path. Server emits `cc_reconciliation_<stage>`, where
-          // <stage> is a STAGE_SEQUENCE member (or "init" before the first stage is
-          // entered). The numeric `progress` fields are all zero on this path by
-          // construction — routing/analysis/merge never run — so the stage index is
-          // what we render. Deliberately NOT written to lastKnownCheckpointsRef: that
-          // ref is compared against DB checkpoint counts (hundreds), and mixing a
-          // 0–5 stage index into it would make the stall detector read false progress.
+          // Legacy CC reconciliation path (v1). Kept for backward compatibility.
           const stageKey = phase.slice("cc_reconciliation_".length);
           const stageIdx = RECON_STAGE_LABELS.findIndex((s) => s.key === stageKey);
           const total = RECON_STAGE_LABELS.length;
@@ -1808,7 +1861,6 @@ export default function DealDashboardPage() {
               detail: { current: stageIdx + 1, total, phase: "synthesizing" },
             });
           } else {
-            // "init", or a stage added server-side that this list doesn't know yet.
             setModuleProgress(moduleId, {
               message: "Starting reconciliation…",
               detail: { current: 0, total, phase: "synthesizing" },

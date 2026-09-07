@@ -86,66 +86,61 @@ export default api({
   }),
 
   async run(ctx, input): Promise<PipelineResult> {
-    // ── OA v2: extraction only through v1, then skip merge → v2 orchestrator ──
+    // ── OA v2 — no v1 extraction prerequisite ────────────────────
+    // OA v2 orchestrator handles all 9 stages directly.
+    // Extraction (universal_extractions) must already exist for the deal.
     if (input.moduleId === "omission_audit" && OA_V2_ENABLED) {
       var db = ctx.integrations.db;
+
+      // Resolve runId: use provided, find in-progress, or create fresh row
       var runId = input.runId || "";
-
-      // Check if extraction is already complete for this deal.
-      // universal_extractions > 0 means chunks have been extracted.
-      // Skip pipeline-core entirely to avoid the expensive merge phase.
-      var extractionRows = await db.query(
-        "SELECT count(*)::int AS cnt FROM universal_extractions WHERE deal_id = $1",
-        z.object({ cnt: z.coerce.number() }),
-        [input.dealId],
-        { label: "OA v2: check extraction completion" },
-      );
-      var extractionDone = extractionRows[0]?.cnt > 0;
-
-      if (!extractionDone) {
-        // Extraction not started/incomplete — run through v1 pipeline-core
-        // for chunk analysis only. On the next invocation after extraction
-        // finishes, we'll skip pipeline-core and go to v2 orchestrator.
-        var v1Result = await runPipelineCore(ctx, {
-          dealId: input.dealId,
-          moduleId: input.moduleId,
-          runId: runId || undefined,
-          useOpus: input.useOpus,
-          subjectDocumentIds: input.subjectDocumentIds,
-          numericReport: input.numericReport,
-          numericPartial: input.numericPartial,
-          diagnosticOnly: input.diagnosticOnly,
-          ownerToken: input.ownerToken,
-        });
-        // Capture the runId created by pipeline-core
-        runId = v1Result.runId || runId;
-        // Always return — let the client re-invoke. On next call,
-        // extraction will be done and we'll skip to v2.
-        return v1Result;
-      }
-
-      // If no runId provided, find the active run for this deal
       if (!runId) {
         var activeRuns = await db.query(
-          "SELECT id FROM module_runs WHERE deal_id = $1 AND module_id = 'omission_audit' AND status IN ('running', 'failed') ORDER BY triggered_at DESC LIMIT 1",
+          "SELECT id FROM module_runs WHERE deal_id = $1 AND module_id = 'omission_audit' AND status = 'running' ORDER BY triggered_at DESC LIMIT 1",
           z.object({ id: z.string() }),
           [input.dealId],
           { label: "OA v2: find active run" },
         );
         if (activeRuns.length > 0) {
           runId = activeRuns[0].id;
+        } else {
+          // No running run found — create a fresh module_runs row
+          var newOaRunRows = await db.query(
+            "INSERT INTO module_runs (id, deal_id, module_id, status, triggered_at) " +
+            "VALUES (gen_random_uuid(), $1, 'omission_audit', 'running', now()) " +
+            "RETURNING id",
+            z.object({ id: z.string() }),
+            [input.dealId],
+            { label: "OA v2: create new module_run row" },
+          );
+          runId = newOaRunRows[0].id;
+          console.log("[OA v2] Created new module_run: " + runId);
         }
       }
 
-      // Extraction complete — skip merge, go straight to v2 orchestrator
       var oaResult = await runOaPipeline(
         ctx as any,
         input.dealId,
         runId,
         input.subjectDocumentIds || [],
       );
-      // Map OaPipelineResult → PipelineResult
-      // The output schema requires progress.analysisTotal/analysisCompleted/mergeRound/mergeTotal
+
+      // Update module_runs status to match orchestrator result
+      if (oaResult.status === "complete") {
+        await db.execute(
+          "UPDATE module_runs SET status = 'completed', completed_at = now() WHERE id = $1",
+          [runId],
+          { label: "OA v2: mark run completed" },
+        );
+      } else if (oaResult.status === "failed") {
+        await db.execute(
+          "UPDATE module_runs SET status = 'failed', completed_at = now() WHERE id = $1",
+          [runId],
+          { label: "OA v2: mark run failed" },
+        );
+      }
+
+      // Map OaPipelineResult → PipelineResult with v2 phase prefix
       var totalStages = 9; // fact_norm through publish
       var doneStages = oaResult.stagesComplete.length;
       return {
@@ -154,7 +149,7 @@ export default api({
         moduleId: input.moduleId,
         dealId: input.dealId,
         message: oaResult.message,
-        phase: oaResult.currentStage,
+        phase: "oa_v2_" + oaResult.currentStage,
         progress: {
           analysisTotal: totalStages,
           analysisCompleted: doneStages,
@@ -165,32 +160,11 @@ export default api({
       } as unknown as PipelineResult;
     }
 
-    // ── CC v2 path ──────────────────────────────────────────────────
+    // ── CC v2 path — no v1 extraction prerequisite ─────────────────
+    // CC v2 orchestrator handles everything: claims extraction from IC memos,
+    // figure extraction from Excel/DD reports, reconciliation, and finalization.
+    // No dependency on universal_extractions or pipeline-core.
     if (input.moduleId === "contradiction_check" && CC_V2_ENABLED) {
-      // Check if extraction is complete (universal_extractions exist)
-      var ccExtRows = await ctx.integrations.db.query(
-        "SELECT count(*)::int AS cnt FROM universal_extractions WHERE deal_id = $1 LIMIT 1",
-        z.object({ cnt: z.coerce.number() }),
-        [input.dealId],
-        { label: "CC v2: check extraction complete" },
-      );
-      var ccExtCount = ccExtRows[0]?.cnt || 0;
-
-      if (ccExtCount === 0) {
-        // Extraction not done — run through v1 pipeline-core
-        return runPipelineCore(ctx, {
-          dealId: input.dealId,
-          moduleId: input.moduleId,
-          runId: input.runId,
-          useOpus: input.useOpus,
-          subjectDocumentIds: input.subjectDocumentIds,
-          numericReport: input.numericReport,
-          numericPartial: input.numericPartial,
-          diagnosticOnly: input.diagnosticOnly,
-          ownerToken: input.ownerToken,
-        });
-      }
-
       // Resolve runId: use provided, find in-progress, or create fresh row
       var ccRunId = input.runId || "";
       if (!ccRunId) {
@@ -248,7 +222,7 @@ export default api({
         moduleId: input.moduleId,
         dealId: input.dealId,
         message: ccResult.message,
-        phase: ccResult.currentStage,
+        phase: "cc_v2_" + ccResult.currentStage,
         progress: {
           analysisTotal: ccTotalStages,
           analysisCompleted: ccDoneStages,
