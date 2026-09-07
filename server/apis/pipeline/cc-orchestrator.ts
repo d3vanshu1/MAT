@@ -27,7 +27,10 @@ import { getPipelineVersion } from "./pipeline-version.js";
 import { runPostMergePipeline } from "./pipeline-core.js";
 
 // ── Budget constants ─────────────────────────────────────────────
-const TOTAL_BUDGET_MS = 450_000;
+// Must stay well under EFFECTIVE_CAP_MS (300s) to return in_progress
+// before the platform kills the process. The client poll loop will re-invoke.
+import { EFFECTIVE_CAP_MS, PLATFORM_HEADROOM_MS } from "./pipeline-config.js";
+const TOTAL_BUDGET_MS = EFFECTIVE_CAP_MS - PLATFORM_HEADROOM_MS; // ~240s
 const STAGE_SAFETY_MARGIN_MS = 15_000;
 
 // ── Stage sequence ───────────────────────────────────────────────
