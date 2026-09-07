@@ -280,10 +280,9 @@ export default api({
       ``,
       `Obligation checklist version: ${OBLIGATION_CHECKLIST_VERSION}.`,
       ``,
-      `Scope: findings are drawn from IC memos compared against the CIM, PwC Vendor FDD, Osborne Clarke Legal DD, and Altman Solon CDD.`,
+      `Scope: findings are drawn from IC memos compared against the uploaded reference documents (CIM, due diligence reports, financial models, and other supporting materials).`,
       ``,
       `Limitations:`,
-      `• Both financial models (Base Case and Downside Case) contributed no analysable facts to the extraction pipeline.`,
       `• ${cappedCount} findings had evidence sets capped at 150 facts per role (subject or reference).`,
       `• ${withheldCount} narratives were withheld because the generated text contained a quotation that could not be verified against source.`,
     ].join("\n");

@@ -15,7 +15,7 @@
  *   1. adviser_severity_max = 'high' AND verified quantified impact present
  *   2. Verified quantified impact >= £6.55m (EV threshold only — no EBITDA branch)
  *   3. obligation_class='required' AND gap_kind='not_disclosed' AND probe ran and returned nothing
- *   4. Gap touches a deal.* or returns.* topic
+ *   4. (REMOVED — was namespace auto-promotion) LLM consequence-based: go/no-go, structure, or bid-level
  *   5. Gap contradicts a stated investment-thesis pillar (not implemented — requires pillar list)
  *
  * TIER 2:
@@ -178,11 +178,12 @@ function buildMaterialityPrompt(
     "  \"tier_recommendation\": 1 | 2 | 3,\n" +
     "  \"basis\": \"<one sentence explaining the tier assignment>\"\n" +
     "}\n\n" +
-    "Rules:\n" +
-    "- No quantifying figure -> estimated_impact_gbp: null, tier_recommendation: 3\n" +
-    "- Verified figure >= " + t1Label + " -> tier_recommendation: 1\n" +
-    "- Verified figure " + t2LowLabel + " to " + t1Label + " -> tier_recommendation: 2\n" +
-    "- Verified figure below " + t2LowLabel + " -> tier_recommendation: 3\n" +
+    "Rules for tier_recommendation (apply consequence, not just monetary size):\n" +
+    "- Tier 1: verified figure >= " + t1Label + ", OR go/no-go consequence (deal structure, bid-level, " +
+    "or an adviser conclusion stated as conditional that the memo presents as settled)\n" +
+    "- Tier 2: verified figure " + t2LowLabel + " to " + t1Label + ", OR a term/protection to negotiate pre-signing\n" +
+    "- Tier 3: affects 100-day plan, value creation plan, or diligence completeness; or no quantifying figure and qualitative only\n" +
+    "- If no quantifying figure exists, tier based on CONSEQUENCE: does this gap affect the bid price, structure, or go/no-go? If yes, Tier 1-2. If it affects post-close planning only, Tier 3.\n" +
     "- Be conservative: if uncertain whether a figure describes THIS gap, return null\n" +
     "- Return ONLY valid JSON. No markdown fences.\n\n" +
     "SCOPE CONSTRAINT:\n" +
@@ -260,10 +261,14 @@ function assignTier(input: TierInput, dealCfg: DealConfig): TierOutput {
     return { tier: 1, basis: "required topic not_disclosed with probe confirming absence" };
   }
 
-  // Rule 4: Gap touches deal.* or returns.* topic
-  if (topicId.startsWith("deal.") || topicId.startsWith("returns.")) {
-    return { tier: 1, basis: `topic ${topicId} is deal.* or returns.* — automatically Tier 1` };
-  }
+  // Rule 4: (REMOVED) Previously auto-promoted deal.* and returns.* topics to Tier 1 regardless of materiality.
+  // Now: namespace is an input to the LLM tier recommendation, NOT an auto-promotion trigger.
+  // Findings in deal.*/returns.* still typically land at Tier 1-2 because they carry
+  // deal-structure consequence that the LLM's tier_recommendation captures.
+  // Keeping the comment for audit trail — the line below was the prior logic:
+  //   if (topicId.startsWith("deal.") || topicId.startsWith("returns.")) {
+  //     return { tier: 1, basis: `topic ${topicId} is deal.* or returns.* — automatically Tier 1` };
+  //   }
 
   // Rule 5: contradicts investment-thesis pillar — requires pillar list, skip for now
 
@@ -301,11 +306,16 @@ function assignTier(input: TierInput, dealCfg: DealConfig): TierOutput {
     return { tier: 2, basis: "adviser_severity=high — floors at Tier 2" };
   }
 
-  // ─── Default to LLM recommendation, bounded to Tier 2-3 ───────────────
-  // (Tier 1 can only be reached by explicit rules above)
-  const boundedLlmTier = Math.max(llmTier, 2);
-  if (boundedLlmTier <= 2 && llmTier <= 2) {
-    return { tier: 2, basis: "LLM assessed Tier 2 — no rule elevates or caps" };
+  // ─── Default to LLM recommendation ────────────────────────────────────
+  // With namespace auto-promotion removed, the LLM's consequence-based
+  // tier recommendation is now respected for Tier 1. The LLM prompt
+  // instructs it to assign Tier 1 for go/no-go, deal structure, or bid-level
+  // consequences, and Tier 2 for terms to negotiate pre-signing.
+  if (llmTier === 1) {
+    return { tier: 1, basis: "LLM assessed Tier 1 — consequence-based (go/no-go, deal structure, or bid-level)" };
+  }
+  if (llmTier === 2) {
+    return { tier: 2, basis: "LLM assessed Tier 2 — term/protection to negotiate or moderate materiality" };
   }
 
   return { tier: 3, basis: "Tier 3 — no rule elevates above default" };

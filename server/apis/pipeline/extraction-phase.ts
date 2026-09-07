@@ -264,7 +264,10 @@ export async function runExtractionPhase(
     if (page.length === 0) break;
     docOffset += page.length;
     for (const doc of page) {
-      if (isSpreadsheetFile(doc.file_name)) continue;
+      // Spreadsheet files are now included in extraction — their chunks contain
+      // parsed table text (CSV-like) with customer data, financial model figures,
+      // and operational metrics that the OA pipeline needs for complete coverage.
+      // Previously skipped, this was the root cause of 0 citations to .xlsx files.
       if (doc.text_length === 0) continue;
       docMetas.push(doc);
     }

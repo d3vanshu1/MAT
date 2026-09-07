@@ -248,8 +248,32 @@ function renderAdviserRating(referenceEvidence: any[]): string {
     }
   }
 
+  // Derive adviser name(s) from evidence source documents instead of hardcoding.
+  // Collect distinct document names that carried adviser_severity ratings.
+  const adviserDocs = new Set<string>();
+  for (const e of withSeverity) {
+    if (e?.document_name) {
+      // Extract adviser name from doc name heuristics
+      var docName = String(e.document_name);
+      // Common patterns: "Capstone - PEP - Project...", "Chrysler Week 3 Update" (Bain/Crosslake)
+      if (docName.toLowerCase().includes("capstone")) adviserDocs.add("Capstone");
+      else if (docName.toLowerCase().includes("crosslake")) adviserDocs.add("Crosslake");
+      else if (docName.toLowerCase().includes("bain")) adviserDocs.add("Bain");
+      else if (docName.toLowerCase().includes("deloitte")) adviserDocs.add("Deloitte");
+      else if (docName.toLowerCase().includes("debevoise") || docName.toLowerCase().includes("mintz")) adviserDocs.add("Debevoise & Mintz");
+      else if (docName.toLowerCase().includes("alliant")) adviserDocs.add("Alliant");
+      else if (docName.toLowerCase().includes("vcheck")) adviserDocs.add("vCheck");
+      else {
+        // Fallback: use first word(s) before a dash or project name
+        var shortName = docName.replace(/[-_].*Project.*$/i, "").replace(/[-_].*Chrysler.*$/i, "").trim();
+        if (shortName.length > 2 && shortName.length < 40) adviserDocs.add(shortName);
+      }
+    }
+  }
+  var adviserLabel = adviserDocs.size > 0 ? Array.from(adviserDocs).join(", ") : "Third-party advisers";
+
   const lines: string[] = [];
-  lines.push(`**Adviser rating (Osborne Clarke):** ${summaryParts.join(", ")}`);
+  lines.push(`**Adviser rating (${adviserLabel}):** ${summaryParts.join(", ")}`);
 
   if (highestDisposition) {
     lines.push(`  Highest-rated: "${highestDisposition}"`);
@@ -503,6 +527,41 @@ export default api({
       [runId, dealId],
       { label: "Load findings for render" }
     );
+
+    // ─── F6: De-duplicate findings on same topic ─────────────────────────
+    // If multiple findings exist for the same topic_id, keep the one with:
+    //   1. The lowest (best) materiality_tier
+    //   2. The most reference evidence
+    //   3. A non-empty narrative (if one has narrative and the other doesn't)
+    const topicFindingMap = new Map<string, typeof findings[0]>();
+    for (const f of findings) {
+      var existing = topicFindingMap.get(f.topic_id);
+      if (!existing) {
+        topicFindingMap.set(f.topic_id, f);
+        continue;
+      }
+      // Pick the better finding
+      var keepNew = false;
+      if (f.materiality_tier < existing.materiality_tier) {
+        keepNew = true;
+      } else if (f.materiality_tier === existing.materiality_tier) {
+        var existingRefCount = Array.isArray(existing.reference_evidence) ? existing.reference_evidence.length : 0;
+        var newRefCount = Array.isArray(f.reference_evidence) ? f.reference_evidence.length : 0;
+        if (newRefCount > existingRefCount) keepNew = true;
+        else if (newRefCount === existingRefCount && f.narrative && !existing.narrative) keepNew = true;
+      }
+      if (keepNew) {
+        topicFindingMap.set(f.topic_id, f);
+      }
+    }
+    var dedupedFindings = Array.from(topicFindingMap.values());
+    var duplicatesRemoved = findings.length - dedupedFindings.length;
+    if (duplicatesRemoved > 0) {
+      console.log("[OA-RENDER] F6: Removed " + duplicatesRemoved + " duplicate findings on same topic");
+    }
+    // Replace findings array with deduped version for all downstream processing
+    findings.length = 0;
+    findings.push(...dedupedFindings);
 
     // ─── Enrich evidence with fact details ───────────────────────────────
     // Collect all fact IDs referenced across all findings

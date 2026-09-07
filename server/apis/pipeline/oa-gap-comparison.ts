@@ -265,15 +265,44 @@ export default api({
 
         // Emit not_disclosed finding — load reference fact_ids to populate reference_evidence
         const refFactIds = await db.query(
-          `SELECT tf.fact_id FROM oa_topic_facts tf
+          `SELECT tf.fact_id, f.predicate, f.value FROM oa_topic_facts tf
            JOIN oa_facts f ON f.fact_id = tf.fact_id AND f.deal_id = $3
            WHERE tf.run_id = $1 AND tf.topic_id = $2 AND tf.fact_role = 'reference'
            ORDER BY CASE f.adviser_severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END, f.predicate
            LIMIT 150`,
-          z.object({ fact_id: z.string() }),
+          z.object({ fact_id: z.string(), predicate: z.string().nullable(), value: z.string().nullable() }),
           [runId, topic.topic_id, dealId],
           { label: `Load ref fact_ids for not_disclosed ${topic.topic_id}` }
         );
+
+        // F5: Suppress absence-of-non-issue findings for conditional topics.
+        // If the reference evidence explicitly states the exposure doesn't exist
+        // (e.g., "no defined benefit plans", "limited international exposure"),
+        // suppress the finding — the memo is correct not to address it.
+        if (topic.obligation_class === "conditional" && refFactIds.length > 0) {
+          var negationPatterns = [
+            /\bno\b.*\b(defined benefit|pension|retirement|retiree)\b/i,
+            /\bnot\b.*\b(applicable|relevant|material|significant)\b/i,
+            /\blimited\b.*\b(international|foreign|overseas|exposure)\b/i,
+            /\bno\b.*\b(foreign|international|overseas)\b.*\b(operations?|exposure|revenue)\b/i,
+            /\bprimarily\b.*\b(domestic|united states|u\.?s\.?)\b/i,
+            /\bdoes not\b.*\b(have|maintain|operate|carry)\b/i,
+            /\bno\b.*\b(material|significant|meaningful)\b.*\b(exposure|risk|liability|obligation)\b/i,
+            /\bnone\b.*\b(identified|found|reported|noted)\b/i,
+          ];
+          var allFactText = refFactIds.map(f => [f.predicate || "", f.value || ""].join(" ")).join(" ");
+          var hasNegation = negationPatterns.some(p => p.test(allFactText));
+          if (hasNegation) {
+            console.log("[P6] F5 SUPPRESS: " + topic.topic_id + " — reference evidence negates exposure existence");
+            topicsNoGap++;
+            await db.query(
+              "INSERT INTO oa_stage_checkpoints (run_id, stage, unit_key, status, payload_json) VALUES ($1, 'gap_comparison', $2, 'complete', $3::jsonb) ON CONFLICT DO NOTHING",
+              z.any(), [runId, topic.topic_id, JSON.stringify({ skipped_reason: "f5_suppressed_absence_of_non_issue", negation_detected: true })],
+              { label: "Checkpoint (F5 suppress) " + topic.topic_id }
+            );
+            continue;
+          }
+        }
 
         const refEvidenceJson = JSON.stringify(refFactIds.map(f => f.fact_id));
 
