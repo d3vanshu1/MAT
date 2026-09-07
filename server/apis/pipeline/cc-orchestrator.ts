@@ -149,15 +149,14 @@ export async function runCcPipeline(
         } catch { /* non-fatal */ }
       };
 
-      // Give claims extraction a tight budget (120s max, 60% effective).
-      // Shift pipelineStartTime forward so callLLMWithHeadroom's internal
-      // headroom check aligns with OUR budget, not the full platform cap.
-      // Without this, callLLMWithHeadroom lets LLM calls run until 270s,
-      // exceeding the platform timeout and killing the process.
-      var claimsBudget = Math.min(120000, Math.max(30000, budgetRemaining() - 30000));
-      var claimsEffective = claimsBudget * 0.6;
-      // Fake start time = now minus (EFFECTIVE_CAP - PLATFORM_HEADROOM - claimsEffective)
-      // so callLLMWithHeadroom thinks we've already used most of the cap
+      // Give claims extraction most of the remaining budget.
+      // Reserve 45s for the orchestrator to save checkpoints and return.
+      // Use fakeStartTime to align callLLMWithHeadroom's internal headroom
+      // check with our budget — without it, headroom fires based on wall-clock
+      // time from API call start, which is too aggressive.
+      var claimsEffective = Math.max(60000, budgetRemaining() - 45000);
+      // Fake start time: tell callLLMWithHeadroom that (EFFECTIVE_CAP - HEADROOM - claimsEffective)
+      // seconds have already passed, so it allows claimsEffective more seconds of LLM calls.
       var fakeElapsed = EFFECTIVE_CAP_MS - PLATFORM_HEADROOM_MS - claimsEffective;
       var fakeStartTime = Date.now() - Math.max(0, fakeElapsed);
       claimsLedger = await runClaimsExtraction(
