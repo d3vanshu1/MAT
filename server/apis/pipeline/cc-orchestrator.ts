@@ -241,12 +241,36 @@ export async function runCcPipeline(
       };
     }
 
-    console.log("[CC-ORCH] Entering figure_extraction (" + budgetRemaining() + "ms remaining)");
+    // Load prior partial checkpoint for resume
+    var priorFigCp = figExtractionCp && figExtractionCp.status === "partial"
+      ? figExtractionCp.payload as any : null;
+    var priorTableIds: string[] = priorFigCp?.processedTableIds ?? [];
+
+    console.log("[CC-ORCH] Entering figure_extraction (" + budgetRemaining() + "ms remaining, " +
+      priorTableIds.length + " tables already processed)");
     try {
       var figTimeBudget = Math.min(180000, Math.max(0, budgetRemaining() - 30000));
       var figResult = await runFigureExtraction(
         ctx, dealId, runId, startTime, figTimeBudget,
+        { processedTableIds: priorTableIds },
       );
+
+      if (!figResult.excelComplete) {
+        // Partial — save checkpoint with processedTableIds for resume
+        await saveCheckpoint(db, runId, "figure_extraction", {
+          ...figResult,
+          processedTableIds: figResult.processedTableIds,
+        }, "partial");
+        console.log("[CC-ORCH] figure_extraction partial: " + figResult.processedTableIds.length + " tables done so far");
+        return {
+          status: "in_progress",
+          runId: runId,
+          currentStage: "figure_extraction",
+          stagesComplete: stagesComplete,
+          stagesFailed: stagesFailed,
+          message: "Figure extraction partial — " + figResult.processedTableIds.length + " tables processed, continuing next invocation.",
+        };
+      }
 
       await saveCheckpoint(db, runId, "figure_extraction", figResult, "complete");
       stagesComplete.push("figure_extraction");

@@ -66,6 +66,8 @@ export interface ExcelExtractionResult {
   figuresSkipped: number;
   errors: string[];
   elapsedMs: number;
+  excelComplete: boolean;
+  processedTableIds: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +274,8 @@ export async function extractFiguresFromExcel(
   dealId: string,
   pipelineStartTime: number,
   timeBudgetMs: number,
-): Promise<{ figures: ExtractedFigure[]; tablesProcessed: number; errors: string[] }> {
+  options?: { processedTableIds?: string[] },
+): Promise<{ figures: ExtractedFigure[]; tablesProcessed: number; errors: string[]; complete: boolean; processedTableIds: string[] }> {
   var db = ctx.integrations.db;
   var startTime = Date.now();
 
@@ -300,14 +303,19 @@ export async function extractFiguresFromExcel(
   var allFigures: ExtractedFigure[] = [];
   var tablesProcessed = 0;
   var errors: string[] = [];
+  var priorProcessed = new Set(options?.processedTableIds ?? []);
+  var allProcessedIds: string[] = [...priorProcessed];
 
-  // Group tables by document_id to batch LLM calls
+  // Group tables by document_id to batch LLM calls (skip already-processed)
   var tablesByDoc = new Map<string, typeof tables>();
+  var totalEligible = 0;
   for (var i = 0; i < tables.length; i++) {
     var t = tables[i];
     if (SKIP_SHEETS.has(t.sheet_or_page)) continue;
     var cells = t.data && t.data.cells;
     if (!cells || !Array.isArray(cells) || cells.length === 0) continue;
+    totalEligible++;
+    if (priorProcessed.has(t.id)) continue; // Already processed in prior invocation
 
     var arr = tablesByDoc.get(t.document_id);
     if (!arr) {
@@ -316,6 +324,9 @@ export async function extractFiguresFromExcel(
     }
     arr.push(t);
   }
+
+  console.log("[EXCEL-EXTRACT] " + priorProcessed.size + " already processed, " + 
+    (totalEligible - priorProcessed.size) + " remaining of " + totalEligible + " eligible");
 
   // Process each document's tables
   for (var entry of tablesByDoc.entries()) {
@@ -368,6 +379,10 @@ export async function extractFiguresFromExcel(
           allFigures.push(remaining[ri]);
         }
         tablesProcessed += batchSheets.length;
+        // Track processed table IDs for resume
+        for (var dti = 0; dti < docTables.length; dti++) {
+          allProcessedIds.push(docTables[dti].id);
+        }
       } catch (err) {
         var errMsg = err instanceof Error ? err.message : String(err);
         errors.push("Doc " + docId + " batch error: " + errMsg.slice(0, 200));
@@ -376,8 +391,10 @@ export async function extractFiguresFromExcel(
     }
   }
 
-  console.log("[EXCEL-EXTRACT] Extracted " + allFigures.length + " figures from " + tablesProcessed + " tables");
-  return { figures: allFigures, tablesProcessed: tablesProcessed, errors: errors };
+  var isComplete = allProcessedIds.length >= totalEligible;
+  console.log("[EXCEL-EXTRACT] Extracted " + allFigures.length + " figures from " + tablesProcessed + " tables" +
+    (isComplete ? " (COMPLETE)" : " (PARTIAL — " + (totalEligible - allProcessedIds.length) + " remaining)"));
+  return { figures: allFigures, tablesProcessed: tablesProcessed, errors: errors, complete: isComplete, processedTableIds: allProcessedIds };
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +648,7 @@ export async function runFigureExtraction(
   runId: string,
   pipelineStartTime: number,
   timeBudgetMs: number,
+  options?: { processedTableIds?: string[] },
 ): Promise<ExcelExtractionResult> {
   var db = ctx.integrations.db;
   var startTime = Date.now();
@@ -639,8 +657,11 @@ export async function runFigureExtraction(
   var allErrors: string[] = [];
 
   // ── Phase 1: Excel doc_tables ──────────────────────────────────
-  var excelBudget = Math.floor(timeBudgetMs * 0.6);
-  var excelResult = await extractFiguresFromExcel(ctx, dealId, pipelineStartTime, excelBudget);
+  var excelBudget = Math.floor(timeBudgetMs * 0.7); // 70% for Excel, 30% for DD reports
+  var excelResult = await extractFiguresFromExcel(
+    ctx, dealId, pipelineStartTime, excelBudget,
+    { processedTableIds: options?.processedTableIds },
+  );
   allErrors = allErrors.concat(excelResult.errors);
 
   // Group extracted figures by document_id for insertion
@@ -718,5 +739,7 @@ export async function runFigureExtraction(
     figuresSkipped: totalSkipped,
     errors: allErrors,
     elapsedMs: elapsedMs,
+    excelComplete: excelResult.complete,
+    processedTableIds: excelResult.processedTableIds,
   };
 }
