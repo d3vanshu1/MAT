@@ -484,6 +484,49 @@ export function normalizePeriod(period: string): string {
  * All parts are lowercased and trimmed.
  */
 /**
+ * Normalize metric names so equivalent metrics match across claims and figures.
+ * E.g., "gross_margin" ↔ "margin_pct", "EBITDA" ↔ "ebitda".
+ */
+const METRIC_ALIASES: Record<string, string> = {
+  "gross_margin": "margin_pct",
+  "ebitda_margin": "margin_pct",
+  "operating_margin": "margin_pct",
+  "net_margin": "margin_pct",
+  "profit_margin": "margin_pct",
+  "margin": "margin_pct",
+  "ebitda": "ebitda",
+  "adjusted_ebitda": "ebitda",
+  "adj_ebitda": "ebitda",
+  "revenue_growth": "growth_rate",
+  "yoy_growth": "growth_rate",
+  "cagr": "growth_rate",
+};
+
+export function normalizeMetric(metric: string): string {
+  var m = metric.toLowerCase().trim();
+  return METRIC_ALIASES[m] ?? m;
+}
+
+/**
+ * Detect if a claim is percentage-based (value like 54 meaning 54%)
+ * and a model figure is decimal-based (value like 0.518 meaning 51.8%).
+ * Returns the model value adjusted to the claim's scale for comparison.
+ */
+function alignPercentageScale(claimValue: number, claimUnit: string, modelValue: number): number {
+  var unit = claimUnit.toLowerCase().trim();
+  var isClaimPct = (unit === "%" || unit === "bps" || unit === "pp");
+  if (!isClaimPct) return modelValue;
+
+  // If claim is >1 (e.g., 54 meaning 54%) and model is <1 (e.g., 0.518),
+  // the model is in decimal form — multiply by 100 to align.
+  if (Math.abs(claimValue) >= 1 && Math.abs(modelValue) < 1) {
+    return modelValue * 100;
+  }
+  // If both are >1 or both are <1, assume same scale
+  return modelValue;
+}
+
+/**
  * Normalize scope qualifiers for fuzzy matching.
  * Strips common noise words so "Total Group Revenue" matches "Total Revenue".
  */
@@ -525,7 +568,7 @@ export function coordKey(
     // Non-sensitivity scenarios (base case, management case, etc.) proceed
   }
   const basisPart = basis ? basis.toLowerCase().trim() : "";
-  return `${metric.toLowerCase().trim()}|${normalizeScope(scope)}|${basisPart}|${normalizePeriod(period)}`;
+  return `${normalizeMetric(metric)}|${normalizeScope(scope)}|${basisPart}|${normalizePeriod(period)}`;
 }
 
 /**
@@ -533,7 +576,7 @@ export function coordKey(
  * Used for scope-fuzzy matching when exact coordKey misses.
  */
 function relaxedMetricPeriodKey(metric: string, period: string): string {
-  return `${metric.toLowerCase().trim()}|${normalizePeriod(period)}`;
+  return `${normalizeMetric(metric)}|${normalizePeriod(period)}`;
 }
 
 /**
@@ -664,7 +707,8 @@ function processMatch(
 
   // ----- Compute delta (code-verified, never LLM-computed) -----
   const claimVal = normalizeClaimValue(claim);
-  const modelVal = modelFig.value;
+  // Align percentage scale: if claim is 54% and model stores 0.518, convert model to 51.8
+  const modelVal = alignPercentageScale(claimVal, claim.unit, modelFig.value);
 
   const deltaAbs = Math.abs(claimVal - modelVal);
 
@@ -1114,7 +1158,7 @@ export async function runReconciliation(
         no_scope_near_miss_eligible++;
         // Jump to near-miss: search all figures at same metric+period, any scope
         const nearMissCandidates: Array<{ nf: NormalizedFigure; scopeDelta: string }> = [];
-        const normalizedMetric = claim.metric.toLowerCase().trim();
+        const normalizedMetric = normalizeMetric(claim.metric);
         for (const [fkey, nfs] of figureIndex.entries()) {
           const [fm, _fs, _fb, fp] = fkey.split("|");
           if (fm === normalizedMetric && fp === normalizedClaimPeriod) {
@@ -1134,8 +1178,9 @@ export async function runReconciliation(
 
           for (const { nf, scopeDelta } of capped) {
             const modelFig = nf.raw;
-            const deltaAbs = Math.abs(claimVal - modelFig.value);
-            const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
+            const alignedModelVal = alignPercentageScale(claimVal, claim.unit, modelFig.value);
+            const deltaAbs = Math.abs(claimVal - alignedModelVal);
+            const deltaPct = Math.abs(alignedModelVal) > 1000 ? deltaAbs / Math.abs(alignedModelVal) : 0;
             findings.push({
               finding_kind: "scope_mismatch",
               severity: "info",
@@ -1200,7 +1245,7 @@ export async function runReconciliation(
       // This handles the case where the model label implies a basis the memo omits.
       if ((!matches || matches.length === 0) && !claim.basis) {
         // Look for any figure at same metric+scope+period with any basis
-        const normalizedMetric = claim.metric.toLowerCase().trim();
+        const normalizedMetric = normalizeMetric(claim.metric);
         const normalizedScope = claim.scope_qualifier.toLowerCase().trim();
         for (const [fkey, nfs] of figureIndex.entries()) {
           const [fm, fs, fb, fp] = fkey.split("|");
@@ -1259,7 +1304,7 @@ export async function runReconciliation(
 
           for (const [fkey, nfs] of figureIndex.entries()) {
             const [fm, _fs, _fb, fp] = fkey.split("|");
-            if (fm === claim.metric.toLowerCase().trim() && fp === normalizedClaimPeriod) {
+            if (fm === normalizeMetric(claim.metric) && fp === normalizedClaimPeriod) {
               for (const nf of nfs) {
                 // Unit compatibility gate
                 const modelUnitFamily = classifyModelFigureUnit(nf.raw);
@@ -1299,8 +1344,9 @@ export async function runReconciliation(
           if (scopeFuzzyCandidates.length > 0 && scopeFuzzyCandidates[0].scopeSim >= 0.5) {
             const bestMatch = scopeFuzzyCandidates[0];
             const modelFig = bestMatch.nf.raw;
-            const deltaAbs = Math.abs(claimVal - modelFig.value);
-            const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
+            const alignedModelVal2 = alignPercentageScale(claimVal, claim.unit, modelFig.value);
+            const deltaAbs = Math.abs(claimVal - alignedModelVal2);
+            const deltaPct = Math.abs(alignedModelVal2) > 1000 ? deltaAbs / Math.abs(alignedModelVal2) : 0;
 
             // If delta is significant (>2% or >£500k), flag as data_divergence
             if (deltaPct > 0.02 || deltaAbs > 500_000) {
@@ -1345,8 +1391,9 @@ export async function runReconciliation(
 
             for (const { nf, scopeSim } of capped) {
               const modelFig = nf.raw;
-              const deltaAbs = Math.abs(claimVal - modelFig.value);
-              const deltaPct = Math.abs(modelFig.value) > 1000 ? deltaAbs / Math.abs(modelFig.value) : 0;
+              const alignedModelVal3 = alignPercentageScale(claimVal, claim.unit, modelFig.value);
+              const deltaAbs = Math.abs(claimVal - alignedModelVal3);
+              const deltaPct = Math.abs(alignedModelVal3) > 1000 ? deltaAbs / Math.abs(alignedModelVal3) : 0;
               findings.push({
                 finding_kind: "scope_mismatch",
                 severity: "info",
