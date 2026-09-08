@@ -39,19 +39,10 @@ const MAX_HITS_PER_QUERY = 25;
 const MAX_OUTPUT_TOKENS = 1024;
 
 // ---------------------------------------------------------------------------
-// IC memo document IDs
+// IC memo document IDs — resolved dynamically per deal at runtime.
+// The caller (dispatchAdjudication) looks up documents tagged 'ic_memo'
+// and passes the IDs into adjudicateOneCandidate / retrieveChunks.
 // ---------------------------------------------------------------------------
-
-const IC_MEMO_DOC_IDS = [
-  "8fb7f474-9adf-4c02-b991-e180359812ea", // 2nd IC Memo
-  "31b3df2f-1653-42e5-8ad1-e58ab74e0399", // 3rd IC Memo
-  "6197a6b2-a26c-423a-84b3-2766b0710b10", // IC Update
-  "440a86fb-93d6-4fd6-8d42-32f7047f8958", // Screening Memo
-];
-const LATEST_MEMO_DOC_IDS = [
-  "31b3df2f-1653-42e5-8ad1-e58ab74e0399", // 3rd IC Memo
-  "6197a6b2-a26c-423a-84b3-2766b0710b10", // IC Update
-];
 
 // ---------------------------------------------------------------------------
 // FTS caveat
@@ -420,6 +411,7 @@ export async function retrieveChunks(
   db: DbClient,
   cand: { candidate_id: string; failure_mode: string; implied_assumption: string; hypothesis: string; proposed_queries: any },
   dealId: string,
+  icMemoDocIds: string[],
 ): Promise<{
   coverageChunks: RetrievedChunk[];
   dependencyChunks: RetrievedChunk[];
@@ -516,7 +508,7 @@ export async function retrieveChunks(
        WHERE rn <= ${MAX_HITS_PER_QUERY}
        ORDER BY rank DESC`,
       ChunkHitSchema,
-      [depQueryInput, dealId, IC_MEMO_DOC_IDS],
+      [depQueryInput, dealId, icMemoDocIds],
       { label: `Stage2 dep: ${cand.failure_mode}` },
     );
   } catch (err) {
@@ -929,6 +921,7 @@ export async function adjudicateOneCandidate(
     proposed_queries: any;
   },
   dealId: string,
+  icMemoDocIds: string[],
 ): Promise<{
   coverage: CoverageVerdict;
   dependency: DependencyVerdict;
@@ -941,7 +934,7 @@ export async function adjudicateOneCandidate(
   let totalOut = 0;
 
   // Stage 2: Retrieve
-  const retrieval = await retrieveChunks(db, cand, dealId);
+  const retrieval = await retrieveChunks(db, cand, dealId, icMemoDocIds);
 
   // Stage 3a: Coverage
   const cov = await adjudicateCoverage(ai, cand, retrieval.coverageChunks);
@@ -977,7 +970,7 @@ export async function adjudicateOneCandidate(
   // ── Persist: bss_dependencies (upsert) ─────────────────────────────────
   const thesisHit = dep.verdict.verdict === "RELIED_UPON";
   const latestMemoHit = thesisHit && retrieval.dependencyChunks.some(
-    c => LATEST_MEMO_DOC_IDS.includes(c.document_id),
+    c => icMemoDocIds.includes(c.document_id),
   );
 
   await db.execute(
@@ -1001,7 +994,7 @@ export async function adjudicateOneCandidate(
       JSON.stringify(retrieval.dependencyExpansionLog.length > 0
         ? { original: Array.isArray(cand.proposed_queries) ? cand.proposed_queries : JSON.parse(String(cand.proposed_queries)), expandedCount: retrieval.dependencyQueryCount }
         : cand.proposed_queries),
-      JSON.stringify(IC_MEMO_DOC_IDS),
+      JSON.stringify(icMemoDocIds),
       JSON.stringify({
         verdict: dep.verdict.verdict,
         quote: dep.verdict.quote,
@@ -1198,6 +1191,18 @@ export default api({
       { label: "Archive old verdicts" },
     );
 
+    // ── Resolve IC memo doc IDs dynamically for this deal ───────────────
+    const memoRows = await ctx.integrations.db.query(
+      `SELECT id FROM documents
+       WHERE deal_id = $1::uuid AND document_tag = 'ic_memo'
+       ORDER BY file_name`,
+      z.object({ id: z.string() }),
+      [dealId],
+      { label: "Resolve IC memo doc IDs" },
+    );
+    const icMemoDocIds = memoRows.map(r => r.id);
+    console.log(`${LOG_PREFIX} IC memo docs for deal: ${icMemoDocIds.length} (${icMemoDocIds.join(", ")})`);
+
     // ── Load candidates ──────────────────────────────────────────────────
     let candidates = await ctx.integrations.db.query(
       `SELECT c.candidate_id, c.failure_mode, c.pass_type,
@@ -1249,6 +1254,7 @@ export default api({
             proposed_queries: cand.proposed_queries,
           },
           dealId,
+          icMemoDocIds,
         );
 
         allResults.push({

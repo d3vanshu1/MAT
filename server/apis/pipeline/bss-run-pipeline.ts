@@ -542,6 +542,20 @@ async function dispatchAdjudication(
   // adjudication columns (adjudicated_verdict, adjudication_quote, adjudication_reason)
   // are created by migration — no ALTER TABLE needed at runtime.
 
+  // ── Resolve IC memo doc IDs dynamically for this deal ───────────────
+  const memoRows = await db.query(
+    `SELECT id FROM documents
+     WHERE deal_id = $1::uuid AND document_tag = 'ic_memo'
+     ORDER BY file_name`,
+    z.object({ id: z.string() }),
+    [dealId],
+    { label: "Resolve IC memo doc IDs for adjudication" },
+  );
+  const icMemoDocIds = memoRows.map(r => r.id);
+  console.log(
+    `${LOG_PREFIX} adjudication: ${icMemoDocIds.length} IC memo docs for deal: ${icMemoDocIds.join(", ")}`,
+  );
+
   // Total candidates
   const allCandRows = await db.query(
     `SELECT COUNT(*)::int AS cnt FROM bss_candidates
@@ -595,7 +609,7 @@ async function dispatchAdjudication(
 
     // Stages 2→3a→3b→4 for this candidate (retrieve, coverage LLM, dependency LLM, compose)
     await adjudicateOneCandidate(
-      db, ai, cand, dealId,
+      db, ai, cand, dealId, icMemoDocIds,
     );
 
     processed++;
