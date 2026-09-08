@@ -143,12 +143,8 @@ export default api({
     const db = ctx.integrations.db;
     const ai = ctx.integrations.ai;
 
-    // ── 0. Ensure bss_pipeline_state has owner_token column ──────────────
-    await db.execute(
-      `ALTER TABLE bss_pipeline_state ADD COLUMN IF NOT EXISTS owner_token UUID NULL`,
-      [],
-      { label: "Ensure owner_token column" },
-    );
+    // owner_token column already exists on bss_pipeline_state (migration).
+    // No ALTER TABLE at runtime — Superblocks blocks DDL.
 
     // ── 1. Ensure rows exist for all stages + _lock ─────────────────────
     for (const stage of [...STAGES, "_lock"]) {
@@ -607,9 +603,9 @@ async function dispatchAdjudication(
     // Per-candidate heartbeat
     await db.execute(
       `UPDATE bss_pipeline_state
-       SET started_at = now(), items_done = $3, items_total = $4
+       SET started_at = now(), items_done = $2, items_total = $3
        WHERE deal_id = $1::uuid AND stage = 'adjudication'`,
-      [dealId, "adjudication", alreadyDone + processed, totalCandidates],
+      [dealId, alreadyDone + processed, totalCandidates],
       { label: `Heartbeat: adjudication ${alreadyDone + processed}/${totalCandidates}` },
     );
   }
