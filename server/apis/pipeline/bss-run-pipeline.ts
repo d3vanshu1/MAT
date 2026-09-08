@@ -521,9 +521,9 @@ async function dispatchCoverageSweep(
     // Per-candidate heartbeat on the _lock row
     await db.execute(
       `UPDATE bss_pipeline_state
-       SET started_at = now(), items_done = $3, items_total = $4
+       SET started_at = now(), items_done = $2, items_total = $3
        WHERE deal_id = $1::uuid AND stage = 'coverage_sweep'`,
-      [dealId, "coverage_sweep", alreadyDone + processed, totalCandidates],
+      [dealId, alreadyDone + processed, totalCandidates],
       { label: `Heartbeat: sweep ${alreadyDone + processed}/${totalCandidates}` },
     );
   }

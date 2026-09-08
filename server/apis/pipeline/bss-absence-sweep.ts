@@ -566,6 +566,13 @@ export async function upsertOneCoverageRow(
   db: { execute: (sql: string, params: unknown[], meta?: { label: string }) => Promise<any> },
   row: SweepCoverageRow,
 ): Promise<void> {
+  // Delete-then-insert pattern: bss_coverage has no unique constraint on
+  // candidate_id (only a FK), so ON CONFLICT cannot target it.
+  await db.execute(
+    "DELETE FROM bss_coverage WHERE candidate_id = $1::uuid",
+    [row.candidate_id],
+    { label: `Clear prior coverage: ${row.candidate_id}` },
+  );
   await db.execute(
     `INSERT INTO bss_coverage
        (candidate_id, deal_id, verdict, queries_run, queries_with_hits,
@@ -573,19 +580,7 @@ export async function upsertOneCoverageRow(
         boilerplate_only, expansion_ran, expansion_overturned)
      VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5::int,
              $6::jsonb, $7::int, $8::int, $9::jsonb,
-             $10::boolean, $11::boolean, $12::boolean)
-     ON CONFLICT (candidate_id) DO UPDATE SET
-       verdict = EXCLUDED.verdict,
-       queries_run = EXCLUDED.queries_run,
-       queries_with_hits = EXCLUDED.queries_with_hits,
-       documents_searched = EXCLUDED.documents_searched,
-       documents_with_hits = EXCLUDED.documents_with_hits,
-       max_term_coverage = EXCLUDED.max_term_coverage,
-       hits = EXCLUDED.hits,
-       boilerplate_only = EXCLUDED.boilerplate_only,
-       expansion_ran = EXCLUDED.expansion_ran,
-       expansion_overturned = EXCLUDED.expansion_overturned,
-       swept_at = now()`,
+             $10::boolean, $11::boolean, $12::boolean)`,
     [
       row.candidate_id,
       row.deal_id,
