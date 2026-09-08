@@ -22,6 +22,8 @@ import type { ClaimsLedger } from "./claims-extraction.js";
 import { runFigureExtraction, type ExcelExtractionResult } from "./excel-figure-extraction.js";
 import { runReconciliationPipeline } from "./reconciliation-pipeline.js";
 import type { ReconciliationResult } from "./claims-reconciliation.js";
+import { setDealCurrency, setMaterialityFloors } from "./claims-reconciliation.js";
+import { resolveDealContext } from "./deal-context.js";
 import { runPostMergeFinalizationStages } from "./post-merge-finalization.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { runPostMergePipeline } from "./pipeline-core.js";
@@ -327,6 +329,21 @@ export async function runCcPipeline(
       // from Excel doc_tables and DD reports even when numericReport is absent.
       // baseFigures/discrepancies from NumericVerify are additive; empty is fine.
       console.log("[CC-ORCH] Entering reconciliation (" + budgetRemaining() + "ms remaining)");
+
+      // C5: Wire currency and materiality floors from deal_config
+      try {
+        const dealCtx = await resolveDealContext(ctx.integrations.db as any, dealId);
+        setDealCurrency(dealCtx.currencySymbol);
+        if (dealCtx.materialityAbsFloor != null && dealCtx.criticalAbsThreshold != null) {
+          setMaterialityFloors(dealCtx.materialityAbsFloor, dealCtx.criticalAbsThreshold);
+        }
+        console.log("[CC-ORCH] Deal config loaded: currency=" + dealCtx.currencySymbol +
+          ", absFloor=" + dealCtx.materialityAbsFloor + ", critThreshold=" + dealCtx.criticalAbsThreshold);
+      } catch (cfgErr: any) {
+        console.warn("[CC-ORCH] Could not load deal_config for currency/floors: " + cfgErr.message);
+        // Degrade gracefully — use module defaults
+      }
+
       try {
         var reconTimeBudget = Math.min(90000, Math.max(0, budgetRemaining() - 15000));
         var pipelineResult = await runReconciliationPipeline({

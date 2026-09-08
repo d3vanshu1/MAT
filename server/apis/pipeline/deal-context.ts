@@ -59,6 +59,114 @@ export interface NumericVerifyConfig {
   materialityAbsFloor?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Document Role Taxonomy (Track A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every document has exactly one role. Checks declare which roles they consume.
+ * - subject: IC memos, CIM, screener — the claim side
+ * - model: formatted forecast workbooks — data_divergence, derived_divergence
+ * - data_extract: tidy fact tables (long-format, declared dimensions) — derived_divergence
+ * - advisor_report: third-party diligence reports — attribution_divergence
+ */
+export type DocumentRole = "subject" | "model" | "data_extract" | "advisor_report" | "unassigned";
+
+/** Map document_tag → default role. Override per-deal via deal_config. */
+const TAG_TO_ROLE: Record<string, DocumentRole> = {
+  ic_memo: "subject",
+  screening_memo: "subject",
+  cim: "subject",
+  financial_model: "model",
+  returns_model: "model",
+  customer_data: "data_extract",
+  datacube: "data_extract",
+  consultant_report: "advisor_report",
+  advisor_report: "advisor_report",
+  legal_report: "advisor_report",
+};
+
+export interface DocumentWithRole {
+  id: string;
+  fileName: string;
+  documentTag: string;
+  role: DocumentRole;
+  fileType: string;
+}
+
+/**
+ * Resolve the role for a document_tag value.
+ * Returns "unassigned" for unknown tags — the diagnostic catches these.
+ */
+export function resolveDocumentRole(
+  tag: string,
+  overrides?: Record<string, DocumentRole>,
+): DocumentRole {
+  if (overrides && tag in overrides) return overrides[tag];
+  return TAG_TO_ROLE[tag] ?? "unassigned";
+}
+
+/**
+ * Load all documents for a deal with their roles resolved.
+ * Any document with role="unassigned" is a release-blocker diagnostic.
+ */
+export async function loadDocumentInventory(
+  db: DbClient,
+  dealId: string,
+  overrides?: Record<string, DocumentRole>,
+): Promise<DocumentWithRole[]> {
+  const DocRow = z.object({
+    id: z.string(),
+    file_name: z.string(),
+    document_tag: z.string(),
+    file_type: z.string(),
+  });
+
+  let offset = 0;
+  const docs: DocumentWithRole[] = [];
+  while (true) {
+    const page = await db.query(
+      `SELECT id, file_name, document_tag, file_type
+       FROM documents WHERE deal_id = $1::uuid
+       ORDER BY file_name LIMIT 50 OFFSET ${offset}`,
+      DocRow,
+      [dealId],
+      { label: `Load document inventory (offset ${offset})` },
+    );
+    if (page.length === 0) break;
+    for (const d of page) {
+      docs.push({
+        id: d.id,
+        fileName: d.file_name,
+        documentTag: d.document_tag,
+        role: resolveDocumentRole(d.document_tag, overrides),
+        fileType: d.file_type,
+      });
+    }
+    offset += page.length;
+  }
+  return docs;
+}
+
+/**
+ * Diagnostic: returns documents with role="unassigned".
+ * A non-empty result is a release-blocker per Track A acceptance criteria.
+ */
+export function getUnassignedDocuments(inventory: DocumentWithRole[]): DocumentWithRole[] {
+  return inventory.filter((d) => d.role === "unassigned");
+}
+
+/**
+ * Filter inventory by role(s).
+ */
+export function getDocumentsByRole(
+  inventory: DocumentWithRole[],
+  ...roles: DocumentRole[]
+): DocumentWithRole[] {
+  const roleSet = new Set(roles);
+  return inventory.filter((d) => roleSet.has(d.role));
+}
+
 /** Tiering-specific subset (W1.1) */
 export interface TieringDealContext {
   prose: string;

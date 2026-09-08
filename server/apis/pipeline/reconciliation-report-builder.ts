@@ -87,6 +87,8 @@ export interface BuildReconciliationReportInput {
    */
   survivingTitles: Set<string> | null;
   timings?: { extractionMs?: number | null; reconciliationMs?: number | null; totalMs?: number | null } | null;
+  /** Deal currency symbol, defaults to $ */
+  currency?: string;
 }
 
 const DocRowSchema = z.object({
@@ -246,6 +248,7 @@ export async function buildReconciliationReportMarkdown(
     timings: input.timings ?? null,
     generatedAt: new Date().toISOString(),
     topN: RECONCILIATION_REPORT_TOP_N,
+    currencySymbol: input.currency ?? "$",
   };
 
   const markdown = formatReconciliationReport(ctx);

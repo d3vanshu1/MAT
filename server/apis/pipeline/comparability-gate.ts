@@ -28,11 +28,67 @@ export type ComparabilityReasonCode =
   | "denominator_mismatch"      // D-02 variant: per_site vs per_brand
   | "implausible_ratio"         // D-03: Δ% ≥ 95% AND ≥2 orders of magnitude apart
   | "period_mismatch"           // D-04: FY vs month, YTD vs FY, LTM vs CY
+  | "frequency_mismatch"        // C1: incompatible frequencies (e.g. quarterly vs LTM)
   | "scope_mismatch"            // D-05: brand vs company total
   | "figure_fanout"             // D-06: one figure serving >1 claim with differing scope/period
   | "case_mismatch"             // D-09: management vs risk_adjusted vs base
   | "basis_mismatch"            // existing: reported vs PEP vs organic
   | "currency_mismatch";        // D-08: mismatched currency
+
+// ---------------------------------------------------------------------------
+// Frequency (C1) — month ↔ annual treated as a declared scale transform
+// ---------------------------------------------------------------------------
+
+export type Frequency = "month" | "quarter" | "year" | "ltm" | "unknown";
+
+/** Detect frequency from a period string. */
+export function detectFrequency(period: string): Frequency {
+  if (!period) return "unknown";
+  const p = period.toLowerCase().trim();
+  // Monthly: Jan-26, 01/2026, Jan 2026, M1 2026
+  if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\s]/i.test(p)) return "month";
+  if (/^\d{2}\/\d{4}$/.test(p)) return "month";
+  if (/\bm\d{1,2}\b/i.test(p)) return "month";
+  // Quarterly: Q1 2026, 1Q26
+  if (/\bq[1-4]\b/i.test(p) || /\b[1-4]q\d{2}\b/i.test(p)) return "quarter";
+  // LTM / NTM / TTM
+  if (/\b(ltm|ntm|ttm)\b/i.test(p)) return "ltm";
+  // Annual: FY2026, 2026E, CY2026, 2026A
+  if (/\b(fy|cy)?\d{4}[ea]?\b/i.test(p)) return "year";
+  return "unknown";
+}
+
+/**
+ * C1: Can two frequencies be compared?
+ * - Same frequency: always compatible
+ * - month ↔ year: compatible with ×12 or ÷12 scale transform, logged
+ * - quarter ↔ year: compatible with ×4 or ÷4 scale transform, logged
+ * - month ↔ quarter: compatible with ×3 or ÷3 scale transform, logged
+ * - ltm ↔ year: compatible (LTM ≈ annual)
+ * - unknown: compatible (don't block on missing data)
+ */
+export function frequenciesAreComparable(
+  claimFreq: Frequency,
+  figFreq: Frequency,
+): { compatible: boolean; transform?: { op: string; factor: number } } {
+  if (claimFreq === figFreq) return { compatible: true };
+  if (claimFreq === "unknown" || figFreq === "unknown") return { compatible: true };
+  // LTM ≈ year
+  if ((claimFreq === "ltm" && figFreq === "year") || (claimFreq === "year" && figFreq === "ltm")) {
+    return { compatible: true };
+  }
+  // month ↔ year
+  if (claimFreq === "month" && figFreq === "year") return { compatible: true, transform: { op: "annualize", factor: 12 } };
+  if (claimFreq === "year" && figFreq === "month") return { compatible: true, transform: { op: "monthize", factor: 1 / 12 } };
+  // quarter ↔ year
+  if (claimFreq === "quarter" && figFreq === "year") return { compatible: true, transform: { op: "annualize", factor: 4 } };
+  if (claimFreq === "year" && figFreq === "quarter") return { compatible: true, transform: { op: "quarterize", factor: 1 / 4 } };
+  // month ↔ quarter
+  if (claimFreq === "month" && figFreq === "quarter") return { compatible: true, transform: { op: "quarterize", factor: 3 } };
+  if (claimFreq === "quarter" && figFreq === "month") return { compatible: true, transform: { op: "monthize", factor: 1 / 3 } };
+  // Incompatible (shouldn't normally reach here, but fail closed)
+  return { compatible: false };
+}
 
 // ---------------------------------------------------------------------------
 // Unit class (D-02)
@@ -444,6 +500,31 @@ export function checkComparability(
     fieldsReconciled.push({ field: "period", op: "type_match", from: claimPeriod.key, to: figPeriod.key });
   }
 
+  // 3b. Frequency (C1) — month ↔ annual as declared scale transform
+  const claimFreq = detectFrequency(claim.period);
+  const figFreq = detectFrequency(nf.period);
+  const freqCompat = frequenciesAreComparable(claimFreq, figFreq);
+  if (!freqCompat.compatible) {
+    return {
+      admitted: false,
+      reason_code: "frequency_mismatch",
+      fields_matched: fieldsMatched,
+      fields_reconciled: fieldsReconciled,
+      comparability_confidence: 0,
+      detail: `claim_freq=${claimFreq} vs figure_freq=${figFreq}`,
+    };
+  }
+  if (claimFreq === figFreq || claimFreq === "unknown" || figFreq === "unknown") {
+    fieldsMatched.push("frequency");
+  } else if (freqCompat.transform) {
+    fieldsReconciled.push({
+      field: "frequency",
+      op: freqCompat.transform.op,
+      from: claimFreq,
+      to: figFreq,
+    });
+  }
+
   // 4. Scope (D-05)
   const claimScope = parseScope(claim.scope_qualifier);
   const figScope = parseScope(nf.scope_qualifier);
@@ -619,5 +700,132 @@ export function computeRunDiagnostics(
     figure_fanout_max: figureFanoutMax,
     placeholder_coordinate_count: placeholderCoordinateCount,
     report_currency: reportCurrency,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// C2: Ratio Reconstruction
+// ---------------------------------------------------------------------------
+
+/**
+ * C2: Try to match a per_unit claim by computing numerator ÷ denominator
+ * from two resolved figures.
+ *
+ * Example: claim "revenue per site = $8.5k"
+ *   → numerator: aggregate revenue figure at same period
+ *   → denominator: site count figure at same period
+ *   → computed = numerator / denominator
+ *   → compare to claim value
+ *
+ * Returns null if either input is missing (fail closed).
+ */
+export interface RatioReconstructionResult {
+  computed: number;
+  numerator: { name: string; value: number; source: string };
+  denominator: { name: string; value: number; source: string };
+  claimValue: number;
+  deltaPct: number;
+  deltaAbs: number;
+}
+
+/** Common denominator keywords for per-unit metrics */
+const DENOMINATOR_KEYWORDS: Record<string, string[]> = {
+  site: ["site", "location", "practice", "office", "clinic"],
+  fte: ["fte", "employee", "headcount", "head count", "staff"],
+  customer: ["customer", "client", "account", "advertiser", "brand"],
+  unit: ["unit", "subscriber", "user", "member"],
+  deal: ["deal", "transaction"],
+};
+
+/**
+ * Find the denominator metric keyword from a per_unit claim's denominator string.
+ * Returns the canonical denominator key or null.
+ */
+export function canonicalizeDenominator(denom: string | null): string | null {
+  if (!denom) return null;
+  const d = denom.toLowerCase().trim();
+  for (const [canonical, keywords] of Object.entries(DENOMINATOR_KEYWORDS)) {
+    if (keywords.some((k) => d.includes(k))) return canonical;
+  }
+  return d; // Use as-is if no canonical match
+}
+
+/**
+ * C2: Attempt ratio reconstruction for a per_unit claim.
+ *
+ * @param claim - The per-unit claim
+ * @param claimValue - Normalized claim value
+ * @param figures - All available figures for the deal
+ * @param claimMetric - The claim's normalized metric
+ * @param claimPeriod - The claim's normalized period
+ * @returns RatioReconstructionResult if both inputs found, null otherwise
+ */
+export function tryRatioReconstruction(
+  claim: Claim,
+  claimValue: number,
+  figures: NormalizedFigure[],
+  claimMetric: string,
+  claimPeriod: string,
+): RatioReconstructionResult | null {
+  const uc = classifyClaimUnitClass(claim);
+  if (uc.unit_class !== "per_unit" || !uc.denominator) return null;
+
+  const denomKey = canonicalizeDenominator(uc.denominator);
+  if (!denomKey) return null;
+
+  // Find numerator: aggregate figure with same metric and period
+  const numerator = figures.find((f) => {
+    const figUC = classifyFigureUnitClass(f.raw, f);
+    if (figUC.unit_class !== "aggregate") return false;
+    const metricMatch = f.metric.toLowerCase().includes(claimMetric.toLowerCase()) ||
+                        claimMetric.toLowerCase().includes(f.metric.toLowerCase());
+    const periodMatch = f.period.toLowerCase().includes(claimPeriod.toLowerCase()) ||
+                        claimPeriod.toLowerCase().includes(f.period.toLowerCase());
+    return metricMatch && periodMatch;
+  });
+
+  if (!numerator) return null;
+
+  // Find denominator: count figure with matching denominator keyword and period
+  const denominator = figures.find((f) => {
+    const figUC = classifyFigureUnitClass(f.raw, f);
+    if (figUC.unit_class !== "count" && figUC.unit_class !== "aggregate") return false;
+    const nameLC = f.raw.name.toLowerCase();
+    const keywords = DENOMINATOR_KEYWORDS[denomKey] ?? [denomKey];
+    const nameMatch = keywords.some((k) => nameLC.includes(k));
+    if (!nameMatch) return false;
+    // Must also be a count-like metric (sites, FTEs, etc.) not another monetary figure
+    if (figUC.unit_class === "aggregate") {
+      // Only allow if name clearly indicates a count
+      const countIndicators = ["count", "number", "total sites", "total locations", "headcount", "fte"];
+      if (!countIndicators.some((ci) => nameLC.includes(ci))) return false;
+    }
+    const periodMatch = f.period.toLowerCase().includes(claimPeriod.toLowerCase()) ||
+                        claimPeriod.toLowerCase().includes(f.period.toLowerCase());
+    return periodMatch;
+  });
+
+  if (!denominator) return null;
+  if (denominator.raw.value === 0) return null; // Division by zero guard
+
+  const computed = numerator.raw.value / denominator.raw.value;
+  const deltaAbs = Math.abs(claimValue - computed);
+  const deltaPct = computed !== 0 ? deltaAbs / Math.abs(computed) : (deltaAbs === 0 ? 0 : 1);
+
+  return {
+    computed,
+    numerator: {
+      name: numerator.raw.name,
+      value: numerator.raw.value,
+      source: numerator.raw.source_sheet + (numerator.raw.source_cell ? "!" + numerator.raw.source_cell : ""),
+    },
+    denominator: {
+      name: denominator.raw.name,
+      value: denominator.raw.value,
+      source: denominator.raw.source_sheet + (denominator.raw.source_cell ? "!" + denominator.raw.source_cell : ""),
+    },
+    claimValue,
+    deltaPct,
+    deltaAbs,
   };
 }
