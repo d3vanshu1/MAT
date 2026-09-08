@@ -50,9 +50,16 @@ function bssToModuleOutput(
   funnel: BssFunnel,
   dealId: string,
 ): ModuleOutput {
-  const findingsCount = findings.length;
+  // Dedup: same failure_mode from both passes → keep one
+  const seen = new Set<string>();
+  const deduped = findings.filter((f) => {
+    if (seen.has(f.failure_mode)) return false;
+    seen.add(f.failure_mode);
+    return true;
+  });
+  const findingsCount = deduped.length;
 
-  // Build executive header — mirrors tone of other modules
+  // Build executive header
   const headerParts = [`Blind Spot Scan — ${funnel.totalCandidates} candidate assumptions evaluated.`];
   if (findingsCount === 0) {
     headerParts.push("No material blind spots identified.");
@@ -60,25 +67,23 @@ function bssToModuleOutput(
     headerParts.push(`${findingsCount} blind spot${findingsCount > 1 ? "s" : ""} surfaced for IC attention.`);
   }
   headerParts.push(
-    `${funnel.droppedCovered} candidates already covered in diligence; ${funnel.droppedNotReliedUpon} assessed as thesis-independent.`,
+    `${funnel.droppedCovered} covered in diligence; ${funnel.droppedNotReliedUpon} thesis-independent.`,
   );
 
   // Map BSS findings → standard Finding[]
-  const standardFindings: Finding[] = findings.map((f) => {
+  const standardFindings: Finding[] = deduped.map((f) => {
     const analysisLines: string[] = [];
     analysisLines.push(`**Failure mode:** ${f.failure_mode}`);
     analysisLines.push(`**Hypothesis:** ${f.hypothesis}`);
     if (f.rationale) analysisLines.push(`**Rationale:** ${f.rationale}`);
-    if (f.adjudicated_verdict) analysisLines.push(`**Adjudication:** ${f.adjudicated_verdict}`);
+    if (f.adjudicated_verdict) analysisLines.push(`**Coverage verdict:** ${f.adjudicated_verdict}`);
+    if (f.adjudication_reason) analysisLines.push(`**Coverage detail:** ${f.adjudication_reason}`);
     if (f.adjudication_quote) analysisLines.push(`> ${f.adjudication_quote}`);
-    if (f.adjudication_reason) analysisLines.push(`**Reason:** ${f.adjudication_reason}`);
 
     return {
       severity: "critical" as const,
       title: f.implied_assumption,
-      detail: f.adjudicated_verdict
-        ? `${f.adjudicated_verdict}${f.adjudication_quote ? " — " + f.adjudication_quote : ""}`
-        : f.failure_mode,
+      detail: f.hypothesis,
       full_analysis: analysisLines.join("\n\n"),
       source_docs: [],
     };
@@ -88,34 +93,44 @@ function bssToModuleOutput(
   const reportLines: string[] = [
     "# Blind Spot Scan Report",
     "",
-    `**Candidates evaluated:** ${funnel.totalCandidates}`,
-    `**Findings surfaced:** ${findingsCount}`,
-    `**Dropped (already covered):** ${funnel.droppedCovered}`,
-    `**Dropped (thesis-independent):** ${funnel.droppedNotReliedUpon}`,
+    "## Summary",
+    "",
+    `| Metric | Count |`,
+    `|---|---|`,
+    `| Candidates evaluated | ${funnel.totalCandidates} |`,
+    `| **Findings** | **${findingsCount}** |`,
+    `| Covered in diligence | ${funnel.droppedCovered} |`,
+    `| Thesis-independent | ${funnel.droppedNotReliedUpon} |`,
     "",
     "---",
     "",
-    "> **Caveat — missing adviser workstreams:** This scan was limited to the uploaded data room. If adviser reports have not been uploaded, findings that overlap with those workstreams may be flagged here but already addressed in the full diligence package.",
-    "",
-    "> **Caveat — absence-based reasoning:** Some findings are based on the *absence* of discussion in the available materials. Absence does not confirm a gap; the topic may be covered in documents not provided.",
+    "> **Caveat — corpus scope:** This scan covers the uploaded data room only. An assumption may appear unaddressed here but be covered in materials not yet uploaded (board packs, management presentations, adviser working papers).",
     "",
   ];
   if (findingsCount > 0) {
     reportLines.push("## Findings", "");
-    findings.forEach((f, i) => {
+    deduped.forEach((f, i) => {
       reportLines.push(`### ${i + 1}. ${f.implied_assumption}`);
       reportLines.push("");
-      reportLines.push(`**Pass type:** ${f.pass_type}`);
-      reportLines.push(`**Failure mode:** ${f.failure_mode}`);
+      reportLines.push(`| | |`);
+      reportLines.push(`|---|---|`);
+      reportLines.push(`| **Failure mode** | ${f.failure_mode} |`);
+      reportLines.push(`| **Coverage** | ${f.adjudicated_verdict ?? "—"} |`);
+      reportLines.push(`| **Pass** | ${f.pass_type} |`);
+      reportLines.push("");
       reportLines.push(`**Hypothesis:** ${f.hypothesis}`);
-      if (f.rationale) reportLines.push(`**Rationale:** ${f.rationale}`);
-      if (f.adjudicated_verdict) reportLines.push(`**Adjudication:** ${f.adjudicated_verdict}`);
-      if (f.adjudication_quote) reportLines.push(`> ${f.adjudication_quote}`);
-      if (f.adjudication_reason) reportLines.push(`**Reason:** ${f.adjudication_reason}`);
+      if (f.adjudication_reason) {
+        reportLines.push("");
+        reportLines.push(`**Why this is a blind spot:** ${f.adjudication_reason}`);
+      }
+      if (f.adjudication_quote) {
+        reportLines.push("");
+        reportLines.push(`> ${f.adjudication_quote}`);
+      }
       reportLines.push("");
     });
   } else {
-    reportLines.push("## No Findings", "", "All candidates were either already covered in the diligence materials or assessed as non-material.", "");
+    reportLines.push("## No Findings", "", "All candidates were either already covered in the diligence materials or assessed as thesis-independent.", "");
   }
 
   return {
@@ -2179,7 +2194,7 @@ export default function DealDashboardPage() {
                   completed_at: new Date().toISOString(),
                   documents_included: docs.map((d) => d.file_name),
                   findings_count: bssFindings.length,
-                  critical_count: bssFindings.length, // all BSS findings are critical-tier
+                  critical_count: bssFindings.filter((f, i, arr) => arr.findIndex(x => x.failure_mode === f.failure_mode) === i).length,
                 },
                 latestOutput: bssOutput,
               },
