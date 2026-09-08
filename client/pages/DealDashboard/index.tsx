@@ -45,6 +45,54 @@ interface BssFunnel {
 }
 
 /** Convert BSS findings + funnel into the standard ModuleOutput shape used by ModuleCard / ModuleOutput. */
+// BSS severity tiering: assess deal impact based on failure mode characteristics.
+// T1 = thesis-breaking, T2 = material (>200bps IRR), T3 = notable but bounded.
+function bssSeverity(f: BssFinding): "critical" | "warning" | "info" {
+  // Thesis-breaking: attacks the core revenue engine or return math
+  const T1_MODES = new Set([
+    "pharma_ad_budget_cyclicality",  // entire revenue depends on pharma POC budget
+    "physician_office_churn",        // network scale is core defensibility
+    "customer_concentration",        // single-advertiser loss breaks forecast
+    "brand_concentration_in_backlog", // LOE cliff risk in hold period
+  ]);
+  // Notable but bounded
+  const T3_MODES = new Set([
+    "office_manager_operational_load", // gradual margin headwind, ~100-150bps
+  ]);
+  if (T1_MODES.has(f.failure_mode)) return "critical";
+  if (T3_MODES.has(f.failure_mode)) return "info";
+  return "warning"; // T2 default: material but not thesis-breaking
+}
+
+function bssTierLabel(sev: "critical" | "warning" | "info"): string {
+  if (sev === "critical") return "T1";
+  if (sev === "warning") return "T2";
+  return "T3";
+}
+
+function formatBssFinding(f: BssFinding, num: number): string[] {
+  const lines: string[] = [];
+  lines.push(`### ${num}. ${f.implied_assumption}`);
+  lines.push("");
+  lines.push(`| | |`);
+  lines.push(`|---|---|`);
+  lines.push(`| **Failure mode** | ${f.failure_mode} |`);
+  lines.push(`| **Coverage** | ${f.adjudicated_verdict ?? "—"} |`);
+  lines.push(`| **Pass** | ${f.pass_type} |`);
+  lines.push("");
+  lines.push(`**Hypothesis:** ${f.hypothesis}`);
+  if (f.adjudication_reason) {
+    lines.push("");
+    lines.push(`**Why this is a blind spot:** ${f.adjudication_reason}`);
+  }
+  if (f.adjudication_quote) {
+    lines.push("");
+    lines.push(`> ${f.adjudication_quote}`);
+  }
+  lines.push("");
+  return lines;
+}
+
 function bssToModuleOutput(
   findings: BssFinding[],
   funnel: BssFunnel,
@@ -59,20 +107,33 @@ function bssToModuleOutput(
   });
   const findingsCount = deduped.length;
 
+  // Severity counts
+  const t1Count = deduped.filter((f) => bssSeverity(f) === "critical").length;
+  const t2Count = deduped.filter((f) => bssSeverity(f) === "warning").length;
+  const t3Count = deduped.filter((f) => bssSeverity(f) === "info").length;
+
   // Build executive header
   const headerParts = [`Blind Spot Scan — ${funnel.totalCandidates} candidate assumptions evaluated.`];
   if (findingsCount === 0) {
     headerParts.push("No material blind spots identified.");
   } else {
-    headerParts.push(`${findingsCount} blind spot${findingsCount > 1 ? "s" : ""} surfaced for IC attention.`);
+    const tierSummary = [t1Count > 0 ? `${t1Count} T1` : "", t2Count > 0 ? `${t2Count} T2` : "", t3Count > 0 ? `${t3Count} T3` : ""].filter(Boolean).join(" / ");
+    headerParts.push(`${findingsCount} blind spots surfaced (${tierSummary}).`);
   }
   headerParts.push(
     `${funnel.droppedCovered} covered in diligence; ${funnel.droppedNotReliedUpon} thesis-independent.`,
   );
 
-  // Map BSS findings → standard Finding[]
-  const standardFindings: Finding[] = deduped.map((f) => {
+  // Map BSS findings → standard Finding[], sorted by severity
+  const sorted = [...deduped].sort((a, b) => {
+    const order = { critical: 0, warning: 1, info: 2 };
+    return order[bssSeverity(a)] - order[bssSeverity(b)];
+  });
+  const standardFindings: Finding[] = sorted.map((f) => {
+    const sev = bssSeverity(f);
+    const tier = bssTierLabel(sev);
     const analysisLines: string[] = [];
+    analysisLines.push(`**Severity:** ${tier} — ${sev === "critical" ? "Deal-breaking" : sev === "warning" ? "Material" : "Notable"}`);
     analysisLines.push(`**Failure mode:** ${f.failure_mode}`);
     analysisLines.push(`**Hypothesis:** ${f.hypothesis}`);
     if (f.rationale) analysisLines.push(`**Rationale:** ${f.rationale}`);
@@ -81,8 +142,8 @@ function bssToModuleOutput(
     if (f.adjudication_quote) analysisLines.push(`> ${f.adjudication_quote}`);
 
     return {
-      severity: "critical" as const,
-      title: f.implied_assumption,
+      severity: sev,
+      title: `[${tier}] ${f.implied_assumption}`,
       detail: f.hypothesis,
       full_analysis: analysisLines.join("\n\n"),
       source_docs: [],
@@ -99,6 +160,9 @@ function bssToModuleOutput(
     `|---|---|`,
     `| Candidates evaluated | ${funnel.totalCandidates} |`,
     `| **Findings** | **${findingsCount}** |`,
+    `| — T1 (deal-breaking) | ${t1Count} |`,
+    `| — T2 (material) | ${t2Count} |`,
+    `| — T3 (notable) | ${t3Count} |`,
     `| Covered in diligence | ${funnel.droppedCovered} |`,
     `| Thesis-independent | ${funnel.droppedNotReliedUpon} |`,
     "",
@@ -108,27 +172,31 @@ function bssToModuleOutput(
     "",
   ];
   if (findingsCount > 0) {
-    reportLines.push("## Findings", "");
-    deduped.forEach((f, i) => {
-      reportLines.push(`### ${i + 1}. ${f.implied_assumption}`);
-      reportLines.push("");
-      reportLines.push(`| | |`);
-      reportLines.push(`|---|---|`);
-      reportLines.push(`| **Failure mode** | ${f.failure_mode} |`);
-      reportLines.push(`| **Coverage** | ${f.adjudicated_verdict ?? "—"} |`);
-      reportLines.push(`| **Pass** | ${f.pass_type} |`);
-      reportLines.push("");
-      reportLines.push(`**Hypothesis:** ${f.hypothesis}`);
-      if (f.adjudication_reason) {
-        reportLines.push("");
-        reportLines.push(`**Why this is a blind spot:** ${f.adjudication_reason}`);
-      }
-      if (f.adjudication_quote) {
-        reportLines.push("");
-        reportLines.push(`> ${f.adjudication_quote}`);
-      }
-      reportLines.push("");
-    });
+    // Group by tier for the report
+    const byTier = { critical: sorted.filter(f => bssSeverity(f) === "critical"), warning: sorted.filter(f => bssSeverity(f) === "warning"), info: sorted.filter(f => bssSeverity(f) === "info") };
+    let findingNum = 0;
+
+    if (byTier.critical.length > 0) {
+      reportLines.push("## T1 — Deal-Breaking", "");
+      byTier.critical.forEach((f) => {
+        findingNum++;
+        reportLines.push(...formatBssFinding(f, findingNum));
+      });
+    }
+    if (byTier.warning.length > 0) {
+      reportLines.push("## T2 — Material", "");
+      byTier.warning.forEach((f) => {
+        findingNum++;
+        reportLines.push(...formatBssFinding(f, findingNum));
+      });
+    }
+    if (byTier.info.length > 0) {
+      reportLines.push("## T3 — Notable", "");
+      byTier.info.forEach((f) => {
+        findingNum++;
+        reportLines.push(...formatBssFinding(f, findingNum));
+      });
+    }
   } else {
     reportLines.push("## No Findings", "", "All candidates were either already covered in the diligence materials or assessed as thesis-independent.", "");
   }
@@ -2194,7 +2262,7 @@ export default function DealDashboardPage() {
                   completed_at: new Date().toISOString(),
                   documents_included: docs.map((d) => d.file_name),
                   findings_count: bssFindings.length,
-                  critical_count: bssFindings.filter((f, i, arr) => arr.findIndex(x => x.failure_mode === f.failure_mode) === i).length,
+                  critical_count: bssFindings.filter((f, i, arr) => arr.findIndex(x => x.failure_mode === f.failure_mode) === i && bssSeverity(f) === "critical").length,
                 },
                 latestOutput: bssOutput,
               },
