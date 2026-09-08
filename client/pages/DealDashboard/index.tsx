@@ -52,8 +52,6 @@ function bssSeverity(f: BssFinding): "critical" | "warning" | "info" {
   const T1_MODES = new Set([
     "pharma_ad_budget_cyclicality",  // entire revenue depends on pharma POC budget
     "physician_office_churn",        // network scale is core defensibility
-    "customer_concentration",        // single-advertiser loss breaks forecast
-    "brand_concentration_in_backlog", // LOE cliff risk in hold period
   ]);
   // Notable but bounded
   const T3_MODES = new Set([
