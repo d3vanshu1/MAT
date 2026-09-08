@@ -43,7 +43,7 @@
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { callLLMWithHeadroom } from "./call-llm.js";
-import { getModuleModel } from "./model-config.js";
+import { getModuleModel, SONNET_MODEL } from "./model-config.js";
 import { sha256hex } from "./sha256-pure.js";
 import { BSS_V2_MODULE_ID, FORBIDDEN_KEY_PATTERN, PROFILE_FIELDS, THESIS_FIELDS } from "./bss-profile.js";
 import type { PipelineContext } from "./pipeline-config.js";
@@ -656,25 +656,42 @@ export async function runBssGenerateCore(
 
     // useOpus = true. This pass is generating hypotheses from eight phrases with
     // no corpus to lean on; the whole output quality is the reasoning.
-    const generationModel = getModuleModel(BSS_V2_MODULE_ID, true);
+    let generationModel = getModuleModel(BSS_V2_MODULE_ID, true);
 
     console.log(
       `${LOG_PREFIX} prompt assembled: ${promptChars} chars, model=${generationModel}, ` +
         `sha256=${promptHash.slice(0, 16)}…, leakage assertion passed.`,
     );
 
-    // ── Step 4: the single LLM call ───────────────────────────────────────
+    // ── Step 4: the single LLM call (with Sonnet fallback) ─────────────────
     const callStart = Date.now();
-    const response = await callLLMWithHeadroom(
-      pipelineCtx,
-      {
-        model: generationModel,
-        max_tokens: MAX_OUTPUT_TOKENS,
-        messages: [{ role: "user", content: prompt }],
-      },
-      `BSSGenerate: ${passType} candidates`,
-      { pipelineStartTime, maxPerCallTimeout: MAX_PER_CALL_TIMEOUT_MS, retries: RETRIES },
-    );
+    let response;
+    try {
+      response = await callLLMWithHeadroom(
+        pipelineCtx,
+        {
+          model: generationModel,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          messages: [{ role: "user", content: prompt }],
+        },
+        `BSSGenerate: ${passType} candidates`,
+        { pipelineStartTime, maxPerCallTimeout: MAX_PER_CALL_TIMEOUT_MS, retries: RETRIES },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`${LOG_PREFIX} ${generationModel} failed for ${passType} (${msg}) — falling back to ${SONNET_MODEL}.`);
+      generationModel = SONNET_MODEL;
+      response = await callLLMWithHeadroom(
+        pipelineCtx,
+        {
+          model: generationModel,
+          max_tokens: MAX_OUTPUT_TOKENS,
+          messages: [{ role: "user", content: prompt }],
+        },
+        `BSSGenerate: ${passType} candidates (fallback)`,
+        { pipelineStartTime, maxPerCallTimeout: MAX_PER_CALL_TIMEOUT_MS, retries: 1 },
+      );
+    }
     const llmCallMs = Date.now() - callStart;
 
     const rawText = response.content.find((c) => c.type === "text")?.text ?? "";
