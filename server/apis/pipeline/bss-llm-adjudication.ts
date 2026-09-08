@@ -942,6 +942,61 @@ export async function adjudicateOneCandidate(
   totalIn += cov.tokens.input;
   totalOut += cov.tokens.output;
 
+  // Stage 3a.1: Verdict–reason consistency gate
+  // If the LLM's own reasoning describes thorough coverage but the verdict
+  // is only MENTIONED, promote to ADDRESSED. This catches the calibration gap
+  // where the model writes "directly quantifies" / "explicitly tests" but
+  // still conservatively stamps MENTIONED.
+  if (cov.verdict.verdict === "MENTIONED" && cov.verdict.reason) {
+    const r = cov.verdict.reason.toLowerCase();
+    const ADDRESSED_SIGNALS = [
+      "directly quantif",
+      "directly test",
+      "explicitly test",
+      "explicitly analyz",
+      "comprehensively address",
+      "directly address",
+      "directly engag",
+      "thoroughly analyz",
+      "quantifies and analyz",
+      "detailed analysis of",
+      "specific data on",
+      "directly measures",
+    ];
+    // Negative signals: diligence found the problem but didn't resolve it.
+    // "Directly tests and flags a gap" ≠ "addressed" — it means diligence
+    // confirmed the risk exists. Don't promote these.
+    const UNRESOLVED_SIGNALS = [
+      "flags a concrete gap",
+      "flags a gap",
+      "confirms the weakness",
+      "confirming the gap",
+      "confirming the weakness",
+      "no independent measurement",
+      "not yet been obtained",
+      "distrust vendor",
+      "has not yet",
+      "remains unresolved",
+      "outstanding item",
+      "open item",
+      "not been completed",
+      "gap identified",
+    ];
+    const hasUnresolved = UNRESOLVED_SIGNALS.some((s) => r.includes(s));
+    const selfContradiction = ADDRESSED_SIGNALS.some((s) => r.includes(s)) && !hasUnresolved;
+    if (selfContradiction) {
+      console.log(
+        `[BSS-ADJ] Consistency gate: promoting ${cand.failure_mode} from MENTIONED→ADDRESSED ` +
+        `(reason self-contradicts verdict: "${cov.verdict.reason.slice(0, 120)}...")`,
+      );
+      cov.verdict.verdict = "ADDRESSED";
+      cov.verdict.overridden = true;
+      cov.verdict.overrideReason =
+        "Promoted by verdict-reason consistency gate: adjudicator's own reasoning " +
+        "describes direct, quantified coverage but stamped MENTIONED.";
+    }
+  }
+
   // Stage 3b: Dependency (always runs — coverage and dependency are orthogonal questions)
   const dep = await adjudicateDependency(ai, cand, retrieval.dependencyChunks, retrieval.dependencyQueryCount);
   totalIn += dep.tokens.input;
