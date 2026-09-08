@@ -122,6 +122,14 @@ export interface ReconciliationReportContext {
   generatedAt?: string | null;
   /** Presentation cap actually applied, for disclosure in §2. */
   topN?: number;
+  /** D-08: Deal currency symbol (e.g., '$', '£', '€'). Defaults to '$'. */
+  currencySymbol?: string;
+  /** D-07: Run-level diagnostics from comparability gate. */
+  comparabilityDiagnostics?: {
+    not_comparable_count: number;
+    figure_fanout_max: number;
+    placeholder_coordinate_count: number;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,13 +173,15 @@ function formatETDate(iso: string | null | undefined): string {
   }
 }
 
-/** Raw pounds → £Xm / £Xk. Reconciliation deltas are always in raw £. */
+/** Raw value → ${sym}Xm / ${sym}Xk. Currency symbol from deal config (D-08). */
+let _currencySymbol = "$"; // Module-level default, set per report render
 function money(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return "n/a";
+  const s = _currencySymbol;
   const a = Math.abs(v);
-  if (a >= 1_000_000) return `£${(v / 1_000_000).toFixed(1)}m`;
-  if (a >= 1_000) return `£${(v / 1_000).toFixed(0)}k`;
-  return `£${v.toFixed(0)}`;
+  if (a >= 1_000_000) return `${s}${(v / 1_000_000).toFixed(1)}m`;
+  if (a >= 1_000) return `${s}${(v / 1_000).toFixed(0)}k`;
+  return `${s}${v.toFixed(0)}`;
 }
 
 /** Fraction (0.153) → "15.3%". */
@@ -275,6 +285,9 @@ function countEntries(counts: Record<string, number> | undefined): Array<[string
 // ---------------------------------------------------------------------------
 
 export function formatReconciliationReport(ctx: ReconciliationReportContext): string {
+  // D-08: Set currency symbol for this report render
+  _currencySymbol = ctx.currencySymbol ?? "$";
+
   const lines: string[] = [];
 
   const presented = presentedFindings(ctx.ranked);
@@ -404,9 +417,9 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
       // Delta.
       if (f.delta_abs !== null || f.delta_pct !== null) {
         const floorNote = r.floors.both_cleared
-          ? "clears both materiality floors (£2m and 5%)"
+          ? `clears both materiality floors (${_currencySymbol}2m and 5%)`
           : r.floors.abs_cleared
-            ? "clears the £2m absolute floor"
+            ? `clears the ${_currencySymbol}2m absolute floor`
             : r.floors.rel_cleared
               ? "clears the 5% relative floor"
               : "clears neither materiality floor";
@@ -490,7 +503,7 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
   lines.push(`- ${cov.no_period_count} excluded for having no stated period — a claim without a period has no coordinate to match on`);
   lines.push(`- ${cov.ambiguous_reference_count} hit an ambiguous model coordinate resolving to multiple disagreeing figures — failed closed rather than guess`);
   if (rec.near_miss_unit_rejected > 0) {
-    lines.push(`- ${rec.near_miss_unit_rejected} near-miss candidates rejected on unit incompatibility (e.g. % against £)`);
+    lines.push(`- ${rec.near_miss_unit_rejected} near-miss candidates rejected on unit incompatibility (e.g. % against ${_currencySymbol})`);
   }
   lines.push(`- ${cov.unmatched} adjudicable claims found no model figure at their coordinate`);
   lines.push("");

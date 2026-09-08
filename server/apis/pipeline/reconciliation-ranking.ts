@@ -77,11 +77,15 @@ const MAGNITUDE_SCALE = 15;
 const MAGNITUDE_CAP = 30;
 
 /**
- * Percentage magnitude: delta_pct(as %) x 1.33, clamped to [0, 20].
- * 1.33 is chosen so the cap is reached exactly at the 15% critical threshold
- * (claims-reconciliation.ts:669) — beyond that, percentage stops discriminating
- * and absolute magnitude decides.
+ * D-12: Percentage scoring with peak + decay.
+ * Peaks at ~15% (the critical threshold) then decays — a 15% delta
+ * should score higher than a 900% delta (which signals a scale/unit error).
+ * Uses a bell-like curve: 20 · (x/15) · e^(1 - x/15) for x > 0.
+ * Peak value is 20 at x=15%. Decays to ~7.4 at 100%, ~1.5 at 900%.
  */
+const PERCENTAGE_PEAK = 20;
+const PERCENTAGE_PEAK_AT = 15; // percent
+// Legacy constants kept for reference:
 const PERCENTAGE_SCALE = 1.33;
 const PERCENTAGE_CAP = 20;
 
@@ -175,8 +179,20 @@ export function scoreReconciliationFinding(finding: ReconciliationFinding): {
     MAGNITUDE_CAP,
   );
 
-  const deltaPct = Math.abs(finding.delta_pct ?? 0);
-  const percentagePoints = clamp(deltaPct * 100 * PERCENTAGE_SCALE, 0, PERCENTAGE_CAP);
+  // D-12: Bell-curve percentage scoring — peak at 15%, decay above.
+  // f(x) = PEAK · (x / PEAK_AT) · e^(1 - x / PEAK_AT), x in %.
+  const deltaPctAbs = Math.abs(finding.delta_pct ?? 0) * 100; // as percentage
+  let percentagePoints: number;
+  if (deltaPctAbs <= 0) {
+    percentagePoints = 0;
+  } else {
+    const normalized = deltaPctAbs / PERCENTAGE_PEAK_AT; // 1.0 at the peak
+    percentagePoints = clamp(
+      PERCENTAGE_PEAK * normalized * Math.exp(1 - normalized),
+      0,
+      PERCENTAGE_PEAK,
+    );
+  }
 
   const components: ScoreComponents = {
     class_base: classBase,

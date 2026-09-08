@@ -23,6 +23,11 @@ import { z } from "@superblocksteam/sdk-api";
 import type { Claim, ClaimsLedger } from "./claims-extraction.js";
 import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { PipelineContext } from "./pipeline-config.js";
+import {
+  checkComparability,
+  type ComparabilityResult,
+  type ComparabilityReasonCode,
+} from "./comparability-gate.js";
 
 // ---------------------------------------------------------------------------
 // UUID helper (cross-environment — avoids Node `crypto` import that Vite externalizes)
@@ -44,7 +49,7 @@ function generateUUID(): string {
 // ---------------------------------------------------------------------------
 
 export interface ReconciliationFinding {
-  finding_kind: "data_divergence" | "unreconcilable" | "scope_mismatch" | "cross_version";
+  finding_kind: "data_divergence" | "unreconcilable" | "scope_mismatch" | "cross_version" | "not_comparable" | "basis_divergence";
   severity: "critical" | "warning" | "info";
   title: string;
   detail: string;
@@ -102,8 +107,12 @@ export interface ReconciliationResult {
   near_miss_count: number;
   /** F1: Claims that hit an ambiguous multi-figure key (fail-closed, no assertion) */
   ambiguous_reference_count: number;
-  /** 1.1: Near-miss candidates rejected by unit compatibility (% vs £) */
+  /** 1.1: Near-miss candidates rejected by unit compatibility (% vs $) */
   near_miss_unit_rejected: number;
+  /** D-02..D-09: Pairs rejected by the comparability gate (not_comparable findings) */
+  not_comparable_count: number;
+  /** D-06: Max figure fanout across all matched pairs */
+  figure_fanout_max: number;
   /** Internal error from LLM matching step (null if LLM succeeded or wasn't attempted) */
   matching_error?: string | null;
   /** Fix 20: Total supersession diagnostics emitted during this reconciliation.
@@ -170,7 +179,9 @@ export type UnitFamily = "absolute_gbp" | "rate_pct" | "multiplier" | "count" | 
 
 export function classifyClaimUnit(unit: string): UnitFamily {
   const u = unit.trim().toLowerCase();
-  if (u === "£m" || u === "£k" || u === "£" || u === "£bn") return "absolute_gbp";
+  if (u === "£m" || u === "£k" || u === "£" || u === "£bn" ||
+      u === "$m" || u === "$k" || u === "$" || u === "$bn" ||
+      u === "€m" || u === "€k" || u === "€") return "absolute_gbp";
   if (u === "%" || u === "bps" || u === "pp") return "rate_pct";
   if (u === "x" || u === "turns") return "multiplier";
   if (u === "#" || u === "headcount" || u === "units") return "count";
@@ -298,10 +309,33 @@ function ebitdaBasisCompatible(claim: Claim, modelFig: Figure): boolean {
 // ---------------------------------------------------------------------------
 // Materiality thresholds
 // ---------------------------------------------------------------------------
-const MATERIALITY_ABS_FLOOR = 2_000_000; // £2m — below this, delta is not material
+const MATERIALITY_ABS_FLOOR = 2_000_000; // $2m — below this, delta is not material
 const MATERIALITY_REL_FLOOR = 0.05;      // 5% — below this, delta is not material
-const CRITICAL_ABS_THRESHOLD = 10_000_000; // £10m — above this, finding is critical
+const CRITICAL_ABS_THRESHOLD = 10_000_000; // $10m — above this, finding is critical
 const CRITICAL_REL_THRESHOLD = 0.15;       // 15%
+
+// ---------------------------------------------------------------------------
+// D-08: Currency-aware formatting. Set per reconciliation run.
+// ---------------------------------------------------------------------------
+let _dealCurrency = "$";
+
+/** Set the deal currency symbol for this reconciliation run. */
+export function setDealCurrency(symbol: string): void {
+  _dealCurrency = symbol || "$";
+}
+
+/** Get current deal currency symbol. */
+export function getDealCurrency(): string {
+  return _dealCurrency;
+}
+
+/** Format a raw value as currency with appropriate scale. */
+export function formatMoney(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1_000_000) return `${_dealCurrency}${(v / 1_000_000).toFixed(1)}m`;
+  if (a >= 1_000) return `${_dealCurrency}${(v / 1_000).toFixed(0)}k`;
+  return `${_dealCurrency}${v.toFixed(0)}`;
+}
 
 // ---------------------------------------------------------------------------
 // Coordinate normalization — model-side mapping into claims vocabulary
@@ -623,7 +657,7 @@ function fuzzyPeriodLookup(
 
 /** Result from processMatch — caller updates counters */
 interface MatchResult {
-  kind: "reconciled" | "within_tolerance" | "scope_mismatch" | "unreconcilable";
+  kind: "reconciled" | "within_tolerance" | "scope_mismatch" | "unreconcilable" | "not_comparable";
   finding: ReconciliationFinding | null;
 }
 
@@ -639,6 +673,38 @@ function processMatch(
   options?: { basisUnconfirmed?: boolean; periodBasisUnconfirmed?: boolean },
 ): MatchResult {
   const modelFig = nf.raw;
+
+  // ── D-10: Comparability gate FIRST (before any materiality/delta logic) ──
+  // Compute values needed for the gate
+  const preClaimVal = normalizeClaimValue(claim);
+  const preModelVal = alignPercentageScale(preClaimVal, claim.unit, modelFig.value);
+
+  const comparability = checkComparability(claim, nf, preClaimVal, preModelVal);
+  if (!comparability.admitted) {
+    // D-09: case_mismatch with both non-unstated → basis_divergence
+    const findingKind = comparability.reason_code === "case_mismatch"
+      ? "basis_divergence" as const
+      : "not_comparable" as const;
+
+    findings.push({
+      finding_kind: findingKind,
+      severity: "info",
+      title: `${claim.scope_qualifier} (${claim.period}): ${comparability.reason_code}`,
+      detail: comparability.detail ?? `Comparability gate failed: ${comparability.reason_code}`,
+      full_analysis: `[${comparability.reason_code!.toUpperCase()}] Comparability gate rejection.\n` +
+        `  Claim: "${claim.verbatim_snippet}" → ${formatValue(claim)}\n` +
+        `  Model: "${modelFig.name}" ${modelFig.period} → ${formatMoney(preModelVal)} (source: ${modelFig.source_sheet}!${modelFig.source_cell})\n` +
+        `  Fields matched: [${comparability.fields_matched.join(", ")}]\n` +
+        `  Reason: ${comparability.reason_code} — ${comparability.detail ?? ""}`,
+      severity_anchor: null,
+      source_docs: [claim.source_doc],
+      claim,
+      model_figure: modelFig,
+      delta_abs: null,
+      delta_pct: null,
+    });
+    return { kind: "scope_mismatch", finding: findings[findings.length - 1] };
+  }
 
   // Guard 1: Unit compatibility
   const claimFamily = classifyClaimUnit(claim.unit);
@@ -781,7 +847,7 @@ function processMatch(
       title: `${claim.scope_qualifier} (${claim.period}): period_basis_unconfirmed — matched against forecast figure`,
       detail: `Claim period "${claim.period}" has no exact match in actuals. ` +
         `Matched against forecast figure "${nf.raw.name}" at ${nf.raw.period}. ` +
-        `Delta: ${deltaAbs >= 1_000_000 ? `£${(deltaAbs / 1_000_000).toFixed(1)}m` : `£${(deltaAbs / 1_000).toFixed(0)}k`} (${(deltaPct * 100).toFixed(1)}%). Not asserted as contradiction.`,
+        `Delta: ${formatMoney(deltaAbs)} (${(deltaPct * 100).toFixed(1)}%). Not asserted as contradiction.`,
       full_analysis: `[PERIOD_BASIS_UNCONFIRMED] Forecast-relaxed match. Claim: "${claim.verbatim_snippet}" ` +
         `(period="${claim.period}"). Model: "${nf.raw.name}" at period="${nf.raw.period}" (forecast suffix). ` +
         `Matched by stripping actual/forecast distinction. Delta not asserted as definitive divergence.`,
@@ -796,19 +862,17 @@ function processMatch(
   }
 
   const sign = claimVal > modelVal ? "higher" : "lower";
-  const deltaFormatted = deltaAbs >= 1_000_000
-    ? `£${(deltaAbs / 1_000_000).toFixed(1)}m`
-    : `£${(deltaAbs / 1_000).toFixed(0)}k`;
+  const deltaFormatted = formatMoney(deltaAbs);
 
   const finding: ReconciliationFinding = {
     finding_kind: "data_divergence",
     severity,
     title: `${claim.scope_qualifier} (${claim.period}): memo ${sign} than model by ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%)`,
-    detail: `Memo cites ${formatValue(claim)} but model shows £${(modelVal / 1_000_000).toFixed(1)}m ` +
+    detail: `Memo cites ${formatValue(claim)} but model shows ${formatMoney(modelVal)} ` +
       `for "${modelFig.name}" (${modelFig.period}). Delta: ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%).`,
     full_analysis: `[DATA_DIVERGENCE] Code-verified delta computation.\n` +
-      `  Claim: "${claim.verbatim_snippet}" → ${formatValue(claim)} (normalized: £${(claimVal / 1_000_000).toFixed(2)}m)\n` +
-      `  Model: "${modelFig.name}" ${modelFig.period} → £${(modelVal / 1_000_000).toFixed(2)}m (source: ${modelFig.source_sheet}!${modelFig.source_cell})\n` +
+      `  Claim: "${claim.verbatim_snippet}" → ${formatValue(claim)} (normalized: ${formatMoney(claimVal)})\n` +
+      `  Model: "${modelFig.name}" ${modelFig.period} → ${formatMoney(modelVal)} (source: ${modelFig.source_sheet}!${modelFig.source_cell})\n` +
       `  Delta: ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%) — memo is ${sign}\n` +
       `  Materiality: abs=${deltaAbs >= MATERIALITY_ABS_FLOOR ? "ABOVE" : "below"} floor (${MATERIALITY_ABS_FLOOR/1e6}m), ` +
       `rel=${deltaPct >= MATERIALITY_REL_FLOOR ? "ABOVE" : "below"} floor (${(MATERIALITY_REL_FLOOR*100)}%)\n` +
@@ -1660,6 +1724,8 @@ export async function runReconciliation(
     cross_version_findings,
     near_miss_count,
     near_miss_unit_rejected: near_miss_unit_rejected_total,
+    not_comparable_count: findings.filter(f => f.finding_kind === "not_comparable" || f.finding_kind === "basis_divergence").length,
+    figure_fanout_max: 0, // Populated by caller if figure fanout check is run
     ambiguous_reference_count,
     matching_error,
     coverage: {
