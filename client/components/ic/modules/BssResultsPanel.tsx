@@ -5,7 +5,7 @@
  * - Funnel summary: N candidates → M findings, with drop counts
  * - Each finding: assumption, adjudication verdict + quote, dependency evidence
  * - Two standing caveats:
- *   1. Suspect flag for missing adviser workstreams (EQTR, Hakluyt, Kolayo)
+ *   1. Suspect flag for missing adviser workstreams (from deal_config)
  *   2. Over-reported-absence caveat on all findings
  * - Collapsed drops section: how many dropped_covered and dropped_no_dependency
  */
@@ -48,13 +48,11 @@ export interface BssFunnel {
 interface BssResultsPanelProps {
   findings: BssFinding[];
   funnel: BssFunnel;
+  /** W2.1: Adviser workstreams from deal_config. Empty array = no caveat. */
+  adviserWorkstreams?: string[];
 }
 
-// ── Suspect-flag workstreams ──────────────────────────────────────────────
-
-const SUSPECT_WORKSTREAMS = ["EQTR", "Hakluyt", "Kolayo"];
-
-export default function BssResultsPanel({ findings, funnel }: BssResultsPanelProps) {
+export default function BssResultsPanel({ findings, funnel, adviserWorkstreams = [] }: BssResultsPanelProps) {
   const [showDrops, setShowDrops] = useState(false);
 
   const totalDropped = funnel.droppedCovered + funnel.droppedNotReliedUpon;
@@ -114,12 +112,14 @@ export default function BssResultsPanel({ findings, funnel }: BssResultsPanelPro
               presentations, working group outputs). Findings should be read as
               &ldquo;not found in the indexed evidence&rdquo; rather than &ldquo;not addressed.&rdquo;
             </p>
+            {adviserWorkstreams.length > 0 && (
             <p>
               <strong>Suspect workstream flag:</strong> If adviser workstreams that are expected
-              for this deal type (specifically: {SUSPECT_WORKSTREAMS.join(", ")}) have not been
+              for this deal type (specifically: {adviserWorkstreams.join(", ")}) have not been
               uploaded, any finding that would be addressed by those workstreams may be a
               false positive. Review those findings with additional scrutiny.
             </p>
+            )}
           </div>
         </div>
       </div>

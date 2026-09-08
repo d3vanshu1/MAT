@@ -15,6 +15,14 @@
 
 import { tierFindings } from "../materiality-tiering-stage.js";
 import type { CanonicalFinding } from "../canonical-finding.js";
+import type { TieringDealContext } from "../deal-context.js";
+
+// W1.1: Test fixture for deal context — uses SCG values as baseline
+const TEST_DEAL_CONTEXT: TieringDealContext = {
+  prose: "Test deal. Enterprise Value $100m. Base case: 20% IRR / 2.5x MoM.",
+  enterpriseValueLabel: "$100m EV",
+  baseCaseLabel: "20% IRR / 2.5x MoM",
+};
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -202,7 +210,7 @@ async function runTests() {
       { tier: 3, rationale: "Immaterial at £655m EV", driver: "none" },
     ]);
 
-    await tierFindings(findings, queryFn, aiFn, "test-run-1:materiality");
+    await tierFindings(findings, queryFn, aiFn, "test-run-1:materiality", TEST_DEAL_CONTEXT);
 
     const ff1 = findings.find(f => f.finding_id === F1_ID)!;
     const ff2 = findings.find(f => f.finding_id === F2_ID)!;
@@ -246,7 +254,7 @@ async function runTests() {
     const aiFnBase = makeStubAiFn([]);
     const wrappedAiFn = async (req: any, opts: any, meta?: any) => { aiFnCalled++; return aiFnBase(req, opts, meta); };
 
-    await tierFindings(findings, queryFn, wrappedAiFn, "test-run-2:materiality");
+    await tierFindings(findings, queryFn, wrappedAiFn, "test-run-2:materiality", TEST_DEAL_CONTEXT);
 
     const ff4 = findings[0];
     assert(ff4.materiality_tier === undefined, `f4 materiality_tier is undefined (not tiered)`);
@@ -282,7 +290,7 @@ async function runTests() {
       return aiFnBase(req, opts, meta);
     };
 
-    const result = await tierFindings(findings, queryFn, aiFn, CHECKPOINT_KEY);
+    const result = await tierFindings(findings, queryFn, aiFn, CHECKPOINT_KEY, TEST_DEAL_CONTEXT);
 
     // f1 should be applied from checkpoint without calling AI
     const ff1 = findings.find(f => f.finding_id === F1_ID)!;
@@ -336,7 +344,7 @@ async function runTests() {
       "throw", // f2 will fail
     ]);
 
-    await tierFindings(findings, queryFn, aiFn, "test-run-4:materiality");
+    await tierFindings(findings, queryFn, aiFn, "test-run-4:materiality", TEST_DEAL_CONTEXT);
 
     const ff1 = findings.find(f => f.finding_id === F1_ID)!;
     const ff2 = findings.find(f => f.finding_id === F2_ID)!;
@@ -368,7 +376,7 @@ async function runTests() {
       { tier: 3, rationale: "r3", driver: "none" },
     ]);
 
-    const result = await tierFindings(findings, queryFn, aiFn, "test-run-5:materiality");
+    const result = await tierFindings(findings, queryFn, aiFn, "test-run-5:materiality", TEST_DEAL_CONTEXT);
 
     assert(result.totalEligible === 3, `totalEligible = 3 (got ${result.totalEligible})`);
     assert(result.tieredCount === 3, `tieredCount = 3 (got ${result.tieredCount})`);
@@ -382,7 +390,7 @@ async function runTests() {
   {
     const { queryFn } = makeMemoryCheckpointStore();
     const aiFn = makeStubAiFn([]);
-    const result = await tierFindings([], queryFn, aiFn, "test-run-6:materiality");
+    const result = await tierFindings([], queryFn, aiFn, "test-run-6:materiality", TEST_DEAL_CONTEXT);
 
     assert(result.totalEligible === 0, `totalEligible = 0`);
     assert(result.tieredCount === 0, `tieredCount = 0`);
@@ -417,7 +425,7 @@ async function runTests() {
       };
     };
 
-    await tierFindings(findings, queryFn, aiFn, "test-run-7:materiality");
+    await tierFindings(findings, queryFn, aiFn, "test-run-7:materiality", TEST_DEAL_CONTEXT);
 
     // All 3 should be persisted
     assert(insertLog.length === 3, `3 rows inserted incrementally (got ${insertLog.length})`);
@@ -449,7 +457,7 @@ async function runTests() {
     const aiFn = makeStubAiFn([{ tier: 1, rationale: "r", driver: "d" }]);
 
     try {
-      await tierFindings(findings, brokenQueryFn, aiFn, "test-run-8:materiality");
+      await tierFindings(findings, brokenQueryFn, aiFn, "test-run-8:materiality", TEST_DEAL_CONTEXT);
     } catch (e: any) {
       threw = true;
       errorMsg = e.message;

@@ -21,7 +21,7 @@ import { DILIGENCE_CHECKLIST } from "./diligence-checklist.js";
 // ---------------------------------------------------------------------------
 
 const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
-const SCG_DEAL = "c46b4129-8a16-48ae-ad3a-1da061255445";
+// W3: SCG_DEAL removed — dealId is now required input
 
 // The 8 known false-absence topics to investigate
 const DEFAULT_TOPICS = [
@@ -143,6 +143,7 @@ export default api({
   },
 
   input: z.object({
+    dealId: z.string().describe("Deal ID (required)"),
     topics: z.array(z.string()).nullable().optional(),
   }),
 
@@ -151,7 +152,7 @@ export default api({
     topics: z.array(TopicResultSchema),
   }),
 
-  async run(ctx, { topics }) {
+  async run(ctx, { dealId, topics }) {
     const topicList = topics && topics.length > 0 ? topics : DEFAULT_TOPICS;
 
     // 1. Auto-select OA run (largest finding count for the SCG deal)
@@ -166,7 +167,7 @@ export default api({
        ORDER BY finding_count DESC
        LIMIT 1`,
       RunSelectSchema,
-      [SCG_DEAL],
+      [dealId],
       { label: "Select OA run with most findings" }
     );
 
@@ -209,7 +210,7 @@ export default api({
              ORDER BY rank DESC
              LIMIT 50`,
             ChunkMatchSchema,
-            [SCG_DEAL, query],
+            [dealId, query],
             { label: `Topic search: "${topic}" — query: "${query.slice(0, 50)}"` }
           );
 
@@ -299,7 +300,7 @@ export default api({
                  ORDER BY rank DESC
                  LIMIT 5`,
                 ChunkMatchSchema,
-                [SCG_DEAL, catQuery],
+                [dealId, catQuery],
                 { label: `Category replay: ${mc.id} — "${catQuery.slice(0, 50)}"` }
               );
 

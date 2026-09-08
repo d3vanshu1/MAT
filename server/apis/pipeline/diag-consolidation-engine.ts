@@ -25,7 +25,7 @@ import { getModuleModel } from "./model-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
-const SCG_DEAL_ID = "c46b4129-8a16-48ae-ad3a-1da061255445";
+// W3: SCG_DEAL_ID removed — dealId is now required input
 
 const MAX_INPUT_CHARS = 550_000;
 const MAX_PASSES = 5;
@@ -283,6 +283,7 @@ export default api({
     ai: anthropic(ANTHROPIC_ID),
   },
   input: z.object({
+    dealId: z.string().describe("Deal ID (required)"),
     runId: z.string().nullable(),
     passNumber: z.number().nullable(),
     sessionId: z.string().nullable(),
@@ -346,7 +347,7 @@ export default api({
     dumpJson: z.string().nullable(),
   }),
 
-  async run(ctx, { runId: inputRunId, passNumber: passNumberInput, sessionId: sessionIdInput, dumpMode, dumpPart }) {
+  async run(ctx, { dealId, runId: inputRunId, passNumber: passNumberInput, sessionId: sessionIdInput, dumpMode, dumpPart }) {
     const passNumber = passNumberInput ?? 1;
     const model = getModuleModel("omission_audit");
     const startTime = Date.now();
@@ -528,10 +529,10 @@ export default api({
            ORDER BY jsonb_array_length(mo.findings) DESC
            LIMIT 1`,
           z.object({ id: z.string() }),
-          [SCG_DEAL_ID],
+          [dealId],
           { label: "Auto-select largest OA run" }
         );
-        if (rows.length === 0) throw new Error("No completed OA runs found for SCG deal");
+        if (rows.length === 0) throw new Error(`No completed OA runs found for deal ${dealId}`);
         resolvedRunId = rows[0].id;
       }
 

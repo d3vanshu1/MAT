@@ -99,7 +99,7 @@ function buildJsonContent(findings: any[], meta: any, indent?: number): string {
       generated_at:          new Date().toISOString(),
       run_id:                meta.run_id,
       module_id:             meta.module_id,
-      deal_id:               "c46b4129-8a16-48ae-ad3a-1da061255445",
+      deal_id:               meta.deal_id ?? null, // W2.2: resolved from module_run
       git_reference_commit:  "bc01c41",
       export_checkpoint_id:  meta.export_checkpoint_id,
       total_findings:        normalised.length,
@@ -134,7 +134,7 @@ function buildJsonContent(findings: any[], meta: any, indent?: number): string {
 
 function buildMarkdownContent(findings: any[], meta: any): string {
   const lines: string[] = [];
-  lines.push("# Saint / SCG — L3 Raw Findings Corpus");
+  lines.push(`# ${meta.deal_label ?? "Deal"} — L3 Raw Findings Corpus`);
   lines.push("");
   lines.push("## Provenance");
   lines.push("");
@@ -142,7 +142,7 @@ function buildMarkdownContent(findings: any[], meta: any): string {
   lines.push("|---|---|");
   lines.push(`| run_id | \`${meta.run_id}\` |`);
   lines.push(`| module_id | \`${meta.module_id}\` |`);
-  lines.push(`| deal_id | \`c46b4129-8a16-48ae-ad3a-1da061255445\` |`);
+  lines.push(`| deal_id | \`${meta.deal_id ?? "unknown"}\` |`);
   lines.push(`| export_checkpoint_id | \`${meta.export_checkpoint_id}\` |`);
   lines.push(`| export_timestamp | ${meta.export_timestamp} |`);
   lines.push(`| generated_at | ${new Date().toISOString()} |`);

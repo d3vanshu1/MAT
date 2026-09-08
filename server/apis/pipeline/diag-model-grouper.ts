@@ -23,7 +23,7 @@ import { getModuleModel } from "./model-config.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
-const SCG_DEAL_ID = "c46b4129-8a16-48ae-ad3a-1da061255445";
+// W3: SCG_DEAL_ID removed — dealId is now required input
 
 // All 17 material dimensions — most conservative gate.
 const ALL_DIMENSIONS: GroupingDimension[] = [
@@ -116,6 +116,7 @@ export default api({
   },
 
   input: z.object({
+    dealId: z.string().describe("Deal ID (required)"),
     runId: z.string().nullable().describe("Explicit run ID; null = auto-select largest OA run"),
     dryRun: z.boolean().nullable().describe("Reserved for future use; currently ignored"),
     replayGroupedRefs: z.array(z.string()).nullable().describe(
@@ -164,7 +165,7 @@ export default api({
     ungroupedTitles: z.array(z.string()),
   }),
 
-  async run(ctx, { runId: inputRunId, replayGroupedRefs }) {
+  async run(ctx, { dealId, runId: inputRunId, replayGroupedRefs }) {
     // ── Step 0: Resolve run ID ─────────────────────────────────────────────
     let resolvedRunId: string;
 
@@ -182,7 +183,7 @@ export default api({
          ORDER BY jsonb_array_length(mo.findings) DESC
          LIMIT 1`,
         AutoSelectRow,
-        [SCG_DEAL_ID],
+        [dealId],
         { label: "Auto-select largest OA run" }
       );
       if (autoRows.length === 0) {

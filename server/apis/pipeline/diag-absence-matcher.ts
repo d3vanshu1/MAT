@@ -32,7 +32,7 @@ import {
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
-const SCG_DEAL_ID = "c46b4129-8a16-48ae-ad3a-1da061255445";
+// W3: SCG_DEAL_ID removed — dealId is now a required input
 
 /** Max concurrent LLM calls during resume */
 const RESUME_CONCURRENCY = 5;
@@ -110,7 +110,7 @@ export default api({
   },
 
   input: z.object({
-    dealId: z.string().nullable().describe("Deal ID; null = SCG deal"),
+    dealId: z.string().describe("Deal ID (required)"),
     runId: z.string().nullable().describe("Module run ID; null = auto-select largest OA run"),
     dumpMode: z.boolean().nullable().describe("Enable batch persistence + dump mode"),
     sessionId: z.string().nullable().describe("Resume existing session"),
@@ -122,7 +122,7 @@ export default api({
   output: OutputSchema,
 
   async run(ctx, { dealId, runId, dumpMode, sessionId: sessionIdInput, dumpPart, dumpOffset, dumpLimit }) {
-    const targetDeal = dealId ?? SCG_DEAL_ID;
+    const targetDeal = dealId;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Ensure session table exists (idempotent)

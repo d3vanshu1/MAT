@@ -68,6 +68,7 @@ import { validateMergeContract } from "./merge-contract-validator.js";
 import { deduplicateFindings } from "./canonical-family-dedup.js";
 import { modelConsolidate } from "./model-consolidation-adapter.js";
 import { tierFindings } from "./materiality-tiering-stage.js";
+import { loadTieringDealContext } from "./deal-context.js";
 import { runExtractionPhase } from "./extraction-phase.js";
 import { runDocTablesPhase } from "./doc-tables-phase.js";
 import { runNumericVerifyInline } from "./numeric-verify-inline.js";
@@ -1414,13 +1415,16 @@ export async function runPostMergePipeline(input: PostMergePipelineInput): Promi
   // Tiers each absence-surviving genuine-omission finding (Tier 1/2/3) via Sonnet.
   // Runs ONLY for CHECKLIST_MODULES (omission_audit, blind_spot_scanner, diligence_completeness).
   // Uses checkpoint/resume to survive across 240s invocation boundaries.
-  if (CHECKLIST_MODULES.has(moduleId) && queryFn && aiFn) {
+  if (CHECKLIST_MODULES.has(moduleId) && queryFn && aiFn && dealId) {
+    // W1.1: Load deal-specific tiering context — throws DealConfigMissingError if not seeded
+    const tierDealCtx = await loadTieringDealContext(queryFn as any, dealId);
     const tierCheckpointKey = runId ? `${runId}:materiality` : `postmerge:${moduleId}:materiality`;
     const tierResult = await tierFindings(
       findings as any,
       queryFn,
       aiFn,
       tierCheckpointKey,
+      tierDealCtx,
       invocationStart,
     );
     if (tierResult.partial) {

@@ -54,7 +54,7 @@ export default api({
 
   input: z.object({
     runId: z.string(),
-    dealId: z.string().default("c46b4129-8a16-48ae-ad3a-1da061255445"),
+    dealId: z.string().describe("Deal ID (required)"),
   }),
 
   output: z.object({

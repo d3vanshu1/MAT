@@ -34,6 +34,7 @@ import { sweepOneCandidate, upsertOneCoverageRow } from "./bss-absence-sweep.js"
 import {
   adjudicateOneCandidate,
 } from "./bss-llm-adjudication.js";
+import { resolveDealContext } from "./deal-context.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -542,18 +543,11 @@ async function dispatchAdjudication(
   // adjudication columns (adjudicated_verdict, adjudication_quote, adjudication_reason)
   // are created by migration — no ALTER TABLE needed at runtime.
 
-  // ── Resolve IC memo doc IDs dynamically for this deal ───────────────
-  const memoRows = await db.query(
-    `SELECT id FROM documents
-     WHERE deal_id = $1::uuid AND document_tag = 'ic_memo'
-     ORDER BY file_name`,
-    z.object({ id: z.string() }),
-    [dealId],
-    { label: "Resolve IC memo doc IDs for adjudication" },
-  );
-  const icMemoDocIds = memoRows.map(r => r.id);
+  // W1.2: Resolve IC memo doc IDs from deal_config (fail-closed via resolveDealContext)
+  const dealCtx = await resolveDealContext(db, dealId);
+  const icMemoDocIds = dealCtx.icMemoDocIds;
   console.log(
-    `${LOG_PREFIX} adjudication: ${icMemoDocIds.length} IC memo docs for deal: ${icMemoDocIds.join(", ")}`,
+    `${LOG_PREFIX} adjudication: ${icMemoDocIds.length} IC memo docs from deal_config: ${icMemoDocIds.join(", ")}`,
   );
 
   // Total candidates

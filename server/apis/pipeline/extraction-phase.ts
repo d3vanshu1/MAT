@@ -388,12 +388,18 @@ export async function runExtractionPhase(
     }
   }
 
-  // Prioritize the three always-failing documents so we get diagnostic data sooner
-  const PRIORITY_DOC_IDS = new Set([
-    "5c0e0060-0d36-4971-88e9-3bc440041897", // SCG - Project Saint-IM_vF.pdf
-    "989537e9-cad0-4588-b7d0-5391d29a44d8", // 2026-06-21 Saint IC update_vS.pdf
-    "b5ae5ba1-ef41-4947-a706-7c888c896e6a", // SCG IC Screening Memo vS.pdf
-  ]);
+  // W2.4: Priority doc IDs from deal_config — throughput optimisation only.
+  // Degrade gracefully: unprioritised if not available. Do not throw.
+  let PRIORITY_DOC_IDS = new Set<string>();
+  try {
+    const { resolveDealContext } = await import("./deal-context.js");
+    const dealCtx = await resolveDealContext(ctx.integrations.db as any, dealId);
+    if (dealCtx.priorityDocIds.length > 0) {
+      PRIORITY_DOC_IDS = new Set(dealCtx.priorityDocIds);
+    }
+  } catch {
+    console.warn("[extraction] Could not load priority_doc_ids from deal_config — proceeding unprioritised");
+  }
   allChunks.sort((a, b) => {
     const aPri = PRIORITY_DOC_IDS.has(a.documentId) ? 0 : 1;
     const bPri = PRIORITY_DOC_IDS.has(b.documentId) ? 0 : 1;

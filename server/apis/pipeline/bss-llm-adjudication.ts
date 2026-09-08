@@ -19,6 +19,7 @@
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { SONNET_MODEL } from "./model-config.js";
+import { resolveDealContext } from "./deal-context.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
@@ -1191,17 +1192,10 @@ export default api({
       { label: "Archive old verdicts" },
     );
 
-    // ── Resolve IC memo doc IDs dynamically for this deal ───────────────
-    const memoRows = await ctx.integrations.db.query(
-      `SELECT id FROM documents
-       WHERE deal_id = $1::uuid AND document_tag = 'ic_memo'
-       ORDER BY file_name`,
-      z.object({ id: z.string() }),
-      [dealId],
-      { label: "Resolve IC memo doc IDs" },
-    );
-    const icMemoDocIds = memoRows.map(r => r.id);
-    console.log(`${LOG_PREFIX} IC memo docs for deal: ${icMemoDocIds.length} (${icMemoDocIds.join(", ")})`);
+    // W1.2: Resolve IC memo doc IDs from deal_config (fail-closed)
+    const dealCtx = await resolveDealContext(ctx.integrations.db, dealId);
+    const icMemoDocIds = dealCtx.icMemoDocIds;
+    console.log(`${LOG_PREFIX} IC memo docs from deal_config: ${icMemoDocIds.length} (${icMemoDocIds.join(", ")})`);
 
     // ── Load candidates ──────────────────────────────────────────────────
     let candidates = await ctx.integrations.db.query(

@@ -274,22 +274,22 @@ export default api({
     // (resolvePrimaryReferenceDoc) rather than hardcoded. The previously-hardcoded id
     // is retained only as an assertion target so any divergence is visible in the log
     // and reflected in the output, instead of silently changing the harness baseline.
-    const HARNESS_BASELINE_PRIMARY_DOC = "3ea34aa1-6617-4d95-ae3c-5225d3da0387";
+    const SCG_HARNESS_BASELINE_PRIMARY_DOC = "3ea34aa1-6617-4d95-ae3c-5225d3da0387";
     const resolvedPrimary = await resolvePrimaryReferenceDoc(
       (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
       dealId,
     );
     const PRIMARY_DOC = resolvedPrimary?.documentId;
-    const primaryDocMatchesBaseline = PRIMARY_DOC === HARNESS_BASELINE_PRIMARY_DOC;
+    const primaryDocMatchesBaseline = PRIMARY_DOC === SCG_HARNESS_BASELINE_PRIMARY_DOC;
     console.log(
       `[DiagReconcileOnly] Primary reference doc resolved: ${PRIMARY_DOC ?? "none"} ` +
       `(${resolvedPrimary?.fileName ?? "unknown"}, source=${resolvedPrimary?.source ?? "null"}, ${resolvedPrimary?.figCount ?? 0} figures). ` +
-      `Matches harness baseline ${HARNESS_BASELINE_PRIMARY_DOC}: ${primaryDocMatchesBaseline}`
+      `Matches harness baseline ${SCG_HARNESS_BASELINE_PRIMARY_DOC}: ${primaryDocMatchesBaseline}`
     );
     if (!primaryDocMatchesBaseline) {
       console.warn(
         `[DiagReconcileOnly] PRIMARY DOC DIVERGENCE — resolver picked ${PRIMARY_DOC ?? "none"}, ` +
-        `baseline was ${HARNESS_BASELINE_PRIMARY_DOC}. Harness counts are NOT comparable to the published baseline.`
+        `baseline was ${SCG_HARNESS_BASELINE_PRIMARY_DOC}. Harness counts are NOT comparable to the published baseline.`
       );
     }
     const { bridgeFigures, refFigCoords, rawRows: refFigRows } = await loadReferenceFigures(

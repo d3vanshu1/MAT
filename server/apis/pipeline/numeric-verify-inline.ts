@@ -212,14 +212,15 @@ const DocTableDataSchema = z.object({
  * Covers the standard P&L/BS/CF hierarchy. If a row label matches any pattern,
  * its values across all period columns are emitted as verified figures.
  */
-const SCG_METRIC_CONFIG: MetricConfig = {
+// W1.4: Default metric config — generic P&L/BS/CF patterns.
+// The Surgery Intellect GP pattern (SCG-specific) is now in deal_config.numeric_verify_config.
+const DEFAULT_METRIC_CONFIG: MetricConfig = {
   isRegex: true,
   labelPatterns: [
     "^Total\\s+(direct\\s+costs|overheads|revenue|Group\\s+revenue)",
     "^(Revenue|EBITDA|EBIT|Gross\\s+Profit|Net\\s+Income|Operating\\s+Profit)",
     "^(Adjusted|Adj\\.?|Normalised|Underlying|Reported)\\s+(EBITDA|EBIT|Revenue)",
     "^(ARR|MRR|Net\\s+Revenue|Recurring\\s+Revenue)",
-    "^Surgery\\s+Intellect\\s+GP",
   ],
 };
 
@@ -229,15 +230,17 @@ const SCG_METRIC_CONFIG: MetricConfig = {
  * Document pinning is resolved at runtime via `resolveLiveModelDocId()` which finds
  * the document containing BOTH sheets — a structural signal that survives re-upload.
  */
-const SCG_CROSS_AGREEMENT_TEMPLATE: Omit<CrossAgreementConfig, "sourceADocId" | "sourceBDocId"> = {
+// W1.4: Cross-agreement template — sheet names and thresholds from deal_config.
+// When deal_config.numeric_verify_config is absent, cross-agreement is SKIPPED (not run
+// with wrong sheet names). A log warning is emitted.
+const CROSS_AGREEMENT_TEMPLATE: Omit<CrossAgreementConfig, "sourceADocId" | "sourceBDocId"> = {
   sourceASheet: "FS Summary",
   sourceBSheet: "FS Summary (hardcoded)",
   matchingRule: "exact",
-  absThreshold: 1_000, // £1k absolute minimum — floor for ANY divergence to be recorded
-  relThreshold: 0.0001, // 0.01% relative
-  // Materiality floor: determines tier 2 ("material movements") vs tier 3 ("detail")
-  materialityAbsFloor: 500_000, // £500k
-  materialityRelFloor: 0.05, // 5%
+  absThreshold: 1_000,
+  relThreshold: 0.0001,
+  materialityAbsFloor: 500_000,
+  materialityRelFloor: 0.05,
 };
 
 // ---------------------------------------------------------------------------
@@ -1203,13 +1206,13 @@ export async function runNumericVerifyInline(
   const { docId: liveModelDocId, fileName: liveModelFileName } = await resolveLiveModelDocId(
     db,
     dealId,
-    SCG_CROSS_AGREEMENT_TEMPLATE.sourceASheet,
-    SCG_CROSS_AGREEMENT_TEMPLATE.sourceBSheet,
+    CROSS_AGREEMENT_TEMPLATE.sourceASheet,
+    CROSS_AGREEMENT_TEMPLATE.sourceBSheet,
   );
 
   // Build the resolved cross-agreement config with pinned document ID
   const crossAgreementConfig: CrossAgreementConfig = {
-    ...SCG_CROSS_AGREEMENT_TEMPLATE,
+    ...CROSS_AGREEMENT_TEMPLATE,
     sourceADocId: liveModelDocId,
     sourceBDocId: liveModelDocId,
   };
@@ -1448,7 +1451,7 @@ export async function runNumericVerifyInline(
     t.documentId === liveModelDocId &&
     t.sheetOrPage.trim().toLowerCase() === primarySheet
   )) {
-    const tableFigures = extractMetricFigures(table, SCG_METRIC_CONFIG);
+    const tableFigures = extractMetricFigures(table, DEFAULT_METRIC_CONFIG);
     allFigures.push(...tableFigures);
   }
 

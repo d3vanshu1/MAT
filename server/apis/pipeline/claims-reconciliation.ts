@@ -309,10 +309,18 @@ function ebitdaBasisCompatible(claim: Claim, modelFig: Figure): boolean {
 // ---------------------------------------------------------------------------
 // Materiality thresholds
 // ---------------------------------------------------------------------------
-const MATERIALITY_ABS_FLOOR = 2_000_000; // $2m — below this, delta is not material
-const MATERIALITY_REL_FLOOR = 0.05;      // 5% — below this, delta is not material
-const CRITICAL_ABS_THRESHOLD = 10_000_000; // $10m — above this, finding is critical
-const CRITICAL_REL_THRESHOLD = 0.15;       // 15%
+// W1.3: Materiality thresholds — set per deal from deal_config.
+// Relative floors (5% / 15%) are currency-neutral and genuinely general.
+let MATERIALITY_ABS_FLOOR = 2_000_000; // default $2m — overridden per deal
+const MATERIALITY_REL_FLOOR = 0.05;      // 5% — currency-neutral, not overridden
+let CRITICAL_ABS_THRESHOLD = 10_000_000; // default $10m — overridden per deal
+const CRITICAL_REL_THRESHOLD = 0.15;       // 15% — currency-neutral, not overridden
+
+/** W1.3: Set deal-specific absolute materiality thresholds. */
+export function setMaterialityFloors(absFloor: number, criticalThreshold: number): void {
+  MATERIALITY_ABS_FLOOR = absFloor;
+  CRITICAL_ABS_THRESHOLD = criticalThreshold;
+}
 
 // ---------------------------------------------------------------------------
 // D-08: Currency-aware formatting. Set per reconciliation run.

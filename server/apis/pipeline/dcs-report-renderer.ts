@@ -355,8 +355,8 @@ function abbreviateSource(sourceFile: string): string {
   // Remove leading date prefix: "09 04 2026 " or "2026-06-15 "
   name = name.replace(/^\d{1,2}\s+\d{1,2}\s+\d{4}\s+/, "");
   name = name.replace(/^\d{4}-\d{2}-\d{2}\s+/, "");
-  // Remove common project prefixes
-  name = name.replace(/^(?:SCG\s*[-–—]\s*)?(?:Project\s+Saint\s*[-–—]\s*)?/i, "");
+  // W2.5: Remove common project prefixes (generic pattern, not deal-specific)
+  name = name.replace(/^(?:Project\s+\w+\s*[-–—]\s*)/i, "");
   // Remove version suffixes: _vS, _vFinal Report, _vF, vF, vS at end
   name = name.replace(/\s*[-–—]\s*Updated\s+for\s+.*$/i, " (CT Update)");
   name = name.replace(/_v\w+.*$/i, "");

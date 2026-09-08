@@ -34,6 +34,7 @@
 
 import { z } from "@superblocksteam/sdk-api";
 import type { CanonicalFinding } from "./canonical-finding.js";
+import type { TieringDealContext } from "./deal-context.js";
 
 // ---------------------------------------------------------------------------
 // Local query function type (mirrors AbsenceGateQueryFn from pipeline-core
@@ -59,24 +60,16 @@ const SAFETY_MARGIN_MS = 45_000;
 const TIERING_MODEL = "claude-sonnet-4-6";
 
 // ---------------------------------------------------------------------------
-// Deal context — COPIED verbatim from diag-materiality.ts.
-// TODO: DEAL_CONTEXT must become deal-derived before this runs on any deal
-// other than SCG (Project Saint). See module docstring above.
+// Prompt — parameterized via TieringDealContext (W1.1)
 // ---------------------------------------------------------------------------
-const DEAL_CONTEXT = `Project Saint / SCG. Enterprise Value £655m (11.6x LTM Sep-26 Cash EBITDA), plus £85m earn-out above 2.5x MoM. PEP base case: 23.0% IRR / 2.8x MoM; 6x opening leverage. Thesis: (1) verticalisation — own-IP platforms Surgery Connect (55% GP share) and Evonex growing ~30%; (2) vendor-agnostic SME comms one-stop-shop, 35k+ customers, ~7% churn; (3) industrialised M&A, ~50 acquisitions, £6m EBITDA near-term pipeline; (4) re-rating as own-IP mix grows 30%→43%; (5) backable management. Key return drivers: retention holding, M&A continuing, AI ancillary upsell into Surgery Connect, education vertical for Evonex.`;
-
-// ---------------------------------------------------------------------------
-// Prompt — COPIED verbatim from diag-materiality.ts buildPrompt().
-// TODO: Replace DEAL_CONTEXT with deal-derived value before using on other deals.
-// ---------------------------------------------------------------------------
-function buildPrompt(title: string): string {
+function buildPrompt(title: string, deal: TieringDealContext): string {
   return `You are an IC member assessing a due-diligence finding that is ABSENT from the investment memos. Given the DEAL CONTEXT below, assign a materiality tier:
-  TIER 1 (DEAL-CHANGING): could kill the deal, materially move the price, or break the base-case return (23% IRR / 2.8x). Reserve for findings a partner would want on the first page.
+  TIER 1 (DEAL-CHANGING): could kill the deal, materially move the price, or break the base-case return (${deal.baseCaseLabel}). Reserve for findings a partner would want on the first page.
   TIER 2 (CONDITION / DILIGENCE): a real issue requiring a condition to close or a specific diligence follow-up, but not a threat to the thesis or returns.
   TIER 3 (NOTED / IMMATERIAL): genuine but immaterial to the investment decision at this deal size.
-Judge materiality RELATIVE TO THE DEAL (a £60k liability is immaterial on a £655m EV; an uncapped indemnity on a top customer may not be). Do NOT tier by how alarming the wording is — most findings are worded as risks. Be STRICT with Tier 1: if most findings are Tier 1, you are miscalibrated. Return JSON only:
+Judge materiality RELATIVE TO THE DEAL (scale your judgement to the ${deal.enterpriseValueLabel}; an uncapped indemnity on a top customer may not be immaterial). Do NOT tier by how alarming the wording is — most findings are worded as risks. Be STRICT with Tier 1: if most findings are Tier 1, you are miscalibrated. Return JSON only:
   {"tier":1|2|3, "rationale":"one sentence tying it to deal impact", "driver":"which return driver / thesis pillar it affects, or 'none'"}
-DEAL CONTEXT: ${DEAL_CONTEXT}
+DEAL CONTEXT: ${deal.prose}
 FINDING: ${title}`;
 }
 
@@ -188,8 +181,9 @@ function parseTierResponse(text: string): TierAssignment | null {
 async function callTierModel(
   aiFn: AiFn,
   finding: CanonicalFinding,
+  dealCtx: TieringDealContext,
 ): Promise<TierAssignment> {
-  const prompt = buildPrompt(finding.title);
+  const prompt = buildPrompt(finding.title, dealCtx);
 
   const result = await aiFn(
     {
@@ -239,6 +233,7 @@ export async function tierFindings(
   queryFn: QueryFn,
   aiFn: AiFn,
   checkpointKey: string,
+  dealContext: TieringDealContext,
   invocationStart: number = Date.now(),
 ): Promise<TieredResult> {
   const deadlineMs = invocationStart + INVOCATION_BUDGET_MS - SAFETY_MARGIN_MS;
@@ -348,7 +343,7 @@ export async function tierFindings(
       let assignment: TierAssignment;
 
       try {
-        assignment = await callTierModel(aiFn, f);
+        assignment = await callTierModel(aiFn, f, dealContext);
       } catch (err: unknown) {
         // Safety floor: default to tier 2, never tier 3, never drop
         const msg = err && typeof err === "object" && "message" in err

@@ -690,12 +690,12 @@ export function buildQualitativeClaim(params: {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-function deriveEntity(scopeQualifier: string, documentName: string): string | null {
-  // Try to extract entity from document name
-  const docLower = documentName.toLowerCase();
-  // Common deal entity patterns
-  if (docLower.includes("scg")) return "SCG";
-  if (docLower.includes("gamma")) return "Gamma";
+function deriveEntity(scopeQualifier: string, documentName: string, dealCode?: string): string | null {
+  // W2.3: Use deal code from deal_config if available, not hardcoded entity names
+  if (dealCode) {
+    const docLower = documentName.toLowerCase();
+    if (docLower.includes(dealCode.toLowerCase())) return dealCode;
+  }
 
   // From scope qualifier
   const scopeLower = scopeQualifier.toLowerCase();

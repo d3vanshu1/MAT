@@ -197,7 +197,7 @@ function buildJsonCorpus(findings: any[], meta: any): string {
       generated_at:          meta.generated_at,
       run_id:                meta.run_id,
       module_id:             meta.module_id,
-      deal_id:               "c46b4129-8a16-48ae-ad3a-1da061255445",
+      deal_id:               meta.deal_id ?? null, // W2.2: resolved from module_run, not hardcoded
       pipeline_version:      "stabilization-batch-v1",
       git_reference_commit:  "bc01c41",
       merge_generation:      meta.merge_generation ?? 1,

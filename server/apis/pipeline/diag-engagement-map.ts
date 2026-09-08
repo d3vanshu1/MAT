@@ -11,7 +11,7 @@ import { buildEngagementMap } from "./engagement-map.js";
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 const ANTHROPIC_ID = "8ccd43c8-5340-4ae2-8eee-7cbb3896df53";
-const SCG_DEAL_ID = "c46b4129-8a16-48ae-ad3a-1da061255445";
+// W3: SCG_DEAL_ID removed — dealId is now required
 
 // ---------------------------------------------------------------------------
 // Output schemas
@@ -53,13 +53,13 @@ export default api({
   },
 
   input: z.object({
-    dealId: z.string().nullable().describe("Deal ID; null = SCG deal"),
+    dealId: z.string().describe("Deal ID (required)"),
   }),
 
   output: OutputSchema,
 
   async run(ctx, { dealId }) {
-    const targetDeal = dealId ?? SCG_DEAL_ID;
+    const targetDeal = dealId;
 
     // Platform timeout is ~300s; set deadline with 40s safety margin
     const deadlineMs = Date.now() + 260_000;

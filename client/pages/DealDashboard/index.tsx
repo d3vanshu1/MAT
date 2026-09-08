@@ -95,7 +95,7 @@ function bssToModuleOutput(
     "",
     "---",
     "",
-    "> **Caveat — missing adviser workstreams:** This scan did not have access to adviser reports (e.g. EQTR, Hakluyt, Kolayo). Findings that overlap with those workstreams may be flagged here but already addressed in the full diligence package.",
+    "> **Caveat — missing adviser workstreams:** This scan was limited to the uploaded data room. If adviser reports have not been uploaded, findings that overlap with those workstreams may be flagged here but already addressed in the full diligence package.",
     "",
     "> **Caveat — absence-based reasoning:** Some findings are based on the *absence* of discussion in the available materials. Absence does not confirm a gap; the topic may be covered in documents not provided.",
     "",
