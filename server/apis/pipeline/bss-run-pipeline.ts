@@ -543,15 +543,8 @@ async function dispatchAdjudication(
   dealId: string,
   startTime: number,
 ): Promise<StageResult> {
-  // Ensure adjudication columns exist (idempotent)
-  await db.execute(
-    `ALTER TABLE bss_coverage
-       ADD COLUMN IF NOT EXISTS adjudicated_verdict text,
-       ADD COLUMN IF NOT EXISTS adjudication_quote text,
-       ADD COLUMN IF NOT EXISTS adjudication_reason text`,
-    [],
-    { label: "Ensure adjudication columns" },
-  );
+  // adjudication columns (adjudicated_verdict, adjudication_quote, adjudication_reason)
+  // are created by migration — no ALTER TABLE needed at runtime.
 
   // Total candidates
   const allCandRows = await db.query(
