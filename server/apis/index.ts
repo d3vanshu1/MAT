@@ -221,6 +221,7 @@ import DcsComputeDimensionRationales from './pipeline/dcs-compute-dimension-rati
 import DcsPersistRationalesOneshot from './pipeline/dcs-persist-rationales-oneshot.js';
 import DcsRepublishV2 from './pipeline/dcs-republish-v2.js';
 import PublishEroToModuleOutputs from './pipeline/publish-ero-to-module-outputs.js';
+import PublishSriToModuleOutputs from './pipeline/publish-sri-to-module-outputs.js';
 import EroTestPublish from './pipeline/ero-test-publish.js';
 import BssGetFindings from './pipeline/bss-get-findings.js';
 import PromoteClaimsLedger from './pipeline/promote-claims-ledger.js';
@@ -335,7 +336,7 @@ const apis = {
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // SRI v2 pipeline
-  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, TestExcelExtraction,
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, TestExcelExtraction, PublishSriToModuleOutputs,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals

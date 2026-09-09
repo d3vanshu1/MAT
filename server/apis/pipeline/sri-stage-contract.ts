@@ -7,6 +7,7 @@
 
 // ── Stage sequence (order matters) ──────────────────────────────────
 export const SRI_STAGES = [
+  "build_target_profile",
   "build_claim_register",
   "verify_claims",
   "render",

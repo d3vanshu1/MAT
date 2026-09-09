@@ -12,6 +12,7 @@
  */
 
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
+import type { StageResult } from "./sri-stage-contract.js";
 
 // ── Integration IDs ──────────────────────────────────────────────
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -86,34 +87,48 @@ const OutputSchema = z.object({
 // ── Prompt ────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = "You are a due diligence analyst building a structured profile of the target company from investment documents. You must extract factual attributes with exact verbatim snippets from the source text.\n\nReturn ONLY a JSON object with this structure:\n{\n  \"fields\": [\n    { \"field\": \"products_services\", \"value\": \"<what the company sells or provides>\", \"snippet\": \"<exact verbatim span from source text>\" },\n    { \"field\": \"sector\", \"value\": \"<industry or sector>\", \"snippet\": \"<exact verbatim span>\" },\n    { \"field\": \"geography\", \"value\": \"<primary operating geography>\", \"snippet\": \"<exact verbatim span>\" },\n    { \"field\": \"customer_type\", \"value\": \"<type of customers>\", \"snippet\": \"<exact verbatim span>\" },\n    { \"field\": \"approximate_size\", \"value\": \"<revenue, employees, or other size indicator>\", \"snippet\": \"<exact verbatim span>\" }\n  ],\n  \"trading_names\": [\n    { \"name\": \"<trading name or brand>\", \"snippet\": \"<exact verbatim span>\" }\n  ],\n  \"web_domains\": [\n    { \"domain\": \"<website domain>\", \"snippet\": \"<exact verbatim span>\" }\n  ]\n}\n\nRules:\n- Every snippet MUST be an exact substring of the source text provided. Do not paraphrase.\n- Include only fields you can support with a verbatim snippet.\n- If you cannot find evidence for a field, omit it entirely.\n- trading_names: include the primary company name and any subsidiaries, brands, or trading names mentioned.\n- web_domains: include any website domains mentioned in the text.\n- Do not invent or guess values. Only state what appears in the text.\n- Return valid JSON only, no surrounding text.";
 
-export default api({
-  name: "SriBuildTargetProfile",
-  description: "Builds target company profile from CIM and IC memos for entity matching.",
-  integrations: {
-    db: postgres(IC_DILIGENCE_DB),
-    claude: anthropic(ANTHROPIC_ID),
-  },
-  input: InputSchema,
-  output: OutputSchema,
+// ═════════════════════════════════════════════════════════════════
+// STAGE HANDLER — called by SRI orchestrator
+// ═════════════════════════════════════════════════════════════════
 
-  async run(ctx, input) {
-    var db = ctx.integrations.db;
-    var claude = ctx.integrations.claude;
-    var dealId = input.dealId;
+const STAGE_NAME = "build_target_profile";
+const StagesCompletedRow = z.object({ stages_completed: z.array(z.string()) });
 
-    // ── Find the active SRI run ─────────────────────────────────
-    var runRows = await db.query(
-      "SELECT run_id FROM sri_pipeline_state WHERE run_id IN (SELECT run_id FROM sri_pipeline_state ORDER BY updated_at DESC LIMIT 5) LIMIT 1",
-      z.object({ run_id: z.string() }),
-      [],
-      { label: LOG_PREFIX + " find active run" },
-    );
-    if (runRows.length === 0) {
-      throw new Error("No SRI pipeline run found. Run SriRunPipeline first.");
+export async function buildTargetProfile(
+  ctx: any,
+  runId: string,
+  dealId: string,
+): Promise<StageResult> {
+  const db = ctx.integrations.db;
+  const claude = ctx.integrations.claude;
+
+  // ── Idempotency: check stages_completed marker ──────────────
+  const completedRows = await db.query(
+    "SELECT stages_completed FROM sri_pipeline_state WHERE run_id = $1 LIMIT 1",
+    StagesCompletedRow,
+    [runId],
+    { label: LOG_PREFIX + " check stages_completed" },
+  );
+  if (completedRows.length > 0) {
+    const completed = completedRows[0].stages_completed;
+    if (completed.indexOf(STAGE_NAME) !== -1) {
+      const existingCountRows = await db.query(
+        "SELECT count(*)::int AS cnt FROM sri_target_identity WHERE run_id = $1 AND identity_type = 'profile_field'",
+        IdentityCountRow,
+        [runId],
+        { label: LOG_PREFIX + " existing count (marker present)" },
+      );
+      const existingCount = existingCountRows.length > 0 ? existingCountRows[0].cnt : 0;
+      return {
+        stage: STAGE_NAME,
+        status: "complete",
+        message: "Already complete (" + existingCount + " profile fields). Skipped.",
+        stageData: { persisted: existingCount, alreadyComplete: true },
+      };
     }
-    var runId = runRows[0].run_id;
+  }
 
-    // ── Check if profile already exists for this run ────────────
+  // ── Check if profile already exists for this run ────────────
     var existingCount = await db.query(
       "SELECT count(*)::int AS cnt FROM sri_target_identity WHERE run_id = $1 AND identity_type = 'profile_field'",
       IdentityCountRow,
@@ -134,18 +149,25 @@ export default api({
         [runId],
         { label: LOG_PREFIX + " load existing profile" },
       );
+      // Write stages_completed marker if not already present
+      await db.execute(
+        "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2), updated_at = now() WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
+        [runId, STAGE_NAME],
+        { label: LOG_PREFIX + " ensure stages_completed marker (existing profile)" },
+      );
       return {
-        runId: runId,
-        profile: { existing: true, rows: existingRows },
-        persisted: existingRows.length,
-        dropped: 0,
-        chunksUsed: 0,
+        stage: STAGE_NAME,
+        status: "complete",
+        message: "Profile already exists (" + existingRows.length + " rows). Skipped extraction.",
+        stageData: { persisted: existingRows.length, alreadyComplete: true },
       };
     }
 
     // ── Load chunks from CIM and IC memo ────────────────────────
+    // W0.2: Filter on d.deal_id (document table), not dc.deal_id (chunk table),
+    // for consistency with sri-claim-register.ts and sri-target-identity.ts.
     var chunks = await db.query(
-      "SELECT dc.id AS chunk_id, dc.content, dc.file_name, d.document_tag, dc.document_id FROM document_chunks dc JOIN documents d ON d.id = dc.document_id WHERE dc.deal_id = $1 AND d.document_tag IN ('cim', 'ic_memo') ORDER BY d.document_tag, dc.chunk_index LIMIT " + String(MAX_CHUNKS),
+      "SELECT dc.id AS chunk_id, dc.content, dc.file_name, d.document_tag, dc.document_id FROM document_chunks dc JOIN documents d ON d.id = dc.document_id WHERE d.deal_id = $1 AND d.document_tag IN ('cim', 'ic_memo') ORDER BY d.document_tag, dc.chunk_index LIMIT " + String(MAX_CHUNKS),
       ChunkRow,
       [dealId],
       { label: LOG_PREFIX + " load CIM and IC memo chunks" },
@@ -172,7 +194,7 @@ export default api({
     }
 
     // ── Concatenate chunk content for gate checking ─────────────
-    var allContent = chunks.map(function (c) { return c.content; }).join(" ");
+    var allContent = chunks.map(function (c: { content: string }) { return c.content; }).join(" ");
     var normalizedAllContent = normalizeWs(allContent);
 
     // ── LLM call ────────────────────────────────────────────────
@@ -327,12 +349,64 @@ export default api({
       }
     }
 
+    // ── Write stages_completed marker ─────────────────────────
+    await db.execute(
+      "UPDATE sri_pipeline_state SET stages_completed = array_append(stages_completed, $2), updated_at = now() WHERE run_id = $1 AND NOT ($2 = ANY(stages_completed))",
+      [runId, STAGE_NAME],
+      { label: LOG_PREFIX + " write stages_completed marker" },
+    );
+
     return {
-      runId: runId,
-      profile: profileResult,
-      persisted: persisted,
-      dropped: dropped,
-      chunksUsed: chunks.length,
+      stage: STAGE_NAME,
+      status: "complete",
+      message: "Target profile built. " + persisted + " persisted, " + dropped + " dropped from " + chunks.length + " chunks.",
+      stageData: {
+        runId: runId,
+        profile: profileResult,
+        persisted: persisted,
+        dropped: dropped,
+        chunksUsed: chunks.length,
+      },
+    };
+}
+
+// ═════════════════════════════════════════════════════════════════
+// STANDALONE API — thin wrapper for manual invocation
+// ═════════════════════════════════════════════════════════════════
+
+export default api({
+  name: "SriBuildTargetProfile",
+  description: "Builds target company profile from CIM and IC memos for entity matching.",
+  integrations: {
+    db: postgres(IC_DILIGENCE_DB),
+    claude: anthropic(ANTHROPIC_ID),
+  },
+  input: InputSchema,
+  output: OutputSchema,
+
+  async run(ctx, input) {
+    const dealId = input.dealId;
+    const db = ctx.integrations.db;
+
+    // Find run for this deal
+    const runRows = await db.query(
+      "SELECT run_id FROM sri_pipeline_state WHERE deal_id = $1 ORDER BY created_at DESC LIMIT 1",
+      z.object({ run_id: z.string() }),
+      [dealId],
+      { label: LOG_PREFIX + " standalone: find run" },
+    );
+    if (runRows.length === 0) {
+      throw new Error("No SRI pipeline run found for deal " + dealId);
+    }
+    const runId = runRows[0].run_id;
+
+    const result = await buildTargetProfile(ctx, runId, dealId);
+    return {
+      runId,
+      profile: result.stageData ?? {},
+      persisted: (result.stageData as any)?.persisted ?? 0,
+      dropped: (result.stageData as any)?.dropped ?? 0,
+      chunksUsed: (result.stageData as any)?.chunksUsed ?? 0,
     };
   },
 });

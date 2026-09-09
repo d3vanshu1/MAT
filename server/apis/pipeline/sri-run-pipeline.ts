@@ -6,8 +6,10 @@ import {
   type StageHandler,
   type StageResult,
 } from "./sri-stage-contract.js";
+import { buildTargetProfile } from "./sri-target-profile.js";
 import { buildClaimRegister } from "./sri-claim-register.js";
 import { verifyClaims } from "./sri-verify-claims.js";
+import { renderSriReport } from "./sri-render.js";
 
 
 const IC_DILIGENCE_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
@@ -34,9 +36,10 @@ function makeStub(stage: SriStageName): StageHandler {
 }
 
 var DISPATCH: Record<SriStageName, StageHandler> = {
+  build_target_profile: buildTargetProfile,
   build_claim_register: buildClaimRegister,
   verify_claims: verifyClaims,
-  render: makeStub("render"),
+  render: renderSriReport,
 };
 
 // NOTE: No inline ALTER TABLE for stages_completed. Migration 042 creates that column,

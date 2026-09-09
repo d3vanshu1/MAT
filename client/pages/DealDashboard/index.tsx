@@ -541,6 +541,9 @@ export default function DealDashboardPage() {
   // MAST v2 orchestrator
   const { run: mastRunPipelineApi } = useApi("MastRunPipeline");
   const { run: mastPublishApi } = useApi("MastPublish");
+  // SRI v2 orchestrator
+  const { run: sriRunPipelineApi } = useApi("SriRunPipeline");
+  const { run: publishSriApi } = useApi("PublishSriToModuleOutputs");
 
   // Cancellation tracking — stores run IDs that have been cancelled
   const cancelledRunsRef = useRef<Set<string>>(new Set());
@@ -2136,6 +2139,14 @@ export default function DealDashboardPage() {
     complete: "Publishing results",
   };
 
+  /** Human-readable stage labels for SRI progress display */
+  const SRI_STAGE_LABELS: Record<string, string> = {
+    build_target_profile: "Building target profile",
+    build_claim_register: "Extracting reputation claims",
+    verify_claims: "Verifying against public sources",
+    render: "Rendering report",
+  };
+
   const runBssPipeline = useCallback(
     async () => {
       if (!dealId) return;
@@ -2497,6 +2508,129 @@ export default function DealDashboardPage() {
       clearTimeout(timer);
     };
   }, [dealId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---------------------------------------------------------------------------
+  // SRI v2 — orchestrator poll loop (mirrors ERO pattern)
+  // ---------------------------------------------------------------------------
+
+  const runSriPipeline = useCallback(
+    async (resumeRunId?: string) => {
+      if (!dealId) return;
+
+      pipelinePollingActive.current.add("social_reputation");
+
+      const SRI_POLL_INTERVAL_MS = 3_000;
+      const SRI_BACKOFF_MAX_MS = 30_000;
+      const SRI_MAX_POLLS = 300;
+      let pollCount = 0;
+      let consecutiveTimeouts = 0;
+      let sriRunId: string | null = resumeRunId ?? null;
+
+      if (!sriRunId) {
+        setModuleProgress("social_reputation", { message: "Creating SRI run…" });
+        try {
+          const createResult = await sriRunPipelineApi({ dealId, runId: null, claimLimit: null });
+          if (!createResult) throw new Error("SriRunPipeline returned no result");
+          sriRunId = createResult.runId;
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message) : String(err);
+          throw new Error("SRI: failed to create run — " + msg);
+        }
+      } else {
+        setModuleProgress("social_reputation", { message: "Resuming SRI pipeline…" });
+      }
+
+      let terminal = false;
+      while (!terminal && pollCount < SRI_MAX_POLLS) {
+        let result: {
+          runId: string; stage: string; status: string;
+          invocationCount: number; message: string;
+          stageData: Record<string, unknown> | null;
+        };
+
+        try {
+          const raw = await sriRunPipelineApi({ dealId, runId: sriRunId, claimLimit: null });
+          if (!raw) throw new Error("SriRunPipeline returned no result");
+          result = raw;
+        } catch (err) {
+          const msg = err && typeof err === "object" && "message" in err
+            ? String((err as { message: unknown }).message) : String(err);
+          const isNetwork = /failed to fetch|network|timeout|abort/i.test(msg);
+          if (isNetwork && pollCount < SRI_MAX_POLLS - 1) {
+            consecutiveTimeouts++;
+            const backoff = Math.min(SRI_POLL_INTERVAL_MS * Math.pow(2, consecutiveTimeouts - 1), SRI_BACKOFF_MAX_MS);
+            setModuleProgress("social_reputation", {
+              message: "Connection interrupted, retrying in " + Math.round(backoff / 1000) + "s… (attempt " + consecutiveTimeouts + ")",
+            });
+            await new Promise(r => setTimeout(r, backoff));
+            pollCount++;
+            continue;
+          }
+          throw err;
+        }
+
+        consecutiveTimeouts = 0;
+        const stageLabel = SRI_STAGE_LABELS[result.stage] ?? result.stage;
+        const sriStages = ["build_target_profile", "build_claim_register", "verify_claims", "render"];
+
+        switch (result.status) {
+          case "complete": {
+            if (result.stage === "render") {
+              terminal = true;
+              setModuleProgress("social_reputation", { message: "Publishing SRI results…" });
+              try {
+                await publishSriApi({ runId: sriRunId });
+              } catch (pubErr) {
+                console.error("[SRI] Publish failed:", pubErr);
+              }
+              await refetchModules();
+              toast.success("Social & Reputation Intelligence complete!");
+            } else {
+              const stageIdx = sriStages.indexOf(result.stage);
+              setModuleProgress("social_reputation", {
+                message: stageLabel + " ✓",
+                detail: { current: stageIdx + 1, total: 4, phase: "researching" },
+              });
+            }
+            break;
+          }
+
+          case "in_progress":
+          case "pending": {
+            const stageIdx = sriStages.indexOf(result.stage);
+            setModuleProgress("social_reputation", {
+              message: stageLabel + "…",
+              detail: { current: Math.max(stageIdx + 1, 1), total: 4, phase: "researching" },
+            });
+            break;
+          }
+
+          case "failed": {
+            terminal = true;
+            throw new Error("SRI pipeline failed at " + stageLabel + ": " + result.message);
+          }
+
+          default: {
+            setModuleProgress("social_reputation", {
+              message: stageLabel + "… (" + result.status + ")",
+            });
+            break;
+          }
+        }
+
+        if (!terminal) {
+          await new Promise(r => setTimeout(r, SRI_POLL_INTERVAL_MS));
+          pollCount++;
+        }
+      }
+
+      if (!terminal) {
+        throw new Error("SRI pipeline timed out after maximum poll attempts");
+      }
+    },
+    [dealId, sriRunPipelineApi, publishSriApi, setModuleProgress, refetchModules],
+  );
 
   // ---------------------------------------------------------------------------
   // DCS rebuild — orchestrator poll loop
@@ -2910,6 +3044,9 @@ export default function DealDashboardPage() {
         } else if (moduleId === "diligence_completeness" && dealId) {
           // DCS rebuild — uses DcsRunPipeline orchestrator instead of v1
           await runDcsPipeline();
+        } else if (moduleId === "social_reputation" && dealId) {
+          // SRI v2 divert — uses SriRunPipeline orchestrator instead of v1
+          await runSriPipeline(resumeRunId);
         } else if (moduleId === "model_assumptions_stress" && dealId) {
           // MAST v2 divert — uses MastRunPipeline orchestrator instead of v1
           await runMastPipeline(resumeRunId);
