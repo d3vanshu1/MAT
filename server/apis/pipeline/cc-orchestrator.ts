@@ -24,6 +24,7 @@ import { runReconciliationPipeline } from "./reconciliation-pipeline.js";
 import type { ReconciliationResult } from "./claims-reconciliation.js";
 import { setDealCurrency, setMaterialityFloors } from "./claims-reconciliation.js";
 import { resolveDealContext } from "./deal-context.js";
+import { runInternalConsistencyChecks } from "./internal-consistency-checker.js";
 import { runPostMergeFinalizationStages } from "./post-merge-finalization.js";
 import { getPipelineVersion } from "./pipeline-version.js";
 import { runPostMergePipeline } from "./pipeline-core.js";
@@ -330,6 +331,23 @@ export async function runCcPipeline(
       // baseFigures/discrepancies from NumericVerify are additive; empty is fine.
       console.log("[CC-ORCH] Entering reconciliation (" + budgetRemaining() + "ms remaining)");
 
+      // B1: Internal consistency checks (cross-version, does-not-foot)
+      try {
+        const b1Findings = runInternalConsistencyChecks(claimsLedger.claims);
+        if (b1Findings.length > 0) {
+          console.log("[CC-ORCH] B1: " + b1Findings.length + " internal inconsistencies found (" +
+            b1Findings.filter(f => f.subCheck === "cross_version").length + " cross-version, " +
+            b1Findings.filter(f => f.subCheck === "does_not_foot").length + " does-not-foot)");
+          // Store in checkpoint for the finalization stage to merge with reconciliation findings
+          await saveCheckpoint(ctx.integrations.db as any, runId, "internal_consistency",
+            { findings: b1Findings, count: b1Findings.length }, "complete");
+        } else {
+          console.log("[CC-ORCH] B1: No internal inconsistencies detected");
+        }
+      } catch (b1Err: any) {
+        console.warn("[CC-ORCH] B1 internal consistency check failed (non-blocking): " + b1Err.message);
+      }
+
       // C5: Wire currency and materiality floors from deal_config
       try {
         const dealCtx = await resolveDealContext(ctx.integrations.db as any, dealId);
@@ -342,6 +360,32 @@ export async function runCcPipeline(
       } catch (cfgErr: any) {
         console.warn("[CC-ORCH] Could not load deal_config for currency/floors: " + cfgErr.message);
         // Degrade gracefully — use module defaults
+      }
+
+      // D2: Infer deal settings from Excel captions — log for transparency
+      try {
+        const { inferDealConfig } = await import("./deal-config-inference.js");
+        const inferred = await inferDealConfig(ctx.integrations.db as any, dealId);
+        if (inferred.currency) {
+          console.log("[CC-ORCH] D2 inferred currency: " + inferred.currency.value +
+            " (confidence=" + inferred.currency.confidence + ", source=" + inferred.currency.source + ")");
+          if (inferred.currency.conflicting && inferred.currency.conflicting.length > 0) {
+            console.warn("[CC-ORCH] D4 CROSS-CHECK: currency conflict — " +
+              inferred.currency.conflicting.map(c => c.value + " from " + c.source).join(", "));
+          }
+        }
+        if (inferred.scale) {
+          console.log("[CC-ORCH] D2 inferred scale: " + inferred.scale.value +
+            " (source=" + inferred.scale.source + ")");
+        }
+        if (inferred.caseNames) {
+          console.log("[CC-ORCH] D2 inferred cases: " + inferred.caseNames.value.join(", "));
+        }
+        if (inferred.fiscalYearEnd) {
+          console.log("[CC-ORCH] D2 inferred fiscal year end: month " + inferred.fiscalYearEnd.value);
+        }
+      } catch (inferErr: any) {
+        console.warn("[CC-ORCH] D2 inference failed (non-blocking): " + inferErr.message);
       }
 
       try {

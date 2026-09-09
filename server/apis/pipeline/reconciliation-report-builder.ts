@@ -89,6 +89,16 @@ export interface BuildReconciliationReportInput {
   timings?: { extractionMs?: number | null; reconciliationMs?: number | null; totalMs?: number | null } | null;
   /** Deal currency symbol, defaults to $ */
   currency?: string;
+  /** Resolved deal config for §0 transparency. */
+  dealConfig?: {
+    dealCode: string;
+    currencySymbol: string;
+    materialityAbsFloor: number | null;
+    criticalAbsThreshold: number | null;
+    enterpriseValueLabel: string | null;
+    baseCaseLabel: string | null;
+    documentRoles: Array<{ fileName: string; role: string }>;
+  } | null;
 }
 
 const DocRowSchema = z.object({
@@ -246,6 +256,7 @@ export async function buildReconciliationReportMarkdown(
       : null,
     unmatchableScopes: p21?.unmatchableScopeDetails ?? [],
     timings: input.timings ?? null,
+    dealConfig: input.dealConfig ?? null,
     generatedAt: new Date().toISOString(),
     topN: RECONCILIATION_REPORT_TOP_N,
     currencySymbol: input.currency ?? "$",

@@ -354,3 +354,31 @@ export async function resolveDealFromRun(
     return { dealId: null, dealLabel: null };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Document role resolver (D1 — report transparency)
+// ---------------------------------------------------------------------------
+
+const DocRoleRow = z.object({
+  file_name: z.string(),
+  document_tag: z.string().nullable(),
+});
+
+export async function resolveDocumentRoles(
+  db: { query: (...args: any[]) => Promise<any[]> },
+  dealId: string,
+): Promise<Array<{ fileName: string; role: DocumentRole }>> {
+  const rows = await db.query(
+    `SELECT file_name, document_tag
+     FROM documents
+     WHERE deal_id = $1::uuid
+     ORDER BY file_name`,
+    DocRoleRow,
+    [dealId],
+    { label: "Resolve document roles for report" },
+  );
+  return rows.map((r: { file_name: string; document_tag: string | null }) => ({
+    fileName: r.file_name,
+    role: TAG_TO_ROLE[r.document_tag ?? ""] ?? "unassigned" as DocumentRole,
+  }));
+}

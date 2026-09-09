@@ -48,6 +48,18 @@ export interface ReconciliationReportContext {
   /** Deal label for the header. Optional — omitted from the header when absent. */
   dealName?: string | null;
 
+  // ── §0 Deal config (D1) ──────────────────────────────────────────────────
+  /** Resolved deal config printed for transparency. Null fields print as "not set". */
+  dealConfig?: {
+    dealCode: string;
+    currencySymbol: string;
+    materialityAbsFloor: number | null;
+    criticalAbsThreshold: number | null;
+    enterpriseValueLabel: string | null;
+    baseCaseLabel: string | null;
+    documentRoles: Array<{ fileName: string; role: string }>;
+  } | null;
+
   // ── §1 What was audited ──────────────────────────────────────────────────
   /** Memo-side documents claims were extracted from. */
   memos: ReportDocument[];
@@ -326,6 +338,32 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
   lines.push("");
 
   // ── §1 What was audited ───────────────────────────────────────────────────
+  // ── §0 Deal config ────────────────────────────────────────────────────────
+  if (ctx.dealConfig) {
+    const dc = ctx.dealConfig;
+    lines.push("## 0. Deal Configuration");
+    lines.push("");
+    lines.push("| Setting | Value |");
+    lines.push("|---|---|");
+    lines.push(`| Deal code | ${dc.dealCode} |`);
+    lines.push(`| Currency | ${dc.currencySymbol} |`);
+    lines.push(`| Enterprise value | ${dc.enterpriseValueLabel ?? "*not set*"} |`);
+    lines.push(`| Base case | ${dc.baseCaseLabel ?? "*not set*"} |`);
+    lines.push(`| Materiality floor | ${dc.materialityAbsFloor != null ? money(dc.materialityAbsFloor) : "*not set*"} |`);
+    lines.push(`| Critical threshold | ${dc.criticalAbsThreshold != null ? money(dc.criticalAbsThreshold) : "*not set*"} |`);
+    lines.push("");
+    if (dc.documentRoles.length > 0) {
+      lines.push("**Document roles**");
+      lines.push("");
+      lines.push("| Document | Role |");
+      lines.push("|---|---|");
+      for (const dr of dc.documentRoles) {
+        lines.push(`| ${dr.fileName} | ${dr.role} |`);
+      }
+      lines.push("");
+    }
+  }
+
   lines.push("## 1. What was audited");
   lines.push("");
   lines.push("**Memo documents**");

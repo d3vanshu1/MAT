@@ -1180,6 +1180,23 @@ export async function runPostMergeFinalizationStages(
       const survivingTitles = new Set(
         (postMergeFindings as any[]).map(f => String(f?.title ?? "")).filter(t => t.length > 0),
       );
+      // D1: Resolve deal config for report transparency section
+      let reportDealConfig: Parameters<typeof buildReconciliationReportMarkdown>[0]["dealConfig"] = undefined;
+      try {
+        const { resolveDealContext, resolveDocumentRoles } = await import("./deal-context.js");
+        const dc = await resolveDealContext(ctx.integrations.db, dealId);
+        const roles = await resolveDocumentRoles(ctx.integrations.db, dealId);
+        reportDealConfig = {
+          dealCode: dc.dealCode,
+          currencySymbol: dc.currencySymbol,
+          materialityAbsFloor: dc.materialityAbsFloor,
+          criticalAbsThreshold: dc.criticalAbsThreshold,
+          enterpriseValueLabel: dc.enterpriseValueLabel,
+          baseCaseLabel: dc.baseCaseLabel,
+          documentRoles: roles.map(r => ({ fileName: r.fileName, role: r.role })),
+        };
+      } catch { /* degrade gracefully — report renders without §0 */ }
+
       const built = await buildReconciliationReportMarkdown({
         db: ctx.integrations.db,
         dealId,
@@ -1193,6 +1210,7 @@ export async function runPostMergeFinalizationStages(
           reconciliationMs: reconP21Meta?.elapsedMs ?? null,
           totalMs: Date.now() - startTime,
         },
+        dealConfig: reportDealConfig,
       });
       if (built) {
         reportOverride = built.markdown;
