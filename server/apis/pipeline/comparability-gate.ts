@@ -91,7 +91,66 @@ export function frequenciesAreComparable(
 }
 
 // ---------------------------------------------------------------------------
-// Unit class (D-02)
+// 2.5: Approximation bands
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect stated precision from claim text.
+ * Returns the precision band (± range) in the same units as the value.
+ * "~$38M" → precision = 500_000 (±$0.5M for a value stated to nearest $M)
+ * "approximately 12%" → precision = 0.005 (±0.5pp)
+ */
+export function detectStatedPrecision(
+  verbatim: string,
+  value: number,
+): { isApproximate: boolean; band: number } {
+  const text = (verbatim ?? "").toLowerCase();
+
+  // Approximate markers
+  const isApproximate = /~|approximately|about|circa|roughly|around|≈/.test(text);
+
+  if (!isApproximate) {
+    return { isApproximate: false, band: 0 };
+  }
+
+  // Determine precision from trailing zeros / rounding
+  const absVal = Math.abs(value);
+  let band: number;
+
+  if (absVal >= 1_000_000) {
+    // Stated in millions — ± $500k
+    band = 500_000;
+  } else if (absVal >= 1_000) {
+    // Stated in thousands — ± $500
+    band = 500;
+  } else if (absVal >= 1) {
+    // Stated in units — ± 0.5
+    band = 0.5;
+  } else {
+    // Stated as a ratio/percentage — ± 0.005 (0.5pp)
+    band = 0.005;
+  }
+
+  return { isApproximate, band };
+}
+
+/**
+ * Check if a delta clears a materiality floor given approximation bands.
+ * A finding clears the floor only if the ENTIRE band clears it.
+ * Returns false if the band straddles the floor.
+ */
+export function bandedFloorClearance(
+  deltaAbs: number,
+  band: number,
+  floor: number,
+): boolean {
+  // The minimum possible delta (conservative end of band)
+  const minDelta = Math.max(0, deltaAbs - band);
+  return minDelta >= floor;
+}
+
+// ---------------------------------------------------------------------------
+// Ratio reconstruction
 // ---------------------------------------------------------------------------
 
 export type UnitClass =

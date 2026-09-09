@@ -86,6 +86,7 @@ const RefFigRow = z.object({
   document_id: z.string(),
   sheet_name: z.string(),
   row_label: z.string().nullable(),
+  segment: z.string().nullable(),
   metric: z.string(),
   scope_qualifier: z.string(),
   period: z.string(),
@@ -164,7 +165,7 @@ export async function loadReferenceFigures(
   primaryDocId?: string,
 ): Promise<{ bridgeFigures: Figure[]; refFigCoords: RefFigCoord[]; rawRows: Array<z.infer<typeof RefFigRow>> }> {
   const refFigRows = await queryFn(
-    `SELECT document_id, sheet_name, row_label, metric, scope_qualifier, period, value, basis
+    `SELECT document_id, sheet_name, row_label, segment, metric, scope_qualifier, period, value, basis
      FROM reference_figures WHERE deal_id = $1
      AND sheet_name NOT IN ('Recent_acquisition_overlay')
      ORDER BY CASE WHEN document_id = $2 THEN 0 ELSE 1 END, sheet_name, period`,

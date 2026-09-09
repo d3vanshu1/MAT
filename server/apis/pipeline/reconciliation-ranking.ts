@@ -131,6 +131,14 @@ export interface RankedReconciliationFinding {
   presented: boolean;
   /** Position in the input array, retained as the final deterministic tiebreak. */
   source_index: number;
+  /** 1.5: Severity assessment — level goes to the report, basis to the log. */
+  severity: {
+    level: "critical" | "material" | "notable";
+    basis: string; // reasoning — logged, never rendered
+  };
+  /** 1.4: True for the top 3 critical findings; items 4+ are critical_overflow. */
+  critical_elevated: boolean;
+  critical_overflow: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,19 +187,24 @@ export function scoreReconciliationFinding(finding: ReconciliationFinding): {
     MAGNITUDE_CAP,
   );
 
-  // D-12: Bell-curve percentage scoring — peak at 15%, decay above.
-  // f(x) = PEAK · (x / PEAK_AT) · e^(1 - x / PEAK_AT), x in %.
+  // 2.3: Plateau-then-decay percentage scoring.
+  // Ramps linearly to PEAK over [0, 5%], flat across [5%, 60%], decays above 60%.
+  // A 40% delta scores the same as a 15% one (both plausible). Only implausible
+  // values (>60%) sort down. Test: 5/15/25/40/60% must not decline; only 300% should.
   const deltaPctAbs = Math.abs(finding.delta_pct ?? 0) * 100; // as percentage
   let percentagePoints: number;
   if (deltaPctAbs <= 0) {
     percentagePoints = 0;
+  } else if (deltaPctAbs <= 5) {
+    // Ramp: 0 at 0% → PEAK at 5%
+    percentagePoints = PERCENTAGE_PEAK * (deltaPctAbs / 5);
+  } else if (deltaPctAbs <= 60) {
+    // Plateau: flat at PEAK across the plausible band
+    percentagePoints = PERCENTAGE_PEAK;
   } else {
-    const normalized = deltaPctAbs / PERCENTAGE_PEAK_AT; // 1.0 at the peak
-    percentagePoints = clamp(
-      PERCENTAGE_PEAK * normalized * Math.exp(1 - normalized),
-      0,
-      PERCENTAGE_PEAK,
-    );
+    // Decay: exponential falloff above 60% — signals scale/unit error
+    const excess = (deltaPctAbs - 60) / 60; // 1.0 at 120%, 4.0 at 300%
+    percentagePoints = PERCENTAGE_PEAK * Math.exp(-excess);
   }
 
   const components: ScoreComponents = {
@@ -251,15 +264,86 @@ export function rankReconciliationFindings(
     return a.source_index - b.source_index;
   });
 
-  return scored.map((entry, i) => ({
-    finding: entry.finding,
-    rank: i + 1,
-    score: entry.score,
-    components: entry.components,
-    floors: entry.floors,
-    presented: i < topN,
-    source_index: entry.source_index,
-  }));
+  // 1.5: Assess severity per finding
+  const ranked = scored.map((entry, i) => {
+    const severity = assessSeverity(entry.finding, entry.floors, entry.score);
+    return {
+      finding: entry.finding,
+      rank: i + 1,
+      score: entry.score,
+      components: entry.components,
+      floors: entry.floors,
+      presented: i < topN,
+      source_index: entry.source_index,
+      severity,
+      critical_elevated: false,
+      critical_overflow: false,
+    };
+  });
+
+  // 1.4: Three-critical cap — top 3 by rank get elevated, rest are overflow
+  const CRITICAL_CAP = 3;
+  let elevatedCount = 0;
+  for (const r of ranked) {
+    if (r.severity.level === "critical") {
+      if (elevatedCount < CRITICAL_CAP) {
+        r.critical_elevated = true;
+        elevatedCount++;
+      } else {
+        r.critical_overflow = true;
+      }
+    }
+  }
+
+  return ranked;
+}
+
+/**
+ * 1.5: Per-module severity assessment.
+ * Four questions, answered from signals the finding already carries:
+ *   1. Does this change what we pay? (both floors cleared)
+ *   2. Does this change the forecast? (principal class)
+ *   3. Can the deal team answer it in one line? (small delta)
+ *   4. Would it change the recommendation? (score > 150)
+ */
+function assessSeverity(
+  finding: ReconciliationFinding,
+  floors: FloorClearance,
+  score: number,
+): { level: "critical" | "material" | "notable"; basis: string } {
+  const reasons: string[] = [];
+
+  // Q1: Does this change what we pay?
+  const q1 = floors.both_cleared;
+  if (q1) reasons.push("clears both materiality floors");
+
+  // Q2: Does this change the forecast?
+  const isPrincipal = PRINCIPAL_KINDS.has(finding.finding_kind);
+  if (isPrincipal) reasons.push("principal finding class (data_divergence/cross_version)");
+
+  // Q3: Can the deal team answer it in one line?
+  const deltaPct = Math.abs(finding.delta_pct ?? 0);
+  const smallDelta = deltaPct < 0.03; // < 3%
+  if (smallDelta) reasons.push("delta < 3%, likely answerable in one line");
+
+  // Q4: Would it change the recommendation?
+  const highScore = score > 150;
+  if (highScore) reasons.push("score > 150");
+
+  // Determine level
+  let level: "critical" | "material" | "notable";
+  if (q1 && isPrincipal && highScore) {
+    level = "critical";
+  } else if ((q1 || isPrincipal) && !smallDelta) {
+    level = "material";
+  } else {
+    level = "notable";
+  }
+
+  return {
+    level,
+    basis: level.toUpperCase() + ": " + (reasons.length > 0 ? reasons.join("; ") : "default classification"),
+  };
 }
 
 /** Findings above the presentation cap, in rank order. */

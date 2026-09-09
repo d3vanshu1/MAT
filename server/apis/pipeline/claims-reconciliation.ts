@@ -1809,6 +1809,31 @@ function isHistoricalActualPeriod(period: string): boolean {
   return year < CURRENT_DEAL_YEAR;
 }
 
+/**
+ * 2.4: Detect claims where the label unit conflicts with the value unit.
+ * A percent-labelled claim carrying a currency value is a mangled extraction.
+ * Returns true if the claim should be rejected.
+ */
+export function hasUnitConflict(claim: Claim): boolean {
+  const metric = (claim.metric ?? "").toLowerCase();
+  const verbatim = (claim.verbatim_snippet ?? "").toLowerCase();
+  const value = typeof claim.value === "number" ? claim.value : parseFloat(String(claim.value));
+
+  // Label says percent but value is large (> 1 million) → currency value in a % field
+  const labelSaysPercent = /\bpercent|\brate|\bmargin|\b%/.test(metric) || /\b%\b/.test(verbatim);
+  if (labelSaysPercent && Math.abs(value) > 1_000_000) {
+    return true;
+  }
+
+  // Label says currency/absolute but value is between 0 and 1 → likely a ratio
+  const labelSaysCurrency = /\brevenue|\bebitda|\bcost|\bdebt|\bcapex|\bcash/i.test(metric);
+  if (labelSaysCurrency && Math.abs(value) > 0 && Math.abs(value) < 1) {
+    return true;
+  }
+
+  return false;
+}
+
 export function normalizeClaimValue(claim: Claim): number {
   // Convert claim value to the same units as model figures (raw absolute value).
   // Claims may use £m, $m, £k, etc. — the currency symbol doesn't matter

@@ -32,6 +32,7 @@ import type { CoverageDenominator, ReconciliationFinding, ReconciliationResult }
 import { normalizeClaimValue } from "./claims-reconciliation.js";
 import type { RankedReconciliationFinding } from "./reconciliation-ranking.js";
 import { appendixFindings, formatRankAudit, presentedFindings } from "./reconciliation-ranking.js";
+import { cleanVerdictLanguage, generateAlternativeExplanation, hashFinding, type FindingCheckType } from "./finding-quality-gate.js";
 
 // ---------------------------------------------------------------------------
 // Context
@@ -245,8 +246,8 @@ function meaningSentence(finding: ReconciliationFinding): string {
   if (finding.finding_kind === "cross_version") {
     return (
       `The same metric appears with different values across document versions — ` +
-      `up to ${money(finding.delta_abs)} apart. One of the documents is stale, or the ` +
-      `restatement is intentional and undisclosed.`
+      `up to ${money(finding.delta_abs)} apart. One document may have been updated ` +
+      `after the other was finalised.`
     );
   }
 
@@ -269,14 +270,16 @@ function meaningSentence(finding: ReconciliationFinding): string {
   }
 
   const claimVal = normalizeClaimValue(claim);
-  const direction = claimVal >= fig.value ? "overstates" : "understates";
+  const direction = claimVal >= fig.value ? "higher than" : "lower than";
   const scope = claim.scope_qualifier && claim.scope_qualifier !== "NONE_STATED"
     ? claim.scope_qualifier
     : claim.metric;
 
   return (
-    `If the model is correct, the memo ${direction} ${scope} for ${claim.period} by ` +
-    `${money(finding.delta_abs)} (${pct(finding.delta_pct)}).`
+    `The memo's figure for ${scope} (${claim.period}) is ${direction} the model by ` +
+    `${money(finding.delta_abs)} (${pct(finding.delta_pct)}). ` +
+    `This does not establish which is correct — the difference may reflect a ` +
+    `basis or convention difference.`
   );
 }
 
@@ -468,7 +471,36 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
       // Meaning — one sentence.
       lines.push(`**What it means:** ${meaningSentence(f)}`);
       lines.push("");
-      lines.push(`_Rank ${r.rank} of ${ctx.ranked.length} · score ${r.score} · ${f.finding_kind}_`);
+
+      // 1.2: Alternative explanation — every finding must carry an innocent reason
+      const checkType: FindingCheckType = (
+        f.finding_kind === "cross_version" ? "cross_version"
+        : f.finding_kind === "basis_divergence" ? "basis_divergence"
+        : (f.finding_kind as string) === "does_not_foot" ? "does_not_foot"
+        : "data_divergence"
+      );
+      const altExplanation = generateAlternativeExplanation(checkType, {
+        docA: f.claim?.source_doc ?? undefined,
+        docB: f.model_figure?.source_sheet ?? undefined,
+        deltaAbs: f.delta_abs ?? undefined,
+        deltaPct: f.delta_pct ?? undefined,
+      });
+      if (altExplanation) {
+        lines.push(altExplanation);
+        lines.push("");
+      }
+
+      // 1.3: Integrity hash — immutable after generation
+      const fHash = hashFinding({
+        metric: f.claim?.metric ?? null,
+        period: f.claim?.period ?? null,
+        scope: f.claim?.scope_qualifier ?? null,
+        claimValue: f.claim ? normalizeClaimValue(f.claim) : null,
+        figureValue: f.model_figure?.value ?? null,
+        deltaAbs: f.delta_abs ?? null,
+        deltaPct: f.delta_pct ?? null,
+      });
+      lines.push(`_Rank ${r.rank} of ${ctx.ranked.length} · score ${r.score} · ${f.finding_kind} · ${fHash}_`);
       lines.push("");
     }
 
@@ -692,5 +724,7 @@ export function formatReconciliationReport(ctx: ReconciliationReportContext): st
   lines.push(`_${footer.join(" · ")}_`);
   lines.push("");
 
-  return lines.join("\n");
+  // 1.1: Final wording lint — clean any verdict language that slipped through
+  const raw = lines.join("\n");
+  return cleanVerdictLanguage(raw);
 }
