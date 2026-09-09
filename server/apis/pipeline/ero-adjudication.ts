@@ -174,7 +174,8 @@ export async function adjudicateFindings(
       // Uses 'error' which is schema-legal per ero_hypotheses_status_chk:
       //   CHECK (status IN ('pending', 'researched', 'no_evidence_found', 'error'))
       await db.execute(
-        `UPDATE ero_hypotheses SET status = 'error' WHERE hypothesis_id = $1`,
+        `UPDATE ero_hypotheses SET status = 'error', failure_reason = 'adjudication_failed'
+         WHERE hypothesis_id = $1`,
         [hyp.hypothesis_id],
         { label: `Adjudication: set hyp ${hyp.execution_rank} → error` },
       );

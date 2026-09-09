@@ -176,7 +176,8 @@ interface RenderedReport {
     hypotheses_generated: number;
     hypotheses_researched: number;
     hypotheses_no_evidence: number;
-    hypotheses_pending: number;
+    hypotheses_not_run: number;
+    hypotheses_failed: number;
     findings_count: number;
   };
   entity_manifest: {
@@ -327,8 +328,12 @@ export async function renderReport(
   const hypNoEvidence = hypotheses.filter(
     (h: z.infer<typeof HypothesisRow>) => h.status === "no_evidence_found",
   ).length;
-  const hypPending = hypotheses.filter(
-    (h: z.infer<typeof HypothesisRow>) => h.status === "pending" || h.status === "error",
+  // D-06: split "never ran" from "ran and failed"
+  const hypNotRun = hypotheses.filter(
+    (h: z.infer<typeof HypothesisRow>) => h.status === "pending",
+  ).length;
+  const hypFailed = hypotheses.filter(
+    (h: z.infer<typeof HypothesisRow>) => h.status === "error",
   ).length;
 
   const generatedAt = pipelineState.length > 0
@@ -342,7 +347,8 @@ export async function renderReport(
     hypotheses_generated: hypGenerated,
     hypotheses_researched: hypResearched,
     hypotheses_no_evidence: hypNoEvidence,
-    hypotheses_pending: hypPending,
+    hypotheses_not_run: hypNotRun,
+    hypotheses_failed: hypFailed,
     findings_count: findings.length,
   };
 
@@ -558,12 +564,26 @@ function assembleMarkdown(
   lines.push("");
   lines.push("## Coverage Summary");
   lines.push("");
+
+  // W2-1: Coverage warning — above the table when research is incomplete
+  if (header.hypotheses_not_run > 0) {
+    const tested = header.hypotheses_researched + header.hypotheses_no_evidence;
+    lines.push(
+      `> **Incomplete coverage.** ${header.hypotheses_not_run} of ` +
+      `${header.hypotheses_generated} hypotheses were not researched. ` +
+      `Findings below reflect ${tested} tested hypotheses only.`,
+    );
+    lines.push("");
+  }
+
   lines.push(`| Metric | Count |`);
   lines.push(`|--------|-------|`);
   lines.push(`| Hypotheses generated | ${header.hypotheses_generated} |`);
   lines.push(`| Hypotheses researched | ${header.hypotheses_researched} |`);
   lines.push(`| No evidence found | ${header.hypotheses_no_evidence} |`);
-  lines.push(`| Pending/error | ${header.hypotheses_pending} |`);
+  // W2-2: Split "never ran" from "ran and failed"
+  lines.push(`| Not attempted | ${header.hypotheses_not_run} |`);
+  lines.push(`| Failed (error) | ${header.hypotheses_failed} |`);
   lines.push(`| Adjudicated findings | ${header.findings_count} |`);
   lines.push("");
 

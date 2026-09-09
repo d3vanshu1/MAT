@@ -25,7 +25,7 @@
  */
 import { z } from "@superblocksteam/sdk-api";
 import type { StageResult } from "./ero-stage-contract.js";
-import { STAGE_BUDGET_MS } from "./ero-stage-contract.js";
+import { STAGE_BUDGET_MS, MIN_SEARCH_MS } from "./ero-stage-contract.js";
 import {
   extractHost,
   classifyTier,
@@ -43,6 +43,9 @@ const PER_CALL_TIMEOUT_MS = 90_000;
 /** Retry config. */
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 2_000;
+
+/** Hypotheses exceeding this many research attempts are retired to 'error'. */
+const MAX_HYP_ATTEMPTS = 3;
 
 // ── DB row schemas ──────────────────────────────────────────────────
 const HypothesisRow = z.object({
@@ -120,7 +123,7 @@ interface HypothesisResult {
   search_query: string;
   evidence_written: EvidenceItem[];
   dropped: DroppedItem[];
-  status: "researched" | "no_evidence_found" | "error";
+  status: "researched" | "no_evidence_found" | "error" | "budget_exhausted";
   error_message: string | null;
   round2_spawned: { question: string; family: string } | null;
 }
@@ -137,6 +140,18 @@ export async function researchExecution(
   const db = ctx.integrations.ic_diligence_db;
   const ai = ctx.integrations.claude;
   const stageStart = Date.now();
+
+  // ── D-05: Retire hypotheses that burned their attempts ──────────
+  // Terminal so they surface in the report rather than re-queueing forever.
+  // Must run BEFORE the snapshot load so retired hypotheses don't enter
+  // the pending pool.
+  await db.execute(
+    `UPDATE ero_hypotheses
+     SET status = 'error', failure_reason = 'attempts_exhausted'
+     WHERE run_id = $1 AND status = 'pending' AND research_attempts >= $2`,
+    [runId, MAX_HYP_ATTEMPTS],
+    { label: "Research: retire over-attempted hypotheses" },
+  );
 
   // ── Load pending hypotheses in execution_rank order ───────────────
   const pendingHypotheses = await db.query(
@@ -165,9 +180,11 @@ export async function researchExecution(
   let hypothesesProcessed = 0;
 
   for (const hyp of pendingHypotheses) {
-    // ── Budget guard ──────────────────────────────────────────────
+    // ── Budget guard (Guard A) ────────────────────────────────────
+    // Reserve MIN_SEARCH_MS so Guard B in runWebSearch is a backstop,
+    // not the primary control path. This closes D-01.
     const elapsed = Date.now() - stageStart;
-    if (elapsed >= STAGE_BUDGET_MS) {
+    if (elapsed >= STAGE_BUDGET_MS - MIN_SEARCH_MS) {
       return {
         stage: "research_execution",
         status: "in_progress",
@@ -182,6 +199,12 @@ export async function researchExecution(
 
     // ── Process one hypothesis ────────────────────────────────────
     const hypResult = await processOneHypothesis(ctx, db, ai, runId, hyp, stageStart);
+
+    // D-01: budget exhaustion is a statement about the stage, not the
+    // hypothesis. Every later hypothesis hits the same wall, so break
+    // immediately — do not push, do not increment.
+    if (hypResult.status === "budget_exhausted") break;
+
     results.push(hypResult);
     hypothesesProcessed++;
 
@@ -195,14 +218,31 @@ export async function researchExecution(
     );
   }
 
+  // ── D-02: Completion is a data assertion, not a control-flow inference.
+  // Re-query catches round-2 hypotheses spawned during this loop that
+  // were absent from the snapshot loaded at the top.
+  const remainingRows = await db.query(
+    `SELECT count(*)::int AS cnt FROM ero_hypotheses
+     WHERE run_id = $1 AND status = 'pending'`,
+    CountRow, [runId],
+    { label: "Research: assert completion" },
+  );
+  const stillPending = remainingRows[0]?.cnt ?? 0;
+
+  if (stillPending > 0) {
+    return {
+      stage: "research_execution",
+      status: "in_progress",
+      message: `Researched ${hypothesesProcessed} this invocation. ${stillPending} still pending.`,
+      stageData: { hypothesesProcessed, hypothesesRemaining: stillPending, results },
+    };
+  }
+
   return {
     stage: "research_execution",
     status: "complete",
-    message: `Research complete. ${hypothesesProcessed} hypotheses processed.`,
-    stageData: {
-      hypothesesProcessed,
-      results,
-    },
+    message: `Research complete. ${hypothesesProcessed} researched this invocation, 0 pending.`,
+    stageData: { hypothesesProcessed, results },
   };
 }
 
@@ -218,6 +258,14 @@ async function processOneHypothesis(
   hyp: z.infer<typeof HypothesisRow>,
   stageStart: number,
 ): Promise<HypothesisResult> {
+  // ── W1-4: Increment attempts before doing any work ───────────
+  await db.execute(
+    `UPDATE ero_hypotheses SET research_attempts = research_attempts + 1
+     WHERE hypothesis_id = $1`,
+    [hyp.hypothesis_id],
+    { label: `Research: increment attempts for hyp ${hyp.execution_rank}` },
+  );
+
   // ── 0. Resolve entity identity for disambiguation ────────────
   let entity: z.infer<typeof EntityRow> | null = null;
   if (hyp.entity_id) {
@@ -310,12 +358,19 @@ async function processOneHypothesis(
 
     if (!isBudgetExhaustion) {
       await db.execute(
-        `UPDATE ero_hypotheses SET status = 'error' WHERE hypothesis_id = $1`,
+        `UPDATE ero_hypotheses SET status = 'error', failure_reason = 'research_failed'
+         WHERE hypothesis_id = $1`,
         [hyp.hypothesis_id],
         { label: `Research: set hyp ${hyp.execution_rank} → error` },
       );
+    } else {
+      // Budget exhaustion: leave as 'pending', but warn — Guard A should
+      // have caught this before we entered processOneHypothesis.
+      console.warn(
+        `[Research] Guard B fired for hyp ${hyp.execution_rank} — ` +
+        `Guard A should have pre-empted this. Check MIN_SEARCH_MS calibration.`,
+      );
     }
-    // else: leave as 'pending' — next invocation will pick it up
 
     return {
       hypothesis_id: hyp.hypothesis_id,
@@ -323,7 +378,7 @@ async function processOneHypothesis(
       search_query: searchQuery,
       evidence_written: [],
       dropped: [],
-      status: isBudgetExhaustion ? "pending" as any : "error",
+      status: isBudgetExhaustion ? "budget_exhausted" : "error",
       error_message: msg,
       round2_spawned: null,
     };
@@ -390,9 +445,10 @@ async function runWebSearch(
   label: string,
 ): Promise<z.infer<typeof WebSearchResponseSchema>> {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    // Budget check before each attempt
+    // Guard B — backstop. Guard A in the main loop should pre-empt this
+    // by reserving MIN_SEARCH_MS. If Guard B fires, log a warning.
     const remaining = deadlineMs - Date.now();
-    if (remaining < 30_000) {
+    if (remaining < MIN_SEARCH_MS) {
       throw new Error(
         `Budget exhausted mid-retry (attempt ${attempt}/${MAX_RETRIES}, ` +
           `${Math.round(remaining / 1000)}s left): ${label}`,

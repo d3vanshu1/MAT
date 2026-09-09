@@ -22,6 +22,10 @@ export type EroStageName = (typeof ERO_STAGES)[number];
 // ── Wall-clock budget per invocation ────────────────────────────────
 export const STAGE_BUDGET_MS = 240_000;
 
+/** Wall-clock floor for one web_search round-trip. Guard A reserves this
+ *  so Guard B in runWebSearch is a backstop, not a control path. */
+export const MIN_SEARCH_MS = 30_000;
+
 // ── Stage handler result ────────────────────────────────────────────
 export type StageResult = {
   stage: string;

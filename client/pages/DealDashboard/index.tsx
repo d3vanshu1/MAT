@@ -2406,9 +2406,14 @@ export default function DealDashboardPage() {
 
           case "in_progress":
           case "pending": {
+            const stageIdx = [
+              "build_entity_manifest", "build_deal_profile", "generate_hypotheses",
+              "rank_hypotheses", "research_execution", "adjudicate_findings",
+              "corpus_confrontation", "render",
+            ].indexOf(result.stage);
             setModuleProgress("external_risk_overlay", {
               message: `${stageLabel}…`,
-              detail: { current: result.invocationCount, total: 8, phase: "researching" },
+              detail: { current: Math.max(stageIdx + 1, 1), total: 8, phase: "researching" },
             });
             break;
           }

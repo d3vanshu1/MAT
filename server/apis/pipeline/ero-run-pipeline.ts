@@ -261,18 +261,9 @@ export default api({
       }
     }
 
-    // ── 6. Budget guard ─────────────────────────────────────────────
-    const elapsed = Date.now() - invocationStart;
-    if (elapsed >= STAGE_BUDGET_MS) {
-      return {
-        runId,
-        stage: stageToRun,
-        status: "in_progress",
-        invocationCount,
-        message: `Budget exhausted (${elapsed}ms). Re-invoke to continue.`,
-        stageData: null,
-      };
-    }
+    // ── 6. (D-07: Removed unreachable orchestrator budget guard.)
+    // invocationStart is set 4 DB calls earlier; elapsed is always ~0ms.
+    // Stage handlers own their own budget via STAGE_BUDGET_MS. ───────
 
     // ── 7. Set stage_status = 'running' ─────────────────────────────
     await db.execute(
