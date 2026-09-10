@@ -466,11 +466,97 @@ export default api({
         }
       }
 
+      // Check orientation: if period tokens are found in rows (label col) rather than columns
+      // For now, mark as periods_across_columns unless we detect transposition
+      let orientation = "periods_across_columns";
+      let structureReason: string | null = null;
+
+      // --- Section-level header fallback ---
+      // When no sheet-wide header band is found, check if the sheet has
+      // section headers (is_section_header / is_aggregate rows) that carry
+      // year-like numbers across data columns. This handles multi-section
+      // sheets like LBO Model where each calculation block has its own
+      // local header row instead of a single top-level band.
+      if (headerBandRows.length === 0) {
+        // Find section marker rows from already-loaded cells
+        const sectionRows: number[] = [];
+        const sectionSeen = new Set<number>();
+        for (const c of cellRows) {
+          if (c.col_idx !== (labelCol) || sectionSeen.has(c.row_idx)) continue;
+          // We need the Phase 2 flags; query them in one batch below
+          sectionSeen.add(c.row_idx);
+        }
+        // Load Phase 2 section markers for this sheet
+        const sectionMarkers = await db.query(
+          `SELECT DISTINCT row_idx FROM workbook_cells
+           WHERE workbook_id = $1 AND sheet_name = $2 AND col_idx = $3
+             AND (is_section_header = true OR is_aggregate = true)
+           ORDER BY row_idx`,
+          z.object({ row_idx: z.number() }),
+          [workbookId, sheetName, labelCol],
+          { label: `Phase3: section markers ${sheetName}` },
+        );
+        for (const m of sectionMarkers) sectionRows.push(m.row_idx);
+
+        // Scan each section header row for year-like values across data columns
+        let foundSectionHeader = false;
+        for (const secRow of sectionRows) {
+          let yearLikeCount = 0;
+          let totalInRow = 0;
+          for (const col of dataCols) {
+            const val = getCellValue(secRow, col);
+            if (!val) continue;
+            totalInRow++;
+            const typ = getCellType(secRow, col);
+            const isYearNum = typ === "number" && /^\d{4}$/.test(val)
+              && parseInt(val) >= 1990 && parseInt(val) <= 2060;
+            const isYearText = (typ === "text" || typ === "string")
+              && /^\d{4}[AEBFaebf]?$/.test(val.trim());
+            if (isYearNum || isYearText) yearLikeCount++;
+          }
+          if (totalInRow >= 3 && yearLikeCount / totalInRow >= 0.5) {
+            // This section row has year headers — use it as the canonical band
+            headerBandRows.push(secRow);
+            foundSectionHeader = true;
+            // One canonical header row is sufficient for the whole sheet
+            break;
+          }
+          // Also check the row immediately after for a sub-header
+          const nextRow = secRow + 1;
+          let nextYearCount = 0;
+          let nextTotal = 0;
+          for (const col of dataCols) {
+            const val = getCellValue(nextRow, col);
+            if (!val) continue;
+            nextTotal++;
+            const typ = getCellType(nextRow, col);
+            const isYearNum = typ === "number" && /^\d{4}$/.test(val)
+              && parseInt(val) >= 1990 && parseInt(val) <= 2060;
+            const isYearText = (typ === "text" || typ === "string")
+              && /^\d{4}[AEBFaebf]?$/.test(val.trim());
+            if (isYearNum || isYearText) nextYearCount++;
+          }
+          if (nextTotal >= 3 && nextYearCount / nextTotal >= 0.5) {
+            headerBandRows.push(nextRow);
+            foundSectionHeader = true;
+            break;
+          }
+        }
+
+        if (foundSectionHeader) {
+          orientation = "periods_across_columns";
+          structureReason = "section_level_header_row_" + headerBandRows[0];
+        } else {
+          orientation = "none";
+          structureReason = "no header band found";
+        }
+      }
+
+      // Confidence & debug capture (after section-level fallback)
       const bandConf = headerBandRows.length > 0
         ? Math.min(1, headerBandRows.length / 3)
         : 0;
 
-      // Debug capture for first 3 sheets
       if (debugInfo.length < 3) {
         const sampleCols = Array.from(dataCols).slice(0, 5);
         const sampleHeaders: Record<string, string | null> = {};
@@ -484,17 +570,8 @@ export default api({
           sheetName, drs, effectiveDrs, labelCol,
           dataColCount: dataCols.size,
           headerBandRows, bandConf, sampleHeaders,
+          structureReason,
         });
-      }
-
-      // Check orientation: if period tokens are found in rows (label col) rather than columns
-      // For now, mark as periods_across_columns unless we detect transposition
-      let orientation = "periods_across_columns";
-      let structureReason: string | null = null;
-
-      if (headerBandRows.length === 0) {
-        orientation = "none";
-        structureReason = "no header band found";
       }
 
       // Build column header path and parse periods/cases per data column
