@@ -472,42 +472,38 @@ export default api({
       let structureReason: string | null = null;
 
       // --- Section-level header fallback ---
-      // When no sheet-wide header band is found, check if the sheet has
-      // section headers (is_section_header / is_aggregate rows) that carry
-      // year-like numbers across data columns. This handles multi-section
-      // sheets like LBO Model where each calculation block has its own
-      // local header row instead of a single top-level band.
-      if (headerBandRows.length === 0) {
-        // Find section marker rows from already-loaded cells
-        const sectionRows: number[] = [];
-        const sectionSeen = new Set<number>();
-        for (const c of cellRows) {
-          if (c.col_idx !== (labelCol) || sectionSeen.has(c.row_idx)) continue;
-          // We need the Phase 2 flags; query them in one batch below
-          sectionSeen.add(c.row_idx);
-        }
-        // Load Phase 2 section markers for this sheet
-        const sectionMarkers = await db.query(
-          `SELECT DISTINCT row_idx FROM workbook_cells
-           WHERE workbook_id = $1 AND sheet_name = $2 AND col_idx = $3
-             AND (is_section_header = true OR is_aggregate = true)
-           ORDER BY row_idx`,
-          z.object({ row_idx: z.number() }),
-          [workbookId, sheetName, labelCol],
-          { label: `Phase3: section markers ${sheetName}` },
-        );
-        for (const m of sectionMarkers) sectionRows.push(m.row_idx);
+      // When no sheet-wide header band is found, look for multi-section
+      // structure: a "Date" row with ISO dates, a "Stub" row with period
+      // fractions, and year-header rows that define section boundaries.
+      // Rows above the first year-header row are non-temporal.
 
-        // Scan each section header row for year-like values across data columns
-        let foundSectionHeader = false;
-        for (const secRow of sectionRows) {
+      // sectionBands: array of { headerRows, startRow, endRow } describing
+      // each section's column mapping. Built only for multi-section sheets.
+      interface SectionBand {
+        headerRows: number[];         // row indices used as header source
+        dateRow: number | null;       // row with ISO dates (preferred)
+        stubRow: number | null;       // row with stub fractions
+        startRow: number;             // first data row (inclusive)
+        endRow: number;               // last data row (inclusive, Infinity = end)
+      }
+      let sectionBands: SectionBand[] = [];
+      let nonTemporalEndRow = -1; // rows 0..nonTemporalEndRow have no time axis
+
+      if (headerBandRows.length === 0) {
+        // 1. Find all year-header rows across the sheet
+        const yearHeaderRows: number[] = [];
+        const maxRow = cellRows.reduce((mx, c) => Math.max(mx, c.row_idx), 0);
+        const checkedRows = new Set<number>();
+        for (const c of cellRows) {
+          if (checkedRows.has(c.row_idx)) continue;
+          checkedRows.add(c.row_idx);
           let yearLikeCount = 0;
           let totalInRow = 0;
           for (const col of dataCols) {
-            const val = getCellValue(secRow, col);
+            const val = getCellValue(c.row_idx, col);
             if (!val) continue;
             totalInRow++;
-            const typ = getCellType(secRow, col);
+            const typ = getCellType(c.row_idx, col);
             const isYearNum = typ === "number" && /^\d{4}$/.test(val)
               && parseInt(val) >= 1990 && parseInt(val) <= 2060;
             const isYearText = (typ === "text" || typ === "string")
@@ -515,37 +511,93 @@ export default api({
             if (isYearNum || isYearText) yearLikeCount++;
           }
           if (totalInRow >= 3 && yearLikeCount / totalInRow >= 0.5) {
-            // This section row has year headers — use it as the canonical band
-            headerBandRows.push(secRow);
-            foundSectionHeader = true;
-            // One canonical header row is sufficient for the whole sheet
-            break;
+            yearHeaderRows.push(c.row_idx);
           }
-          // Also check the row immediately after for a sub-header
-          const nextRow = secRow + 1;
-          let nextYearCount = 0;
-          let nextTotal = 0;
-          for (const col of dataCols) {
-            const val = getCellValue(nextRow, col);
-            if (!val) continue;
-            nextTotal++;
-            const typ = getCellType(nextRow, col);
-            const isYearNum = typ === "number" && /^\d{4}$/.test(val)
-              && parseInt(val) >= 1990 && parseInt(val) <= 2060;
-            const isYearText = (typ === "text" || typ === "string")
-              && /^\d{4}[AEBFaebf]?$/.test(val.trim());
-            if (isYearNum || isYearText) nextYearCount++;
+        }
+        yearHeaderRows.sort((a, b) => a - b);
+
+        // 2. Find "Date" row and "Stub" row by scanning label column
+        //    These are metadata rows with specific labels and date/numeric content.
+        let globalDateRow: number | null = null;
+        let globalStubRow: number | null = null;
+        for (const c of cellRows) {
+          if (c.col_idx !== labelCol) continue;
+          const lbl = (c.value_raw ?? "").trim().toLowerCase();
+          if (lbl === "date" && !globalDateRow) {
+            // Verify this row actually has date-typed cells in data columns
+            let hasDate = false;
+            for (const col of dataCols) {
+              if (getCellType(c.row_idx, col) === "date") { hasDate = true; break; }
+            }
+            if (hasDate) globalDateRow = c.row_idx;
           }
-          if (nextTotal >= 3 && nextYearCount / nextTotal >= 0.5) {
-            headerBandRows.push(nextRow);
-            foundSectionHeader = true;
-            break;
+          if (lbl === "stub" && !globalStubRow) {
+            // Verify this row has numeric fractions (not years)
+            let hasFraction = false;
+            for (const col of dataCols) {
+              const v = getCellValue(c.row_idx, col);
+              if (v && getCellType(c.row_idx, col) === "number") {
+                const n = parseFloat(v);
+                if (n >= 0 && n <= 1.01 && !/^\d{4}$/.test(v)) { hasFraction = true; break; }
+              }
+            }
+            if (hasFraction) globalStubRow = c.row_idx;
           }
         }
 
-        if (foundSectionHeader) {
+        // 3. De-duplicate year header rows: if a year-header row is the same
+        //    as a section-label row (like P&L at row 66 which has years AND
+        //    a label), prefer a subsequent year-header row if one exists
+        //    within 10 rows. The section-label row has the title in col 1
+        //    plus years in data cols; the real header has "($ in Millions)"
+        //    or similar plus years. Distinguish by checking if a Date row
+        //    or another year-header row follows within 10 rows.
+        const validYearHeaders: number[] = [];
+        for (let i = 0; i < yearHeaderRows.length; i++) {
+          const r = yearHeaderRows[i];
+          const nextYH = yearHeaderRows[i + 1] ?? null;
+          // If the next year-header row is within 10 rows, this row is
+          // likely a section label — skip it in favor of the next one
+          if (nextYH !== null && nextYH - r <= 10) {
+            // Skip this one; the next iteration will pick up nextYH
+            continue;
+          }
+          validYearHeaders.push(r);
+        }
+
+        if (validYearHeaders.length > 0) {
+          // 4. Build section bands from valid year-header rows
+          nonTemporalEndRow = validYearHeaders[0] - 1;
+
+          for (let i = 0; i < validYearHeaders.length; i++) {
+            const hdrRow = validYearHeaders[i];
+            // Find Date row and Stub row near this header (within 5 rows above)
+            let dateRow = globalDateRow;
+            let stubRow = globalStubRow;
+            // Only associate the global Date/Stub with the first section
+            // if they fall within its neighborhood
+            if (dateRow !== null && Math.abs(dateRow - hdrRow) > 10) dateRow = null;
+            if (stubRow !== null && Math.abs(stubRow - hdrRow) > 10) stubRow = null;
+
+            const startRow = hdrRow + 1;
+            const endRow = (i + 1 < validYearHeaders.length)
+              ? validYearHeaders[i + 1] - 1
+              : maxRow;
+
+            sectionBands.push({
+              headerRows: dateRow !== null ? [dateRow, hdrRow] : [hdrRow],
+              dateRow,
+              stubRow,
+              startRow,
+              endRow,
+            });
+          }
+
+          // Use the first valid header row as the canonical band for metadata
+          headerBandRows.push(validYearHeaders[0]);
+          if (globalDateRow !== null) headerBandRows.push(globalDateRow);
           orientation = "periods_across_columns";
-          structureReason = "section_level_header_row_" + headerBandRows[0];
+          structureReason = "multi_section_headers_" + validYearHeaders.join("_");
         } else {
           orientation = "none";
           structureReason = "no header band found";
@@ -557,7 +609,7 @@ export default api({
         ? Math.min(1, headerBandRows.length / 3)
         : 0;
 
-      if (debugInfo.length < 3) {
+      if (debugInfo.length < 5) {
         const sampleCols = Array.from(dataCols).slice(0, 5);
         const sampleHeaders: Record<string, string | null> = {};
         for (const col of sampleCols) {
@@ -571,56 +623,101 @@ export default api({
           dataColCount: dataCols.size,
           headerBandRows, bandConf, sampleHeaders,
           structureReason,
+          sectionBands: sectionBands.map(b => ({
+            headerRows: b.headerRows, dateRow: b.dateRow, stubRow: b.stubRow,
+            startRow: b.startRow, endRow: b.endRow,
+          })),
+          nonTemporalEndRow,
         });
       }
 
-      // Build column header path and parse periods/cases per data column
-      const colPeriods = new Map<number, ParsedPeriod | null>();
-      const colCases = new Map<number, { label: string; key: string; source: string } | null>();
-      const colHeaderRaws = new Map<number, string>();
+      // Build column header path and parse periods/cases per data column.
+      // For multi-section sheets (sectionBands.length > 0), build separate
+      // maps per section. For normal sheets, one map covers all rows.
+      interface ColMapping {
+        period: ParsedPeriod | null;
+        caseInfo: { label: string; key: string; source: string } | null;
+        headerRaw: string | null;
+      }
+      // sectionColMaps[i] = per-column mapping for sectionBands[i]
+      // If sectionBands is empty, colMapsDefault is used for all rows.
+      const sectionColMaps: Map<number, ColMapping>[] = [];
+      let colMapsDefault: Map<number, ColMapping> | null = null;
 
-      for (const col of dataCols) {
-        const headerParts: string[] = [];
-        let period: ParsedPeriod | null = null;
-        let caseInfo: { label: string; key: string; source: string } | null = null;
-        let basisFromBandRow: string | null = null;
+      function buildColMap(bandRows: number[], dateRow: number | null, stubRow: number | null): Map<number, ColMapping> {
+        const m = new Map<number, ColMapping>();
+        for (const col of dataCols) {
+          const headerParts: string[] = [];
+          let period: ParsedPeriod | null = null;
+          let caseInfo: { label: string; key: string; source: string } | null = null;
+          let basisFromBandRow: string | null = null;
 
-        for (const r of headerBandRows) {
-          const val = getCellValue(r, col);
-          if (!val || !val.trim()) continue;
-          headerParts.push(val.trim());
-
-          // Try period parse
-          if (!period) {
-            const typ = getCellType(r, col);
-            const raw = typ === "date" ? val : val;
-            const parsed = parsePeriodToken(raw, fyEndMonth);
-            if (parsed) period = parsed;
+          // Prefer Date row for period if available
+          if (dateRow !== null) {
+            const dateVal = getCellValue(dateRow, col);
+            if (dateVal && getCellType(dateRow, col) === "date") {
+              const parsed = parsePeriodToken(dateVal, fyEndMonth);
+              if (parsed) period = parsed;
+            }
           }
 
-          // Try case extract
-          if (!caseInfo) {
-            const c = extractCase(val);
-            if (c) caseInfo = { ...c, source: "band_row" };
+          for (const r of bandRows) {
+            const val = getCellValue(r, col);
+            if (!val || !val.trim()) continue;
+            headerParts.push(val.trim());
+
+            // Try period parse from year row (only if Date row didn't provide one)
+            if (!period) {
+              const parsed = parsePeriodToken(val, fyEndMonth);
+              if (parsed) period = parsed;
+            }
+
+            // Try case extract
+            if (!caseInfo) {
+              const c = extractCase(val);
+              if (c) caseInfo = { ...c, source: "band_row" };
+            }
+
+            // Try basis from band row
+            if (!basisFromBandRow) {
+              const b = extractBasis(val);
+              if (b) basisFromBandRow = b;
+            }
           }
 
-          // Try basis from band row
-          if (!basisFromBandRow) {
-            const b = extractBasis(val);
-            if (b) basisFromBandRow = b;
+          const headerRaw = headerParts.join(" | ") || null;
+
+          // Apply basis
+          if (period && basisFromBandRow && period.periodBasis === "unknown") {
+            period.periodBasis = basisFromBandRow;
           }
+
+          // Detect stub period from Stub row
+          if (period && stubRow !== null) {
+            const stubVal = getCellValue(stubRow, col);
+            if (stubVal && getCellType(stubRow, col) === "number") {
+              const frac = parseFloat(stubVal);
+              if (frac > 0 && frac < 1) {
+                period = { ...period, periodType: "stub" };
+                // Adjust period label to indicate sub-annual
+                const months = Math.round(frac * 12);
+                period.periodLabel = period.periodLabel + ` (${months}mo stub)`;
+              }
+            }
+          }
+
+          m.set(col, { period, caseInfo, headerRaw });
         }
+        return m;
+      }
 
-        const headerRaw = headerParts.join(" | ") || null;
-        if (headerRaw) colHeaderRaws.set(col, headerRaw);
-
-        // Apply basis from band row to period
-        if (period && basisFromBandRow && period.periodBasis === "unknown") {
-          period.periodBasis = basisFromBandRow;
+      if (sectionBands.length > 0) {
+        for (const band of sectionBands) {
+          sectionColMaps.push(buildColMap(band.headerRows, band.dateRow, band.stubRow));
         }
-
-        colPeriods.set(col, period);
-        colCases.set(col, caseInfo);
+      } else {
+        // Normal sheet: one column map from headerBandRows
+        colMapsDefault = buildColMap(headerBandRows, null, null);
       }
 
       // Sheet-level case from sheet name
@@ -628,82 +725,158 @@ export default api({
       const sheetCase = extractCase(sheetName);
       if (sheetCase) {
         sheetCaseLabel = sheetCase.label;
-        // Apply to columns without a band_row case
-        for (const col of dataCols) {
-          if (!colCases.get(col)) {
-            colCases.set(col, { label: sheetCase.label, key: sheetCase.key, source: "sheet_name" });
-          }
-        }
-      }
-
-      // Scenario switch detection (look for switch-like cells)
-      let scenarioSwitchCell: string | null = null;
-      for (const c of cellRows) {
-        if (c.row_idx >= drs) break; // only check above data region
-        if (c.value_type === "text" || c.value_type === "string") {
-          if (c.value_raw && SWITCH_TOKENS.test(c.value_raw)) {
-            // Check adjacent cell for a value
-            const nextCell = cellByRC.get(`${c.row_idx}:${c.col_idx + 1}`);
-            if (nextCell?.value_raw) {
-              scenarioSwitchCell = nextCell.value_raw.includes(":")
-                ? `${c.value_raw}: ${nextCell.value_raw}`
-                : nextCell.value_raw;
-              break;
+        // Apply to all section maps / default map
+        const allMaps = sectionColMaps.length > 0 ? sectionColMaps : (colMapsDefault ? [colMapsDefault] : []);
+        for (const m of allMaps) {
+          for (const col of dataCols) {
+            const entry = m.get(col);
+            if (entry && !entry.caseInfo) {
+              entry.caseInfo = { label: sheetCase.label, key: sheetCase.key, source: "sheet_name" };
             }
           }
         }
       }
 
-      // Count stats
+      // Scenario switch detection (look for switch-like cells)
+      // A switch cell contains a switch token ("case", "scenario", "toggle",
+      // "switch", "live case") and the adjacent cell to its right holds
+      // the active state as a non-numeric text value.
+      let scenarioSwitchCell: string | null = null;
+      for (const c of cellRows) {
+        if (c.value_type === "text" || c.value_type === "string") {
+          const raw = (c.value_raw ?? "").trim();
+          if (raw.length > 60 || !SWITCH_TOKENS.test(raw)) continue;
+          const nextCell = cellByRC.get(`${c.row_idx}:${c.col_idx + 1}`);
+          if (nextCell?.value_raw) {
+            const adj = nextCell.value_raw.trim();
+            // Skip pure numeric values (toggle flags like 0/1)
+            if (/^-?\d+(\.\d+)?$/.test(adj)) continue;
+            // Skip if the adjacent value is too long (likely a label, not a state)
+            if (adj.length > 30) continue;
+            scenarioSwitchCell = adj;
+            break;
+          }
+        }
+      }
+
+      // Count stats from all maps
       let sheetPeriodsFound = 0;
       let sheetCasesFound = 0;
-      for (const [, p] of colPeriods) if (p) sheetPeriodsFound++;
-      for (const [, c] of colCases) if (c) sheetCasesFound++;
-
-      // Batch update: CTE with 10 columns per batch
-      const dataColArr = Array.from(dataCols);
-      const COL_BATCH = 10;
-      for (let bi = 0; bi < dataColArr.length; bi += COL_BATCH) {
-        const batch = dataColArr.slice(bi, bi + COL_BATCH);
-        const valueClauses: string[] = [];
-        const params: unknown[] = [workbookId, sheetName];
-        let idx = 3;
-        for (const col of batch) {
-          const period = colPeriods.get(col) ?? null;
-          const caseInfo = colCases.get(col) ?? null;
-          const headerRaw = colHeaderRaws.get(col) ?? null;
-          valueClauses.push(
-            `($${idx}::int, $${idx+1}, $${idx+2}, $${idx+3}, $${idx+4}, $${idx+5}, $${idx+6}, $${idx+7}, $${idx+8}, $${idx+9}, $${idx+10})`
-          );
-          params.push(
-            col, headerRaw, headerRaw,
-            period?.periodType ?? null, period?.periodStart ?? null,
-            period?.periodEnd ?? null, period?.periodLabel ?? null,
-            period?.periodBasis ?? null,
-            caseInfo?.label ?? null, caseInfo?.key ?? null, caseInfo?.source ?? null,
-          );
-          idx += 11;
+      const countedPeriodCols = new Set<number>();
+      const countedCaseCols = new Set<number>();
+      const allColMaps = sectionColMaps.length > 0 ? sectionColMaps : (colMapsDefault ? [colMapsDefault] : []);
+      for (const m of allColMaps) {
+        for (const [col, entry] of m) {
+          if (entry.period && !countedPeriodCols.has(col)) { sheetPeriodsFound++; countedPeriodCols.add(col); }
+          if (entry.caseInfo && !countedCaseCols.has(col)) { sheetCasesFound++; countedCaseCols.add(col); }
         }
-        await db.execute(
-          `WITH vals(ci, chp, chr, pt, ps, pe, pl, pb, cl, ck, cs) AS (
-             VALUES ${valueClauses.join(", ")}
-           )
-           UPDATE workbook_cells c SET
-             col_header_path = v.chp,
-             col_header_raw = v.chr,
-             period_type = v.pt,
-             period_start = v.ps,
-             period_end = v.pe,
-             period_label = v.pl,
-             period_basis = v.pb,
-             case_label = v.cl,
-             case_key = v.ck,
-             case_source = v.cs
-           FROM vals v
-           WHERE c.workbook_id = $1 AND c.sheet_name = $2 AND c.col_idx = v.ci`,
-          params,
-          { label: `Phase3: update ${sheetName} cols ${bi+1}-${bi+batch.length}` },
-        );
+      }
+
+      // --- Batch update ---
+      // For multi-section sheets, we update per-section with row range filters.
+      // For normal sheets, one column-wide update covers all rows.
+
+      async function batchUpdateCols(
+        colMap: Map<number, ColMapping>,
+        rowFilterSql: string,
+        extraParams: unknown[],
+        labelSuffix: string,
+      ) {
+        const dataColArr = Array.from(dataCols);
+        const COL_BATCH = 10;
+        for (let bi = 0; bi < dataColArr.length; bi += COL_BATCH) {
+          const batch = dataColArr.slice(bi, bi + COL_BATCH);
+          const valueClauses: string[] = [];
+          const params: unknown[] = [workbookId, sheetName, ...extraParams];
+          let idx = 3 + extraParams.length;
+          for (const col of batch) {
+            const entry = colMap.get(col);
+            const period = entry?.period ?? null;
+            const caseInfo = entry?.caseInfo ?? null;
+            const headerRaw = entry?.headerRaw ?? null;
+            valueClauses.push(
+              `($${idx}::int, $${idx+1}, $${idx+2}, $${idx+3}, $${idx+4}, $${idx+5}, $${idx+6}, $${idx+7}, $${idx+8}, $${idx+9}, $${idx+10})`
+            );
+            params.push(
+              col, headerRaw, headerRaw,
+              period?.periodType ?? null, period?.periodStart ?? null,
+              period?.periodEnd ?? null, period?.periodLabel ?? null,
+              period?.periodBasis ?? null,
+              caseInfo?.label ?? null, caseInfo?.key ?? null, caseInfo?.source ?? null,
+            );
+            idx += 11;
+          }
+          await db.execute(
+            `WITH vals(ci, chp, chr, pt, ps, pe, pl, pb, cl, ck, cs) AS (
+               VALUES ${valueClauses.join(", ")}
+             )
+             UPDATE workbook_cells c SET
+               col_header_path = v.chp,
+               col_header_raw = v.chr,
+               period_type = v.pt,
+               period_start = v.ps,
+               period_end = v.pe,
+               period_label = v.pl,
+               period_basis = v.pb,
+               case_label = v.cl,
+               case_key = v.ck,
+               case_source = v.cs
+             FROM vals v
+             WHERE c.workbook_id = $1 AND c.sheet_name = $2 AND c.col_idx = v.ci
+               AND ${rowFilterSql}`,
+            params,
+            { label: `Phase3: update ${sheetName} ${labelSuffix} cols ${bi+1}-${bi+batch.length}` },
+          );
+        }
+      }
+
+      if (sectionBands.length > 0) {
+        // 1. Null out non-temporal rows (above first year-header)
+        if (nonTemporalEndRow >= 0) {
+          await db.execute(
+            `UPDATE workbook_cells SET
+               col_header_path = NULL, col_header_raw = NULL,
+               period_type = NULL, period_start = NULL, period_end = NULL,
+               period_label = NULL, period_basis = NULL,
+               case_label = NULL, case_key = NULL, case_source = NULL,
+               reason = 'non_temporal_section'
+             WHERE workbook_id = $1 AND sheet_name = $2 AND row_idx <= $3`,
+            [workbookId, sheetName, nonTemporalEndRow],
+            { label: `Phase3: null non-temporal ${sheetName} rows 0-${nonTemporalEndRow}` },
+          );
+        }
+
+        // 2. Update each section band
+        for (let si = 0; si < sectionBands.length; si++) {
+          const band = sectionBands[si];
+          const colMap = sectionColMaps[si];
+          await batchUpdateCols(
+            colMap,
+            `c.row_idx >= $3 AND c.row_idx <= $4`,
+            [band.startRow, band.endRow],
+            `sect${si}(r${band.startRow}-${band.endRow})`,
+          );
+        }
+
+        // 3. Null out rows between non-temporal end and first section start
+        //    (metadata rows like Stub, Live?, Date)
+        const metaStart = nonTemporalEndRow + 1;
+        const metaEnd = sectionBands[0].startRow - 1;
+        if (metaEnd >= metaStart) {
+          await db.execute(
+            `UPDATE workbook_cells SET
+               period_type = NULL, period_start = NULL, period_end = NULL,
+               period_label = NULL, period_basis = NULL,
+               reason = CASE WHEN reason IS NULL THEN 'header_row' ELSE reason END
+             WHERE workbook_id = $1 AND sheet_name = $2
+               AND row_idx >= $3 AND row_idx <= $4`,
+            [workbookId, sheetName, metaStart, metaEnd],
+            { label: `Phase3: null meta rows ${sheetName} ${metaStart}-${metaEnd}` },
+          );
+        }
+      } else if (colMapsDefault) {
+        // Normal sheet: column-wide update
+        await batchUpdateCols(colMapsDefault, `TRUE`, [], `all`);
       }
 
       totalCellsUpdated += cellRows.length;
@@ -727,6 +900,29 @@ export default api({
           sheetCaseLabel, scenarioSwitchCell,
         ],
         { label: `Phase3: update sheet meta ${sheetName}` },
+      );
+    }
+
+    // --- Active case label ---
+    // Collect scenario_switch_cell values across all processed sheets.
+    // These represent the live/active case state of the workbook.
+    const switchValues = await db.query(
+      `SELECT sheet_name, scenario_switch_cell FROM workbook_sheets
+       WHERE workbook_id = $1 AND scenario_switch_cell IS NOT NULL
+       ORDER BY sheet_index`,
+      z.object({ sheet_name: z.string(), scenario_switch_cell: z.string() }),
+      [workbookId],
+      { label: "Phase3: collect switch cells" },
+    );
+    if (switchValues.length > 0) {
+      // Build a composite label from all switch values
+      const parts = switchValues.map(s => s.scenario_switch_cell);
+      const activeCaseLabel = parts.join("; ");
+      await db.execute(
+        `UPDATE workbooks SET active_case_label = $2, active_case_source = 'scenario_switch_cells'
+         WHERE id = $1`,
+        [workbookId, activeCaseLabel],
+        { label: "Phase3: set active case label" },
       );
     }
 
