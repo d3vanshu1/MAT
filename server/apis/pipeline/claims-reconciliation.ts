@@ -122,6 +122,12 @@ export interface ReconciliationResult {
   figure_fanout_max: number;
   /** Internal error from LLM matching step (null if LLM succeeded or wasn't attempted) */
   matching_error?: string | null;
+  /** F22: Coverage entries routed away from findings (unreconcilable, scope_mismatch) */
+  coverage_entries_count: number;
+  /** F22: Findings that passed the quality gate */
+  gate_passed_count: number;
+  /** F22: Findings dropped by the quality gate */
+  gate_dropped_count: number;
   /** Fix 20: Total supersession diagnostics emitted during this reconciliation.
    *  Corrective E2: No longer populated here — supersession moved to Stage 3.5. */
   supersession_diagnostics_count?: number;
@@ -1649,9 +1655,37 @@ export async function runReconciliation(
 
   // ----- U5: Findings dump — generate stable report ID & apply 3MB guard -----
   const findings_report_id = generateUUID();
+  // ── Coverage split ──────────────────────────────────────────────
+  // "We couldn't find the other side" is coverage, not a finding.
+  // Route to a separate list before the quality gate.
+  const COVERAGE_KINDS = new Set(["unreconcilable", "scope_mismatch"]);
+  interface CoverageEntry {
+    title: string;
+    finding_kind: string;
+    detail: string;
+    claim_metric: string | null;
+    claim_period: string | null;
+  }
+  const coverageEntries: CoverageEntry[] = [];
+  const verifiedFindings: typeof findings = [];
+
+  for (const f of findings) {
+    if (COVERAGE_KINDS.has(f.finding_kind ?? "")) {
+      coverageEntries.push({
+        title: f.title,
+        finding_kind: f.finding_kind ?? "unknown",
+        detail: f.detail,
+        claim_metric: f.claim?.metric ?? null,
+        claim_period: f.claim?.period ?? null,
+      });
+    } else {
+      verifiedFindings.push(f);
+    }
+  }
+
   // ── Quality gate (A1–A4, F22) ───────────────────────────────────
   // Sanitize → lint → explanation → hash. Drop and log on failure.
-  // This is the SINGLE emit gate. Every finding flows through here.
+  // Only verified disagreements reach this gate. Coverage entries bypass it.
   interface GateDrop {
     title: string;
     finding_kind: string;
@@ -1660,7 +1694,7 @@ export async function runReconciliation(
   const gateDrops: GateDrop[] = [];
   const gatedFindings: typeof findings = [];
 
-  for (const f of findings) {
+  for (const f of verifiedFindings) {
     // Step 1: Sanitize all human-facing text fields
     if (f.title) f.title = cleanVerdictLanguage(f.title);
     if (f.detail) f.detail = cleanVerdictLanguage(f.detail);
@@ -1721,19 +1755,31 @@ export async function runReconciliation(
     gatedFindings.push(f);
   }
 
-  // F22: Log every drop
+  // F22: Log both counts every run — findings and coverage
+  console.log(
+    `[Reconciliation] Emit split: ${verifiedFindings.length} verified disagreements, ` +
+    `${coverageEntries.length} coverage entries (not-found / scope mismatch).`
+  );
+  console.log(
+    `[Reconciliation] Quality gate: ${gatedFindings.length} passed, ${gateDrops.length} dropped.`
+  );
   if (gateDrops.length > 0) {
-    console.log(
-      `[Reconciliation] Quality gate: ${gatedFindings.length} passed, ${gateDrops.length} dropped.`
-    );
     for (const d of gateDrops) {
       console.log(
         `[Reconciliation]   DROPPED: "${d.title}" (${d.finding_kind}) — ${d.reason}`
       );
     }
   }
+  if (coverageEntries.length > 0) {
+    for (const c of coverageEntries) {
+      console.log(
+        `[Reconciliation]   COVERAGE: "${c.title}" (${c.finding_kind}) — ` +
+        `metric: ${c.claim_metric ?? "?"}, period: ${c.claim_period ?? "?"}`
+      );
+    }
+  }
 
-  // Replace findings with gated set
+  // Replace findings with gated set — coverage entries are logged only
   findings.length = 0;
   findings.push(...gatedFindings);
 
@@ -1831,6 +1877,10 @@ export async function runReconciliation(
     figure_fanout_max: 0, // Populated by caller if figure fanout check is run
     ambiguous_reference_count,
     matching_error,
+    // F22: Coverage split baseline
+    coverage_entries_count: coverageEntries.length,
+    gate_passed_count: gatedFindings.length,
+    gate_dropped_count: gateDrops.length,
     coverage: {
       raw_claims: ledger.claims.length,
       category_excluded: nonReconcilable.length,

@@ -115,10 +115,7 @@ export type FindingCheckType =
   | "cross_version"
   | "does_not_foot"
   | "basis_divergence"
-  | "internal_inconsistency"
-  | "unreconcilable"
-  | "scope_mismatch"
-  | "not_comparable";
+  | "internal_inconsistency";
 
 /**
  * Generate an alternative (innocent) explanation for a finding.
@@ -182,26 +179,6 @@ export function generateAlternativeExplanation(
         "**Alternative explanation:** The two citations may refer to different " +
         "scopes, time periods or definitions that are not apparent from the " +
         "extracted text alone."
-      );
-
-    case "unreconcilable":
-      return (
-        "**Alternative explanation:** The figure may be derived from a returns " +
-        "model, side letter, or other document not included in the operating model " +
-        "files provided. Its absence from the model does not indicate an error."
-      );
-
-    case "scope_mismatch":
-      return (
-        "**Alternative explanation:** The memo and model figures may measure " +
-        "different scopes, segments, or reporting boundaries that are not " +
-        "apparent from the labels alone."
-      );
-
-    case "not_comparable":
-      return (
-        "**Alternative explanation:** The two figures may be on different units, " +
-        "time bases, or accounting treatments that make direct comparison invalid."
       );
 
     default:

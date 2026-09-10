@@ -189,6 +189,9 @@ export default api({
           near_miss_unit_rejected: 0,
           not_comparable_count: 0,
           figure_fanout_max: 0,
+          coverage_entries_count: 0,
+          gate_passed_count: 0,
+          gate_dropped_count: 0,
           coverage: {
             raw_claims: ledger.claims.length,
             category_excluded: 0,
@@ -227,6 +230,9 @@ export default api({
         near_miss_unit_rejected: 0,
         not_comparable_count: 0,
         figure_fanout_max: 0,
+        coverage_entries_count: 0,
+        gate_passed_count: 0,
+        gate_dropped_count: 0,
         coverage: {
           raw_claims: ledger.claims.length,
           category_excluded: 0,
