@@ -92,7 +92,21 @@ export async function upsertModuleOutput(
   // at runtime — Supabase PgBouncer in transaction-pooling mode rejects DDL,
   // and even caught errors corrupt the connection state for subsequent queries.
   const finalizedAt = new Date().toISOString();
-  const findingsJson = JSON.stringify(validatedFindings);
+
+  // W3: Surface top findings — rank, cap at 30, 3 critical, 3 IC-flagged
+  const { surfaceFindings } = await import("./surface-findings.js");
+  const { surfaced, suppressedCount, suppressedCritical } = surfaceFindings(validatedFindings);
+
+  let finalHeader = executiveHeader;
+  if (suppressedCount > 0) {
+    finalHeader += "\n\n" + suppressedCount + " additional findings below the surfacing threshold";
+    if (suppressedCritical > 0) {
+      finalHeader += " (" + suppressedCritical + " scored critical)";
+    }
+    finalHeader += ". Full register: module run " + runId + ".";
+  }
+
+  const findingsJson = JSON.stringify(surfaced);
 
   // Log payload sizes for diagnostics
   console.log(
@@ -122,7 +136,7 @@ export async function upsertModuleOutput(
       `UPDATE module_outputs
        SET executive_header = $2, schema_version = $3, finalized_at = $4::timestamptz
        WHERE id = $1`,
-      [outputId, executiveHeader, schemaVersion, finalizedAt],
+      [outputId, finalHeader, schemaVersion, finalizedAt],
       { label: "upsertModuleOutput: update skeleton" }
     );
 
@@ -153,7 +167,7 @@ export async function upsertModuleOutput(
        VALUES ($1, $2, '[]'::jsonb, '', $3, $4::timestamptz)
        RETURNING id AS output_id`,
       z.object({ output_id: z.string() }),
-      [runId, executiveHeader, schemaVersion, finalizedAt],
+      [runId, finalHeader, schemaVersion, finalizedAt],
       { label: "upsertModuleOutput: insert skeleton" }
     );
     outputId = insertRows[0].output_id;

@@ -19,6 +19,7 @@ import MergeFindings from './modules/merge-findings.js';
 import FormatReport from './modules/format-report.js';
 import SaveModuleResult from './modules/save-module-result.js';
 import LoadModuleResults from './modules/load-module-results.js';
+import GetModuleReport from './modules/get-module-report.js';
 import GetRunnableRuns from './modules/get-runnable-runs.js';
 import GetRunHistory from './modules/get-run-history.js';
 import GetRunOutput from './modules/get-run-output.js';
@@ -320,7 +321,7 @@ import FramingPatternAudit from './audit/framing-pattern-audit.js';
 const apis = {
   // AI pipeline
   AnalyzeChunk, UniversalExtract, MergeFindings, FormatReport,
-  SaveModuleResult, LoadModuleResults, GetRunnableRuns, GetRunHistory, GetRunOutput,
+  SaveModuleResult, LoadModuleResults, GetModuleReport, GetRunnableRuns, GetRunHistory, GetRunOutput,
   // Server-side pipeline
   RunModulePipeline, ResumeStalePipelines, DiagnoseParsedText, CleanParsedTextDryRun, CountSheets, DiagnoseChunks, DiagnoseRuns, DiagnoseChunkCoverage, DiagnoseChunkDetail, DiagnoseRunEvidence, DiagnoseFindingTrace, DiagnoseExtractionRaw, ResetDealRun, ResetModuleMerge, RunMigration004, RunMigration005, RunMigration006, RunMigration007, RunMigration009, RunMigration010, RunMigration011, RunMigration012, RunMigration013, RunMigration014, RunMigration015, DiagTimeoutProbe, ReadTimeoutProbeResult, ListTimeoutProbes, DiagMergeNodeSize, DiagRawFlagAggregate, DiagMergeFunnel, DiagMergeMetrics, DiagConsolidationFailure, DiagConsolidationDryrun, DiagOaIdentityFit, DiagModelGrouper, DiagPromptExport, ExportFindings, UnstickPool, ExtractReportChunk, DiagClaimsExtraction, DiagReconciliation, DiagMergeStall,     ResumeMergeRecovery, DiagnosticFinalization, ExportL3RawFindings, ConsolidateL3Export, ReadL3ExportChunk, GenerateL3ArtifactFiles, ReadArtifactChunk, AssembleExportArtifact, StreamExportArtifact, DownloadDiagnosticArtifact,
   ReplayDispositionHarness, ExportReplayEvidence, ReplayClaimLinkage, ReplayCanonicalIdentity, AssembleCanonicalFindings, ReplayPopulateClaimsLedger, DiagSaintReconciliation, GetSaintReconciliationPage, DiagReconciliationFindings,

@@ -9,6 +9,7 @@
  */
 import { api, z, postgres } from "@superblocksteam/sdk-api";
 import { SEEDED_TOPICS, OBLIGATION_CHECKLIST_VERSION } from "./oa-taxonomy.js";
+import { surfaceFindings } from "../modules/surface-findings.js";
 
 const DB_ID = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -326,7 +327,19 @@ export default api({
       { label: "Clear existing module_output" }
     );
 
-    const findingsJson = JSON.stringify(canonicalFindings);
+    // W3: Surface top findings — rank, cap at 30, 3 critical, 3 IC-flagged
+    const { surfaced, suppressedCount, suppressedCritical } = surfaceFindings(canonicalFindings as any);
+
+    let finalHeader = executiveHeader;
+    if (suppressedCount > 0) {
+      finalHeader += "\n\n" + suppressedCount + " additional findings below the surfacing threshold";
+      if (suppressedCritical > 0) {
+        finalHeader += " (" + suppressedCritical + " scored critical)";
+      }
+      finalHeader += ". Full register: module run " + moduleRunId + ".";
+    }
+
+    const findingsJson = JSON.stringify(surfaced);
 
     const OutputIdRow = z.object({ id: z.string() });
     const insertResult = await db.query(
@@ -334,7 +347,7 @@ export default api({
        VALUES ($1::uuid, $2, $3::jsonb, $4)
        RETURNING id`,
       OutputIdRow,
-      [moduleRunId, executiveHeader, findingsJson, fullReport],
+      [moduleRunId, finalHeader, findingsJson, fullReport],
       { label: "Insert module_outputs row" }
     );
 

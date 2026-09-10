@@ -406,8 +406,8 @@ export default function DealDashboardPage() {
                 triggered_at: m.latestRun.triggeredAt,
                 completed_at: m.latestRun.completedAt,
                 documents_included: [],
-                findings_count: m.latestOutput?.findings?.length ?? 0,
-                critical_count: m.latestOutput?.findings?.filter((f: Record<string, unknown>) => f.severity === "critical").length ?? 0,
+                findings_count: m.latestOutput?.findingsCount ?? 0,
+                critical_count: m.latestOutput?.criticalCount ?? 0,
               }
             : null,
           latestOutput: m.latestOutput
@@ -415,9 +415,15 @@ export default function DealDashboardPage() {
                 id: crypto.randomUUID(),
                 module_run_id: m.latestRun?.id ?? "",
                 executive_header: m.latestOutput.executiveHeader,
-                findings: m.latestOutput.findings,
-                full_report_markdown: m.latestOutput.fullReport,
+                findings: [], // Findings no longer carried in listing — loaded on demand via GetRunOutput
+                full_report_markdown: "",
                 created_at: m.latestOutput.createdAt,
+                // W1 counts — used by cards and rollup
+                findings_count: m.latestOutput.findingsCount,
+                critical_count: m.latestOutput.criticalCount,
+                warning_count: m.latestOutput.warningCount,
+                info_count: m.latestOutput.infoCount,
+                critical_assessed_count: m.latestOutput.criticalAssessedCount,
               }
             : null,
         };
@@ -622,13 +628,13 @@ export default function DealDashboardPage() {
 
   const stats = useMemo(() => {
     const totalFindings = Object.values(statuses).reduce(
-      (sum, s) => sum + (s.latestOutput?.findings.length ?? 0),
+      (sum, s) => sum + (s.latestRun?.findings_count ?? 0),
       0
     );
+    // W4: Use assessed (uncapped) critical count for deal-level stat
     const criticalFindings = Object.values(statuses).reduce(
       (sum, s) =>
-        sum +
-        (s.latestOutput?.findings.filter((f) => f.severity === "critical").length ?? 0),
+        sum + ((s.latestOutput as any)?.critical_assessed_count ?? s.latestRun?.critical_count ?? 0),
       0
     );
     return {
@@ -1720,22 +1726,39 @@ export default function DealDashboardPage() {
       return;
     }
 
-    // Build chunks from prior module outputs
-    const execChunks = priorModules.map(([id, s]) => {
-      const displayName = MODULE_MAP[id]?.displayName ?? id;
-      const output = s.latestOutput!;
-      return {
-        label: displayName,
-        sourceFile: `Module: ${displayName}`,
-        text: `Module: ${displayName}\n\nExecutive Header: ${output.executive_header}\n\nFindings (${output.findings.length}):\n${output.findings
-          .map(
-            (f: { severity: string; title: string; detail: string }, fi: number) =>
-              `${fi + 1}. [${f.severity}] ${f.title}: ${f.detail}`
-          )
-          .join("\n")}\n\nFull Report:\n${output.full_report_markdown}`,
-        pageImages: [] as Array<{ pageNumber: number; text: string; imageBase64: string; mediaType: "image/jpeg" }>,
-      };
-    });
+    // W2: Fetch full module outputs on demand — the listing payload no longer
+    // carries findings or markdown. Each call is ~500 KB, well under the wire
+    // limit, vs. the old single-message approach that exceeded 4 MB.
+    const execChunks = await Promise.all(
+      priorModules.map(async ([id, s]) => {
+        const displayName = MODULE_MAP[id]?.displayName ?? id;
+        const full = await executeApi("GetRunOutput", { runId: s.latestRun!.id });
+        const o = (full as any)?.output;
+        if (!o) {
+          throw new Error(
+            "Executive Summary: no output for " + displayName +
+            " (run " + s.latestRun!.id + "). Cannot synthesize an incomplete memo."
+          );
+        }
+        const findings = Array.isArray(o.findings) ? o.findings : [];
+        const fullReport = typeof o.fullReport === "string" ? o.fullReport : "";
+        const header = typeof o.executiveHeader === "string" ? o.executiveHeader : "";
+        return {
+          label: displayName,
+          sourceFile: "Module: " + displayName,
+          text: "Module: " + displayName + "\n\nExecutive Header: " + header +
+            "\n\nFindings (" + findings.length + "):\n" +
+            findings
+              .map(
+                (f: { severity: string; title: string; detail: string }, fi: number) =>
+                  (fi + 1) + ". [" + f.severity + "] " + f.title + ": " + f.detail
+              )
+              .join("\n") +
+            "\n\nFull Report:\n" + fullReport,
+          pageImages: [] as Array<{ pageNumber: number; text: string; imageBase64: string; mediaType: "image/jpeg" }>,
+        };
+      })
+    );
 
     // Analyze all module outputs in parallel
     const { extractions } = await analyzeChunksParallel(

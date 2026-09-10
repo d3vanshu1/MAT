@@ -26,6 +26,12 @@ export interface ModuleOutput {
   findings: Finding[];
   full_report_markdown: string;
   created_at: string;
+  // W1 server-computed counts — used by cards and rollup
+  findings_count?: number;
+  critical_count?: number;
+  warning_count?: number;
+  info_count?: number;
+  critical_assessed_count?: number;
 }
 
 export interface ModuleStatus {

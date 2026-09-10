@@ -208,6 +208,13 @@ export const CanonicalFindingSchema = z.object({
    *  Preserves content that would otherwise be lost when cluster members are merged. */
   consolidated_analyses: z.array(z.string()).optional(),
 
+  // --- Surfacing & display caps ---
+  /** Severity as scored on the merits, before display caps.
+   *  Equals severity unless the publisher downgraded for the 3-critical cap. */
+  severity_assessed: z.enum(["critical", "warning", "info"]).optional(),
+  /** Whether this finding is flagged for IC attention (max 3 per module). */
+  ic_flagged: z.boolean().optional(),
+
   // --- MG-4: Materiality tiering (Stage 4.6) ---
   /** Materiality tier assigned by Sonnet: 1=deal-changing, 2=condition/diligence, 3=noted/immaterial */
   materiality_tier: z.number().optional(),
@@ -479,6 +486,13 @@ export function parseCanonicalFindings(
     if (tier_driver !== undefined) finding.tier_driver = tier_driver;
     if (consolidated_analyses && consolidated_analyses.length > 0) finding.consolidated_analyses = consolidated_analyses;
     if (absence_verification !== undefined) finding.absence_verification = absence_verification;
+
+    // --- Surfacing & display caps ---
+    const severity_assessed = parseEnum(obj.severity_assessed, ["critical", "warning", "info"] as const, itemSource, itemIssues)
+      ?? finalSeverity;
+    if (severity_assessed !== finalSeverity) finding.severity_assessed = severity_assessed;
+    const ic_flagged = typeof obj.ic_flagged === "boolean" ? obj.ic_flagged : undefined;
+    if (ic_flagged !== undefined) finding.ic_flagged = ic_flagged;
 
     if (!isValid || itemIssues.length > 0) {
       invalid.push({ finding, valid: isValid, issues: itemIssues });

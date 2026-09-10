@@ -1225,7 +1225,20 @@ export async function canonicalFinalize(
   // ledger, with per-finding gate attribution, to `module_run_diagnostics`.
   //
   // Schema: module_outputs has (id, module_run_id, executive_header, findings, full_report_markdown, created_at).
-  const reportableFindingsJson = JSON.stringify(reportableFindings);
+  // W3: Surface top findings — rank, cap at 30, 3 critical, 3 IC-flagged
+  const { surfaceFindings } = await import("../modules/surface-findings.js");
+  const { surfaced: surfacedFindings, suppressedCount, suppressedCritical } = surfaceFindings(reportableFindings);
+
+  let finalHeader = effectiveHeader;
+  if (suppressedCount > 0) {
+    finalHeader += "\n\n" + suppressedCount + " additional findings below the surfacing threshold";
+    if (suppressedCritical > 0) {
+      finalHeader += " (" + suppressedCritical + " scored critical)";
+    }
+    finalHeader += ". Full register: module run " + runId + ".";
+  }
+
+  const reportableFindingsJson = JSON.stringify(surfacedFindings);
 
   try {
     let artifactId: string;
@@ -1241,7 +1254,7 @@ export async function canonicalFinalize(
            WHERE id = $1`,
           [
             artifactId,
-            effectiveHeader,
+            finalHeader,
             reportableFindingsJson,
             reportMarkdown,
           ],
@@ -1257,7 +1270,7 @@ export async function canonicalFinalize(
         z.object({ id: z.string() }),
         [
           runId,
-          effectiveHeader,
+          finalHeader,
           reportableFindingsJson,
           reportMarkdown,
         ],
