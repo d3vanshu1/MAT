@@ -42,6 +42,14 @@ interface ExtractedFigure {
   value: number;
   basis: string | null;
   scenario: string | null;
+  // C10: Complete the coordinate
+  cell_ref: string | null;      // e.g. "D15"
+  column_header: string | null; // raw header text for the column
+  formula: string | null;       // cell formula if present
+  unit_tag: string | null;      // detected unit from headers/labels
+  scale: string | null;         // e.g. "millions", "thousands"
+  value_raw: number;            // pre-transform value as read from cell
+  transform: string | null;     // e.g. "divide_1000", "multiply_100", null if none
 }
 
 // ---------------------------------------------------------------------------
@@ -414,9 +422,11 @@ export default api({
 
       // Load cells in two chunks: structure cols (0-6) and value cols (7-15)
       // This keeps each query under the 4MB gRPC limit
-      const CellSchema = z.object({ r: z.number(), c: z.number(), value: z.any(), type: z.string() });
+      // D14 note: cell JSON currently has {r,c,value,type} only. Formula capture
+      // requires doc-tables-phase.ts to extract from xlsx. Column is ready; data is not.
+      const CellSchema = z.object({ r: z.number(), c: z.number(), value: z.any(), type: z.string(), formula: z.string().nullable().optional() });
       const structureCells = await ctx.integrations.db.query(
-        `SELECT (cell->>'r')::int as r, (cell->>'c')::int as c, cell->'value' as value, cell->>'type' as type
+        `SELECT (cell->>'r')::int as r, (cell->>'c')::int as c, cell->'value' as value, cell->>'type' as type, cell->>'f' as formula
          FROM doc_tables, jsonb_array_elements(data->'cells') AS cell
          WHERE id = $1::uuid AND (cell->>'c')::int <= 6`,
         CellSchema,
@@ -424,7 +434,7 @@ export default api({
         { label: `Stage5: Struct cells ${sheetInfo.sheet_or_page}` }
       );
       const valueCells = await ctx.integrations.db.query(
-        `SELECT (cell->>'r')::int as r, (cell->>'c')::int as c, cell->'value' as value, cell->>'type' as type
+        `SELECT (cell->>'r')::int as r, (cell->>'c')::int as c, cell->'value' as value, cell->>'type' as type, cell->>'f' as formula
          FROM doc_tables, jsonb_array_elements(data->'cells') AS cell
          WHERE id = $1::uuid AND (cell->>'c')::int > 6 AND (cell->>'c')::int <= 15`,
         CellSchema,
@@ -434,7 +444,7 @@ export default api({
 
       // Also load row 0 and row 1 cells for period detection (may be in higher cols)
       const headerCells = await ctx.integrations.db.query(
-        `SELECT (cell->>'r')::int as r, (cell->>'c')::int as c, cell->'value' as value, cell->>'type' as type
+        `SELECT (cell->>'r')::int as r, (cell->>'c')::int as c, cell->'value' as value, cell->>'type' as type, cell->>'f' as formula
          FROM doc_tables, jsonb_array_elements(data->'cells') AS cell
          WHERE id = $1::uuid AND (cell->>'r')::int <= 1 AND (cell->>'c')::int > 6`,
         CellSchema,
@@ -558,6 +568,14 @@ export default api({
           if (!cell || cell.type !== "number" || typeof cell.value !== "number") continue;
           if (cell.value === 0) continue; // Skip zero values
 
+          // C10: Build cell reference (e.g. "D15") from column index and row index
+          const colLetter = colIdx < 26
+            ? String.fromCharCode(65 + colIdx)
+            : String.fromCharCode(64 + Math.floor(colIdx / 26)) + String.fromCharCode(65 + (colIdx % 26));
+          const cellRef = `${colLetter}${ri + 1}`;
+          // Column header — raw text from the effective column headers
+          const rawColHeader = effectiveColHeaders[colIdx] ?? null;
+
           allFigures.push({
             document_id: sheetInfo.document_id,
             sheet_name: sheetName,
@@ -569,6 +587,14 @@ export default api({
             value: cell.value,
             basis: matchedMapping.basis ?? null,
             scenario: null,
+            // C10: coordinate fields
+            cell_ref: cellRef,
+            column_header: rawColHeader,
+            formula: cell.formula ?? null,
+            unit_tag: null,  // populated in D14 from header/label parsing
+            scale: null,     // populated in D14 from header/label parsing
+            value_raw: cell.value,
+            transform: null, // No transform applied at extraction time
           });
           sheetFigures++;
         }
@@ -652,12 +678,13 @@ export default api({
       );
 
       // Batch insert (50 per batch to stay within query limits)
-      const batchSize = 50;
+      const COLS_PER_ROW = 17;
+      const batchSize = 30; // Reduced from 50: 17 cols × 30 = 510 params (under PG limit)
       for (let i = 0; i < allFigures.length; i += batchSize) {
         const batch = allFigures.slice(i, i + batchSize);
-        const values = batch.map((f, idx) => {
-          const offset = idx * 10;
-          return `($${offset + 1}::uuid, $${offset + 2}::uuid, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}::numeric, $${offset + 10})`;
+        const values = batch.map((_f, idx) => {
+          const o = idx * COLS_PER_ROW;
+          return `($${o+1}::uuid, $${o+2}::uuid, $${o+3}, $${o+4}, $${o+5}, $${o+6}, $${o+7}, $${o+8}, $${o+9}::numeric, $${o+10}, $${o+11}, $${o+12}, $${o+13}, $${o+14}, $${o+15}, $${o+16}::numeric, $${o+17})`;
         }).join(", ");
 
         const params = batch.flatMap((f) => [
@@ -671,10 +698,21 @@ export default api({
           f.period,
           String(f.value),
           f.basis ?? null,
+          // C10: new coordinate columns
+          f.cell_ref ?? null,
+          f.column_header ?? null,
+          f.formula ?? null,
+          f.unit_tag ?? null,
+          f.scale ?? null,
+          f.value_raw != null ? String(f.value_raw) : null,
+          f.transform ?? null,
         ]);
 
         await ctx.integrations.db.query(
-          `INSERT INTO reference_figures (deal_id, document_id, sheet_name, segment, row_label, metric, scope_qualifier, period, value, basis)
+          `INSERT INTO reference_figures
+             (deal_id, document_id, sheet_name, segment, row_label, metric,
+              scope_qualifier, period, value, basis,
+              cell_ref, column_header, formula, unit_tag, scale, value_raw, transform)
            VALUES ${values}`,
           z.any(),
           params,

@@ -92,6 +92,14 @@ const RefFigRow = z.object({
   period: z.string(),
   value: z.coerce.number(),
   basis: z.string().nullable(),
+  // C10: coordinate columns
+  cell_ref: z.string().nullable().optional(),
+  column_header: z.string().nullable().optional(),
+  formula: z.string().nullable().optional(),
+  unit_tag: z.string().nullable().optional(),
+  scale: z.string().nullable().optional(),
+  value_raw: z.coerce.number().nullable().optional(),
+  transform: z.string().nullable().optional(),
 });
 
 const PrimaryDocRow = z.object({
@@ -165,7 +173,8 @@ export async function loadReferenceFigures(
   primaryDocId?: string,
 ): Promise<{ bridgeFigures: Figure[]; refFigCoords: RefFigCoord[]; rawRows: Array<z.infer<typeof RefFigRow>> }> {
   const refFigRows = await queryFn(
-    `SELECT document_id, sheet_name, row_label, segment, metric, scope_qualifier, period, value, basis
+    `SELECT document_id, sheet_name, row_label, segment, metric, scope_qualifier, period, value, basis,
+            cell_ref, column_header, formula, unit_tag, scale, value_raw, transform
      FROM reference_figures WHERE deal_id = $1
      AND sheet_name NOT IN ('Recent_acquisition_overlay')
      ORDER BY CASE WHEN document_id = $2 THEN 0 ELSE 1 END, sheet_name, period`,
@@ -183,6 +192,14 @@ export async function loadReferenceFigures(
     source_doc: r.document_id,
     source_cell: r.row_label ?? "ref_fig",
     source_sheet: r.sheet_name,
+    // C10: carry coordinate through
+    cell_ref: r.cell_ref ?? null,
+    column_header: r.column_header ?? null,
+    formula: r.formula ?? null,
+    unit_tag: r.unit_tag ?? null,
+    scale: r.scale ?? null,
+    value_raw: r.value_raw ?? null,
+    transform: r.transform ?? null,
   }));
 
   const refFigCoords: RefFigCoord[] = refFigRows.map(r => ({

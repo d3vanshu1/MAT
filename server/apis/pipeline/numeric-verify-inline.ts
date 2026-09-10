@@ -70,6 +70,14 @@ export interface Figure {
   source_doc: string;
   source_cell: string;
   source_sheet: string;
+  // C10: Complete coordinate fields (populated from reference_figures)
+  cell_ref?: string | null;
+  column_header?: string | null;
+  formula?: string | null;
+  unit_tag?: string | null;
+  scale?: string | null;
+  value_raw?: number | null;
+  transform?: string | null;
 }
 
 export interface Discrepancy {
