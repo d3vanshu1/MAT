@@ -3907,15 +3907,31 @@ export default function DealDashboardPage() {
 
             // Save cells in 500-cell chunks
             const CELL_CHUNK = 500;
+            const MAX_RETRIES = 3;
             let totalSaved = 0;
             for (let ci = 0; ci < mapResult.cells.length; ci += CELL_CHUNK) {
               const chunk = mapResult.cells.slice(ci, ci + CELL_CHUNK);
-              const batchResult = await saveWorkbookCellsBatchApi({
-                workbookId: wbId,
-                workbookRole: mapResult.workbook.workbookRole,
-                cells: chunk,
-              });
-              totalSaved += batchResult?.cellsInserted ?? 0;
+              let attempt = 0;
+              let saved = false;
+              while (attempt < MAX_RETRIES && !saved) {
+                try {
+                  const batchResult = await saveWorkbookCellsBatchApi({
+                    workbookId: wbId,
+                    workbookRole: mapResult.workbook.workbookRole,
+                    cells: chunk,
+                  });
+                  totalSaved += batchResult?.cellsInserted ?? 0;
+                  saved = true;
+                } catch (retryErr) {
+                  attempt++;
+                  if (attempt >= MAX_RETRIES) {
+                    console.error(`[WorkbookMap] Cell batch ${Math.floor(ci / CELL_CHUNK) + 1} failed after ${MAX_RETRIES} retries:`, retryErr);
+                    throw retryErr;
+                  }
+                  // Wait 2s before retry to let platform recover
+                  await new Promise((r) => setTimeout(r, 2000));
+                }
+              }
             }
             console.info(
               `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
