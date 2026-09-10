@@ -54,7 +54,7 @@ export interface WorkbookFiguresResult {
     cellsWithLabel: number;
     cellsWithPeriod: number;
     figuresProduced: number;
-    stubsExcluded: number;
+    stubCount: number;
     byUnitClass: Record<string, number>;
     bySheet: Record<string, number>;
   };
@@ -166,16 +166,13 @@ export async function loadWorkbookFigures(
 
   // Convert to Figure[]
   const figures: Figure[] = [];
-  let stubsExcluded = 0;
+  let stubCount = 0;
   const byUnitClass: Record<string, number> = {};
   const bySheet: Record<string, number> = {};
 
   for (const r of rows) {
-    // Exclude stub periods — sub-annual figures should not match annual claims
-    if (r.period_type === "stub") {
-      stubsExcluded++;
-      continue;
-    }
+    const isStub = r.period_type === "stub";
+    if (isStub) stubCount++;
 
     const rawNum = parseFloat(r.value_num!);
     if (isNaN(rawNum)) continue;
@@ -230,7 +227,11 @@ export async function loadWorkbookFigures(
       unit_tag: unitTag,
       scale: scaleLabel,
       value_raw: rawNum,
-      transform: r.sign_convention === "negative_convention" ? "sign_inverted" : null,
+      transform: isStub
+        ? "stub"
+        : r.sign_convention === "negative_convention"
+          ? "sign_inverted"
+          : null,
     };
 
     figures.push(fig);
@@ -241,11 +242,11 @@ export async function loadWorkbookFigures(
   return {
     figures,
     stats: {
-      cellsQueried: rows.length + stubsExcluded,
-      cellsWithLabel: rows.length + stubsExcluded,
-      cellsWithPeriod: rows.length + stubsExcluded,
+      cellsQueried: rows.length,
+      cellsWithLabel: rows.length,
+      cellsWithPeriod: rows.length,
       figuresProduced: figures.length,
-      stubsExcluded,
+      stubCount,
       byUnitClass,
       bySheet,
     },
