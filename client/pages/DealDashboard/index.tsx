@@ -3858,11 +3858,21 @@ export default function DealDashboardPage() {
               const mapResult = await buildWorkbookMap(buf, docId);
               console.info(`[WorkbookMap] ${f.name}:\n${formatWorkbookSummary(mapResult)}`);
 
+              // Round-trip reconstruction test + independent count
+              // Runs BEFORE save so results are always available even if save fails
+              if (mapResult.workbook.loadStatus === "ok" && mapResult.cells.length > 0) {
+                try {
+                  const rtReport = runRoundTripTest(buf, mapResult);
+                  console.info(`[WorkbookMap] ${f.name} round-trip:\n${formatRoundTripReport(rtReport)}`);
+                } catch (rtErr) {
+                  console.warn(`[WorkbookMap] Round-trip test failed for ${f.name}:`, rtErr);
+                }
+              }
+
               if (mapResult.workbook.loadStatus === "failed") {
                 console.warn(
                   `[WorkbookMap] FAILED for ${f.name}: ${mapResult.workbook.loadReason}`
                 );
-                // Still save the workbook + sheet records (no cells) so the failure is visible
               }
 
               // Save workbook + sheets first (small payload)
@@ -3891,16 +3901,6 @@ export default function DealDashboardPage() {
                   `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
                   `sheets=${mapResult.sheets.length}, cells=${totalSaved}`
                 );
-              }
-
-              // Round-trip reconstruction test + independent count
-              if (mapResult.workbook.loadStatus === "ok" && mapResult.cells.length > 0) {
-                try {
-                  const rtReport = runRoundTripTest(buf, mapResult);
-                  console.info(`[WorkbookMap] ${f.name} round-trip:\n${formatRoundTripReport(rtReport)}`);
-                } catch (rtErr) {
-                  console.warn(`[WorkbookMap] Round-trip test failed for ${f.name}:`, rtErr);
-                }
               }
             } catch (err) {
               // Non-fatal — log and continue
