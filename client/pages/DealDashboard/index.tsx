@@ -6,6 +6,7 @@ import { useApiData } from "@/hooks/useApiData.js";
 import { executeApi } from "@/lib/executeApi.js";
 import { processAllFiles, extractTextFromFile, parseExcelToTables, parseCsvToTable } from "@/lib/pdfProcessor";
 import { buildWorkbookMap, formatWorkbookSummary } from "@/lib/workbookMapBuilder";
+import { runRoundTripTest, formatRoundTripReport } from "@/lib/workbookRoundTrip";
 import type { DocumentChunk, ProcessedFileInfo, ExcludedFile, StructuredCell } from "@/lib/pdfProcessor";
 import { MODULE_DEFINITIONS, MODULE_MAP, NUMERIC_MODULES, DISABLED_MODULE_IDS } from "@/lib/moduleConfig";
 import { CHUNK_CHARS, CHUNK_CONCURRENCY, EXTRACTION_MODEL, isSpreadsheetFile } from "@/lib/pipelineConfig";
@@ -3853,7 +3854,7 @@ export default function DealDashboardPage() {
             if (!docId) return;
             try {
               const buf = await f.arrayBuffer();
-              const mapResult = buildWorkbookMap(buf, docId);
+              const mapResult = await buildWorkbookMap(buf, docId);
               console.info(`[WorkbookMap] ${f.name}:\n${formatWorkbookSummary(mapResult)}`);
 
               if (mapResult.workbook.loadStatus === "failed") {
@@ -3872,6 +3873,16 @@ export default function DealDashboardPage() {
                 `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
                 `sheets=${mapResult.sheets.length}, cells=${mapResult.cells.length}`
               );
+
+              // Round-trip reconstruction test + independent count
+              if (mapResult.workbook.loadStatus === "ok" && mapResult.cells.length > 0) {
+                try {
+                  const rtReport = runRoundTripTest(buf, mapResult);
+                  console.info(`[WorkbookMap] ${f.name} round-trip:\n${formatRoundTripReport(rtReport)}`);
+                } catch (rtErr) {
+                  console.warn(`[WorkbookMap] Round-trip test failed for ${f.name}:`, rtErr);
+                }
+              }
             } catch (err) {
               // Non-fatal — log and continue
               console.error(`[WorkbookMap] Build/save failed for ${f.name}:`, err);

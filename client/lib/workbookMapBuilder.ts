@@ -193,20 +193,16 @@ function evaluateMatchingScope(
 // ---------------------------------------------------------------------------
 
 /**
- * Compute a fast hash of the raw xlsx bytes.
- * Uses DJB2 on a sampled subset for speed — enough for change detection.
+ * Compute SHA-256 hash of the full xlsx binary.
+ * Uses crypto.subtle.digest — async, built into the browser,
+ * milliseconds for a few MB. Hashes every byte so any edit
+ * to the file is detected and the map is never silently stale.
  */
-function computeFileHash(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let hash = 5381;
-  // Sample every Nth byte for large files
-  const step = bytes.length > 1_000_000 ? Math.floor(bytes.length / 500_000) : 1;
-  for (let i = 0; i < bytes.length; i += step) {
-    hash = ((hash << 5) + hash + bytes[i]) | 0;
-  }
-  // Include length to differentiate files with same sampled bytes
-  hash = ((hash << 5) + hash + (bytes.length & 0xffffffff)) | 0;
-  return `djb2:${(hash >>> 0).toString(16)}:${bytes.length}`;
+async function computeFileHash(buffer: ArrayBuffer): Promise<string> {
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+  const hashArray = new Uint8Array(hashBuffer);
+  const hex = Array.from(hashArray, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `sha256:${hex}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,11 +269,11 @@ function getPopulatedRange(sheet: XLSX.WorkSheet): XLSX.Range {
  * @param roleOverride  Optional role override (skip detection)
  * @returns WorkbookMapResult ready for persistence
  */
-export function buildWorkbookMap(
+export async function buildWorkbookMap(
   buffer: ArrayBuffer,
   documentId: string,
   roleOverride?: WorkbookRole,
-): WorkbookMapResult {
+): Promise<WorkbookMapResult> {
   // -----------------------------------------------------------------------
   // 1. Parse with SheetJS (values + number formats)
   // -----------------------------------------------------------------------
@@ -311,7 +307,7 @@ export function buildWorkbookMap(
   // -----------------------------------------------------------------------
   // 4. File hash
   // -----------------------------------------------------------------------
-  const fileHash = computeFileHash(buffer);
+  const fileHash = await computeFileHash(buffer);
 
   // -----------------------------------------------------------------------
   // 5. Build cell records + sheet records
