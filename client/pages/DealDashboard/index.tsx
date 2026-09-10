@@ -5,6 +5,7 @@ import { useApi } from "@/hooks/useApi.js";
 import { useApiData } from "@/hooks/useApiData.js";
 import { executeApi } from "@/lib/executeApi.js";
 import { processAllFiles, extractTextFromFile, parseExcelToTables, parseCsvToTable } from "@/lib/pdfProcessor";
+import { buildWorkbookMap, formatWorkbookSummary } from "@/lib/workbookMapBuilder";
 import type { DocumentChunk, ProcessedFileInfo, ExcludedFile, StructuredCell } from "@/lib/pdfProcessor";
 import { MODULE_DEFINITIONS, MODULE_MAP, NUMERIC_MODULES, DISABLED_MODULE_IDS } from "@/lib/moduleConfig";
 import { CHUNK_CHARS, CHUNK_CONCURRENCY, EXTRACTION_MODEL, isSpreadsheetFile } from "@/lib/pipelineConfig";
@@ -529,6 +530,7 @@ export default function DealDashboardPage() {
   const { run: saveRunCoverageApi } = useApi("SaveRunCoverage");
   const { run: loadRunCoverageApi } = useApi("LoadRunCoverage");
   const { run: saveDocTablesApi } = useApi("SaveDocTables");
+  const { run: saveWorkbookMapApi } = useApi("SaveWorkbookMap");
   const { run: numericVerifyApi } = useApi("NumericVerify");
   const { run: cancelModuleRunApi } = useApi("CancelModuleRun");
   const { run: checkRunCancelledApi } = useApi("CheckRunCancelled");
@@ -3835,8 +3837,50 @@ export default function DealDashboardPage() {
       } else {
         console.warn(`[doc_tables] No tables extracted. Excel/CSV files found: ${files.filter(f => /\.(xlsx|xls|xlsm|csv)$/i.test(f.name)).map(f=>f.name).join(", ") || "none"}`);
       }
+
+      // ---------------------------------------------------------------
+      // Workbook Map Phase 1 — non-blocking, alongside doc_tables
+      // Map build failure logs and does not fail ingestion.
+      // ---------------------------------------------------------------
+      const xlsxFiles = files.filter((f) =>
+        /\.(xlsx|xls|xlsm)$/i.test(f.name)
+      );
+      if (xlsxFiles.length > 0) {
+        // Fire-and-forget: build + save workbook maps for each xlsx
+        void Promise.allSettled(
+          xlsxFiles.map(async (f) => {
+            const docId = docIdByName[f.name];
+            if (!docId) return;
+            try {
+              const buf = await f.arrayBuffer();
+              const mapResult = buildWorkbookMap(buf, docId);
+              console.info(`[WorkbookMap] ${f.name}:\n${formatWorkbookSummary(mapResult)}`);
+
+              if (mapResult.workbook.loadStatus === "failed") {
+                console.warn(
+                  `[WorkbookMap] FAILED for ${f.name}: ${mapResult.workbook.loadReason}`
+                );
+                // Still save the workbook + sheet records (no cells) so the failure is visible
+              }
+
+              await saveWorkbookMapApi({
+                workbook: mapResult.workbook,
+                sheets: mapResult.sheets,
+                cells: mapResult.cells,
+              });
+              console.info(
+                `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
+                `sheets=${mapResult.sheets.length}, cells=${mapResult.cells.length}`
+              );
+            } catch (err) {
+              // Non-fatal — log and continue
+              console.error(`[WorkbookMap] Build/save failed for ${f.name}:`, err);
+            }
+          })
+        );
+      }
     },
-    [dealId, docs, saveDocumentApi, saveDocTablesApi, indexDocumentChunks]
+    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, indexDocumentChunks]
   );
 
   const handleDeleteDoc = useCallback(async (docId: string) => {

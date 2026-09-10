@@ -202,6 +202,7 @@ import RunMigration047 from './pipeline/run-migration-047.js';
 import RunMigration048 from './pipeline/run-migration-048.js';
 import RunMigration049 from './pipeline/run-migration-049.js';
 import RunMigration050 from './pipeline/run-migration-050.js';
+import RunMigration051 from './pipeline/run-migration-051.js';
 import TestExcelExtraction from './pipeline/test-excel-extraction.js';
 import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import EroTestRanking from './pipeline/ero-test-ranking.js';
@@ -273,6 +274,7 @@ import SaveDocTables from './documents/save-doc-tables.js';
 import GetDocTables from './documents/get-doc-tables.js';
 import BackfillDocTablesFromText from './documents/backfill-doc-tables-from-text.js';
 import GetDocTablesSummary from './documents/get-doc-tables-summary.js';
+import SaveWorkbookMap from './documents/save-workbook-map.js';
 import UpdateParsedText from './documents/update-parsed-text.js';
 import ClearParsedText from './documents/clear-parsed-text.js';
 
@@ -338,14 +340,14 @@ const apis = {
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // SRI v2 pipeline
-  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, TestExcelExtraction, PublishSriToModuleOutputs,
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, TestExcelExtraction, PublishSriToModuleOutputs,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
   ListDeals, GetDeal, CreateDeal, UpdateDeal, DeleteDeal,
   // Documents
   ListDocuments, SaveDocument, UpdateDocument, DeleteDocument, GetDocumentTexts,
-  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText,
+  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, SaveWorkbookMap,
   // Numeric verification
   NumericVerify, GetNumericReport, SearchNumericFindings, DiagSharedFormulas, DiagFormulaExtraction, InspectColHeaders, InspectEnrichedHeaders, InspectRowLabels, InspectCellValues,
   // Q&A
