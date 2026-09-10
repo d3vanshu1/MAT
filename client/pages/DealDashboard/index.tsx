@@ -530,6 +530,7 @@ export default function DealDashboardPage() {
   const { run: getRunProgressApi } = useApi("GetRunProgress");
   const { run: saveRunCoverageApi } = useApi("SaveRunCoverage");
   const { run: loadRunCoverageApi } = useApi("LoadRunCoverage");
+  const { run: saveDocumentFileApi } = useApi("SaveDocumentFile");
   const { run: saveDocTablesApi } = useApi("SaveDocTables");
   const { run: saveWorkbookMapApi } = useApi("SaveWorkbookMap");
   const { run: saveWorkbookSheetApi } = useApi("SaveWorkbookSheet");
@@ -3756,6 +3757,42 @@ export default function DealDashboardPage() {
                     : d
                 )
               );
+            }
+
+            // Store raw file binary in 1MB chunks for server-side re-parse
+            if (result?.document?.id) {
+              const CHUNK_SIZE = 1_048_576; // 1MB
+              try {
+                const fileBuf = await f.arrayBuffer();
+                const fileBytes = new Uint8Array(fileBuf);
+                const totalChunks = Math.ceil(fileBytes.length / CHUNK_SIZE);
+                // Compute hash
+                const hashBuf = await crypto.subtle.digest("SHA-256", fileBuf);
+                const hashArr = new Uint8Array(hashBuf);
+                const fileHash = "sha256:" + Array.from(hashArr, (b) => b.toString(16).padStart(2, "0")).join("");
+
+                for (let ci = 0; ci < totalChunks; ci++) {
+                  const start = ci * CHUNK_SIZE;
+                  const end = Math.min(start + CHUNK_SIZE, fileBytes.length);
+                  const chunkBytes = fileBytes.slice(start, end);
+                  // Convert to base64
+                  let binary = "";
+                  for (let i = 0; i < chunkBytes.length; i++) binary += String.fromCharCode(chunkBytes[i]);
+                  const base64Data = btoa(binary);
+
+                  await saveDocumentFileApi({
+                    documentId: result.document.id,
+                    chunkIndex: ci,
+                    base64Data,
+                    byteCount: chunkBytes.length,
+                    fileHash: ci === totalChunks - 1 ? fileHash : null,
+                    totalChunks,
+                  });
+                }
+                console.log(`[file-storage] Stored ${totalChunks} chunk(s) for ${f.name} (${fileBytes.length} bytes, ${fileHash})`);
+              } catch (storageErr) {
+                console.warn(`[file-storage] Failed to store file bytes for ${f.name}:`, storageErr);
+              }
             }
 
             // Index chunks for full-text search
