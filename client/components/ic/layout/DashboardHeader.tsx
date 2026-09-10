@@ -1,7 +1,6 @@
-import { Play, Zap, Sparkles } from "lucide-react";
+import { Play } from "lucide-react";
 import type { DealStatus } from "@/types/deal";
 import ICButton from "../ui/ICButton";
-import ExportExtractionsButton from "../documents/ExportExtractionsButton";
 
 interface DashboardHeaderProps {
   dealId: string;
@@ -17,11 +16,8 @@ interface DashboardHeaderProps {
 }
 
 export default function DashboardHeader({
-  dealId,
   dealName,
   status,
-  useOpus,
-  onToggleOpus,
   onRunAll,
   disableRunAll = false,
   disableReason,
@@ -38,42 +34,6 @@ export default function DashboardHeader({
         </div>
 
         <div className="flex items-center gap-4">
-          {/* Synthesis quality toggle */}
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase tracking-wider text-ic-muted font-bold">Synthesis</span>
-            <div className="flex rounded-lg border border-ic-border overflow-hidden">
-              <button
-                type="button"
-                onClick={() => onToggleOpus(false)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all ${
-                  !useOpus
-                    ? "bg-ic-turquoise/20 text-ic-turquoise border-r border-ic-turquoise/30"
-                    : "bg-transparent text-ic-muted hover:text-ic-text border-r border-ic-border"
-                }`}
-              >
-                <Zap className="w-3 h-3" />
-                Fast
-              </button>
-              <button
-                type="button"
-                onClick={() => onToggleOpus(true)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all ${
-                  useOpus
-                    ? "bg-amber-500/20 text-amber-400"
-                    : "bg-transparent text-ic-muted hover:text-ic-text"
-                }`}
-              >
-                <Sparkles className="w-3 h-3" />
-                Deep
-              </button>
-            </div>
-            {useOpus && (
-              <span className="text-[10px] text-amber-400/70 font-light">~3× slower</span>
-            )}
-          </div>
-
-          <ExportExtractionsButton dealId={dealId} dealName={dealName} />
-
           <ICButton size="lg" glow onClick={onRunAll} disabled={disableRunAll}>
             <Play className="w-4 h-4" />
             Run All Modules
