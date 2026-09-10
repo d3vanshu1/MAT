@@ -4,25 +4,51 @@ import { parseExcelFormat } from "../../lib/excelFormatParser.js";
 const IC_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
 // ---------------------------------------------------------------------------
-// Scale detection from column headers
+// Unit / currency / scale detection from text (column headers, sheet titles)
 // ---------------------------------------------------------------------------
 
-const SCALE_PATTERNS: Array<{ pattern: RegExp; multiplier: number }> = [
-  // Millions: $m, (£m), "in millions", US$mm
-  { pattern: /\b(?:in\s+)?millions?\b|\$m\b|\([$£€]m\)|mm\b/i, multiplier: 1_000_000 },
-  // Thousands: $000, US$000, "in thousands", $k, (£k)
-  { pattern: /\$000|\b(?:in\s+)?thousands?\b|\$k\b|\([$£€]k\)/i, multiplier: 1_000 },
-  // Billions
-  { pattern: /\b(?:in\s+)?billions?\b|\$b\b/i, multiplier: 1_000_000_000 },
-];
+/** What a text source tells us about unit, currency, and scale. */
+interface TextUnitInfo {
+  unitClass: "currency" | null;  // only currency is inferable from text
+  currency: string | null;       // USD, GBP, EUR, etc.
+  multiplier: number;            // 1, 1000, 1000000
+}
 
-function detectScaleFromText(text: string): { multiplier: number; source: string } | null {
-  for (const { pattern, multiplier } of SCALE_PATTERNS) {
-    if (pattern.test(text)) {
-      return { multiplier, source: "column_header" };
-    }
+const CURRENCY_SYMBOLS_TEXT: Record<string, string> = {
+  "$": "USD", "£": "GBP", "€": "EUR", "¥": "JPY",
+  "US$": "USD", "A$": "AUD", "C$": "CAD", "R$": "BRL",
+};
+
+/**
+ * Parse a text string (column header, sheet title, note row) for
+ * unit, currency, and scale information.
+ *
+ * Returns null if no signal found.
+ */
+function detectUnitFromText(text: string): TextUnitInfo | null {
+  // Detect currency symbol
+  let currency: string | null = null;
+  for (const [sym, code] of Object.entries(CURRENCY_SYMBOLS_TEXT)) {
+    if (text.includes(sym)) { currency = code; break; }
   }
-  return null;
+
+  // Detect scale
+  let multiplier = 1;
+  if (/\b(?:in\s+)?millions?\b|\$m\b|\([$£€]m\)|mm\b/i.test(text)) {
+    multiplier = 1_000_000;
+  } else if (/\$000|\b(?:in\s+)?thousands?\b|\$k\b|\([$£€]k\)/i.test(text)) {
+    multiplier = 1_000;
+  } else if (/\b(?:in\s+)?billions?\b|\$b\b/i.test(text)) {
+    multiplier = 1_000_000_000;
+  }
+
+  if (!currency && multiplier === 1) return null;
+
+  return {
+    unitClass: currency ? "currency" : null,
+    currency,
+    multiplier,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -103,9 +129,12 @@ export default api({
       const headerBandRows: number[] = Array.isArray(sheet.header_band_rows)
         ? sheet.header_band_rows
         : [];
-      let sheetScale: { multiplier: number; source: string } | null = null;
+      // Sheet-level unit info: unit_class, currency, and scale from
+      // the sheet title or header band text. Applied to cells that don't
+      // have their own format-level signals (percent, multiple, date, text).
+      let sheetUnitInfo: (TextUnitInfo & { source: string }) | null = null;
 
-      // Check sheet title (first few rows) AND header band rows for scale.
+      // Check sheet title (first few rows) AND header band rows.
       // Multi-section sheets like LBO Model have "($ in Millions)" at the
       // header band row (e.g. B72), not in the first few rows.
       const hdrRowFilter = headerBandRows.length > 0
@@ -126,18 +155,27 @@ export default api({
         { label: `Phase4: title cells ${sheetName}` },
       );
 
+      // Scan ALL title cells and prefer the one with the most complete info.
+      // A bare "$" column label should not beat "($ in Millions)" which has
+      // both currency and scale. Priority: scale+currency > scale > currency.
+      let bestTitleInfo: (TextUnitInfo & { source: string }) | null = null;
+      let bestTitleScore = 0;
       for (const tc of titleCells) {
         if (tc.value_raw) {
-          const scaleInfo = detectScaleFromText(tc.value_raw);
-          if (scaleInfo) {
-            sheetScale = { multiplier: scaleInfo.multiplier, source: "sheet_title" };
-            break;
+          const info = detectUnitFromText(tc.value_raw);
+          if (info) {
+            const score = (info.currency ? 1 : 0) + (info.multiplier > 1 ? 2 : 0);
+            if (score > bestTitleScore) {
+              bestTitleScore = score;
+              bestTitleInfo = { ...info, source: "sheet_title" };
+            }
           }
         }
       }
+      if (bestTitleInfo) sheetUnitInfo = bestTitleInfo;
 
-      // Check column header text for scale
-      if (headerBandRows.length > 0) {
+      // Check column header text for unit/scale
+      if (!sheetUnitInfo && headerBandRows.length > 0) {
         const headerCells = await db.query(
           `SELECT col_idx, col_header_raw FROM workbook_cells
            WHERE workbook_id = $1 AND sheet_name = $2
@@ -146,12 +184,12 @@ export default api({
            LIMIT 50`,
           z.object({ col_idx: z.number(), col_header_raw: z.string() }),
           [workbookId, sheetName, labelCol],
-          { label: `Phase4: header scale ${sheetName}` },
+          { label: `Phase4: header unit ${sheetName}` },
         );
         for (const hc of headerCells) {
-          const scaleInfo = detectScaleFromText(hc.col_header_raw);
-          if (scaleInfo) {
-            sheetScale = scaleInfo;
+          const info = detectUnitFromText(hc.col_header_raw);
+          if (info) {
+            sheetUnitInfo = { ...info, source: "column_header" };
             break;
           }
         }
@@ -214,32 +252,53 @@ export default api({
             } else if (cell.value_type === "date") {
               unitClass = "date";
               unitSource = "value_type";
-            } else if (cell.value_type === "number") {
-              // No format string (implicit General) — classify by value
-              unitClass = "count";
-              unitSource = "none";
             }
+            // No format string and number type → unknown. General tells you
+            // nothing — unit, currency, and scale all come from context.
+            // Never default a unit class without evidence.
 
-            // External scale only applies to scaleable unit types.
-            // Percent, multiple, date, and text are never scaled by
-            // column/sheet-level multipliers — a "5%" is 5% regardless
-            // of whether the sheet header says "($ in Millions)".
-            const isScaleable = unitClass === "currency" || unitClass === "count"
-              || unitClass === "ratio" || unitClass === null;
+            // Which cells can inherit unit/currency/scale from text context?
+            // Cells already classified as percent, multiple, date, or text
+            // are self-describing — they never inherit external context.
+            const selfDescribing = unitClass === "percent" || unitClass === "multiple"
+              || unitClass === "date" || unitClass === "text";
 
-            // Apply column header scale if no format-level scale
-            if (isScaleable && scaleSource === "none" && cell.col_header_raw) {
-              const colScale = detectScaleFromText(cell.col_header_raw);
-              if (colScale) {
-                scaleMultiplier = colScale.multiplier;
-                scaleSource = "column_header";
+            // Can this cell's unit_class be upgraded by context?
+            // count/ratio from format are generic — a "#,##0" cell on a
+            // sheet titled "($ in Millions)" is a dollar amount, not a count.
+            // Only percent/multiple/date/text are immune to context upgrade.
+            const canUpgradeClass = !selfDescribing
+              && (unitClass === "count" || unitClass === "ratio" || !unitClass);
+
+            // Apply column header unit/scale
+            if (!selfDescribing && cell.col_header_raw) {
+              const colInfo = detectUnitFromText(cell.col_header_raw);
+              if (colInfo) {
+                if (colInfo.unitClass && canUpgradeClass) {
+                  unitClass = colInfo.unitClass;
+                  unitSource = "column_header";
+                }
+                if (colInfo.currency && !currency) currency = colInfo.currency;
+                if (colInfo.multiplier > 1 && scaleSource === "none") {
+                  scaleMultiplier = colInfo.multiplier;
+                  scaleSource = "column_header";
+                }
               }
             }
 
-            // Apply sheet-level scale as last fallback
-            if (isScaleable && scaleSource === "none" && sheetScale) {
-              scaleMultiplier = sheetScale.multiplier;
-              scaleSource = sheetScale.source;
+            // Apply sheet-level unit/scale as last fallback
+            if (!selfDescribing && sheetUnitInfo) {
+              if (sheetUnitInfo.unitClass && canUpgradeClass && unitSource !== "column_header") {
+                unitClass = sheetUnitInfo.unitClass;
+                unitSource = sheetUnitInfo.source;
+              }
+              if (sheetUnitInfo.currency && !currency) {
+                currency = sheetUnitInfo.currency;
+              }
+              if (sheetUnitInfo.multiplier > 1 && scaleSource === "none") {
+                scaleMultiplier = sheetUnitInfo.multiplier;
+                scaleSource = sheetUnitInfo.source;
+              }
             }
 
             valueClauses.push(
@@ -292,7 +351,7 @@ export default api({
         debugInfo.push({
           sheetName,
           cellsProcessed: sheetCellsUpdated,
-          sheetScale: sheetScale,
+          sheetUnitInfo,
         });
       }
     }
