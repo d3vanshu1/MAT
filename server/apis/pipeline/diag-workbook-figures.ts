@@ -53,6 +53,37 @@ export default api({
         oldBasis: z.string().nullable(),
         metric: z.string(),
       })),
+      // Re-match absent by value: how many absent figures have a cell
+      // on the same period with matching value_raw (label differs)
+      absentValueMatched: z.number(),
+      absentTrulyMissing: z.number(),
+      absentValueMatchedSamples: z.array(z.object({
+        oldLabel: z.string(),
+        mapLabel: z.string(),
+        period: z.string(),
+        valueRaw: z.number(),
+        sheet: z.string(),
+        cellRef: z.string().nullable(),
+      })),
+      absentTrulyMissingSamples: z.array(z.object({
+        rowLabel: z.string(),
+        period: z.string(),
+        oldValue: z.number(),
+        metric: z.string(),
+      })),
+      // Ratio distribution for differing values
+      differingRatios: z.object({
+        at1000x: z.number(),
+        at1000000x: z.number(),
+        atOther: z.number(),
+        ratioSamples: z.array(z.object({
+          rowLabel: z.string(),
+          period: z.string(),
+          ratio: z.number(),
+          mapVal: z.number(),
+          oldVal: z.number(),
+        })),
+      }),
     }),
   }),
 
@@ -70,20 +101,29 @@ export default api({
     // Also index by cell_ref for direct coordinate matches
     const mapByLabel = new Map<string, number[]>();
     const mapByCellRef = new Map<string, number[]>();
+    // Value-based index: normalizedPeriod → [{valueRaw, label, sheet, cellRef}]
+    const mapByPeriodValue = new Map<string, Array<{valueRaw: number; label: string; sheet: string; cellRef: string | null}>>();
 
     for (const fig of adapterResult.figures) {
       const normPeriod = normalizePeriod(fig.period);
+      const vr = fig.value_raw ?? fig.value;
+
       const labelKey = fig.source_sheet + "|" + fig.source_cell + "|" + normPeriod;
       const arr = mapByLabel.get(labelKey) ?? [];
-      arr.push(fig.value_raw ?? fig.value);
+      arr.push(vr);
       mapByLabel.set(labelKey, arr);
 
       if (fig.cell_ref) {
         const refKey = fig.source_sheet + "|" + fig.cell_ref;
         const refArr = mapByCellRef.get(refKey) ?? [];
-        refArr.push(fig.value_raw ?? fig.value);
+        refArr.push(vr);
         mapByCellRef.set(refKey, refArr);
       }
+
+      // Value index for absent re-matching
+      const pvArr = mapByPeriodValue.get(normPeriod) ?? [];
+      pvArr.push({ valueRaw: vr, label: fig.source_cell, sheet: fig.source_sheet, cellRef: fig.cell_ref ?? null });
+      mapByPeriodValue.set(normPeriod, pvArr);
     }
 
     // --- 3. Load old extractor figures ---
@@ -113,12 +153,12 @@ export default api({
     let presentMatching = 0;
     let presentDiffering = 0;
     let absent = 0;
-    const differingSamples: Array<{
+    const allDiffering: Array<{
       rowLabel: string; period: string; oldValue: number;
       mapValueRaw: number; oldBasis: string | null;
     }> = [];
-    const absentSamples: Array<{
-      rowLabel: string; period: string; oldValue: number;
+    const allAbsent: Array<{
+      rowLabel: string; period: string; normPeriod: string; oldValue: number;
       oldBasis: string | null; metric: string;
     }> = [];
 
@@ -140,6 +180,17 @@ export default api({
         oldUnscaled = oldScale > 1 ? oldVal / oldScale : oldVal;
       }
 
+      // Normalize old period upfront (needed for both label match and absent re-match)
+      let oldPeriod = oldRow.period;
+      const bareYearSuffix = oldPeriod.match(/^(\d{4})(A|E|F|B)$/i);
+      if (bareYearSuffix) {
+        const suffixMap: Record<string, string> = { A: "", E: "F", F: "F", B: "B" };
+        const s = suffixMap[bareYearSuffix[2].toUpperCase()] ?? "";
+        oldPeriod = "FY" + bareYearSuffix[1] + s;
+      }
+      const normPeriod = normalizePeriod(oldPeriod);
+      const label = oldRow.row_label ?? oldRow.scope_qualifier;
+
       // Try cell_ref match first (most precise)
       let mapValues: number[] | undefined;
       if (oldRow.cell_ref) {
@@ -149,18 +200,6 @@ export default api({
 
       // Label + period match
       if (!mapValues) {
-        // Normalize old period — old extractor uses "2023A", "2026E" format
-        // which normalizePeriod doesn't handle (it wants "FY2023" or "2023 actual")
-        // Pre-convert bare year+suffix to FY format before normalizing
-        let oldPeriod = oldRow.period;
-        const bareYearSuffix = oldPeriod.match(/^(\d{4})(A|E|F|B)$/i);
-        if (bareYearSuffix) {
-          const suffixMap: Record<string, string> = { A: "", E: "F", F: "F", B: "B" };
-          const s = suffixMap[bareYearSuffix[2].toUpperCase()] ?? "";
-          oldPeriod = "FY" + bareYearSuffix[1] + s;
-        }
-        const normPeriod = normalizePeriod(oldPeriod);
-        const label = oldRow.row_label ?? oldRow.scope_qualifier;
 
         // Try exact label match across all sheets
         for (const [key, vals] of mapByLabel) {
@@ -199,27 +238,108 @@ export default api({
           presentMatching++;
         } else {
           presentDiffering++;
-          if (differingSamples.length < 10) {
-            differingSamples.push({
-              rowLabel: oldRow.row_label ?? oldRow.scope_qualifier,
-              period: oldRow.period,
-              oldValue: oldUnscaled,
-              mapValueRaw: mapValues[0],
-              oldBasis: oldRow.basis,
-            });
-          }
-        }
-      } else {
-        absent++;
-        if (absentSamples.length < 10) {
-          absentSamples.push({
+          // Track all differing for ratio analysis
+          allDiffering.push({
             rowLabel: oldRow.row_label ?? oldRow.scope_qualifier,
             period: oldRow.period,
             oldValue: oldUnscaled,
+            mapValueRaw: mapValues[0],
             oldBasis: oldRow.basis,
-            metric: oldRow.metric,
           });
         }
+      } else {
+        absent++;
+        // Track all absent for value re-matching
+        allAbsent.push({
+          rowLabel: oldRow.row_label ?? oldRow.scope_qualifier,
+          period: oldRow.period,
+          normPeriod,
+          oldValue: oldUnscaled,
+          oldBasis: oldRow.basis,
+          metric: oldRow.metric,
+        });
+      }
+    }
+
+    // --- 5. Re-match absent by value ---
+    let absentValueMatched = 0;
+    let absentTrulyMissing = 0;
+    const absentValueMatchedSamples: Array<{
+      oldLabel: string; mapLabel: string; period: string;
+      valueRaw: number; sheet: string; cellRef: string | null;
+    }> = [];
+    const absentTrulyMissingSamples: Array<{
+      rowLabel: string; period: string; oldValue: number; metric: string;
+    }> = [];
+
+    for (const ab of allAbsent) {
+      const candidates = mapByPeriodValue.get(ab.normPeriod);
+      if (!candidates) {
+        absentTrulyMissing++;
+        if (absentTrulyMissingSamples.length < 10) {
+          absentTrulyMissingSamples.push({
+            rowLabel: ab.rowLabel, period: ab.period,
+            oldValue: ab.oldValue, metric: ab.metric,
+          });
+        }
+        continue;
+      }
+
+      // Find a cell with matching value_raw (within 1%)
+      const match = candidates.find(c => {
+        if (ab.oldValue === 0 && c.valueRaw === 0) return true;
+        if (ab.oldValue === 0 || c.valueRaw === 0) return Math.abs(ab.oldValue - c.valueRaw) < 0.01;
+        return Math.abs(c.valueRaw - ab.oldValue) / Math.abs(ab.oldValue) < 0.01;
+      });
+
+      if (match) {
+        absentValueMatched++;
+        if (absentValueMatchedSamples.length < 10) {
+          absentValueMatchedSamples.push({
+            oldLabel: ab.rowLabel, mapLabel: match.label,
+            period: ab.period, valueRaw: match.valueRaw,
+            sheet: match.sheet, cellRef: match.cellRef,
+          });
+        }
+      } else {
+        absentTrulyMissing++;
+        if (absentTrulyMissingSamples.length < 10) {
+          absentTrulyMissingSamples.push({
+            rowLabel: ab.rowLabel, period: ab.period,
+            oldValue: ab.oldValue, metric: ab.metric,
+          });
+        }
+      }
+    }
+
+    // --- 6. Ratio distribution for differing values ---
+    let at1000x = 0;
+    let at1000000x = 0;
+    let atOther = 0;
+    const ratioSamples: Array<{
+      rowLabel: string; period: string; ratio: number; mapVal: number; oldVal: number;
+    }> = [];
+
+    for (const d of allDiffering) {
+      if (d.oldValue === 0 || d.mapValueRaw === 0) {
+        atOther++;
+        continue;
+      }
+      const ratio = d.mapValueRaw / d.oldValue;
+      const absRatio = Math.abs(ratio);
+
+      if (absRatio > 900 && absRatio < 1100) at1000x++;
+      else if (absRatio > 900_000 && absRatio < 1_100_000) at1000000x++;
+      else if (absRatio > 0.0009 && absRatio < 0.0011) at1000x++; // inverse 1000x
+      else if (absRatio > 0.0000009 && absRatio < 0.0000011) at1000000x++; // inverse 1M
+      else atOther++;
+
+      if (ratioSamples.length < 15) {
+        ratioSamples.push({
+          rowLabel: d.rowLabel, period: d.period,
+          ratio: Math.round(ratio * 1000) / 1000,
+          mapVal: d.mapValueRaw, oldVal: d.oldValue,
+        });
       }
     }
 
@@ -243,8 +363,21 @@ export default api({
         presentMatching,
         presentDiffering,
         absent,
-        differingSamples,
-        absentSamples,
+        differingSamples: allDiffering.slice(0, 10),
+        absentSamples: allAbsent.slice(0, 10).map(a => ({
+          rowLabel: a.rowLabel, period: a.period,
+          oldValue: a.oldValue, oldBasis: a.oldBasis, metric: a.metric,
+        })),
+        absentValueMatched,
+        absentTrulyMissing,
+        absentValueMatchedSamples,
+        absentTrulyMissingSamples,
+        differingRatios: {
+          at1000x,
+          at1000000x,
+          atOther,
+          ratioSamples,
+        },
       },
     };
   },
