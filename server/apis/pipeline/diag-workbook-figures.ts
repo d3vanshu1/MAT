@@ -71,6 +71,7 @@ export default api({
         oldValue: z.number(),
         metric: z.string(),
       })),
+      absentTrulyMissingByMetric: z.record(z.number()),
       // Ratio distribution for differing values
       differingRatios: z.object({
         at1000x: z.number(),
@@ -264,6 +265,7 @@ export default api({
     // --- 5. Re-match absent by value ---
     let absentValueMatched = 0;
     let absentTrulyMissing = 0;
+    const trulyMissingByMetric: Record<string, number> = {};
     const absentValueMatchedSamples: Array<{
       oldLabel: string; mapLabel: string; period: string;
       valueRaw: number; sheet: string; cellRef: string | null;
@@ -276,6 +278,7 @@ export default api({
       const candidates = mapByPeriodValue.get(ab.normPeriod);
       if (!candidates) {
         absentTrulyMissing++;
+        trulyMissingByMetric[ab.metric] = (trulyMissingByMetric[ab.metric] ?? 0) + 1;
         if (absentTrulyMissingSamples.length < 10) {
           absentTrulyMissingSamples.push({
             rowLabel: ab.rowLabel, period: ab.period,
@@ -285,11 +288,22 @@ export default api({
         continue;
       }
 
-      // Find a cell with matching value_raw (within 1%)
+      // Find a cell with matching value_raw
+      // Use 2-significant-figure match OR 5% tolerance (whichever is more permissive)
+      // to account for LLM rounding (4.949 → 4.9, 0.155 → 0.2)
       const match = candidates.find(c => {
         if (ab.oldValue === 0 && c.valueRaw === 0) return true;
         if (ab.oldValue === 0 || c.valueRaw === 0) return Math.abs(ab.oldValue - c.valueRaw) < 0.01;
-        return Math.abs(c.valueRaw - ab.oldValue) / Math.abs(ab.oldValue) < 0.01;
+        // 5% relative tolerance
+        const relTol = Math.abs(c.valueRaw - ab.oldValue) / Math.abs(ab.oldValue) < 0.05;
+        // 2-significant-figure match
+        const sigFig = (v: number) => {
+          if (v === 0) return "0";
+          const mag = Math.floor(Math.log10(Math.abs(v)));
+          return (Math.round(v / Math.pow(10, mag - 1)) * Math.pow(10, mag - 1)).toPrecision(2);
+        };
+        const sfMatch = sigFig(c.valueRaw) === sigFig(ab.oldValue);
+        return relTol || sfMatch;
       });
 
       if (match) {
@@ -303,6 +317,7 @@ export default api({
         }
       } else {
         absentTrulyMissing++;
+        trulyMissingByMetric[ab.metric] = (trulyMissingByMetric[ab.metric] ?? 0) + 1;
         if (absentTrulyMissingSamples.length < 10) {
           absentTrulyMissingSamples.push({
             rowLabel: ab.rowLabel, period: ab.period,
@@ -372,6 +387,7 @@ export default api({
         absentTrulyMissing,
         absentValueMatchedSamples,
         absentTrulyMissingSamples,
+        absentTrulyMissingByMetric: trulyMissingByMetric,
         differingRatios: {
           at1000x,
           at1000000x,
