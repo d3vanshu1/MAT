@@ -55,6 +55,8 @@ const FindingRow = z.object({
   title: z.string(),
   detail: z.string(),
   materiality_rationale: z.string(),
+  finding_class: z.string().nullable(),
+  supporting_evidence_count: z.coerce.number().nullable(),
 });
 
 const EvidenceRow = z.object({
@@ -166,6 +168,8 @@ interface RenderedFinding {
   family: string;
   entity_name: string | null;
   execution_rank: number;
+  finding_class: string | null;
+  thesis_link: string | null;
 }
 
 interface RenderedReport {
@@ -243,7 +247,8 @@ export async function renderReport(
       ),
       db.query(
         `SELECT f.finding_id, f.hypothesis_id, f.verdict, f.severity,
-                f.ceiling_reason, f.title, f.detail, f.materiality_rationale
+                f.ceiling_reason, f.title, f.detail, f.materiality_rationale,
+                f.finding_class, f.supporting_evidence_count
          FROM ero_findings f
          JOIN ero_hypotheses h ON h.hypothesis_id = f.hypothesis_id
          WHERE h.run_id = $1
@@ -421,45 +426,97 @@ export async function renderReport(
       family: hyp?.family ?? "unknown",
       entity_name: entity?.legal_name ?? null,
       execution_rank: hyp?.execution_rank ?? 0,
+      finding_class: f.finding_class,
+      thesis_link: hyp?.thesis_link ?? null,
     });
   }
 
-  // ── 7. Group findings by classification ───────────────────────────
-  // Priority: known_but_understated → unknown_to_deal_team → known_and_assessed
-  // Within group: severity (critical → warning → info), then execution_rank.
+  // ── 7. Group findings by thesis dependency ──────────────────────
+  // Sections = what the deal depends on. Corpus classification and family
+  // become per-finding labels, not section axes.
 
-  const classificationGroups = new Map<string, RenderedFinding[]>();
-  for (const rf of renderedFindings) {
-    const arr = classificationGroups.get(rf.classification) ?? [];
+  const CLASSIFICATION_LABELS: Record<string, string> = {
+    known_but_understated: "Understated by deal team",
+    unknown_to_deal_team: "Unknown to deal team",
+    known_and_assessed: "Known and assessed",
+  };
+
+  const riskFindings = renderedFindings.filter(rf => rf.finding_class === "risk");
+  const contextFindings = renderedFindings.filter(rf =>
+    rf.finding_class === "context" || rf.finding_class === "unsupported");
+  const orphanRisks = riskFindings.filter(rf => rf.thesis_link == null);
+
+  // Group risk findings by thesis_link
+  const byDependency = new Map<string, RenderedFinding[]>();
+  for (const rf of riskFindings) {
+    if (rf.thesis_link == null) continue;
+    const arr = byDependency.get(rf.thesis_link) ?? [];
     arr.push(rf);
-    classificationGroups.set(rf.classification, arr);
+    byDependency.set(rf.thesis_link, arr);
   }
-
-  // Sort within each group
-  for (const [, group] of classificationGroups) {
+  for (const [, group] of byDependency) {
     group.sort((a, b) => {
-      const sevDiff =
-        (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9);
-      if (sevDiff !== 0) return sevDiff;
-      return a.execution_rank - b.execution_rank;
+      const sevDiff = (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9);
+      return sevDiff !== 0 ? sevDiff : a.execution_rank - b.execution_rank;
     });
   }
 
-  // Assemble in classification priority order
-  const classificationKeys = [
-    "known_but_understated",
-    "unknown_to_deal_team",
-    "known_and_assessed",
-  ];
+  // Determine state for every thesis dependency — iterate profile deps + any
+  // thesis_link values not in the profile (hypothesis-generated links)
+  type DepState = "EXPOSED" | "CLEAR" | "NOT TESTABLE EXTERNALLY";
 
-  const findingsByClassification = classificationKeys
-    .filter((cls) => classificationGroups.has(cls))
-    .map((cls) => ({
-      classification: cls,
-      heading: CLASSIFICATION_HEADINGS[cls] ?? cls,
-      intro: CLASSIFICATION_INTROS[cls] ?? "",
-      findings: classificationGroups.get(cls)!,
-    }));
+  interface DepSection {
+    key: string;
+    description: string;
+    state: DepState;
+    findings: RenderedFinding[];
+    worstSeverity: number;
+  }
+
+  // Collect all known dependency keys: from profile + from hypothesis thesis_links
+  const allDepKeys = new Set<string>();
+  for (const [depKey] of Object.entries(thesisDeps)) {
+    allDepKeys.add(depKey);
+  }
+  for (const h of hypotheses) {
+    if (h.thesis_link) allDepKeys.add(h.thesis_link);
+  }
+
+  function computeDepState(depKey: string): DepState {
+    if ((byDependency.get(depKey)?.length ?? 0) > 0) return "EXPOSED";
+    const hyps = hypotheses.filter((h: z.infer<typeof HypothesisRow>) => h.thesis_link === depKey);
+    if (hyps.length === 0) return "NOT TESTABLE EXTERNALLY";
+    const anyCleared = renderedFindings.some(
+      rf => rf.thesis_link === depKey && rf.finding_class === "cleared");
+    return anyCleared ? "CLEAR" : "NOT TESTABLE EXTERNALLY";
+  }
+
+  const depSections: DepSection[] = [];
+  for (const depKey of allDepKeys) {
+    const state = computeDepState(depKey);
+    const depFindings = byDependency.get(depKey) ?? [];
+    const worstSeverity = depFindings.length > 0
+      ? Math.min(...depFindings.map(f => SEVERITY_ORDER[f.severity] ?? 9))
+      : 9;
+    // Use profile description if available, otherwise use the key itself
+    const description = thesisDeps[depKey] ?? depKey;
+    depSections.push({ key: depKey, description, state, findings: depFindings, worstSeverity });
+  }
+
+  // Order: EXPOSED first (worst severity, then count), then CLEAR, then NOT TESTABLE
+  const STATE_ORDER: Record<DepState, number> = {
+    "EXPOSED": 0, "CLEAR": 1, "NOT TESTABLE EXTERNALLY": 2,
+  };
+  depSections.sort((a, b) => {
+    const stDiff = STATE_ORDER[a.state] - STATE_ORDER[b.state];
+    if (stDiff !== 0) return stDiff;
+    if (a.state === "EXPOSED") {
+      const sevDiff = a.worstSeverity - b.worstSeverity;
+      if (sevDiff !== 0) return sevDiff;
+      return b.findings.length - a.findings.length;
+    }
+    return a.key.localeCompare(b.key);
+  });
 
   // ── 8. No-evidence coverage section ───────────────────────────────
   // Hypotheses with status 'no_evidence_found' — "we checked and found nothing."
@@ -503,18 +560,39 @@ export async function renderReport(
     "Any known_but_understated classifications that lacked both quoted figures were downgraded to known_and_assessed by the magnitude rule.",
   );
 
-  // ── 10. Assemble full_report_markdown ─────────────────────────────
+  // ── 10. Ceiling-reason stats for limitations ─────────────────────
 
-  const md = assembleMarkdown(
+  const tier3CappedCount = renderedFindings.filter(
+    rf => rf.ceiling_reason.includes("Tier-3") || rf.ceiling_reason.includes("best dated source is Tier-3"),
+  ).length;
+
+  if (tier3CappedCount > 0) {
+    limitations.push(
+      `${tier3CappedCount} finding(s) were capped to info because their best dated source was Tier-3.`,
+    );
+  }
+
+  // ── 11. Assemble full_report_markdown ─────────────────────────────
+
+  const md = assembleMarkdownV2(
     header,
     { counts_by_type: countsByType, entity_roster: entityRoster },
     { business_shape: businessShape, thesis_dependencies: thesisDeps },
-    findingsByClassification,
+    depSections,
+    contextFindings,
+    orphanRisks,
     noEvidenceCoverage,
     limitations,
+    hypotheses,
+    renderedFindings,
+    CLASSIFICATION_LABELS,
   );
 
-  // ── 11. Build report object ───────────────────────────────────────
+  // ── 12. Build report object ───────────────────────────────────────
+
+  const exposedCount = depSections.filter(d => d.state === "EXPOSED").length;
+  const clearCount = depSections.filter(d => d.state === "CLEAR").length;
+  const notTestableCount = depSections.filter(d => d.state === "NOT TESTABLE EXTERNALLY").length;
 
   const report: RenderedReport = {
     header,
@@ -526,7 +604,7 @@ export async function renderReport(
       business_shape: businessShape,
       thesis_dependencies: thesisDeps,
     },
-    findings_by_classification: findingsByClassification,
+    findings_by_classification: [],  // deprecated — kept for interface compat
     no_evidence_coverage: noEvidenceCoverage,
     limitations,
     full_report_markdown: md,
@@ -535,7 +613,7 @@ export async function renderReport(
   return {
     stage: "render",
     status: "complete",
-    message: `Render complete. ${renderedFindings.length} findings in ${findingsByClassification.length} classification groups. ${noEvidenceCoverage.length} no-evidence hypotheses documented.`,
+    message: `Render complete. ${riskFindings.length} risk, ${contextFindings.length} context, ${orphanRisks.length} orphan. ${depSections.length} deps (${exposedCount} exposed, ${clearCount} clear, ${notTestableCount} not testable). ${noEvidenceCoverage.length} no-evidence.`,
     stageData: { report },
   };
 }
@@ -544,13 +622,18 @@ export async function renderReport(
 // MARKDOWN ASSEMBLY — pure string formatting, zero LLM
 // ═══════════════════════════════════════════════════════════════════
 
-function assembleMarkdown(
+function assembleMarkdownV2(
   header: RenderedReport["header"],
   entityManifest: RenderedReport["entity_manifest"],
   dealProfile: RenderedReport["deal_profile"],
-  findingGroups: RenderedReport["findings_by_classification"],
+  depSections: Array<{ key: string; description: string; state: string; findings: RenderedFinding[] }>,
+  contextFindings: RenderedFinding[],
+  orphanRisks: RenderedFinding[],
   noEvidence: RenderedReport["no_evidence_coverage"],
   limitations: string[],
+  hypotheses: Array<{ thesis_link: string | null; question: string; family: string; status: string }>,
+  allFindings: RenderedFinding[],
+  classificationLabels: Record<string, string>,
 ): string {
   const lines: string[] = [];
 
@@ -634,75 +717,127 @@ function assembleMarkdown(
     lines.push("");
   }
 
-  // ── Findings by Classification ──────────────────────────────────
+  // ── Findings by Thesis Dependency ────────────────────────────────
 
   lines.push("---");
   lines.push("");
-  lines.push("## Findings");
+
+  const riskCount = depSections.reduce((s, d) => s + d.findings.length, 0) + orphanRisks.length;
+  lines.push(`External Risk Overlay (v2): ${allFindings.length} findings from ${header.hypotheses_generated} hypotheses.`);
+  lines.push("");
+  lines.push(`Hypotheses: ${header.hypotheses_generated} generated, ${header.hypotheses_researched} researched, ${header.hypotheses_no_evidence} no evidence found.`);
+  lines.push("");
+  lines.push(`Findings: ${riskCount} risk, ${contextFindings.length} context.`);
   lines.push("");
 
-  for (const group of findingGroups) {
-    lines.push(`### ${group.heading}`);
+  lines.push("## Findings by Thesis Dependency");
+  lines.push("");
+
+  // Helper to render a single finding block
+  const renderFinding = (f: RenderedFinding) => {
+    lines.push(`#### ${f.title}`);
     lines.push("");
-    lines.push(`_${group.intro}_`);
+    lines.push(`- **Severity:** ${f.severity}`);
+    lines.push(`- **Deal team awareness:** ${classificationLabels[f.classification] ?? f.classification}`);
+    if (f.entity_name) lines.push(`- **Entity:** ${f.entity_name}`);
+    lines.push("");
+    lines.push(f.detail);
+    lines.push("");
+    lines.push(`**Materiality:** ${f.materiality_rationale}`);
     lines.push("");
 
-    for (const f of group.findings) {
-      lines.push(`#### ${f.title}`);
-      lines.push("");
-      lines.push(`- **Severity:** ${f.severity} (${f.ceiling_reason})`);
-      lines.push(`- **Verdict:** ${f.verdict}`);
-      lines.push(`- **Family:** ${f.family}`);
-      if (f.entity_name) {
-        lines.push(`- **Entity:** ${f.entity_name}`);
+    // Corpus classification context
+    if (f.classification === "known_but_understated") {
+      lines.push("**Corpus comparison:**");
+      if (f.corpus_quoted_value && f.external_quoted_value) {
+        lines.push(`- Deal team stated: ${f.corpus_quoted_value}`);
+        lines.push(`- External evidence shows: ${f.external_quoted_value}`);
+      }
+      if (f.corpus_quote) {
+        lines.push(`- Corpus excerpt: _"${f.corpus_quote.slice(0, 300)}"_`);
       }
       lines.push("");
-      lines.push(f.detail);
+    } else if (f.classification === "known_and_assessed" && f.corpus_quote) {
+      lines.push(`**Corpus reference:** _"${f.corpus_quote.slice(0, 300)}"_`);
       lines.push("");
-      lines.push(`**Materiality:** ${f.materiality_rationale}`);
-      lines.push("");
+    }
 
-      // Corpus classification context
-      if (f.classification === "known_but_understated") {
-        lines.push("**Corpus comparison:**");
-        if (f.corpus_quoted_value && f.external_quoted_value) {
-          lines.push(`- Deal team stated: ${f.corpus_quoted_value}`);
-          lines.push(`- External evidence shows: ${f.external_quoted_value}`);
-        }
-        if (f.corpus_quote) {
-          lines.push(`- Corpus excerpt: _"${f.corpus_quote.slice(0, 300)}"_`);
-        }
-        lines.push("");
-      } else if (f.classification === "known_and_assessed" && f.corpus_quote) {
-        lines.push(`**Corpus reference:** _"${f.corpus_quote.slice(0, 300)}"_`);
-        lines.push("");
+    // Evidence list — URLs are FIRST-CLASS
+    lines.push(`**Evidence (${f.evidence.length} sources):**`);
+    lines.push("");
+    for (let i = 0; i < f.evidence.length; i++) {
+      const ev = f.evidence[i];
+      lines.push(`${i + 1}. **${ev.tier_label}**`);
+      lines.push(`   - URL: ${ev.url}`);
+      if (ev.publisher) {
+        lines.push(`   - Publisher: ${ev.publisher}`);
       }
-
-      // Evidence list — URLs are FIRST-CLASS
-      lines.push(`**Evidence (${f.evidence.length} sources):**`);
+      lines.push(`   - Date: ${ev.publication_date ?? "undated"}`);
+      lines.push(`   - Domain: ${ev.domain ?? "unknown"}`);
+      lines.push(`   - Snippet: ${ev.verbatim_snippet.slice(0, 200)}`);
       lines.push("");
-      for (let i = 0; i < f.evidence.length; i++) {
-        const ev = f.evidence[i];
-        lines.push(`${i + 1}. **${ev.tier_label}**`);
-        lines.push(`   - URL: ${ev.url}`);
-        if (ev.publisher) {
-          lines.push(`   - Publisher: ${ev.publisher}`);
-        }
-        lines.push(`   - Date: ${ev.publication_date ?? "undated"}`);
-        lines.push(`   - Domain: ${ev.domain ?? "unknown"}`);
-        lines.push(`   - Snippet: ${ev.verbatim_snippet.slice(0, 200)}`);
-        lines.push("");
-      }
+    }
+  };
+
+  for (const dep of depSections) {
+    lines.push(`### ${dep.key} — ${dep.state}`);
+    lines.push("");
+    lines.push(`_${dep.description}_`);
+    lines.push("");
+
+    if (dep.state !== "EXPOSED") {
+      lines.push(dep.state === "CLEAR"
+        ? "External research found no evidence contradicting this dependency."
+        : "This dependency cannot be tested from public sources. Verification requires data room access.");
+      lines.push("");
+      continue;
+    }
+
+    for (const f of dep.findings) {
+      renderFinding(f);
     }
   }
 
-  // ── No-Evidence Coverage ────────────────────────────────────────
+  // ── Outside the Base Case ───────────────────────────────────────
+
+  if (orphanRisks.length > 0) {
+    lines.push("---");
+    lines.push("");
+    lines.push("## Outside the Base Case");
+    lines.push("");
+    lines.push("These are risk-class findings that are not linked to a named thesis dependency. They represent risks the current investment thesis does not explicitly account for.");
+    lines.push("");
+    for (const f of orphanRisks) {
+      renderFinding(f);
+    }
+  }
+
+  // ── Additional Context ──────────────────────────────────────────
+
+  if (contextFindings.length > 0) {
+    lines.push("---");
+    lines.push("");
+    lines.push("## Additional Context");
+    lines.push("");
+    lines.push("| Finding | Severity | Deal team awareness |");
+    lines.push("|---|---|---|");
+    for (const f of contextFindings) {
+      const awareness = classificationLabels[f.classification] ?? f.classification;
+      lines.push(`| ${f.title} | ${f.severity} | ${awareness} |`);
+    }
+    lines.push("");
+  }
+
+  // ── Coverage by Thesis Dependency ───────────────────────────────
 
   lines.push("---");
   lines.push("");
   lines.push("## Coverage — Hypotheses With No Evidence Found");
   lines.push("");
-  if (noEvidence.length === 0) {
+
+  // Group no-evidence hypotheses by thesis_link
+  const noEvidenceHyps = hypotheses.filter(h => h.status === "no_evidence_found");
+  if (noEvidenceHyps.length === 0) {
     lines.push("All researched hypotheses returned evidence.");
     lines.push("");
   } else {
@@ -711,10 +846,27 @@ function assembleMarkdown(
         "This means the web search did not surface relevant results — it does not confirm the absence of risk.",
     );
     lines.push("");
-    for (const h of noEvidence) {
-      lines.push(`- [Rank ${h.execution_rank}, ${h.family}] ${h.question}`);
+
+    const noEvidByDep = new Map<string, typeof noEvidenceHyps>();
+    for (const h of noEvidenceHyps) {
+      const key = h.thesis_link ?? "__unlinked__";
+      const arr = noEvidByDep.get(key) ?? [];
+      arr.push(h);
+      noEvidByDep.set(key, arr);
     }
-    lines.push("");
+
+    for (const [depKey, hyps] of noEvidByDep) {
+      if (depKey === "__unlinked__") {
+        lines.push(`**Unlinked** — ${hyps.length} hypothesis(es):`);
+      } else {
+        lines.push(`**${depKey}** — ${hyps.length} check(s), nothing found:`);
+      }
+      lines.push("");
+      for (const h of hyps) {
+        lines.push(`- ${h.question}`);
+      }
+      lines.push("");
+    }
   }
 
   // ── Limitations ─────────────────────────────────────────────────
