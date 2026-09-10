@@ -3883,7 +3883,7 @@ export default function DealDashboardPage() {
             console.info(`[WorkbookMap] ${f.name}: hash match — skipped`);
           } else {
             // Save cells in chunks of 5000 to stay under gRPC payload limit
-            const CELL_CHUNK = 5000;
+            const CELL_CHUNK = 500;
             let totalSaved = 0;
             for (let ci = 0; ci < mapResult.cells.length; ci += CELL_CHUNK) {
               const chunk = mapResult.cells.slice(ci, ci + CELL_CHUNK);

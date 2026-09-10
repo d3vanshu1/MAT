@@ -78,12 +78,23 @@ export default api({
     );
 
     if (existingRows.length > 0) {
-      console.log(`[SaveWorkbookMap] Hash match for ${workbook.documentId} — skipping re-parse`);
-      return {
-        workbookId: existingRows[0].id,
-        sheetsInserted: 0,
-        skippedByHash: true,
-      };
+      // Verify the existing record is complete (has sheets). If not, it's a
+      // partial save from a previous failure — delete and redo.
+      const sheetCount = await db.query(
+        `SELECT count(*)::int AS cnt FROM workbook_sheets WHERE workbook_id = $1`,
+        z.object({ cnt: z.number() }),
+        [existingRows[0].id],
+        { label: "SaveWorkbookMap: verify completeness" },
+      );
+      if (sheetCount[0].cnt > 0) {
+        console.log(`[SaveWorkbookMap] Hash match for ${workbook.documentId} — skipping re-parse`);
+        return {
+          workbookId: existingRows[0].id,
+          sheetsInserted: 0,
+          skippedByHash: true,
+        };
+      }
+      console.log(`[SaveWorkbookMap] Incomplete record for ${workbook.documentId} — rebuilding`);
     }
 
     // -----------------------------------------------------------------------
