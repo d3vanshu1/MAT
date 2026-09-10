@@ -3841,73 +3841,68 @@ export default function DealDashboardPage() {
       }
 
       // ---------------------------------------------------------------
-      // Workbook Map Phase 1 — non-blocking, alongside doc_tables
+      // Workbook Map Phase 1 — sequential, awaited, runs AFTER doc_tables
       // Map build failure logs and does not fail ingestion.
       // ---------------------------------------------------------------
       const xlsxFiles = files.filter((f) =>
         /\.(xlsx|xls|xlsm)$/i.test(f.name)
       );
-      if (xlsxFiles.length > 0) {
-        // Fire-and-forget: build + save workbook maps for each xlsx
-        void Promise.allSettled(
-          xlsxFiles.map(async (f) => {
-            const docId = docIdByName[f.name];
-            if (!docId) return;
+      // Process one workbook at a time to avoid saturating the API execution engine
+      for (const f of xlsxFiles) {
+        const docId = docIdByName[f.name];
+        if (!docId) continue;
+        try {
+          const buf = await f.arrayBuffer();
+          const mapResult = await buildWorkbookMap(buf, docId);
+          console.info(`[WorkbookMap] ${f.name}:\n${formatWorkbookSummary(mapResult)}`);
+
+          // Round-trip reconstruction test + independent count
+          if (mapResult.workbook.loadStatus === "ok" && mapResult.cells.length > 0) {
             try {
-              const buf = await f.arrayBuffer();
-              const mapResult = await buildWorkbookMap(buf, docId);
-              console.info(`[WorkbookMap] ${f.name}:\n${formatWorkbookSummary(mapResult)}`);
-
-              // Round-trip reconstruction test + independent count
-              // Runs BEFORE save so results are always available even if save fails
-              if (mapResult.workbook.loadStatus === "ok" && mapResult.cells.length > 0) {
-                try {
-                  const rtReport = runRoundTripTest(buf, mapResult);
-                  console.info(`[WorkbookMap] ${f.name} round-trip:\n${formatRoundTripReport(rtReport)}`);
-                } catch (rtErr) {
-                  console.warn(`[WorkbookMap] Round-trip test failed for ${f.name}:`, rtErr);
-                }
-              }
-
-              if (mapResult.workbook.loadStatus === "failed") {
-                console.warn(
-                  `[WorkbookMap] FAILED for ${f.name}: ${mapResult.workbook.loadReason}`
-                );
-              }
-
-              // Save workbook + sheets first (small payload)
-              const saveResult = await saveWorkbookMapApi({
-                workbook: mapResult.workbook,
-                sheets: mapResult.sheets,
-              });
-
-              if (!saveResult) throw new Error("SaveWorkbookMap returned no result");
-              if (saveResult.skippedByHash) {
-                console.info(`[WorkbookMap] ${f.name}: hash match — skipped`);
-              } else {
-                // Save cells in chunks of 5000 to stay under gRPC payload limit
-                const CELL_CHUNK = 5000;
-                let totalSaved = 0;
-                for (let ci = 0; ci < mapResult.cells.length; ci += CELL_CHUNK) {
-                  const chunk = mapResult.cells.slice(ci, ci + CELL_CHUNK);
-                  const batchResult = await saveWorkbookCellsBatchApi({
-                    workbookId: saveResult.workbookId,
-                    workbookRole: mapResult.workbook.workbookRole,
-                    cells: chunk,
-                  });
-                  totalSaved += batchResult?.cellsInserted ?? 0;
-                }
-                console.info(
-                  `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
-                  `sheets=${mapResult.sheets.length}, cells=${totalSaved}`
-                );
-              }
-            } catch (err) {
-              // Non-fatal — log and continue
-              console.error(`[WorkbookMap] Build/save failed for ${f.name}:`, err);
+              const rtReport = runRoundTripTest(buf, mapResult);
+              console.info(`[WorkbookMap] ${f.name} round-trip:\n${formatRoundTripReport(rtReport)}`);
+            } catch (rtErr) {
+              console.warn(`[WorkbookMap] Round-trip test failed for ${f.name}:`, rtErr);
             }
-          })
-        );
+          }
+
+          if (mapResult.workbook.loadStatus === "failed") {
+            console.warn(
+              `[WorkbookMap] FAILED for ${f.name}: ${mapResult.workbook.loadReason}`
+            );
+          }
+
+          // Save workbook + sheets (small payload)
+          const saveResult = await saveWorkbookMapApi({
+            workbook: mapResult.workbook,
+            sheets: mapResult.sheets,
+          });
+
+          if (!saveResult) throw new Error("SaveWorkbookMap returned no result");
+          if (saveResult.skippedByHash) {
+            console.info(`[WorkbookMap] ${f.name}: hash match — skipped`);
+          } else {
+            // Save cells in chunks of 5000 to stay under gRPC payload limit
+            const CELL_CHUNK = 5000;
+            let totalSaved = 0;
+            for (let ci = 0; ci < mapResult.cells.length; ci += CELL_CHUNK) {
+              const chunk = mapResult.cells.slice(ci, ci + CELL_CHUNK);
+              const batchResult = await saveWorkbookCellsBatchApi({
+                workbookId: saveResult.workbookId,
+                workbookRole: mapResult.workbook.workbookRole,
+                cells: chunk,
+              });
+              totalSaved += batchResult?.cellsInserted ?? 0;
+            }
+            console.info(
+              `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
+              `sheets=${mapResult.sheets.length}, cells=${totalSaved}`
+            );
+          }
+        } catch (err) {
+          // Non-fatal — log and continue to next file
+          console.error(`[WorkbookMap] Build/save failed for ${f.name}:`, err);
+        }
       }
     },
     [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookCellsBatchApi, indexDocumentChunks]
