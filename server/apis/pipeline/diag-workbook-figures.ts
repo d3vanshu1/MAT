@@ -72,6 +72,23 @@ export default api({
         metric: z.string(),
       })),
       absentTrulyMissingByMetric: z.record(z.number()),
+      // Units re-check: try value × {100, 0.01, 1e3, 1e6} for truly missing
+      unitsRecheck: z.object({
+        resolvedAt100: z.number(),
+        resolvedAt001: z.number(),
+        resolvedAt1e3: z.number(),
+        resolvedAt1e6: z.number(),
+        residualMissing: z.number(),
+        residualByMetric: z.record(z.number()),
+        resolvedSamples: z.array(z.object({
+          oldLabel: z.string(),
+          mapLabel: z.string(),
+          period: z.string(),
+          factor: z.string(),
+          oldVal: z.number(),
+          mapVal: z.number(),
+        })),
+      }),
       // Ratio distribution for differing values
       differingRatios: z.object({
         at1000x: z.number(),
@@ -327,6 +344,78 @@ export default api({
       }
     }
 
+    // --- 5b. Units re-check: try value × factors for truly missing ---
+    const factors = [
+      { factor: 100, label: "x100" },       // percent: 0.231 → 23.1
+      { factor: 0.01, label: "x0.01" },     // inverse percent
+      { factor: 1e3, label: "x1e3" },       // thousands
+      { factor: 1e6, label: "x1e6" },       // millions
+    ];
+    let resolvedAt100 = 0, resolvedAt001 = 0, resolvedAt1e3 = 0, resolvedAt1e6 = 0;
+    let residualMissing = 0;
+    const residualByMetric: Record<string, number> = {};
+    const resolvedSamples: Array<{
+      oldLabel: string; mapLabel: string; period: string;
+      factor: string; oldVal: number; mapVal: number;
+    }> = [];
+
+    // trulyMissingItems already identified during first pass — they're the ones
+    // that incremented absentTrulyMissing. Collect them by re-checking.
+    // (We need the normPeriod for the factor search)
+    const trulyMissingItems: typeof allAbsent = [];
+    for (const ab of allAbsent) {
+      const candidates = mapByPeriodValue.get(ab.normPeriod);
+      if (!candidates) { trulyMissingItems.push(ab); continue; }
+      const matched = candidates.some(c => {
+        if (ab.oldValue === 0 && c.valueRaw === 0) return true;
+        if (ab.oldValue === 0 || c.valueRaw === 0) return Math.abs(ab.oldValue - c.valueRaw) < 0.01;
+        return Math.abs(c.valueRaw - ab.oldValue) / Math.abs(ab.oldValue) < 0.05;
+      });
+      if (!matched) trulyMissingItems.push(ab);
+    }
+
+    for (const tm of trulyMissingItems) {
+      if (tm.oldValue === 0) {
+        residualMissing++;
+        residualByMetric[tm.metric] = (residualByMetric[tm.metric] ?? 0) + 1;
+        continue;
+      }
+      const candidates = mapByPeriodValue.get(tm.normPeriod);
+      if (!candidates) {
+        residualMissing++;
+        residualByMetric[tm.metric] = (residualByMetric[tm.metric] ?? 0) + 1;
+        continue;
+      }
+
+      let resolved = false;
+      for (const { factor, label: fLabel } of factors) {
+        const scaledOldVal = tm.oldValue * factor;
+        const match = candidates.find(c => {
+          if (c.valueRaw === 0) return false;
+          return Math.abs(c.valueRaw - scaledOldVal) / Math.abs(scaledOldVal) < 0.05;
+        });
+        if (match) {
+          resolved = true;
+          if (factor === 100) resolvedAt100++;
+          else if (factor === 0.01) resolvedAt001++;
+          else if (factor === 1e3) resolvedAt1e3++;
+          else if (factor === 1e6) resolvedAt1e6++;
+          if (resolvedSamples.length < 10) {
+            resolvedSamples.push({
+              oldLabel: tm.rowLabel, mapLabel: match.label,
+              period: tm.period, factor: fLabel,
+              oldVal: tm.oldValue, mapVal: match.valueRaw,
+            });
+          }
+          break;
+        }
+      }
+      if (!resolved) {
+        residualMissing++;
+        residualByMetric[tm.metric] = (residualByMetric[tm.metric] ?? 0) + 1;
+      }
+    }
+
     // --- 6. Ratio distribution for differing values ---
     let at1000x = 0;
     let at1000000x = 0;
@@ -388,6 +477,15 @@ export default api({
         absentValueMatchedSamples,
         absentTrulyMissingSamples,
         absentTrulyMissingByMetric: trulyMissingByMetric,
+        unitsRecheck: {
+          resolvedAt100,
+          resolvedAt001,
+          resolvedAt1e3,
+          resolvedAt1e6,
+          residualMissing,
+          residualByMetric,
+          resolvedSamples,
+        },
         differingRatios: {
           at1000x,
           at1000000x,

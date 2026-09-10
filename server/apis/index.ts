@@ -147,6 +147,7 @@ import DiagCoordCollisions from './pipeline/diag-coord-collisions.js';
 import DiagReconcilerKeys from './pipeline/diag-reconciler-keys.js';
 import DiagReconcileOnly from './pipeline/diag-reconcile-only.js';
 import DiagWorkbookFigures from './pipeline/diag-workbook-figures.js';
+import DiagWorkbookRoundtrip from './pipeline/diag-workbook-roundtrip.js';
 import DiagPhaseJControl from './pipeline/diag-phase-j-control.js';
 import RunMigration022 from './pipeline/run-migration-022.js';
 import RunMigration023 from './pipeline/run-migration-023.js';
@@ -210,6 +211,7 @@ import RunMigration054 from './pipeline/run-migration-054.js';
 import RunWorkbookPhase2 from './pipeline/run-workbook-phase2.js';
 import RunWorkbookPhase3 from './pipeline/run-workbook-phase3.js';
 import RunWorkbookPhase4 from './pipeline/run-workbook-phase4.js';
+import RunWorkbookPhase4Display from './pipeline/run-workbook-phase4-display.js';
 import TestExcelExtraction from './pipeline/test-excel-extraction.js';
 import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import EroTestRanking from './pipeline/ero-test-ranking.js';
@@ -343,7 +345,7 @@ const apis = {
   DiagCheckpointInspect, DiagPartialNodeLedger, DiagMergeEmissionBudget, FenceRun, RunMigration017, RunMigration018, DiagSchemaVerify, TestConcurrencyGuards, DiagClaimExpiryCheck,
   DiagOaAncestry, DiagOaAncestryExport, TestOaAncestry, TestOaMergeContract, TestOaFamilyDedup, TestOaEvidenceAdmissionSynthesis,
   RunMigration019, RunMigration020, RunMigration021, OaPreconditionCheck, ReadDiagTrace, ResetMergeTruncation, RecoverRun7bbeab48, AdaptiveMergeRecovery, ValidateTreeRoot, FindingReductionGate, ScgClonedStatePreflight, DiagChecklistCoverage, DiagEngagementMap, DiagAbsenceMatcher, DiagConsolidationEngine, DiagMateriality, DiagNode17State, DiagFinalizationState, DiagSuppressedFindings, DiagDumpAnalysisRows,
-  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query, DiagSnippetMatchHarness,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagWorkbookFigures, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, RunMigration030, RunMigration031, RunMigration032,   RunMigration033, RunMigration034, RunMigration035, RunMigration036, RunMigration037, RunMigration038, RunMigration039, RunMigration040, RunMigration041, PromoteClaimsLedger, BssRunPipeline, BssGetFindings, BssPurgeDealState, BuildStructuralProfile, BssGenerateBlindCandidates, BssAbsenceSweep, BssLlmAdjudication, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate, DiagResumeCcRun, DiagTestResumeQuery, DiagDeleteCheckpointRow, PreserveArtifactSnapshot,
+  DiagExportIndexMap, DiagExportExtraction, DiagExportFinding, DiagBulkExtract, GetExtractionManifest, OaDiagQuery, DiagD1Documents, DiagD1ClaimsLedger, DiagD1Query, DiagSnippetMatchHarness,   DiagCoordCollisions, DiagReconcilerKeys, DiagReconcileOnly, DiagWorkbookFigures, DiagWorkbookRoundtrip, DiagPhaseJControl, RunMigration022, RunMigration023, RunMigration024, RunMigration025, RunMigration026, RunMigration027, RunMigration028, RunMigration029, RunMigration030, RunMigration031, RunMigration032,   RunMigration033, RunMigration034, RunMigration035, RunMigration036, RunMigration037, RunMigration038, RunMigration039, RunMigration040, RunMigration041, PromoteClaimsLedger, BssRunPipeline, BssGetFindings, BssPurgeDealState, BuildStructuralProfile, BssGenerateBlindCandidates, BssAbsenceSweep, BssLlmAdjudication, Stage5ExtractReferenceFigures, ResetStageCheckpoints, OaFactNormalization, OaNormalizationReport, OaTopicAssignment, OaIndexAssembly, OaAbsenceProbe, OaGapComparison, OaMateriality, DiagP4Checkpoints, OaFindingAssembly, OaRender, OaAcceptanceTests, PublishOaToModuleOutputs, TestVerificationGate, DiagResumeCcRun, DiagTestResumeQuery, DiagDeleteCheckpointRow, PreserveArtifactSnapshot,
   // ERO v2 pipeline
   EroGetActiveRun, EroRunPipeline, EroDiagState, RunMigration042, EroTestAdvance, EroTestEntityManifest, EroTestDealProfile, EroDiagPhase2Export, EroPurgeDealState, EroTestHypotheses, EroTestRanking, EroTestSourceTiers, EroTestResearch, EroTestAdjudication, EroTestConfrontation, EroTestRender, PublishEroToModuleOutputs, EroTestPublish,   EroTestDedup,
     // DCS rebuild
@@ -351,7 +353,7 @@ const apis = {
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // SRI v2 pipeline
-  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, RunMigration052, RunMigration053, RunMigration054, RunWorkbookPhase2, RunWorkbookPhase3, RunWorkbookPhase4, TestExcelExtraction, PublishSriToModuleOutputs,
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, RunMigration052, RunMigration053, RunMigration054, RunWorkbookPhase2, RunWorkbookPhase3, RunWorkbookPhase4, RunWorkbookPhase4Display, TestExcelExtraction, PublishSriToModuleOutputs,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
