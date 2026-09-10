@@ -48,14 +48,9 @@ export interface RoundTripReport {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in number formats (duplicated from ooxmlStyleExtractor for independence)
+// Built-in number formats — single source of truth in shared/excelBuiltinFormats
 // ---------------------------------------------------------------------------
-const BUILTIN_NUM_FMTS: Record<number, string> = {
-  0: "General", 1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00",
-  9: "0%", 10: "0.00%", 11: "0.00E+00", 14: "mm-dd-yy",
-  22: "m/d/yy h:mm", 37: "#,##0 ;(#,##0)", 38: "#,##0 ;[Red](#,##0)",
-  39: "#,##0.00;(#,##0.00)", 40: "#,##0.00;[Red](#,##0.00)", 49: "@",
-};
+import { BUILTIN_NUM_FMTS } from "../../shared/excelBuiltinFormats.js";
 
 // ---------------------------------------------------------------------------
 // Number format application (simplified — enough for round-trip diff)
