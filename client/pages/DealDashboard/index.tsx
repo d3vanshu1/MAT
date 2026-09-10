@@ -532,6 +532,8 @@ export default function DealDashboardPage() {
   const { run: loadRunCoverageApi } = useApi("LoadRunCoverage");
   const { run: saveDocTablesApi } = useApi("SaveDocTables");
   const { run: saveWorkbookMapApi } = useApi("SaveWorkbookMap");
+  const { run: saveWorkbookSheetApi } = useApi("SaveWorkbookSheet");
+  const { run: saveWorkbookStylesApi } = useApi("SaveWorkbookStyles");
   const { run: saveWorkbookCellsBatchApi } = useApi("SaveWorkbookCellsBatch");
   const { run: numericVerifyApi } = useApi("NumericVerify");
   const { run: cancelModuleRunApi } = useApi("CancelModuleRun");
@@ -3872,23 +3874,44 @@ export default function DealDashboardPage() {
             );
           }
 
-          // Save workbook + sheets (small payload)
+          // Save workbook record (tiny payload — no sheets, cells, or styles)
           const saveResult = await saveWorkbookMapApi({
-            workbook: mapResult.workbook,
-            sheets: mapResult.sheets,
+            workbook: {
+              documentId: mapResult.workbook.documentId,
+              workbookRole: mapResult.workbook.workbookRole,
+              roleSource: mapResult.workbook.roleSource,
+              fileHash: mapResult.workbook.fileHash,
+              captureVersion: mapResult.workbook.captureVersion,
+              loadStatus: mapResult.workbook.loadStatus,
+              loadReason: mapResult.workbook.loadReason,
+            },
           });
 
           if (!saveResult) throw new Error("SaveWorkbookMap returned no result");
           if (saveResult.skippedByHash) {
             console.info(`[WorkbookMap] ${f.name}: hash match — skipped`);
           } else {
-            // Save cells in chunks of 5000 to stay under gRPC payload limit
+            const wbId = saveResult.workbookId;
+
+            // Save sheets one at a time
+            for (const sheet of mapResult.sheets) {
+              await saveWorkbookSheetApi({ workbookId: wbId, sheet });
+            }
+
+            // Save style tables + defined names
+            await saveWorkbookStylesApi({
+              workbookId: wbId,
+              styleTables: mapResult.workbook.styleTables,
+              definedNames: mapResult.workbook.definedNames,
+            });
+
+            // Save cells in 500-cell chunks
             const CELL_CHUNK = 500;
             let totalSaved = 0;
             for (let ci = 0; ci < mapResult.cells.length; ci += CELL_CHUNK) {
               const chunk = mapResult.cells.slice(ci, ci + CELL_CHUNK);
               const batchResult = await saveWorkbookCellsBatchApi({
-                workbookId: saveResult.workbookId,
+                workbookId: wbId,
                 workbookRole: mapResult.workbook.workbookRole,
                 cells: chunk,
               });
@@ -3905,7 +3928,7 @@ export default function DealDashboardPage() {
         }
       }
     },
-    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookCellsBatchApi, indexDocumentChunks]
+    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookSheetApi, saveWorkbookStylesApi, saveWorkbookCellsBatchApi, indexDocumentChunks]
   );
 
   const handleDeleteDoc = useCallback(async (docId: string) => {
