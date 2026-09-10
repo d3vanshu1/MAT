@@ -28,6 +28,13 @@ import {
   type ComparabilityResult,
   type ComparabilityReasonCode,
 } from "./comparability-gate.js";
+import {
+  cleanVerdictLanguage,
+  lintFindingWording,
+  generateAlternativeExplanation,
+  hashFinding,
+  type FindingCheckType,
+} from "./finding-quality-gate.js";
 
 // ---------------------------------------------------------------------------
 // UUID helper (cross-environment — avoids Node `crypto` import that Vite externalizes)
@@ -1642,6 +1649,94 @@ export async function runReconciliation(
 
   // ----- U5: Findings dump — generate stable report ID & apply 3MB guard -----
   const findings_report_id = generateUUID();
+  // ── Quality gate (A1–A4, F22) ───────────────────────────────────
+  // Sanitize → lint → explanation → hash. Drop and log on failure.
+  // This is the SINGLE emit gate. Every finding flows through here.
+  interface GateDrop {
+    title: string;
+    finding_kind: string;
+    reason: string;
+  }
+  const gateDrops: GateDrop[] = [];
+  const gatedFindings: typeof findings = [];
+
+  for (const f of findings) {
+    // Step 1: Sanitize all human-facing text fields
+    if (f.title) f.title = cleanVerdictLanguage(f.title);
+    if (f.detail) f.detail = cleanVerdictLanguage(f.detail);
+    if (f.full_analysis) f.full_analysis = cleanVerdictLanguage(f.full_analysis);
+
+    // Step 2: Lint after sanitization — drop if still fails
+    const lint = lintFindingWording({
+      title: f.title,
+      detail: f.detail,
+      full_analysis: f.full_analysis,
+    });
+    if (!lint.passed) {
+      gateDrops.push({
+        title: f.title,
+        finding_kind: f.finding_kind ?? "unknown",
+        reason: "WORDING_LINT_AFTER_SANITIZE: " + lint.violations.map(v =>
+          `'${v.word}' in ${v.field}`).join("; "),
+      });
+      continue;
+    }
+
+    // Step 3: Alternative explanation — no explanation = no publish
+    const checkType = (f.finding_kind ?? "data_divergence") as FindingCheckType;
+    const explanation = generateAlternativeExplanation(checkType, {
+      metricA: f.claim?.metric,
+      metricB: f.model_figure?.name,
+      periodA: f.claim?.period,
+      periodB: f.model_figure?.period,
+      docA: f.claim?.source_doc,
+      docB: f.model_figure?.source_doc ?? undefined,
+      deltaAbs: f.delta_abs ?? undefined,
+      deltaPct: f.delta_pct ?? undefined,
+    });
+    if (explanation === null) {
+      gateDrops.push({
+        title: f.title,
+        finding_kind: f.finding_kind ?? "unknown",
+        reason: `NO_EXPLANATION: check type '${checkType}' cannot generate a credible alternative`,
+      });
+      continue;
+    }
+    // Append the explanation to the finding's detail
+    f.detail = f.detail + "\n\n" + explanation;
+
+    // Step 4: Immutability hash
+    const hash = hashFinding({
+      metric: f.claim?.metric,
+      period: f.claim?.period,
+      scope: f.claim?.scope_qualifier,
+      claimValue: f.claim?.value ?? null,
+      figureValue: f.model_figure?.value ?? null,
+      deltaAbs: f.delta_abs ?? null,
+      deltaPct: f.delta_pct ?? null,
+      text: f.full_analysis,
+    });
+    (f as any).integrity_hash = hash;
+
+    gatedFindings.push(f);
+  }
+
+  // F22: Log every drop
+  if (gateDrops.length > 0) {
+    console.log(
+      `[Reconciliation] Quality gate: ${gatedFindings.length} passed, ${gateDrops.length} dropped.`
+    );
+    for (const d of gateDrops) {
+      console.log(
+        `[Reconciliation]   DROPPED: "${d.title}" (${d.finding_kind}) — ${d.reason}`
+      );
+    }
+  }
+
+  // Replace findings with gated set
+  findings.length = 0;
+  findings.push(...gatedFindings);
+
   const MAX_PAYLOAD_BYTES = 3 * 1024 * 1024; // 3MB
   let findings_truncated = false;
   const payloadEstimate = JSON.stringify(findings).length;
