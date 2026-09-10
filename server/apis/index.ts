@@ -204,7 +204,9 @@ import RunMigration049 from './pipeline/run-migration-049.js';
 import RunMigration050 from './pipeline/run-migration-050.js';
 import RunMigration051 from './pipeline/run-migration-051.js';
 import RunMigration052 from './pipeline/run-migration-052.js';
+import RunMigration053 from './pipeline/run-migration-053.js';
 import RunWorkbookPhase2 from './pipeline/run-workbook-phase2.js';
+import RunWorkbookPhase3 from './pipeline/run-workbook-phase3.js';
 import TestExcelExtraction from './pipeline/test-excel-extraction.js';
 import EroTestHypotheses from './pipeline/ero-test-hypotheses.js';
 import EroTestRanking from './pipeline/ero-test-ranking.js';
@@ -346,7 +348,7 @@ const apis = {
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // SRI v2 pipeline
-  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, RunMigration052, RunWorkbookPhase2, TestExcelExtraction, PublishSriToModuleOutputs,
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, RunMigration052, RunMigration053, RunWorkbookPhase2, RunWorkbookPhase3, TestExcelExtraction, PublishSriToModuleOutputs,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
