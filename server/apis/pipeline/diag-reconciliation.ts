@@ -275,8 +275,8 @@ export default api({
       claim_source_doc: rf.claim?.source_doc ?? null,
       model_label: rf.model_figure?.name ?? null,
       model_period: rf.model_figure?.period ?? null,
-      model_value_m: rf.model_figure ? `£${(rf.model_figure.value / 1_000_000).toFixed(2)}m` : null,
-      delta_abs_m: rf.delta_abs != null ? `£${(rf.delta_abs / 1_000_000).toFixed(2)}m` : null,
+      model_value_m: rf.model_figure ? `$${(rf.model_figure.value / 1_000_000).toFixed(2)}m` : null,
+      delta_abs_m: rf.delta_abs != null ? `$${(rf.delta_abs / 1_000_000).toFixed(2)}m` : null,
       delta_pct: rf.delta_pct != null ? `${(rf.delta_pct * 100).toFixed(1)}%` : null,
       source_docs: rf.source_docs,
     }));
