@@ -104,6 +104,8 @@ export interface SheetProperties {
   rowProperties: Record<string, RowProperty>;   // key = row index (0-based)
   colProperties: Record<string, ColProperty>;    // key = col index (0-based)
   cellStyleIndices: Map<string, number>;         // cellAddress → s attribute
+  /** True cell addresses from XML r attribute — authoritative source for coordinates */
+  cellTrueAddresses: Set<string>;                // set of "A1"-style addresses
 }
 
 export interface DefinedName {
@@ -395,6 +397,7 @@ function parseWorksheetProperties(xml: string): SheetProperties {
     rowProperties: parseRowProperties(xml),
     colProperties: parseColProperties(xml),
     cellStyleIndices: parseCellStyleIndices(xml),
+    cellTrueAddresses: parseCellTrueAddresses(xml),
   };
 }
 
@@ -485,6 +488,28 @@ function parseCellStyleIndices(xml: string): Map<string, number> {
   let m: RegExpExecArray | null;
   while ((m = cellRegex.exec(xml)) !== null) {
     result.set(m[1], parseInt(m[2], 10));
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Cell true addresses from XML r attribute
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract ALL cell addresses from the sheet XML's <c r="..."> attributes.
+ * These are the authoritative coordinates — they come from the file, not
+ * from array positions. Used by workbookMapBuilder to override SheetJS
+ * coordinates which can be wrong due to row compaction.
+ */
+function parseCellTrueAddresses(xml: string): Set<string> {
+  const result = new Set<string>();
+  // Match <c r="A1" ...> — capture the r attribute value
+  // This regex matches ALL <c> elements, not just styled ones
+  const cellRegex = /<c\s[^>]*?r="([A-Z]{1,3}\d+)"/gi;
+  let m: RegExpExecArray | null;
+  while ((m = cellRegex.exec(xml)) !== null) {
+    result.add(m[1]);
   }
   return result;
 }

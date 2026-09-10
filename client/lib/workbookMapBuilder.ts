@@ -326,6 +326,8 @@ export async function buildWorkbookMap(
     const sheetProps = mapExtraction.sheetProperties.get(sheetName);
     const sheetFormulas = ooxmlFormulas.get(sheetName);
     const cellStyleIndices = sheetProps?.cellStyleIndices ?? new Map<string, number>();
+    // True addresses from the file's XML r attributes — authoritative source
+    const trueAddresses = sheetProps?.cellTrueAddresses ?? new Set<string>();
 
     const sheetCells: CellRecord[] = [];
     const firstColLabels: string[] = [];
@@ -340,11 +342,30 @@ export async function buildWorkbookMap(
     let sheetNoCacheCells = 0;
 
     if (sheet && sheet["!ref"]) {
-      const range = getPopulatedRange(sheet);
+      // Use true addresses from OOXML when available, falling back to SheetJS range scan.
+      // True addresses come from the <c r="..."> attribute in the sheet XML — they are
+      // the authoritative coordinates. SheetJS can compact blank rows, shifting all
+      // subsequent row numbers and producing wrong cell references.
+      const cellAddrs: string[] = trueAddresses.size > 0
+        ? Array.from(trueAddresses).sort((a, b) => {
+            const da = XLSX.utils.decode_cell(a);
+            const db = XLSX.utils.decode_cell(b);
+            return da.r !== db.r ? da.r - db.r : da.c - db.c;
+          })
+        : (() => {
+            // Fallback: scan SheetJS range (original behavior)
+            const range = getPopulatedRange(sheet);
+            const addrs: string[] = [];
+            for (let r = range.s.r; r <= range.e.r; r++) {
+              for (let c = range.s.c; c <= range.e.c; c++) {
+                addrs.push(XLSX.utils.encode_cell({ r, c }));
+              }
+            }
+            return addrs;
+          })();
 
-      for (let r = range.s.r; r <= range.e.r; r++) {
-        for (let c = range.s.c; c <= range.e.c; c++) {
-          const addr = XLSX.utils.encode_cell({ r, c });
+      for (const addr of cellAddrs) {
+          const { r, c } = XLSX.utils.decode_cell(addr);
           const cell = sheet[addr] as XLSX.CellObject | undefined;
           if (!cell || (cell.v == null && !cell.f)) continue; // truly empty
 
@@ -427,7 +448,8 @@ export async function buildWorkbookMap(
             countText++;
           }
 
-          const cellRef = cellToA1(r, c);
+          // Use the address from the file (addr), not computed from position
+          const cellRef = addr;
 
           sheetCells.push({
             sheetName,
@@ -442,11 +464,10 @@ export async function buildWorkbookMap(
             numberFormat,
           });
 
-          // Collect first-column labels for role detection
-          if (c === range.s.c && valueType === "text" && valueRaw) {
+          // Collect first-column labels for role detection (col 0 or first populated col)
+          if (c === 0 && valueType === "text" && valueRaw) {
             firstColLabels.push(valueRaw);
           }
-        }
       }
     }
 
