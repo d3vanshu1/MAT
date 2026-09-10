@@ -19,6 +19,8 @@
 const BANNED_WORDS = [
   "overstates",
   "understates",
+  "higher than",
+  "lower than",
   "wrong",
   "incorrect",
   "misleading",
@@ -38,6 +40,8 @@ const BANNED_PATTERN = new RegExp(
 const REPLACEMENTS: Record<string, string> = {
   overstates: "differs from",
   understates: "differs from",
+  "higher than": "above",
+  "lower than": "below",
   wrong: "does not tie",
   incorrect: "does not tie",
   misleading: "appears to be on a different basis",

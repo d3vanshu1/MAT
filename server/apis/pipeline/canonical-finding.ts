@@ -174,7 +174,7 @@ export const CanonicalFindingSchema = z.object({
   issue_key: z.string().optional(),
 
   // --- Severity & materiality ---
-  /** The £ figure or source statement justifying the severity assignment.
+  /** The currency figure or source statement justifying the severity assignment.
    *  Required for critical findings — used by materiality gate. */
   severity_anchor: z.string().optional(),
   /** Structured impact/delta — enables deterministic materiality attribution.

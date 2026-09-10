@@ -869,19 +869,19 @@ function processMatch(
     return { kind: "scope_mismatch", finding: findings[findings.length - 1] };
   }
 
-  const sign = claimVal > modelVal ? "higher" : "lower";
+  const direction = claimVal > modelVal ? "above" : "below";
   const deltaFormatted = formatMoney(deltaAbs);
 
   const finding: ReconciliationFinding = {
     finding_kind: "data_divergence",
     severity,
-    title: `${claim.scope_qualifier} (${claim.period}): memo ${sign} than model by ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%)`,
-    detail: `Memo cites ${formatValue(claim)} but model shows ${formatMoney(modelVal)} ` +
+    title: `${claim.scope_qualifier} (${claim.period}): memo ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%) ${direction} model`,
+    detail: `Memo cites ${formatMoney(claimVal)} but model shows ${formatMoney(modelVal)} ` +
       `for "${modelFig.name}" (${modelFig.period}). Delta: ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%).`,
     full_analysis: `[DATA_DIVERGENCE] Code-verified delta computation.\n` +
       `  Claim: "${claim.verbatim_snippet}" → ${formatValue(claim)} (normalized: ${formatMoney(claimVal)})\n` +
       `  Model: "${modelFig.name}" ${modelFig.period} → ${formatMoney(modelVal)} (source: ${modelFig.source_sheet}!${modelFig.source_cell})\n` +
-      `  Delta: ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%) — memo is ${sign}\n` +
+      `  Delta: ${deltaFormatted} (${(deltaPct * 100).toFixed(1)}%) — memo is ${direction}\n` +
       `  Materiality: abs=${deltaAbs >= MATERIALITY_ABS_FLOOR ? "ABOVE" : "below"} floor (${MATERIALITY_ABS_FLOOR/1e6}m), ` +
       `rel=${deltaPct >= MATERIALITY_REL_FLOOR ? "ABOVE" : "below"} floor (${(MATERIALITY_REL_FLOOR*100)}%)\n` +
       `  Classification: ${severity} data_divergence`,

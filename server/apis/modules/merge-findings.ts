@@ -90,7 +90,7 @@ A JSON array of PRINCIPAL findings only (category = "principal_finding"). Each o
 - "materiality_rationale": (REQUIRED) One sentence justifying IC relevance
 - "category": "principal_finding" | "housekeeping" | "human_review_flag"
 - "numeric_unverified": boolean — true when core quantitative claim unverifiable
-- "severity_anchor": (REQUIRED) One sentence: the £ figure or source statement justifying severity
+- "severity_anchor": (REQUIRED) One sentence: the currency figure or source statement justifying severity
 - "finding_kind": (REQUIRED) "data_divergence" | "source_stated_risk" | "absence_claim" | "process_observation"
 - "structured_impact": (OPTIONAL) Array of impact objects: {"amount": number, "currency": "GBP"|"USD"|"EUR"|"other", "unit_multiplier": number, "role": "delta"|"exposure"|"annual_impact"|"deal_value"|"threshold"|"context", "source_doc": "filename", "source_coordinate": "reference", "verified": boolean}
 - "analysis_gap_disclosed": (OPTIONAL) boolean — true when finding acknowledges data limitations

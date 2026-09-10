@@ -270,14 +270,14 @@ function meaningSentence(finding: ReconciliationFinding): string {
   }
 
   const claimVal = normalizeClaimValue(claim);
-  const direction = claimVal >= fig.value ? "higher than" : "lower than";
+  const direction = claimVal >= fig.value ? "above" : "below";
   const scope = claim.scope_qualifier && claim.scope_qualifier !== "NONE_STATED"
     ? claim.scope_qualifier
     : claim.metric;
 
   return (
-    `The memo's figure for ${scope} (${claim.period}) is ${direction} the model by ` +
-    `${money(finding.delta_abs)} (${pct(finding.delta_pct)}). ` +
+    `The memo's figure for ${scope} (${claim.period}) is ${money(finding.delta_abs)} ` +
+    `(${pct(finding.delta_pct)}) ${direction} the model. ` +
     `This does not establish which is correct — the difference may reflect a ` +
     `basis or convention difference.`
   );
