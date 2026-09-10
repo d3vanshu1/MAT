@@ -27,19 +27,6 @@ const SheetInputSchema = z.object({
   loadReason: z.string().nullable(),
 });
 
-const CellInputSchema = z.object({
-  sheetName: z.string(),
-  cellRef: z.string(),
-  rowIdx: z.number(),
-  colIdx: z.number(),
-  valueRaw: z.string().nullable(),
-  valueNum: z.number().nullable(),
-  valueType: z.string(),
-  formula: z.string().nullable(),
-  styleIndex: z.number().nullable(),
-  numberFormat: z.string().nullable(),
-});
-
 const WorkbookInputSchema = z.object({
   documentId: z.string().uuid(),
   workbookRole: z.string(),
@@ -55,12 +42,12 @@ const WorkbookInputSchema = z.object({
 const WorkbookIdSchema = z.object({ id: z.string() });
 
 // ---------------------------------------------------------------------------
-// API
+// API — workbook + sheets only (no cells — those go via SaveWorkbookCellsBatch)
 // ---------------------------------------------------------------------------
 
 export default api({
   name: "SaveWorkbookMap",
-  description: "Persists workbook map data (workbooks + sheets + cells)",
+  description: "Creates workbook + sheet records; cells saved separately via SaveWorkbookCellsBatch",
 
   integrations: {
     ic_diligence_db: postgres(IC_DILIGENCE_DB),
@@ -69,17 +56,15 @@ export default api({
   input: z.object({
     workbook: WorkbookInputSchema,
     sheets: z.array(SheetInputSchema),
-    cells: z.array(CellInputSchema),
   }),
 
   output: z.object({
     workbookId: z.string(),
     sheetsInserted: z.number(),
-    cellsInserted: z.number(),
     skippedByHash: z.boolean(),
   }),
 
-  async run(ctx, { workbook, sheets, cells }) {
+  async run(ctx, { workbook, sheets }) {
     const db = ctx.integrations.ic_diligence_db;
 
     // -----------------------------------------------------------------------
@@ -97,7 +82,6 @@ export default api({
       return {
         workbookId: existingRows[0].id,
         sheetsInserted: 0,
-        cellsInserted: 0,
         skippedByHash: true,
       };
     }
@@ -178,64 +162,15 @@ export default api({
       );
     }
 
-    // -----------------------------------------------------------------------
-    // Insert cells in batches
-    // -----------------------------------------------------------------------
-    const BATCH_SIZE = 200;
-    let cellsInserted = 0;
-
-    for (let i = 0; i < cells.length; i += BATCH_SIZE) {
-      const batch = cells.slice(i, i + BATCH_SIZE);
-
-      // Build multi-row INSERT for performance
-      const valueClauses: string[] = [];
-      const params: unknown[] = [workbookId, workbook.workbookRole];
-      let paramIdx = 3;
-
-      for (const cell of batch) {
-        valueClauses.push(
-          `($1, $2, $${paramIdx}, $${paramIdx + 1}, $${paramIdx + 2}, $${paramIdx + 3},` +
-          ` $${paramIdx + 4}, $${paramIdx + 5}, $${paramIdx + 6}, $${paramIdx + 7},` +
-          ` $${paramIdx + 8}, $${paramIdx + 9})`
-        );
-        params.push(
-          cell.sheetName,
-          cell.cellRef,
-          cell.rowIdx,
-          cell.colIdx,
-          cell.valueRaw,
-          cell.valueNum,
-          cell.valueType,
-          cell.formula,
-          cell.styleIndex,
-          cell.numberFormat,
-        );
-        paramIdx += 10;
-      }
-
-      await db.execute(
-        `INSERT INTO workbook_cells (
-           workbook_id, workbook_role, sheet_name, cell_ref,
-           row_idx, col_idx, value_raw, value_num, value_type,
-           formula, style_index, number_format
-         ) VALUES ${valueClauses.join(", ")}`,
-        params,
-        { label: `SaveWorkbookMap: cells batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(cells.length / BATCH_SIZE)}` },
-      );
-      cellsInserted += batch.length;
-    }
-
     console.log(
       `[SaveWorkbookMap] Saved: workbook ${workbookId}, ` +
-      `${sheets.length} sheets, ${cellsInserted} cells, ` +
-      `role=${workbook.workbookRole} (${workbook.roleSource}), ` +
+      `${sheets.length} sheets, role=${workbook.workbookRole} (${workbook.roleSource}), ` +
       `status=${workbook.loadStatus}`
     );
 
     return {
       workbookId,
       sheetsInserted: sheets.length,
-      cellsInserted,
       skippedByHash: false,
     };
   },

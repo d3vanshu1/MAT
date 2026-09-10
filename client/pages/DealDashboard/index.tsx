@@ -532,6 +532,7 @@ export default function DealDashboardPage() {
   const { run: loadRunCoverageApi } = useApi("LoadRunCoverage");
   const { run: saveDocTablesApi } = useApi("SaveDocTables");
   const { run: saveWorkbookMapApi } = useApi("SaveWorkbookMap");
+  const { run: saveWorkbookCellsBatchApi } = useApi("SaveWorkbookCellsBatch");
   const { run: numericVerifyApi } = useApi("NumericVerify");
   const { run: cancelModuleRunApi } = useApi("CancelModuleRun");
   const { run: checkRunCancelledApi } = useApi("CheckRunCancelled");
@@ -3864,15 +3865,33 @@ export default function DealDashboardPage() {
                 // Still save the workbook + sheet records (no cells) so the failure is visible
               }
 
-              await saveWorkbookMapApi({
+              // Save workbook + sheets first (small payload)
+              const saveResult = await saveWorkbookMapApi({
                 workbook: mapResult.workbook,
                 sheets: mapResult.sheets,
-                cells: mapResult.cells,
               });
-              console.info(
-                `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
-                `sheets=${mapResult.sheets.length}, cells=${mapResult.cells.length}`
-              );
+
+              if (!saveResult) throw new Error("SaveWorkbookMap returned no result");
+              if (saveResult.skippedByHash) {
+                console.info(`[WorkbookMap] ${f.name}: hash match — skipped`);
+              } else {
+                // Save cells in chunks of 5000 to stay under gRPC payload limit
+                const CELL_CHUNK = 5000;
+                let totalSaved = 0;
+                for (let ci = 0; ci < mapResult.cells.length; ci += CELL_CHUNK) {
+                  const chunk = mapResult.cells.slice(ci, ci + CELL_CHUNK);
+                  const batchResult = await saveWorkbookCellsBatchApi({
+                    workbookId: saveResult.workbookId,
+                    workbookRole: mapResult.workbook.workbookRole,
+                    cells: chunk,
+                  });
+                  totalSaved += batchResult?.cellsInserted ?? 0;
+                }
+                console.info(
+                  `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
+                  `sheets=${mapResult.sheets.length}, cells=${totalSaved}`
+                );
+              }
 
               // Round-trip reconstruction test + independent count
               if (mapResult.workbook.loadStatus === "ok" && mapResult.cells.length > 0) {
@@ -3891,7 +3910,7 @@ export default function DealDashboardPage() {
         );
       }
     },
-    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, indexDocumentChunks]
+    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookCellsBatchApi, indexDocumentChunks]
   );
 
   const handleDeleteDoc = useCallback(async (docId: string) => {

@@ -275,6 +275,7 @@ import GetDocTables from './documents/get-doc-tables.js';
 import BackfillDocTablesFromText from './documents/backfill-doc-tables-from-text.js';
 import GetDocTablesSummary from './documents/get-doc-tables-summary.js';
 import SaveWorkbookMap from './documents/save-workbook-map.js';
+import SaveWorkbookCellsBatch from './documents/save-workbook-cells-batch.js';
 import UpdateParsedText from './documents/update-parsed-text.js';
 import ClearParsedText from './documents/clear-parsed-text.js';
 
@@ -347,7 +348,7 @@ const apis = {
   ListDeals, GetDeal, CreateDeal, UpdateDeal, DeleteDeal,
   // Documents
   ListDocuments, SaveDocument, UpdateDocument, DeleteDocument, GetDocumentTexts,
-  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, SaveWorkbookMap,
+  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, SaveWorkbookMap, SaveWorkbookCellsBatch,
   // Numeric verification
   NumericVerify, GetNumericReport, SearchNumericFindings, DiagSharedFormulas, DiagFormulaExtraction, InspectColHeaders, InspectEnrichedHeaders, InspectRowLabels, InspectCellValues,
   // Q&A
