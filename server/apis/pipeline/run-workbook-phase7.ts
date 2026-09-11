@@ -273,13 +273,15 @@ export default api({
       z.object({ sheet_name: z.string() }), [workbookId], { label: "Precedent sheets" },
     );
 
-    // Build reverse adjacency: to_cell → [from_cells]
-    // (who feeds into this cell?)
-    // Forward direction: from_cell references to_cell
-    // To find what feeds an anchor, we need reverse: who references the anchor?
+    // Build forward adjacency: from_cell → [to_cells]
+    // Edge semantics: from_cell's formula references to_cell
+    //   → data flows FROM to_cell INTO from_cell
+    //   → to_cell is a DEPENDENCY of from_cell
+    // BFS from anchor follows fwdAdj to walk the dependency chain
+    //   → anchor → what it depends on → what those depend on → ... → hardcoded inputs
     // Paginate within each sheet (gRPC 4MB limit — ~30K rows per page)
     const PAGE_SIZE = 25000;
-    const reverseAdj = new Map<string, string[]>();
+    const fwdAdj = new Map<string, string[]>();
     for (const { sheet_name } of precSheets) {
       let offset = 0;
       let hasMore = true;
@@ -289,18 +291,18 @@ export default api({
           PrecRow, [workbookId, sheet_name, PAGE_SIZE, offset], { label: "Precs: " + sheet_name + " @" + offset },
         );
         for (const p of sheetPrecs) {
-          const toKey = p.to_sheet + "!" + p.to_cell_ref;
           const fromKey = p.from_sheet + "!" + p.from_cell_ref;
-          if (!reverseAdj.has(toKey)) reverseAdj.set(toKey, []);
-          reverseAdj.get(toKey)!.push(fromKey);
+          const toKey = p.to_sheet + "!" + p.to_cell_ref;
+          if (!fwdAdj.has(fromKey)) fwdAdj.set(fromKey, []);
+          fwdAdj.get(fromKey)!.push(toKey);
         }
         hasMore = sheetPrecs.length === PAGE_SIZE;
         offset += PAGE_SIZE;
       }
     }
 
-    // BFS from anchors backwards
-    const MAX_DEPTH = 12;
+    // BFS from anchors through their dependencies
+    const MAX_DEPTH = 20;
     const visited = new Map<string, { feedsEntry: boolean; feedsReturns: boolean; distance: number }>();
 
     // Initialize with anchors
@@ -324,9 +326,9 @@ export default api({
       const item = queue[head++];
       if (item.depth >= MAX_DEPTH) continue;
 
-      const feeders = reverseAdj.get(item.key) ?? [];
-      for (const feederKey of feeders) {
-        const existing = visited.get(feederKey);
+      const deps = fwdAdj.get(item.key) ?? [];
+      for (const depKey of deps) {
+        const existing = visited.get(depKey);
         if (existing) {
           // Already visited — merge flags, keep shorter distance
           let changed = false;
@@ -334,16 +336,16 @@ export default api({
           if (item.feedsReturns && !existing.feedsReturns) { existing.feedsReturns = true; changed = true; }
           if (item.depth + 1 < existing.distance) { existing.distance = item.depth + 1; changed = true; }
           if (changed) {
-            queue.push({ key: feederKey, depth: item.depth + 1, feedsEntry: existing.feedsEntry, feedsReturns: existing.feedsReturns });
+            queue.push({ key: depKey, depth: item.depth + 1, feedsEntry: existing.feedsEntry, feedsReturns: existing.feedsReturns });
           }
         } else {
-          visited.set(feederKey, {
+          visited.set(depKey, {
             feedsEntry: item.feedsEntry,
             feedsReturns: item.feedsReturns,
             distance: item.depth + 1,
           });
           queue.push({
-            key: feederKey,
+            key: depKey,
             depth: item.depth + 1,
             feedsEntry: item.feedsEntry,
             feedsReturns: item.feedsReturns,
