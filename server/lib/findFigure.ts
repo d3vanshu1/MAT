@@ -26,6 +26,7 @@ export interface FindFigureInput {
   workbookRole?: string | null; // "buy_side" | "sell_side" — from 5.3 routing
   scope?: string | null;        // optional segment/member filter
   dealId: string;
+  sheetPreferences?: Record<string, string[]> | null; // sheet_name -> is_primary_for metric families
 }
 
 export interface FigureCandidate {
@@ -54,6 +55,7 @@ export interface FigureCandidate {
     pathBonus: number;
     aggregateNudge: number;
     editDistance: number;
+    sheetPreference?: number;
   };
 }
 
@@ -365,6 +367,21 @@ export async function findFigure(
       claimIsTotal,
     );
 
+    // Sheet preference boost from manifest (ranking only, never a filter)
+    let sheetBonus = 0;
+    if (input.sheetPreferences && input.sheetPreferences[r.sheet_name]) {
+      const primaryFor = input.sheetPreferences[r.sheet_name];
+      const claimLower = input.metricText.toLowerCase();
+      const claimTokens = claimLower.split(/\s+/);
+      for (const family of primaryFor) {
+        const fLower = family.toLowerCase();
+        if (claimLower.includes(fLower) || claimTokens.some(t => fLower.includes(t))) {
+          sheetBonus = 0.15; // meaningful but doesn't override a clearly better label match
+          break;
+        }
+      }
+    }
+
     return {
       cellRef: r.cell_ref,
       sheet: r.sheet_name,
@@ -385,12 +402,13 @@ export async function findFigure(
       caseKey: r.case_key,
       isAggregate: r.is_aggregate === true,
       signConvention: r.sign_convention,
-      score: scores.total,
+      score: scores.total + sheetBonus,
       scoreBreakdown: {
         tokenOverlap: scores.tokenOverlap,
         pathBonus: scores.pathBonus,
         aggregateNudge: scores.aggregateNudge,
         editDistance: scores.editDistance,
+        sheetPreference: sheetBonus,
       },
     };
   });
