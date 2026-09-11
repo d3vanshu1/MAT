@@ -215,6 +215,39 @@ export default api({
 
     } // end else (full precedent rebuild)
 
+    // -----------------------------------------------------------------------
+    // Step 7.2b — Chain break classification (runs on every invocation)
+    // -----------------------------------------------------------------------
+
+    // Mark hardcoded inputs as 'hardcoded_leaf'
+    await q.query(
+      "UPDATE workbook_cells SET chain_break_reason = 'hardcoded_leaf' WHERE workbook_id = $1 AND is_hardcoded_input = true",
+      z.any(), [workbookId], { label: "Mark hardcoded_leaf breaks" },
+    );
+
+    // Mark cells with runtime-computed references (OFFSET, INDIRECT, INDEX)
+    // These are formula cells whose dependencies cannot be fully traced statically.
+    // The parser captures their arguments (e.g. OFFSET's base cell), but the actual
+    // resolved reference is computed at runtime — chain through them is not established.
+    await q.query(
+      `UPDATE workbook_cells SET chain_break_reason = 'runtime_indirect'
+       WHERE workbook_id = $1
+         AND formula IS NOT NULL
+         AND (formula ~* '(^|[^A-Z])OFFSET\\s*\\(' OR formula ~* '(^|[^A-Z])INDIRECT\\s*\\(' OR formula ~* '(^|[^A-Z])INDEX\\s*\\(')
+         AND (chain_break_reason IS NULL OR chain_break_reason != 'hardcoded_leaf')`,
+      z.any(), [workbookId], { label: "Mark runtime_indirect breaks" },
+    );
+
+    // Clear chain_break_reason for cells that are neither
+    await q.query(
+      `UPDATE workbook_cells SET chain_break_reason = NULL
+       WHERE workbook_id = $1
+         AND (is_hardcoded_input = false OR is_hardcoded_input IS NULL)
+         AND chain_break_reason IS NOT NULL
+         AND NOT (formula IS NOT NULL AND (formula ~* '(^|[^A-Z])OFFSET\\s*\\(' OR formula ~* '(^|[^A-Z])INDIRECT\\s*\\(' OR formula ~* '(^|[^A-Z])INDEX\\s*\\('))`,
+      z.any(), [workbookId], { label: "Clear stale break reasons" },
+    );
+
     if (skipAnchorWalk) {
       return {
         precedentsInserted: totalPrecedents,

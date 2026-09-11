@@ -49,6 +49,14 @@ export interface FigureCandidate {
   caseKey: string | null;
   isAggregate: boolean;
   signConvention: string | null;
+  colHeaderRaw: string | null;
+  periodBasis: string | null;
+  decimals: number | null;
+  numberFormat: string | null;
+  feedsEntryValue: boolean | null;
+  feedsReturns: boolean | null;
+  distanceToAnchor: number | null;
+  chainBreakReason: string | null;
   score: number;
   scoreBreakdown: {
     tokenOverlap: number;
@@ -113,6 +121,12 @@ const CandidateRow = z.object({
   is_aggregate: z.boolean().nullable(),
   sign_convention: z.string().nullable(),
   col_header_raw: z.string().nullable(),
+  decimals: z.number().nullable(),
+  number_format: z.string().nullable(),
+  feeds_entry_value: z.boolean().nullable(),
+  feeds_returns: z.boolean().nullable(),
+  distance_to_anchor: z.number().nullable(),
+  chain_break_reason: z.string().nullable(),
 });
 
 // ---------------------------------------------------------------------------
@@ -322,7 +336,13 @@ export async function findFigure(
       c.case_key,
       c.is_aggregate,
       c.sign_convention,
-      c.col_header_raw
+      c.col_header_raw,
+      c.decimals,
+      c.number_format,
+      c.feeds_entry_value,
+      c.feeds_returns,
+      c.distance_to_anchor,
+      c.chain_break_reason
     FROM workbook_cells c
     JOIN workbooks w ON w.id = c.workbook_id
     JOIN documents d ON d.id = w.document_id
@@ -402,6 +422,14 @@ export async function findFigure(
       caseKey: r.case_key,
       isAggregate: r.is_aggregate === true,
       signConvention: r.sign_convention,
+      colHeaderRaw: r.col_header_raw,
+      periodBasis: r.period_basis,
+      decimals: r.decimals,
+      numberFormat: r.number_format,
+      feedsEntryValue: r.feeds_entry_value,
+      feedsReturns: r.feeds_returns,
+      distanceToAnchor: r.distance_to_anchor,
+      chainBreakReason: r.chain_break_reason,
       score: scores.total + sheetBonus,
       scoreBreakdown: {
         tokenOverlap: scores.tokenOverlap,
