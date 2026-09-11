@@ -59,16 +59,60 @@ const CURRENCY_UNITS = new Set(["£m", "£k", "£", "$m", "$k", "$"]);
 /** Units that represent multiples */
 const MULTIPLE_UNITS = new Set(["x"]);
 
-/** Check if the basis_note or scope_qualifier implies a percentage */
-function labelImpliesPercent(claim: Claim): boolean {
-  const text = `${claim.basis_note ?? ""} ${claim.scope_qualifier ?? ""}`.toLowerCase();
-  return /\bmargin\b|\bgrowth\b|\bcagr\b|\b%\b|\bpercent|\brate\b|\byield\b|\breturn\b/.test(text);
-}
+/**
+ * Detect the unit notation next to the cited number in the snippet.
+ * Reads the SYMBOL beside the figure — $, %, x — not words in the label.
+ * Returns "currency" | "percent" | "multiple" | null.
+ *
+ * "75% of revenue" → percent (the % is right next to 75)
+ * "$38m" → currency (the $ is right next to 38)
+ * "5.0x" → multiple (the x is right after the number)
+ */
+function detectNotationUnit(snippet: string, value: number): "currency" | "percent" | "multiple" | null {
+  if (!snippet) return null;
 
-/** Check if the basis_note or scope_qualifier implies a currency amount */
-function labelImpliesCurrency(claim: Claim): boolean {
-  const text = `${claim.basis_note ?? ""} ${claim.scope_qualifier ?? ""}`.toLowerCase();
-  return /\brevenue\b|\bebitda\b|\bcost\b|\bcapex\b|\bcash\b|\bdebt\b|\bequity\b|\bprice\b|\bev\b|\benterprise value\b/.test(text);
+  // Normalize: remove commas in numbers for matching
+  const text = snippet.replace(/(\d),(\d)/g, "$1$2");
+  const absVal = Math.abs(value);
+
+  // Build candidate string representations of the value
+  const candidates: string[] = [];
+  candidates.push(String(absVal));
+  if (absVal >= 1) candidates.push(String(Math.round(absVal)));
+  candidates.push(absVal.toFixed(1));
+  candidates.push(absVal.toFixed(2));
+  // Percentage display: 0.045 stored → 4.5 displayed
+  if (absVal < 1 && absVal > 0) {
+    const pct = absVal * 100;
+    candidates.push(String(pct));
+    candidates.push(pct.toFixed(1));
+  }
+
+  for (const c of candidates) {
+    const idx = text.indexOf(c);
+    if (idx === -1) continue;
+
+    // Check character immediately before the number
+    const before = idx > 0 ? text[idx - 1] : "";
+    // Check characters immediately after the number
+    const afterStart = idx + c.length;
+    const after = text.slice(afterStart, afterStart + 3).toLowerCase();
+
+    // Currency symbol before the number: $38, £12, €50
+    if (/[$£€¥₹]/.test(before)) return "currency";
+
+    // Percent sign after the number: 75%, 4.5%
+    if (after.startsWith("%")) return "percent";
+
+    // Multiple suffix after the number: 5.0x, 12x
+    if (after.startsWith("x") && (after.length === 1 || /[\s,.);\-]/.test(after[1] ?? ""))) return "multiple";
+
+    // Currency abbreviation after: 38m (in "$38m" context — but $ was already caught above)
+    // "bps" after a number
+    if (/^bps\b/.test(after)) return "percent";
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,20 +189,30 @@ function checkDualCurrency(claim: Claim): string | null {
 }
 
 /**
- * Rule 2: Reject a claim whose label unit conflicts with the unit of its value.
- * A percent-labelled claim holding a currency value is a mangled extraction.
+ * Rule 2: Reject a claim whose notation unit conflicts with the declared unit.
+ * Derives the unit from the SYMBOL next to the number in the snippet — not
+ * from words in the label. A conflict is: $38m declared as %, or 12% declared
+ * as £m. "75% of revenue" is NOT a conflict — the % is the notation.
  */
 function checkLabelValueConflict(claim: Claim): string | null {
-  const unit = claim.unit;
+  const declaredUnit = claim.unit;
+  const notation = detectNotationUnit(claim.verbatim_snippet ?? "", claim.value);
 
-  // Label says percentage but unit is currency
-  if (CURRENCY_UNITS.has(unit) && labelImpliesPercent(claim) && !labelImpliesCurrency(claim)) {
-    return `label implies percentage ("${claim.basis_note?.slice(0, 40)}") but unit is ${unit}`;
+  if (!notation) return null; // Can't detect notation — no conflict asserted
+
+  // Notation says currency but declared unit is percent
+  if (notation === "currency" && PERCENT_UNITS.has(declaredUnit)) {
+    return `notation is currency ($) but declared unit is ${declaredUnit}`;
   }
 
-  // Label says currency but unit is percentage
-  if (PERCENT_UNITS.has(unit) && labelImpliesCurrency(claim) && !labelImpliesPercent(claim)) {
-    return `label implies currency ("${claim.basis_note?.slice(0, 40)}") but unit is ${unit}`;
+  // Notation says percent but declared unit is currency
+  if (notation === "percent" && CURRENCY_UNITS.has(declaredUnit)) {
+    return `notation is percent (%) but declared unit is ${declaredUnit}`;
+  }
+
+  // Notation says multiple but declared unit is currency or percent
+  if (notation === "multiple" && (CURRENCY_UNITS.has(declaredUnit) || PERCENT_UNITS.has(declaredUnit))) {
+    return `notation is multiple (x) but declared unit is ${declaredUnit}`;
   }
 
   return null;

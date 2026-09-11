@@ -425,8 +425,8 @@ export default api({
 
     // refFigCoords already loaded from loadReferenceFigures (Step 2b)
 
-    // C9: Load verify table for double-read
-    let verifyCells: Map<string, VerifyCell> | undefined;
+    // C9: Load verify table for double-read. Always create Map — empty = all cells fail.
+    const verifyCells = new Map<string, VerifyCell>();
     try {
       const VRow = z.object({ sheet_name: z.string(), cell_ref: z.string(), value_num_v2: z.number().nullable(), value_raw_v2: z.string().nullable() });
       const vRows = await ctx.integrations.db.query(
@@ -435,11 +435,8 @@ export default api({
          WHERE w.deal_id = $1`, VRow, [dealId],
         { label: "Load verify cells for C9" },
       );
-      if (vRows.length > 0) {
-        verifyCells = new Map();
-        for (const r of vRows) verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
-        console.log(`[DiagReconcileOnly] C9: ${vRows.length} verify cells loaded`);
-      }
+      for (const r of vRows) verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
+      console.log(`[DiagReconcileOnly] C9: ${vRows.length} verify cells loaded${vRows.length === 0 ? " — EMPTY, all cited cells will be rejected" : ""}`);
     } catch { /* table may not exist */ }
 
     // Run the gate

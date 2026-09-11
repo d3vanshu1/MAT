@@ -512,8 +512,10 @@ export async function runReconciliationPipeline(
     }
   }
 
-  // C9: Load verify table for double-read check
-  let verifyCells: Map<string, VerifyCell> | undefined;
+  // C9: Load verify table for double-read check.
+  // ALWAYS create the Map — an empty Map means every cited cell is absent → mismatch.
+  // A guard that cannot fail is not a guard.
+  const verifyCells = new Map<string, VerifyCell>();
   try {
     const VerifyCellRow = z.object({
       sheet_name: z.string(),
@@ -530,16 +532,13 @@ export async function runReconciliationPipeline(
       [dealId],
       { label: "Load verify cells for C9 double-read" },
     );
-    if (verifyRows.length > 0) {
-      verifyCells = new Map();
-      for (const r of verifyRows) {
-        verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
-      }
-      console.log(`[ReconciliationPipeline] C9: loaded ${verifyRows.length} verify cells for double-read`);
+    for (const r of verifyRows) {
+      verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
     }
+    console.log(`[ReconciliationPipeline] C9: loaded ${verifyRows.length} verify cells for double-read${verifyRows.length === 0 ? " — EMPTY, all cited cells will be rejected" : ""}`);
   } catch {
-    // workbook_cells_verify may not exist yet — skip gracefully
-    console.log("[ReconciliationPipeline] C9: verify table not available, skipping double-read");
+    // workbook_cells_verify may not exist yet — Map stays empty, every cell fails
+    console.log("[ReconciliationPipeline] C9: verify table not available — all cited cells will be rejected");
   }
 
   // Run the gate

@@ -267,12 +267,26 @@ function checkDoubleRead(
   verifyCells: Map<string, VerifyCell> | null,
   mismatches: GateResult["doubleReadMismatches"],
 ): GateRejection | null {
-  if (!verifyCells) return null; // Verify table not loaded — skip (pre-C9 runs)
+  if (!verifyCells) return null; // null means caller explicitly opted out (e.g. test harness)
+  // An empty Map is NOT a skip — it means every cited cell is absent → mismatch.
   if (!f.model_figure) return null;
 
   const cellRef = f.model_figure.cell_ref;
   const sheet = f.model_figure.source_sheet;
-  if (!cellRef || !sheet) return null; // No cell coordinate — can't verify
+  if (!cellRef || !sheet) {
+    // Missing coordinate — count as mismatch (cell can't be verified)
+    mismatches.push({
+      cellRef: cellRef ?? "(no cell_ref)",
+      sheet: sheet ?? "(no source_sheet)",
+      mapValue: String(f.model_figure.value_raw ?? f.model_figure.value),
+      verifyValue: "(no coordinate to verify)",
+    });
+    return {
+      finding: f,
+      check: "double_read" as GateCheck,
+      reason: `cell has no coordinate — cannot be double-read verified (cell_ref=${cellRef}, sheet=${sheet})`,
+    };
+  }
 
   const key = `${sheet}|${cellRef}`;
   const verify = verifyCells.get(key);
