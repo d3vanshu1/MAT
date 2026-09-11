@@ -118,12 +118,18 @@ const CandidateRow = z.object({
 // ---------------------------------------------------------------------------
 
 const TIE_THRESHOLD = 0.10;     // top two within 10% → decline
-const FLOOR_SCORE = 0.15;       // below this → decline
+const FLOOR_SCORE = 0.30;       // below this → decline
 const MAX_CANDIDATES = 200;     // SQL LIMIT for initial fetch
 
 // ---------------------------------------------------------------------------
 // Label similarity (no LLM)
 // ---------------------------------------------------------------------------
+
+// Stop words that appear in many financial labels and add noise to matching
+const STOP_WORDS = new Set([
+  "of", "in", "the", "and", "or", "for", "per", "to", "at", "by", "as", "on", "is",
+  "total", "net", "gross", "other", "new", "all", "from", "vs", "yoy",
+]);
 
 function tokenize(text: string): Set<string> {
   return new Set(
@@ -131,7 +137,7 @@ function tokenize(text: string): Set<string> {
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
       .split(/\s+/)
-      .filter((t) => t.length > 1),
+      .filter((t) => t.length > 2 && !STOP_WORDS.has(t)),
   );
 }
 
@@ -188,15 +194,16 @@ function labelScore(
     }
   }
 
-  // Edit distance component (weighted lower — token overlap is primary)
-  const editDist = normalizedEditDistance(queryText, rowLabel) * 0.3;
+  // Edit distance: only use when token overlap is non-zero (prevents unrelated long strings scoring)
+  const rawEditDist = normalizedEditDistance(queryText, rowLabel);
+  const editDist = tokenOvl > 0 ? rawEditDist * 0.2 : 0;
 
   // Aggregate nudge
   let aggregateNudge = 0;
   if (claimLooksLikeTotal && isAggregate) aggregateNudge = 0.05;
   if (!claimLooksLikeTotal && !isAggregate) aggregateNudge = 0.02;
 
-  const total = tokenOvl * 0.5 + editDist + pathBonus + aggregateNudge;
+  const total = tokenOvl * 0.6 + editDist + pathBonus + aggregateNudge;
 
   return { total, tokenOverlap: tokenOvl, pathBonus, aggregateNudge, editDistance: editDist };
 }

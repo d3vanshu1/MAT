@@ -1106,7 +1106,14 @@ export async function runReconciliation(
   pipelineStartTime: number,
   timeBudgetMs: number,
   dealId?: string,
+  options?: { useWorkbookMap?: boolean },
 ): Promise<ReconciliationResult> {
+  // Feature flag: when useWorkbookMap is true, use findFigure instead of the old extractor.
+  // Default OFF — the map path is not IC-ready until CC's guards are built.
+  const _useWorkbookMap = options?.useWorkbookMap ?? false;
+  if (_useWorkbookMap) {
+    console.log("[Reconciliation] ⚠ useWorkbookMap flag is ON — using findFigure for figure resolution. NOT IC-ready.");
+  }
   const phaseStart = Date.now();
   console.log(`[Reconciliation] Starting — ${ledger.claims.length} claims, ${figures.length} figures, budget ${Math.round(timeBudgetMs / 1000)}s`);
 
