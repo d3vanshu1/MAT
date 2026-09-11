@@ -25,9 +25,16 @@ import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { PipelineContext } from "./pipeline-config.js";
 import {
   checkComparability,
+  detectStatedPrecision,
+  modelPrecisionBand,
+  combinedBand,
+  requiresCaseBasis,
+  caseIdentified,
+  buildCaseAttribution,
   type ComparabilityResult,
   type ComparabilityReasonCode,
 } from "./comparability-gate.js";
+import { assessChainSeverity } from "./chain-severity.js";
 import {
   cleanVerdictLanguage,
   lintFindingWording,
@@ -707,11 +714,21 @@ function processMatch(
       ? "basis_divergence" as const
       : "not_comparable" as const;
 
+    // C13: For case_mismatch, enrich with active case attribution
+    let caseDetail = "";
+    if (comparability.reason_code === "case_mismatch") {
+      const figCase = (comparability.detail ?? "").match(/figure_case=(\w+)/)?.[1] ?? "unstated";
+      const attr = buildCaseAttribution(figCase, null);
+      caseDetail = ` Model case: ${attr.caseLabel} (${attr.detail}).`;
+    }
+
     findings.push({
       finding_kind: findingKind,
       severity: "info",
-      title: `${claim.scope_qualifier} (${claim.period}): ${comparability.reason_code}`,
-      detail: comparability.detail ?? `Comparability gate failed: ${comparability.reason_code}`,
+      title: comparability.reason_code === "case_mismatch"
+        ? `${claim.scope_qualifier} (${claim.period}): appears to be on a different basis`
+        : `${claim.scope_qualifier} (${claim.period}): ${comparability.reason_code}`,
+      detail: (comparability.detail ?? `Comparability gate failed: ${comparability.reason_code}`) + caseDetail,
       full_analysis: `[${comparability.reason_code!.toUpperCase()}] Comparability gate rejection.\n` +
         `  Claim: "${claim.verbatim_snippet}" → ${formatValue(claim)}\n` +
         `  Model: "${modelFig.name}" ${modelFig.period} → ${formatMoney(preModelVal)} (source: ${modelFig.source_sheet}!${modelFig.source_cell})\n` +
@@ -820,8 +837,20 @@ function processMatch(
     deltaPct = deltaAbs / Math.abs(modelVal);
   }
 
-  // ----- Materiality classification -----
-  const belowMateriality = deltaAbs < MATERIALITY_ABS_FLOOR && deltaPct < MATERIALITY_REL_FLOOR;
+  // ----- C12: Approximation bands -----
+  // Memo-side: detect stated precision from snippet ("~$38m", "approximately 12%")
+  const memoPrecision = detectStatedPrecision(claim.verbatim_snippet ?? "", claim.value);
+  // Model-side: precision from number format decimals × scale
+  const modelScale = Number((nf.raw as any).scale ?? "1");
+  const modelDecimals: number | null = (nf.raw as any).decimals ?? null;
+  const modelBand = modelPrecisionBand(modelDecimals, modelScale);
+  // Combined band: max of both sides
+  const band = combinedBand(memoPrecision.band, modelBand);
+
+  // ----- Materiality classification (C12: band-aware) -----
+  // A finding clears materiality only if the ENTIRE band clears it.
+  const effectiveDelta = band > 0 ? Math.max(0, deltaAbs - band) : deltaAbs;
+  const belowMateriality = effectiveDelta < MATERIALITY_ABS_FLOOR && deltaPct < MATERIALITY_REL_FLOOR;
 
   // Historical-actuals backstop: for settled past years, a tight tolerance (1%)
   // should not fire — these are just rounding differences in settled accounts.
@@ -833,9 +862,43 @@ function processMatch(
     return { kind: "within_tolerance", finding: null };
   }
 
-  // Material divergence — classify severity
-  const severity: "critical" | "warning" = (deltaAbs >= CRITICAL_ABS_THRESHOLD || deltaPct >= CRITICAL_REL_THRESHOLD)
-    ? "critical" : "warning";
+  // ----- C13: Case/basis enforcement for adjusted metrics -----
+  if (requiresCaseBasis(claim)) {
+    const caseStatus = caseIdentified(claim);
+    if (caseStatus === "basis_not_stated") {
+      // Route to coverage as "basis not stated" — never as a numeric difference
+      findings.push({
+        finding_kind: "not_comparable",
+        severity: "info",
+        title: `${claim.scope_qualifier} (${claim.period}): basis not stated — adjusted metric without identifiable case`,
+        detail: `Claim uses adjusted/normalised metric but neither basis, scenario, nor scope_qualifier identifies the case. ` +
+          `Cannot confirm which model case to compare against. Routed to coverage, not asserted as a difference.`,
+        full_analysis: `[C13_BASIS_NOT_STATED] Adjusted metric without case identification. ` +
+          `Claim: "${claim.verbatim_snippet?.slice(0, 100)}" scope="${claim.scope_qualifier}" basis="${claim.basis}" scenario="${claim.scenario}".`,
+        severity_anchor: null,
+        source_docs: [claim.source_doc],
+        claim,
+        model_figure: nf.raw,
+        delta_abs: deltaAbs,
+        delta_pct: deltaPct,
+      });
+      return { kind: "not_comparable", finding: findings[findings.length - 1] };
+    }
+  }
+
+  // Material divergence — classify severity from chain position (C9–C13 severity rewire)
+  const chainResult = assessChainSeverity({
+    deltaAbs,
+    deltaPct,
+    figure: nf.raw,
+    feedsEntryValue: (nf.raw as any).feeds_entry_value ?? null,
+    feedsReturns: (nf.raw as any).feeds_returns ?? null,
+    distanceToAnchor: (nf.raw as any).distance_to_anchor ?? null,
+    chainBreakReason: (nf.raw as any).chain_break_reason ?? null,
+  });
+  const severity = chainResult.severity === "info" ? "warning" as const : chainResult.severity;
+  // severity.basis goes to run log, not report
+  console.log(`[CC-Severity] ${claim.scope_qualifier} (${claim.period}): ${chainResult.severity} — ${chainResult.basis}`);
 
   // Basis-unconfirmed guard: a relaxed-basis match must never assert contradiction.
   // Downgrade to scope_mismatch so it doesn't appear as a confirmed data_divergence.
