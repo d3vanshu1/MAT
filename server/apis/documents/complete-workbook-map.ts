@@ -23,6 +23,8 @@ export default api({
     completed: z.boolean(),
     oldWorkbookDeleted: z.boolean(),
     cellCount: z.number(),
+    verifyCount: z.number(),
+    verifyStatus: z.string(),
   }),
   async run(ctx, { workbookId, documentId }) {
     const db = ctx.integrations.ic_diligence;
@@ -38,8 +40,20 @@ export default api({
 
     if (cellCount === 0) {
       console.warn(`[CompleteWorkbookMap] workbook ${workbookId} has 0 cells — not marking complete`);
-      return { completed: false, oldWorkbookDeleted: false, cellCount: 0 };
+      return { completed: false, oldWorkbookDeleted: false, cellCount: 0, verifyCount: 0, verifyStatus: "none" };
     }
+
+    // Count verify cells separately
+    const verifyRows = await db.query(
+      `SELECT count(*)::int AS cnt FROM workbook_cells_verify WHERE workbook_id = $1`,
+      z.object({ cnt: z.number() }),
+      [workbookId],
+      { label: "CompleteWorkbookMap: count verify cells" },
+    );
+    const verifyCount = verifyRows[0].cnt;
+    const verifyStatus = verifyCount === 0 ? "none"
+      : verifyCount >= cellCount ? "complete"
+      : "partial";
 
     // Delete old complete workbooks for this document (cascade deletes their cells/sheets)
     const deleteResult = await db.execute(
@@ -48,18 +62,20 @@ export default api({
       { label: "CompleteWorkbookMap: delete old complete" },
     );
 
-    // Mark the new workbook as complete
+    // Mark the new workbook as complete, record verify status
     await db.execute(
-      `UPDATE workbooks SET load_status = 'complete' WHERE id = $1`,
-      [workbookId],
-      { label: "CompleteWorkbookMap: set complete" },
+      `UPDATE workbooks SET load_status = 'complete', verify_status = $2, verify_count = $3 WHERE id = $1`,
+      [workbookId, verifyStatus, verifyCount],
+      { label: "CompleteWorkbookMap: set complete + verify" },
     );
 
-    console.info(`[CompleteWorkbookMap] workbook ${workbookId}: ${cellCount} cells, marked complete`);
+    console.info(`[CompleteWorkbookMap] workbook ${workbookId}: ${cellCount} map cells, ${verifyCount} verify cells (${verifyStatus}), marked complete`);
     return {
       completed: true,
       oldWorkbookDeleted: (deleteResult as any)?.rowCount > 0,
       cellCount,
+      verifyCount,
+      verifyStatus,
     };
   },
 });
