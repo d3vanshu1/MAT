@@ -45,6 +45,8 @@ export default api({
     page: z.number().nullable(),
     /** Optional filter: only return findings of this kind */
     finding_kind: z.string().nullable(),
+    /** When true, use findFigure over workbook_cells instead of reference_figures */
+    useWorkbookMap: z.boolean().nullable(),
   }),
 
   output: z.object({
@@ -233,7 +235,7 @@ export default api({
     }).nullable(),
   }),
 
-  async run(ctx, { dealId, numericReportId, mode, page, finding_kind }) {
+  async run(ctx, { dealId, numericReportId, mode, page, finding_kind, useWorkbookMap }) {
     const startTime = Date.now();
     const resolvedMode = mode ?? "summary";
     const pageNum = page ?? 0;
@@ -340,14 +342,22 @@ export default api({
       },
     };
 
+    const useMap = useWorkbookMap === true;
+    console.log(`[DiagReconcileOnly] useWorkbookMap=${useMap}`);
+
     const result = await runReconciliation(
       pipelineCtx,
       ledger,
       figures,
       discrepancies,
       startTime,
-      60_000, // 60s budget
+      120_000, // 120s budget (map path makes sequential DB queries per claim)
       dealId,
+      useMap ? {
+        useWorkbookMap: true,
+        queryFn: (sql, schema, params, meta) => ctx.integrations.db.query(sql, schema, params, meta),
+        documentId: resolvedPrimary?.documentId ?? undefined,
+      } : undefined,
     );
 
     const elapsed = Date.now() - startTime;

@@ -42,6 +42,12 @@ import {
   hashFinding,
   type FindingCheckType,
 } from "./finding-quality-gate.js";
+import {
+  findFigure,
+  type FigureCandidate,
+  type FindFigureResult,
+  type FindFigureInput,
+} from "../../lib/findFigure.js";
 
 // ---------------------------------------------------------------------------
 // UUID helper (cross-environment — avoids Node `crypto` import that Vite externalizes)
@@ -641,6 +647,125 @@ function relaxedMetricPeriodKey(metric: string, period: string): string {
   return `${normalizeMetric(metric)}|${normalizePeriod(period)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Map-path helpers: convert claim period → date range for findFigure,
+// and convert FigureCandidate → Figure/NormalizedFigure for processMatch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a claim's period string to the {type, start, end} ISO-date format
+ * that findFigure needs. Returns null if the period can't be parsed.
+ *
+ * This deal uses calendar-year FY (Jan 1 – Dec 31). March-end FY deals
+ * would need a different fiscal calendar — the adapter reads fyEndMonth
+ * from the workbook, but claims don't carry it. For now, we detect
+ * "fy-mar-XX" as a Mar-end FY and "fy-XX" / plain year as calendar-year.
+ */
+export function claimPeriodToDateRange(period: string): { type: string; start: string; end: string } | null {
+  const norm = normalizePeriod(period);
+
+  // Range periods ("fy-mar-24_26") — not queryable as a single cell period
+  if (norm.includes("_")) return null;
+
+  // FY with Mar-end: "fy-mar-26" or "fy-mar-26f"
+  const fyMarMatch = norm.match(/^fy-mar-(\d{2})(f?)$/);
+  if (fyMarMatch) {
+    const yr2 = parseInt(fyMarMatch[1], 10);
+    const yr4 = yr2 >= 50 ? 1900 + yr2 : 2000 + yr2;
+    // Mar-end FY: Apr 1 of (yr4-1) to Mar 31 of yr4
+    const start = `${yr4 - 1}-04-01`;
+    const end = `${yr4}-03-31`;
+    return { type: "FY", start, end };
+  }
+
+  // Calendar-year FY: "fy-26", "2026", "fy-2026", "2025a", "2026e", "fy-mar-26"
+  // Suffix a/e/f/b/le are stripped — they indicate actual/estimate/forecast/budget
+  // but don't change the date range.
+  const fyCalMatch = norm.match(/^(?:fy-(?:mar-)?)?(\d{2,4})(f|a|e|b|le)?$/);
+  if (fyCalMatch) {
+    let yr = parseInt(fyCalMatch[1], 10);
+    if (yr < 100) yr = yr >= 50 ? 1900 + yr : 2000 + yr;
+    return { type: "FY", start: `${yr}-01-01`, end: `${yr}-12-31` };
+  }
+
+  // Quarter: "q1-26", "q2-25" → calendar quarters
+  const qMatch = norm.match(/^q([1-4])-(\d{2})$/);
+  if (qMatch) {
+    const q = parseInt(qMatch[1], 10);
+    let yr = parseInt(qMatch[2], 10);
+    if (yr < 100) yr = yr >= 50 ? 1900 + yr : 2000 + yr;
+    const qStarts: Record<number, string> = { 1: "01-01", 2: "04-01", 3: "07-01", 4: "10-01" };
+    const qEnds: Record<number, string> = { 1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31" };
+    return { type: "Q", start: `${yr}-${qStarts[q]}`, end: `${yr}-${qEnds[q]}` };
+  }
+
+  // Month: "jan-26", "feb-25"
+  const monthNames: Record<string, string> = {
+    jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+    jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+  };
+  const mMatch = norm.match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)-(\d{2})$/);
+  if (mMatch) {
+    const mm = monthNames[mMatch[1]];
+    let yr = parseInt(mMatch[2], 10);
+    if (yr < 100) yr = yr >= 50 ? 1900 + yr : 2000 + yr;
+    const lastDay = new Date(yr, parseInt(mm, 10), 0).getDate();
+    return { type: "M", start: `${yr}-${mm}-01`, end: `${yr}-${mm}-${String(lastDay).padStart(2, "0")}` };
+  }
+
+  // LTM: "ltm-jun-26" etc. — not directly queryable by date range
+  if (norm.startsWith("ltm")) return null;
+
+  return null;
+}
+
+/**
+ * Convert a findFigure FigureCandidate into a Figure for processMatch.
+ * Maps workbook_cells fields into the Figure shape the reconciler expects.
+ */
+function candidateToFigure(c: FigureCandidate, docId: string): Figure {
+  return {
+    name: c.rowLabelPath,
+    period: c.periodLabel,
+    value: c.scaledValue,
+    source_doc: docId,
+    source_cell: c.rowLabel,
+    source_sheet: c.sheet,
+    cell_ref: c.cellRef,
+    column_header: c.colHeaderRaw ?? null,
+    formula: null,
+    unit_tag: c.unitClass ?? null,
+    scale: String(c.scaleMultiplier),
+    value_raw: c.valueRaw,
+    transform: null,
+    // Carry chain-position fields for C9-C13 severity
+    decimals: c.decimals,
+    feeds_entry_value: c.feedsEntryValue,
+    feeds_returns: c.feedsReturns,
+    distance_to_anchor: c.distanceToAnchor,
+    chain_break_reason: c.chainBreakReason,
+  } as Figure & Record<string, unknown>;
+}
+
+/**
+ * Convert a findFigure FigureCandidate into a NormalizedFigure for processMatch.
+ * The metric/scope/period/basis come from the CLAIM (since findFigure matched by label,
+ * not by coordinate), which means the NormalizedFigure is already in claims vocabulary.
+ */
+function candidateToNormalizedFigure(
+  c: FigureCandidate,
+  claim: Claim,
+  docId: string,
+): NormalizedFigure {
+  return {
+    raw: candidateToFigure(c, docId),
+    metric: normalizeMetric(claim.metric),
+    scope_qualifier: claim.scope_qualifier,
+    period: normalizePeriod(claim.period),
+    basis: claim.basis ?? null,
+  };
+}
+
 /**
  * Fuzzy period lookup: if exact coordKey misses, try variations.
  * Handles cases where claim says "FY Mar-26" but model says "2026" etc.
@@ -1169,13 +1294,22 @@ export async function runReconciliation(
   pipelineStartTime: number,
   timeBudgetMs: number,
   dealId?: string,
-  options?: { useWorkbookMap?: boolean },
+  options?: {
+    useWorkbookMap?: boolean;
+    /** Required when useWorkbookMap is true — DB query function for findFigure */
+    queryFn?: (sql: string, schema: z.ZodTypeAny, params: unknown[], meta?: { label: string }) => Promise<any[]>;
+    /** Document ID for provenance on map-sourced findings */
+    documentId?: string;
+  },
 ): Promise<ReconciliationResult> {
   // Feature flag: when useWorkbookMap is true, use findFigure instead of the old extractor.
   // Default OFF — the map path is not IC-ready until CC's guards are built.
   const _useWorkbookMap = options?.useWorkbookMap ?? false;
   if (_useWorkbookMap) {
-    console.log("[Reconciliation] ⚠ useWorkbookMap flag is ON — using findFigure for figure resolution. NOT IC-ready.");
+    console.log("[Reconciliation] useWorkbookMap flag is ON — using findFigure for figure resolution.");
+    if (!options?.queryFn) {
+      throw new Error("useWorkbookMap requires options.queryFn");
+    }
   }
   const phaseStart = Date.now();
   console.log(`[Reconciliation] Starting — ${ledger.claims.length} claims, ${figures.length} figures, budget ${Math.round(timeBudgetMs / 1000)}s`);
@@ -1270,10 +1404,178 @@ export async function runReconciliation(
     }
   }
 
-  // ----- Step 3: Deterministic coordinate matching -----
-  // Normalize model figures into the same coordinate space as claims, then direct-lookup.
-  // No LLM needed — matching is by {metric, scope_qualifier, period} coordinates.
-  if (dedupedClaims.length > 0 && figures.length > 0) {
+  // ----- Step 3: Figure resolution -----
+  // Two paths: map path (findFigure over workbook_cells) or old path (coordinate matching
+  // over reference_figures). Both feed into the same processMatch / delta / guard logic.
+
+  if (_useWorkbookMap && dedupedClaims.length > 0) {
+    // ──── MAP PATH: findFigure over workbook_cells ────
+    const mapQueryFn = options!.queryFn!;
+    const mapDocId = options?.documentId ?? dealId ?? "unknown";
+    let mapResolved = 0;
+    let mapDeclined = 0;
+    const declineReasons: Record<string, number> = {};
+    const mapLog: Array<{ claim: string; status: string; score?: number; cell?: string; sheet?: string; reason?: string }> = [];
+
+    console.log(`[Reconciliation:MAP] Processing ${dedupedClaims.length} claims via findFigure (29k+ candidates)`);
+
+    for (const claim of dedupedClaims) {
+      // Skip UNDATED and NONE_STATED — same as old path
+      const normalizedClaimPeriod = normalizePeriod(claim.period);
+      const isUndatedPeriod = claim.period === "UNDATED" || normalizedClaimPeriod === "undated";
+      const isNoScope = claim.scope_qualifier === "NONE_STATED";
+      if (isUndatedPeriod) { no_coordinate_no_period++; continue; }
+      if (isNoScope) {
+        no_coordinate_no_scope++;
+        // For now, NONE_STATED goes to unreconcilable on the map path
+        // (findFigure needs a metricText, not "NONE_STATED")
+        findings.push({
+          finding_kind: "unreconcilable",
+          severity: "info",
+          title: `NONE_STATED (${claim.period}): no scope for map lookup`,
+          detail: `Claim has no scope_qualifier — cannot match against workbook map. ` +
+            `Metric: "${claim.metric}", value: ${claim.value}${claim.unit}.`,
+          full_analysis: `[UNRECONCILABLE:MAP:NO_SCOPE] Claim: "${claim.verbatim_snippet?.slice(0, 100)}"`,
+          severity_anchor: null,
+          source_docs: [claim.source_doc],
+          claim,
+          model_figure: null,
+          delta_abs: null,
+          delta_pct: null,
+        });
+        unreconcilable_count++;
+        continue;
+      }
+
+      // Convert claim period to date range for findFigure
+      const dateRange = claimPeriodToDateRange(claim.period);
+      if (!dateRange) {
+        // Period can't be parsed — unreconcilable on map path
+        findings.push({
+          finding_kind: "unreconcilable",
+          severity: "info",
+          title: `${claim.scope_qualifier} (${claim.period}): period not parseable for map lookup`,
+          detail: `Claim period "${claim.period}" could not be converted to a date range for workbook map query.`,
+          full_analysis: `[UNRECONCILABLE:MAP:BAD_PERIOD] Period "${claim.period}" → normalizePeriod="${normalizedClaimPeriod}" → no date range.`,
+          severity_anchor: null,
+          source_docs: [claim.source_doc],
+          claim,
+          model_figure: null,
+          delta_abs: null,
+          delta_pct: null,
+        });
+        unreconcilable_count++;
+        continue;
+      }
+
+      // Build findFigure input from claim
+      const ffInput: FindFigureInput = {
+        metricText: claim.scope_qualifier,
+        period: dateRange,
+        dealId: dealId ?? "",
+        unitClass: claim.unit ? classifyClaimUnit(claim.unit) === "rate_pct" ? "percent"
+          : classifyClaimUnit(claim.unit) === "multiplier" ? "multiple"
+          : classifyClaimUnit(claim.unit) === "absolute_gbp" ? "currency"
+          : null : null,
+        caseKey: null,  // Let findFigure search all cases; C13 will gate downstream
+        workbookRole: null,  // Let findFigure route by keyword
+      };
+
+      let ffResult: FindFigureResult;
+      try {
+        ffResult = await findFigure(mapQueryFn, ffInput);
+      } catch (err) {
+        console.error(`[Reconciliation:MAP] findFigure error for "${claim.scope_qualifier}": ${err}`);
+        unreconcilable_count++;
+        continue;
+      }
+
+      if (ffResult.status === "declined" || !ffResult.candidate) {
+        // Log decline
+        const reason = ffResult.declineReason ?? "unknown";
+        declineReasons[reason] = (declineReasons[reason] ?? 0) + 1;
+        mapDeclined++;
+        mapLog.push({
+          claim: `${claim.scope_qualifier} (${claim.period})`,
+          status: "declined",
+          reason,
+          score: ffResult.topCandidates[0]?.score,
+        });
+
+        // Emit finding based on decline reason
+        if (reason === "no_candidates") {
+          findings.push({
+            finding_kind: "unreconcilable",
+            severity: "info",
+            title: `${claim.scope_qualifier} (${claim.period}): no map candidates`,
+            detail: `findFigure found 0 candidates in workbook_cells for this period range. ` +
+              `Filters: ${ffResult.filtersApplied.join(", ")}.`,
+            full_analysis: `[UNRECONCILABLE:MAP:NO_CANDIDATES] metricText="${ffInput.metricText}" ` +
+              `period=${dateRange.start}→${dateRange.end} type=${dateRange.type}`,
+            severity_anchor: null,
+            source_docs: [claim.source_doc],
+            claim,
+            model_figure: null,
+            delta_abs: null,
+            delta_pct: null,
+          });
+        } else {
+          // tie, below_floor, unit_conflict_only, case_ambiguity, stub_vs_annual
+          const topLabel = ffResult.topCandidates[0]?.rowLabel ?? "none";
+          const topScore = ffResult.topCandidates[0]?.score?.toFixed(3) ?? "n/a";
+          findings.push({
+            finding_kind: "unreconcilable",
+            severity: "info",
+            title: `${claim.scope_qualifier} (${claim.period}): findFigure declined (${reason})`,
+            detail: `findFigure considered ${ffResult.candidatesConsidered} candidates but declined: ${reason}. ` +
+              `Top candidate: "${topLabel}" (score ${topScore}). ` +
+              `Filters: ${ffResult.filtersApplied.join(", ")}.`,
+            full_analysis: `[DECLINED:MAP:${reason.toUpperCase()}] Top 3: ` +
+              ffResult.topCandidates.map(c => `"${c.rowLabel}" ${c.cellRef} score=${c.score.toFixed(3)}`).join("; "),
+            severity_anchor: null,
+            source_docs: [claim.source_doc],
+            claim,
+            model_figure: null,
+            delta_abs: null,
+            delta_pct: null,
+          });
+        }
+        unreconcilable_count++;
+        continue;
+      }
+
+      // Resolved — convert candidate to Figure/NormalizedFigure and run through processMatch
+      const candidate = ffResult.candidate;
+      mapResolved++;
+      mapLog.push({
+        claim: `${claim.scope_qualifier} (${claim.period})`,
+        status: "resolved",
+        score: candidate.score,
+        cell: candidate.cellRef,
+        sheet: candidate.sheet,
+      });
+
+      const nf = candidateToNormalizedFigure(candidate, claim, mapDocId);
+      const matchResult = processMatch(claim, nf, figures, findings);
+      if (matchResult.kind === "reconciled") reconciled_count++;
+      else if (matchResult.kind === "within_tolerance") within_tolerance_count++;
+      else if (matchResult.kind === "scope_mismatch") scope_mismatch_count++;
+      else if (matchResult.kind === "unreconcilable") unreconcilable_count++;
+    }
+
+    console.log(
+      `[Reconciliation:MAP] Done: ${mapResolved} resolved, ${mapDeclined} declined. ` +
+      `Decline reasons: ${JSON.stringify(declineReasons)}`
+    );
+    // Log first 20 map results for diagnostic visibility
+    for (const entry of mapLog.slice(0, 20)) {
+      console.log(`[MAP] ${entry.status.padEnd(9)} | score=${(entry.score ?? 0).toFixed(3)} | ${entry.cell ?? "-"} | ${entry.sheet ?? "-"} | ${entry.claim} ${entry.reason ? `(${entry.reason})` : ""}`);
+    }
+
+  } else if (dedupedClaims.length > 0 && figures.length > 0) {
+    // ──── OLD PATH: Deterministic coordinate matching via reference_figures ────
+    // Normalize model figures into the same coordinate space as claims, then direct-lookup.
+    // No LLM needed — matching is by {metric, scope_qualifier, period} coordinates.
     const normalizedFigures = normalizeFigures(figures);
     console.log(`[Reconciliation] Normalized ${normalizedFigures.length} figure coordinates from ${figures.length} raw figures`);
 
