@@ -213,6 +213,7 @@ import RunMigration054 from './pipeline/run-migration-054.js';
 import RunMigration055 from './pipeline/run-migration-055.js';
 import RunMigration056 from './pipeline/run-migration-056.js';
 import RunMigration057 from './pipeline/run-migration-057.js';
+import RunMigration058 from './pipeline/run-migration-058.js';
 import ReadCellFromBytes from './pipeline/read-cell-from-bytes.js';
 import GenerateWorkbookManifest from './pipeline/generate-workbook-manifest.js';
 import RunWorkbookPhase7 from './pipeline/run-workbook-phase7.js';
@@ -298,6 +299,7 @@ import SaveWorkbookMap from './documents/save-workbook-map.js';
 import SaveWorkbookSheet from './documents/save-workbook-sheet.js';
 import SaveWorkbookStyles from './documents/save-workbook-styles.js';
 import SaveWorkbookCellsBatch from './documents/save-workbook-cells-batch.js';
+import SaveVerifyCellsBatch from './documents/save-verify-cells-batch.js';
 import UpdateParsedText from './documents/update-parsed-text.js';
 import ClearParsedText from './documents/clear-parsed-text.js';
 
@@ -363,14 +365,14 @@ const apis = {
   // MAST v2 pipeline
   MastRunPipeline, MastResetPipeline, MastPurgeRun, MastResetStage, MastDiagRetrievalProbe, MastDiagSweepProbe, MastDiagLabelProbe, MastDiagSweepPromptAB, MastPublish,
   // SRI v2 pipeline
-  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, RunMigration052, RunMigration053, RunMigration054, RunMigration055, RunMigration056, RunMigration057, ReadCellFromBytes, GenerateWorkbookManifest, RunWorkbookPhase7, SaveDocumentFile, ReparseFromStorage, RunWorkbookPhase2, RunWorkbookPhase3, RunWorkbookPhase4, RunWorkbookPhase4Display, TestExcelExtraction, PublishSriToModuleOutputs,
+  SriRunPipeline, SriGetActiveRun, SriPurgeDealState, RunMigration043, RunMigration044, SriTestMarkerGuard, SriResetVerify, RunMigration045, SriBuildTargetIdentity,   SriBuildTargetProfile, RunMigration046, RunMigration047, RunMigration048, RunMigration049, RunMigration050, RunMigration051, RunMigration052, RunMigration053, RunMigration054, RunMigration055, RunMigration056, RunMigration057, RunMigration058, ReadCellFromBytes, GenerateWorkbookManifest, RunWorkbookPhase7, SaveDocumentFile, ReparseFromStorage, RunWorkbookPhase2, RunWorkbookPhase3, RunWorkbookPhase4, RunWorkbookPhase4Display, TestExcelExtraction, PublishSriToModuleOutputs,
   // DB setup
   SetupSchema, RunCheckpointMigration, CreatePipelineTable, CheckSchemaHealth, AddConcurrentRunIndex,
   // Deals
   ListDeals, GetDeal, CreateDeal, UpdateDeal, DeleteDeal,
   // Documents
   ListDocuments, SaveDocument, UpdateDocument, DeleteDocument, GetDocumentTexts,
-  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, BackfillWorkbookCells, SaveWorkbookMap, SaveWorkbookSheet, SaveWorkbookStyles, SaveWorkbookCellsBatch,
+  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, BackfillWorkbookCells, SaveWorkbookMap, SaveWorkbookSheet, SaveWorkbookStyles, SaveWorkbookCellsBatch, SaveVerifyCellsBatch,
   // Numeric verification
   NumericVerify, GetNumericReport, SearchNumericFindings, DiagSharedFormulas, DiagFormulaExtraction, InspectColHeaders, InspectEnrichedHeaders, InspectRowLabels, InspectCellValues,
   // Q&A

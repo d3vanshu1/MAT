@@ -12,7 +12,8 @@
 
 import { z } from "@superblocksteam/sdk-api";
 import { runReconciliation, coordKey, normalizePeriod, normalizeClaimValue, type ReconciliationResult, type ReconciliationFinding } from "./claims-reconciliation.js";
-import { runVerificationGate, type GateResult, type RefFigCoord } from "./verification-gate.js";
+import { runVerificationGate, type GateResult, type RefFigCoord, type VerifyCell } from "./verification-gate.js";
+import { validateClaims } from "./claim-validation.js";
 import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { ClaimsLedger } from "./claims-extraction.js";
 import type { PipelineContext } from "./pipeline-config.js";
@@ -433,6 +434,17 @@ export async function runReconciliationPipeline(
   // --- Step 2: Metric derivation (MUST precede reconciliation) ---
   const metricDerivation = applyMetricDerivation(ledger, bridgeFigures);
 
+  // --- Step 2.5 (C11): Claim validation ---
+  const claimValidation = validateClaims(ledger.claims);
+  if (claimValidation.rejected.length > 0) {
+    console.log(
+      `[ReconciliationPipeline] C11 claim validation: ${claimValidation.stats.rejected} rejected ` +
+      `(${claimValidation.rejected.map(r => r.reason).join(", ")})`
+    );
+    // Replace ledger claims with validated set
+    ledger.claims = claimValidation.accepted;
+  }
+
   // --- Step 3: Combine figures ---
   const figures: Figure[] = [...baseFigures, ...bridgeFigures];
   console.log(
@@ -500,12 +512,43 @@ export async function runReconciliationPipeline(
     }
   }
 
+  // C9: Load verify table for double-read check
+  let verifyCells: Map<string, VerifyCell> | undefined;
+  try {
+    const VerifyCellRow = z.object({
+      sheet_name: z.string(),
+      cell_ref: z.string(),
+      value_num_v2: z.number().nullable(),
+      value_raw_v2: z.string().nullable(),
+    });
+    const verifyRows = await queryFn(
+      `SELECT v.sheet_name, v.cell_ref, v.value_num_v2, v.value_raw_v2
+       FROM workbook_cells_verify v
+       JOIN workbooks w ON w.id = v.workbook_id
+       WHERE w.deal_id = $1`,
+      VerifyCellRow,
+      [dealId],
+      { label: "Load verify cells for C9 double-read" },
+    );
+    if (verifyRows.length > 0) {
+      verifyCells = new Map();
+      for (const r of verifyRows) {
+        verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
+      }
+      console.log(`[ReconciliationPipeline] C9: loaded ${verifyRows.length} verify cells for double-read`);
+    }
+  } catch {
+    // workbook_cells_verify may not exist yet — skip gracefully
+    console.log("[ReconciliationPipeline] C9: verify table not available, skipping double-read");
+  }
+
   // Run the gate
   const gateResult = runVerificationGate({
     findings: reportableFindings,
     parsedTextByDoc,
     refFigCoords,
     suspectScopes: parallelResult.suspectScopes,
+    verifyCells,
   });
 
   console.log(
@@ -514,8 +557,12 @@ export async function runReconciliationPipeline(
     `(${(gateResult.rejection_rate * 100).toFixed(1)}%). ` +
     `By check: quote=${gateResult.rejection_counts.quote_integrity} fig=${gateResult.rejection_counts.figure_existence} ` +
     `delta=${gateResult.rejection_counts.delta_provenance} source=${gateResult.rejection_counts.source_naming} ` +
-    `unit=${gateResult.rejection_counts.unit_coherence} offset=${gateResult.rejection_counts.parallel_offset}`
+    `unit=${gateResult.rejection_counts.unit_coherence} offset=${gateResult.rejection_counts.parallel_offset} ` +
+    `dbl_read=${gateResult.rejection_counts.double_read} snippet=${gateResult.rejection_counts.snippet_value}`
   );
+  if (gateResult.doubleReadMismatches.length > 0) {
+    console.log(`[ReconciliationPipeline] C9 MISMATCHES: ${JSON.stringify(gateResult.doubleReadMismatches)}`);
+  }
 
   // Compose final verified set: gate-verified reportable + non-reportable pass-throughs
   const nonReportable = parallelResult.passed.filter(

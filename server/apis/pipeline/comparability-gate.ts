@@ -135,6 +135,35 @@ export function detectStatedPrecision(
 }
 
 /**
+ * C12: Compute model-side precision from number format decimals.
+ * A cell formatted to 0 decimal places has precision ± 0.5 (nearest integer).
+ * A cell formatted to 1 decimal has precision ± 0.05, etc.
+ * Returns 0 if decimals is null (no format → no claimed precision).
+ */
+export function modelPrecisionBand(
+  decimals: number | null,
+  scaleMultiplier: number,
+): number {
+  if (decimals === null || decimals === undefined) return 0;
+  // Precision = 0.5 × 10^(-decimals) × scale
+  // e.g. 0 decimals at 1000x scale → ±500
+  // e.g. 1 decimal at 1000000x scale → ±50,000
+  return 0.5 * Math.pow(10, -decimals) * scaleMultiplier;
+}
+
+/**
+ * C12: Compute the combined approximation band from both sides.
+ * The band is the maximum of memo-side and model-side precision —
+ * neither side can claim more precision than its format allows.
+ */
+export function combinedBand(
+  memoBand: number,
+  modelBand: number,
+): number {
+  return Math.max(memoBand, modelBand);
+}
+
+/**
  * Check if a delta clears a materiality floor given approximation bands.
  * A finding clears the floor only if the ENTIRE band clears it.
  * Returns false if the band straddles the floor.
@@ -147,6 +176,19 @@ export function bandedFloorClearance(
   // The minimum possible delta (conservative end of band)
   const minDelta = Math.max(0, deltaAbs - band);
   return minDelta >= floor;
+}
+
+/**
+ * C12: Format the difference as a range when bands are present.
+ * Returns a string like "$2.3M ± $0.5M" or just "$2.3M" when band is 0.
+ */
+export function formatBandedDifference(
+  deltaAbs: number,
+  band: number,
+  unit: string,
+): string {
+  if (band === 0) return `${deltaAbs.toFixed(1)}${unit}`;
+  return `${deltaAbs.toFixed(1)}${unit} ± ${band.toFixed(1)}${unit}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -886,5 +928,68 @@ export function tryRatioReconstruction(
     claimValue,
     deltaPct,
     deltaAbs,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// C13: Case and basis enforcement for adjusted metrics
+// ---------------------------------------------------------------------------
+
+const ADJUSTED_MARKERS = /\badjusted\b|\bnormali[sz]ed\b|\bpro.?forma\b|\brun.?rate\b|\bpf\b/i;
+
+/**
+ * C13: Detect whether a claim's metric requires case/basis identification.
+ * Returns true for adjusted, normalised, pro-forma, or run-rate metrics.
+ */
+export function requiresCaseBasis(claim: Claim): boolean {
+  const text = [
+    claim.scope_qualifier,
+    claim.basis_note,
+    claim.basis,
+    claim.scenario,
+  ].filter(Boolean).join(" ");
+
+  return ADJUSTED_MARKERS.test(text);
+}
+
+/**
+ * C13: Check whether case/basis is identified on a claim.
+ * Returns null if identified, or a reason string if not.
+ */
+export function caseIdentified(claim: Claim): string | null {
+  // Must have at least a scenario or basis stated
+  if (claim.scenario || claim.basis) return null;
+  // Scope_qualifier can also carry case info (e.g. "PEP Cash EBITDA (Organic)")
+  const scope = (claim.scope_qualifier ?? "").toLowerCase();
+  if (/\bpep\b|\bmanagement\b|\bbase\s*case\b|\brisk/i.test(scope)) return null;
+  return "basis_not_stated";
+}
+
+/**
+ * C13: For a case-dependent finding, construct the case attribution.
+ * Returns the active case label and whether the case could be confirmed.
+ */
+export function buildCaseAttribution(
+  figCase: string,
+  activeCaseLabel: string | null,
+): { caseLabel: string; confirmed: boolean; detail: string } {
+  if (activeCaseLabel) {
+    return {
+      caseLabel: activeCaseLabel,
+      confirmed: true,
+      detail: `active case at save time: ${activeCaseLabel}`,
+    };
+  }
+  if (figCase && figCase !== "unstated") {
+    return {
+      caseLabel: figCase,
+      confirmed: false,
+      detail: `case from column label (switch state unknown)`,
+    };
+  }
+  return {
+    caseLabel: "unknown",
+    confirmed: false,
+    detail: "case could not be confirmed — column has no case label and no switch detected",
   };
 }

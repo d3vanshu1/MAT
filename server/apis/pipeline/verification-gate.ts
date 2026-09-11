@@ -28,7 +28,9 @@ export type GateCheck =
   | "delta_provenance"
   | "source_naming"
   | "unit_coherence"
-  | "parallel_offset";
+  | "parallel_offset"
+  | "double_read"           // C9: model-side value cross-check
+  | "snippet_value";        // C9: memo-side cited number must appear in snippet
 
 export interface GateRejection {
   finding: ReconciliationFinding;
@@ -43,6 +45,8 @@ export interface GateResult {
   rejected: GateRejection[];
   /** Counts per check — how many findings each check rejected */
   rejection_counts: Record<GateCheck, number>;
+  /** C9: double-read mismatches — both values logged for audit */
+  doubleReadMismatches: Array<{ cellRef: string; sheet: string; mapValue: string; verifyValue: string }>;
   /** Total findings submitted to the gate */
   total_submitted: number;
   /** Rejection rate (rejected / total) */
@@ -85,6 +89,14 @@ function buildRefFigCoordSet(refFigRows: RefFigCoord[]): Set<string> {
 // Gate implementation
 // ---------------------------------------------------------------------------
 
+/** C9: verification row from workbook_cells_verify */
+export interface VerifyCell {
+  sheet_name: string;
+  cell_ref: string;
+  value_num_v2: number | null;
+  value_raw_v2: string | null;
+}
+
 export interface GateInput {
   findings: ReconciliationFinding[];
   /** Map of source_doc filename → collapsed parsed_text */
@@ -93,6 +105,8 @@ export interface GateInput {
   refFigCoords: RefFigCoord[];
   /** Scopes flagged as suspect_parallel_offset by Part 2 detector */
   suspectScopes: Set<string>;
+  /** C9: verify table keyed by "sheet|cellRef" → VerifyCell */
+  verifyCells?: Map<string, VerifyCell>;
 }
 
 export function runVerificationGate(input: GateInput): GateResult {
@@ -108,10 +122,13 @@ export function runVerificationGate(input: GateInput): GateResult {
     source_naming: 0,
     unit_coherence: 0,
     parallel_offset: 0,
+    double_read: 0,
+    snippet_value: 0,
   };
+  const doubleReadMismatches: GateResult["doubleReadMismatches"] = [];
 
   for (const f of findings) {
-    const failedCheck = checkFinding(f, parsedTextByDoc, refCoordSet, suspectScopes);
+    const failedCheck = checkFinding(f, parsedTextByDoc, refCoordSet, suspectScopes, input.verifyCells ?? null, doubleReadMismatches);
     if (failedCheck) {
       rejected.push(failedCheck);
       rejection_counts[failedCheck.check]++;
@@ -123,7 +140,7 @@ export function runVerificationGate(input: GateInput): GateResult {
   const total_submitted = findings.length;
   const rejection_rate = total_submitted > 0 ? rejected.length / total_submitted : 0;
 
-  return { verified, rejected, rejection_counts, total_submitted, rejection_rate };
+  return { verified, rejected, rejection_counts, total_submitted, rejection_rate, doubleReadMismatches };
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +152,8 @@ function checkFinding(
   parsedTextByDoc: Map<string, string>,
   refCoordSet: Set<string>,
   suspectScopes: Set<string>,
+  verifyCells: Map<string, VerifyCell> | null,
+  doubleReadMismatches: GateResult["doubleReadMismatches"],
 ): GateRejection | null {
   // Only gate data_divergence and cross_version findings (those that would ship to report)
   // scope_mismatch and unreconcilable don't assert a contradiction → not report-worthy
@@ -184,6 +203,14 @@ function checkFinding(
   const offsetResult = checkParallelOffset(f, suspectScopes);
   if (offsetResult) return offsetResult;
 
+  // Check 7 (C9): Double-read — model-side value cross-check
+  const doubleReadResult = checkDoubleRead(f, verifyCells, doubleReadMismatches);
+  if (doubleReadResult) return doubleReadResult;
+
+  // Check 8 (C9): Snippet value — the cited number must appear in the snippet
+  const snippetResult = checkSnippetContainsValue(f);
+  if (snippetResult) return snippetResult;
+
   return null; // All checks passed
 }
 
@@ -219,6 +246,137 @@ function checkQuoteIntegrity(
       finding: f,
       check: "quote_integrity",
       reason: `snippet not found in source: "${snippet.slice(0, 60)}${snippet.length > 60 ? "…" : ""}"`,
+    };
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// C9 Check 7: Double-read — model-side value cross-check
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare the map's value_raw against an independent second parse stored in
+ * workbook_cells_verify. Exact match required. No tolerance, no fuzzy compare.
+ * A cell present in the map but missing from the verify table is a mismatch.
+ * Disagreement drops the finding and logs both values.
+ */
+function checkDoubleRead(
+  f: ReconciliationFinding,
+  verifyCells: Map<string, VerifyCell> | null,
+  mismatches: GateResult["doubleReadMismatches"],
+): GateRejection | null {
+  if (!verifyCells) return null; // Verify table not loaded — skip (pre-C9 runs)
+  if (!f.model_figure) return null;
+
+  const cellRef = f.model_figure.cell_ref;
+  const sheet = f.model_figure.source_sheet;
+  if (!cellRef || !sheet) return null; // No cell coordinate — can't verify
+
+  const key = `${sheet}|${cellRef}`;
+  const verify = verifyCells.get(key);
+
+  if (!verify) {
+    // Cell in map but absent from verify table — mismatch per spec
+    mismatches.push({
+      cellRef, sheet,
+      mapValue: String(f.model_figure.value_raw ?? f.model_figure.value),
+      verifyValue: "(missing from verify table)",
+    });
+    return {
+      finding: f,
+      check: "double_read",
+      reason: `cell ${sheet}!${cellRef} present in map but absent from verification table`,
+    };
+  }
+
+  // Compare value_raw (map) vs value_num_v2 (verify) — exact numeric match
+  const mapVal = f.model_figure.value_raw ?? f.model_figure.value;
+  const verifyVal = verify.value_num_v2;
+
+  if (mapVal === null || mapVal === undefined || verifyVal === null || verifyVal === undefined) {
+    // One side null — mismatch only if the other side has a value
+    if ((mapVal !== null && mapVal !== undefined) !== (verifyVal !== null && verifyVal !== undefined)) {
+      mismatches.push({
+        cellRef, sheet,
+        mapValue: String(mapVal ?? "null"),
+        verifyValue: String(verifyVal ?? "null"),
+      });
+      return {
+        finding: f,
+        check: "double_read",
+        reason: `double-read mismatch at ${sheet}!${cellRef}: map=${mapVal}, verify=${verifyVal}`,
+      };
+    }
+    return null;
+  }
+
+  // Exact numeric comparison (both are numbers)
+  if (Number(mapVal) !== Number(verifyVal)) {
+    mismatches.push({
+      cellRef, sheet,
+      mapValue: String(mapVal),
+      verifyValue: String(verifyVal),
+    });
+    return {
+      finding: f,
+      check: "double_read",
+      reason: `double-read mismatch at ${sheet}!${cellRef}: map=${mapVal}, verify=${verifyVal}`,
+    };
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// C9 Check 8: Snippet value — cited number must appear in its own snippet
+// ---------------------------------------------------------------------------
+
+/**
+ * A finding whose verbatim_snippet doesn't contain its own cited number
+ * means the number came from somewhere nobody can see. Do not publish.
+ */
+function checkSnippetContainsValue(f: ReconciliationFinding): GateRejection | null {
+  if (!f.claim) return null;
+
+  const snippet = f.claim.verbatim_snippet;
+  if (!snippet || snippet.trim().length === 0) return null; // Already caught by quote_integrity
+
+  const value = f.claim.value;
+  if (value === null || value === undefined) return null;
+
+  // Normalize the value to common string representations
+  const absVal = Math.abs(value);
+  const candidates: string[] = [];
+
+  // Try various formatting: 38, 38.0, 38.00, 38m, $38m, 38%, 3800, etc.
+  candidates.push(String(absVal));
+  candidates.push(absVal.toFixed(1));
+  candidates.push(absVal.toFixed(2));
+
+  // For values >= 1, also try integer form
+  if (absVal >= 1) {
+    candidates.push(String(Math.round(absVal)));
+  }
+
+  // Percentage display: 0.045 → 4.5
+  if (absVal < 1 && absVal > 0) {
+    const pctVal = absVal * 100;
+    candidates.push(String(pctVal));
+    candidates.push(pctVal.toFixed(1));
+    candidates.push(pctVal.toFixed(2));
+  }
+
+  // Check if any candidate appears in the snippet
+  const normalizedSnippet = snippet.replace(/,/g, ""); // Remove commas for number matching
+  const found = candidates.some(c => normalizedSnippet.includes(c));
+
+  if (!found) {
+    return {
+      finding: f,
+      check: "snippet_value",
+      reason: `cited value ${value} not found in snippet: "${snippet.slice(0, 80)}${snippet.length > 80 ? "…" : ""}"`,
     };
   }
 
