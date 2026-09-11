@@ -128,6 +128,7 @@ export default api({
     declinedAmbiguous: z.number(),
     declinedNoCandidates: z.number(),
     declinedOther: z.number(),
+    errors: z.number(),
     resolveRate: z.string(),
     byDeclineReason: z.record(z.number()),
     byCategory: z.record(z.object({
@@ -154,9 +155,11 @@ export default api({
       claimPeriod: z.string(),
       claimValue: z.number(),
       reason: z.string(),
+      candidateCount: z.number(),
       topCandidateLabel: z.string().nullable(),
       topCandidateScore: z.number().nullable(),
     })),
+    errorSample: z.array(z.string()),
   }),
 
   async run(ctx, { dealId, maxClaims, categoryFilter }) {
@@ -187,7 +190,9 @@ export default api({
     let declinedAmbiguous = 0;
     let declinedNoCandidates = 0;
     let declinedOther = 0;
+    let errors = 0;
     const byDeclineReason: Record<string, number> = {};
+    const errorSample: string[] = [];
     const byCategory: Record<string, { total: number; resolved: number; declined: number }> = {};
     const resolvedSample: any[] = [];
     const declinedSample: any[] = [];
@@ -219,9 +224,10 @@ export default api({
           unitClass,
           workbookRole: null,
         });
-      } catch (e) {
-        declinedOther++;
+      } catch (e: any) {
+        errors++;
         byCategory[cat].declined++;
+        if (errorSample.length < 5) errorSample.push(`${claim.metric}/${claim.period}: ${e?.message ?? String(e)}`);
         continue;
       }
 
@@ -252,15 +258,16 @@ export default api({
         else if (reason === "tie" || reason === "case_ambiguity") declinedAmbiguous++;
         else declinedOther++;
 
-        if (declinedSample.length < 10) {
+        if (declinedSample.length < 20) {
           declinedSample.push({
             claimMetric: claim.metric,
-            claimScope: claim.scope_qualifier,
+            claimScope: claim.scope_qualifier ?? "",
             claimPeriod: claim.period,
             claimValue: claim.value,
             reason,
-            topCandidateLabel: result.topCandidates[0]?.rowLabel ?? null,
-            topCandidateScore: result.topCandidates[0]?.score ?? null,
+            candidateCount: result.topCandidates?.length ?? 0,
+            topCandidateLabel: result.topCandidates?.[0]?.rowLabel ?? null,
+            topCandidateScore: result.topCandidates?.[0]?.score ?? null,
           });
         }
       }
@@ -279,11 +286,13 @@ export default api({
       declinedAmbiguous,
       declinedNoCandidates,
       declinedOther,
+      errors,
       resolveRate,
       byDeclineReason,
       byCategory,
       resolvedSample,
       declinedSample,
+      errorSample,
     };
   },
 });
