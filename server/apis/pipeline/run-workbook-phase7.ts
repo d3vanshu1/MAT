@@ -70,6 +70,8 @@ export default api({
     workbookId: z.string(),
     skipAnchorWalk: z.boolean().optional(),
     skipPrecedentRebuild: z.boolean().optional(),
+    sheetBatchStart: z.number().optional(),
+    sheetBatchSize: z.number().optional(),
   }),
 
   output: z.object({
@@ -80,7 +82,7 @@ export default api({
     externalRefs: z.number(),
   }),
 
-  async run(ctx, { workbookId, skipAnchorWalk, skipPrecedentRebuild }) {
+  async run(ctx, { workbookId, skipAnchorWalk, skipPrecedentRebuild, sheetBatchStart, sheetBatchSize }) {
     const q = ctx.integrations.ic_db;
 
     // -----------------------------------------------------------------------
@@ -110,17 +112,32 @@ export default api({
       hardcodedInputs = parseInt(hcCount?.cnt ?? "0");
     } else {
 
-    // Clear existing precedents for this workbook
-    await q.query(
-      "DELETE FROM workbook_precedents WHERE workbook_id = $1",
-      z.any(), [workbookId], { label: "Clear old precedents" },
-    );
-
     // Fetch all cells with formulas (batched by sheet)
-    const sheetNames = await q.query(
+    const allSheetNames = await q.query(
       "SELECT DISTINCT sheet_name FROM workbook_cells WHERE workbook_id = $1 AND formula IS NOT NULL ORDER BY sheet_name",
       z.object({ sheet_name: z.string() }), [workbookId], { label: "Sheets with formulas" },
     );
+
+    // If sheetBatchStart is set, process only a slice of sheets (for large workbooks)
+    const batchStart = sheetBatchStart ?? 0;
+    const batchSize = sheetBatchSize ?? allSheetNames.length;
+    const sheetNames = allSheetNames.slice(batchStart, batchStart + batchSize);
+
+    // Only clear all precedents on the first batch (start=0)
+    if (batchStart === 0) {
+      await q.query(
+        "DELETE FROM workbook_precedents WHERE workbook_id = $1",
+        z.any(), [workbookId], { label: "Clear old precedents" },
+      );
+    } else {
+      // Clear precedents only for the sheets in this batch
+      for (const { sheet_name } of sheetNames) {
+        await q.query(
+          "DELETE FROM workbook_precedents WHERE workbook_id = $1 AND from_sheet = $2",
+          z.any(), [workbookId, sheet_name], { label: "Clear precs: " + sheet_name },
+        );
+      }
+    }
 
     for (const { sheet_name } of sheetNames) {
       const cells = await q.query(

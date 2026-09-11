@@ -101,6 +101,17 @@ export function parseFormulaRefs(formula: string, currentSheet: string): Formula
     });
   }
 
+  // Track positions occupied by cross-sheet / external matches
+  // to avoid double-counting in Pattern 3
+  const occupiedRanges: Array<{ start: number; end: number }> = [];
+
+  // Record external match positions
+  const externalRe2 = /\[\d+\](?:'([^']+)'|([A-Za-z_]\w*))!\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?/g;
+  let m2: RegExpExecArray | null;
+  while ((m2 = externalRe2.exec(cleaned)) !== null) {
+    occupiedRanges.push({ start: m2.index, end: m2.index + m2[0].length });
+  }
+
   // Pattern 2: Cross-sheet — 'Sheet Name'!Ref or SheetName!Ref
   // Must not start with [ (already caught above)
   const crossSheetRe = /(?<!\[[\d\]])(?:'([^']+)'|([A-Za-z_][\w.]*))!\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?/g;
@@ -108,6 +119,9 @@ export function parseFormulaRefs(formula: string, currentSheet: string): Formula
     // Skip if this was already matched as external
     const fullMatch = m[0];
     if (fullMatch.startsWith("[")) continue;
+
+    // Record this match's position span
+    occupiedRanges.push({ start: m.index, end: m.index + fullMatch.length });
 
     const sheet = m[1] || m[2];
     const start = m[3] + m[4];
@@ -127,13 +141,9 @@ export function parseFormulaRefs(formula: string, currentSheet: string): Formula
     const start = m[1] + m[2];
     const end = m[3] && m[4] ? m[3] + m[4] : null;
 
-    // Skip if this position was already captured by cross-sheet pattern
-    const startPos = m.index;
-    const alreadyCaptured = refs.some(r =>
-      r.kind !== "external" &&
-      cleaned.indexOf((r.sheet ? r.sheet + "!" : "") + r.cellRef) <= startPos &&
-      cleaned.indexOf((r.sheet ? r.sheet + "!" : "") + r.cellRef) + ((r.sheet ? r.sheet + "!" : "") + r.cellRef).length > startPos
-    );
+    // Skip if this position overlaps any cross-sheet or external match
+    const mStart = m.index;
+    const alreadyCaptured = occupiedRanges.some(r => mStart >= r.start && mStart < r.end);
     if (alreadyCaptured) continue;
 
     // Skip function names that look like refs (e.g., IF, SUM, MAX, MIN, etc.)
