@@ -13,7 +13,8 @@
  */
 import { api, z, postgres, anthropic } from "@superblocksteam/sdk-api";
 import { runReconciliation, coordKey, normalizePeriod, normalizeClaimValue, type ReconciliationFinding } from "./claims-reconciliation.js";
-import { runVerificationGate, type GateCheck, type GateResult, type RefFigCoord } from "./verification-gate.js";
+import { runVerificationGate, type GateCheck, type GateResult, type RefFigCoord, type VerifyCell } from "./verification-gate.js";
+import { validateClaims } from "./claim-validation.js";
 import { loadReferenceFigures, resolvePrimaryReferenceDoc, applyMetricDerivation, applyMagnitudeGuard, applyParallelOffsetDetector, type ParallelAuditEntry } from "./reconciliation-pipeline.js";
 import type { Figure, Discrepancy } from "./numeric-verify-inline.js";
 import type { ClaimsLedger } from "./claims-extraction.js";
@@ -204,6 +205,8 @@ export default api({
         source_naming: z.number(),
         unit_coherence: z.number(),
         parallel_offset: z.number(),
+        double_read: z.number(),
+        snippet_value: z.number(),
       }),
       rejected_sample: z.array(z.object({
         check: z.string(),
@@ -213,6 +216,11 @@ export default api({
       })).nullable(),
       held_upstream: z.number(),
     }).nullable(),
+
+    // --- CC Guard counts ---
+    c11_rejected: z.number().optional(),
+    c11_reasons: z.array(z.object({ reason: z.string(), detail: z.string() })).nullable().optional(),
+    c13_not_comparable: z.number().optional(),
 
     // --- Item 10: Period axis analysis ---
     period_axis: z.object({
@@ -255,19 +263,22 @@ export default api({
       { label: "Load numeric report figures" }
     );
 
-    if (reportRows.length === 0) {
-      return emptyResult(Date.now() - startTime, true, false, ledger.claims.length);
+    let baseFigures: Figure[] = [];
+    let discrepancies: Discrepancy[] = [];
+
+    if (reportRows.length > 0) {
+      const rawFigures = typeof reportRows[0].figures === "string"
+        ? JSON.parse(reportRows[0].figures)
+        : reportRows[0].figures;
+      const rawDisc = typeof reportRows[0].discrepancies === "string"
+        ? JSON.parse(reportRows[0].discrepancies)
+        : reportRows[0].discrepancies;
+
+      baseFigures = Array.isArray(rawFigures) ? rawFigures : [];
+      discrepancies = Array.isArray(rawDisc) ? rawDisc : [];
+    } else {
+      console.log("[DiagReconcileOnly] No numeric report found — proceeding with reference_figures only");
     }
-
-    const rawFigures = typeof reportRows[0].figures === "string"
-      ? JSON.parse(reportRows[0].figures)
-      : reportRows[0].figures;
-    const rawDisc = typeof reportRows[0].discrepancies === "string"
-      ? JSON.parse(reportRows[0].discrepancies)
-      : reportRows[0].discrepancies;
-
-    const baseFigures: Figure[] = Array.isArray(rawFigures) ? rawFigures : [];
-    const discrepancies: Discrepancy[] = Array.isArray(rawDisc) ? rawDisc : [];
 
     // --- Step 2b: Load reference_figures (shared function from reconciliation-pipeline.ts) ---
     // The primary document is now RESOLVED by the same shared rule production uses
@@ -310,6 +321,16 @@ export default api({
     console.log(
       `[DiagReconcileOnly] Metric derivation: ${claimsRewritten} claims rewritten, ${figuresRewritten} figures rewritten`
     );
+
+    // --- Step 2.5 (C11): Claim validation ---
+    const c11Result = validateClaims(ledger.claims);
+    if (c11Result.rejected.length > 0) {
+      console.log(
+        `[DiagReconcileOnly] C11: ${c11Result.stats.rejected} claims rejected ` +
+        `(${c11Result.rejected.map(r => r.reason).join(", ")})`
+      );
+      ledger.claims = c11Result.accepted;
+    }
 
     // --- Step 3: Run reconciliation (pure in-memory — no LLM) ---
     const pipelineCtx: PipelineContext = {
@@ -404,12 +425,30 @@ export default api({
 
     // refFigCoords already loaded from loadReferenceFigures (Step 2b)
 
+    // C9: Load verify table for double-read
+    let verifyCells: Map<string, VerifyCell> | undefined;
+    try {
+      const VRow = z.object({ sheet_name: z.string(), cell_ref: z.string(), value_num_v2: z.number().nullable(), value_raw_v2: z.string().nullable() });
+      const vRows = await ctx.integrations.db.query(
+        `SELECT v.sheet_name, v.cell_ref, v.value_num_v2, v.value_raw_v2
+         FROM workbook_cells_verify v JOIN workbooks w ON w.id = v.workbook_id
+         WHERE w.deal_id = $1`, VRow, [dealId],
+        { label: "Load verify cells for C9" },
+      );
+      if (vRows.length > 0) {
+        verifyCells = new Map();
+        for (const r of vRows) verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
+        console.log(`[DiagReconcileOnly] C9: ${vRows.length} verify cells loaded`);
+      }
+    } catch { /* table may not exist */ }
+
     // Run the gate
     const gateResult = runVerificationGate({
       findings: reportableFindings,
       parsedTextByDoc,
       refFigCoords,
       suspectScopes,
+      verifyCells,
     });
 
     console.log(
@@ -418,8 +457,12 @@ export default api({
       `(${(gateResult.rejection_rate * 100).toFixed(1)}%). ` +
       `By check: quote=${gateResult.rejection_counts.quote_integrity} fig=${gateResult.rejection_counts.figure_existence} ` +
       `delta=${gateResult.rejection_counts.delta_provenance} source=${gateResult.rejection_counts.source_naming} ` +
-      `unit=${gateResult.rejection_counts.unit_coherence} offset=${gateResult.rejection_counts.parallel_offset}`
+      `unit=${gateResult.rejection_counts.unit_coherence} offset=${gateResult.rejection_counts.parallel_offset} ` +
+      `dbl_read=${gateResult.rejection_counts.double_read} snippet=${gateResult.rejection_counts.snippet_value}`
     );
+    if (gateResult.doubleReadMismatches.length > 0) {
+      console.log(`[DiagReconcileOnly] C9 MISMATCHES: ${JSON.stringify(gateResult.doubleReadMismatches)}`);
+    }
 
     // Replace cleanedFindings with gate-verified findings for downstream
     // Non-reportable findings (scope_mismatch, unreconcilable) pass through unchanged
@@ -719,6 +762,14 @@ export default api({
       parallel_offset_audit: parallelAudit.length > 0 ? parallelAudit : null,
       parallel_offset_held: suspectSuppressed.length,
       verification_gate: gateSummary,
+      // --- CC Guard counts ---
+      c11_rejected: c11Result.stats.rejected,
+      c11_reasons: c11Result.rejected.length > 0
+        ? c11Result.rejected.map(r => ({ reason: r.reason, detail: r.detail.slice(0, 100) })).slice(0, 10)
+        : null,
+      c13_not_comparable: (result.findings as ReconciliationFinding[]).filter(
+        f => f.finding_kind === "not_comparable"
+      ).length,
     };
 
     // --- Summary mode: no findings array ---
