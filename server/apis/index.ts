@@ -300,6 +300,7 @@ import SaveWorkbookSheet from './documents/save-workbook-sheet.js';
 import SaveWorkbookStyles from './documents/save-workbook-styles.js';
 import SaveWorkbookCellsBatch from './documents/save-workbook-cells-batch.js';
 import SaveVerifyCellsBatch from './documents/save-verify-cells-batch.js';
+import CompleteWorkbookMap from './documents/complete-workbook-map.js';
 import UpdateParsedText from './documents/update-parsed-text.js';
 import ClearParsedText from './documents/clear-parsed-text.js';
 
@@ -372,7 +373,7 @@ const apis = {
   ListDeals, GetDeal, CreateDeal, UpdateDeal, DeleteDeal,
   // Documents
   ListDocuments, SaveDocument, UpdateDocument, DeleteDocument, GetDocumentTexts,
-  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, BackfillWorkbookCells, SaveWorkbookMap, SaveWorkbookSheet, SaveWorkbookStyles, SaveWorkbookCellsBatch, SaveVerifyCellsBatch,
+  SaveDocTables, GetDocTables, BackfillDocTablesFromText, GetDocTablesSummary, UpdateParsedText, ClearParsedText, BackfillWorkbookCells, SaveWorkbookMap, SaveWorkbookSheet, SaveWorkbookStyles, SaveWorkbookCellsBatch, SaveVerifyCellsBatch, CompleteWorkbookMap,
   // Numeric verification
   NumericVerify, GetNumericReport, SearchNumericFindings, DiagSharedFormulas, DiagFormulaExtraction, InspectColHeaders, InspectEnrichedHeaders, InspectRowLabels, InspectCellValues,
   // Q&A

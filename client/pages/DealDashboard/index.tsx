@@ -6,6 +6,7 @@ import { useApiData } from "@/hooks/useApiData.js";
 import { executeApi } from "@/lib/executeApi.js";
 import { processAllFiles, extractTextFromFile, parseExcelToTables, parseCsvToTable } from "@/lib/pdfProcessor";
 import { buildWorkbookMap, formatWorkbookSummary } from "@/lib/workbookMapBuilder";
+import { parseVerifyCells } from "@/lib/ooxmlVerifyParser";
 import { runRoundTripTest, formatRoundTripReport } from "@/lib/workbookRoundTrip";
 import type { DocumentChunk, ProcessedFileInfo, ExcludedFile, StructuredCell } from "@/lib/pdfProcessor";
 import { MODULE_DEFINITIONS, MODULE_MAP, NUMERIC_MODULES, DISABLED_MODULE_IDS } from "@/lib/moduleConfig";
@@ -536,6 +537,8 @@ export default function DealDashboardPage() {
   const { run: saveWorkbookSheetApi } = useApi("SaveWorkbookSheet");
   const { run: saveWorkbookStylesApi } = useApi("SaveWorkbookStyles");
   const { run: saveWorkbookCellsBatchApi } = useApi("SaveWorkbookCellsBatch");
+  const { run: saveVerifyCellsBatchApi } = useApi("SaveVerifyCellsBatch");
+  const { run: completeWorkbookMapApi } = useApi("CompleteWorkbookMap");
   const { run: numericVerifyApi } = useApi("NumericVerify");
   const { run: cancelModuleRunApi } = useApi("CancelModuleRun");
   const { run: checkRunCancelledApi } = useApi("CheckRunCancelled");
@@ -3974,6 +3977,46 @@ export default function DealDashboardPage() {
               `[WorkbookMap] Saved ${f.name}: role=${mapResult.workbook.workbookRole}, ` +
               `sheets=${mapResult.sheets.length}, cells=${totalSaved}`
             );
+
+            // C9: Second parse using independent OOXML parser → verify table
+            try {
+              const verifyCells = await parseVerifyCells(buf);
+              console.info(`[WorkbookMap] C9 second parse: ${verifyCells.length} verify cells for ${f.name}`);
+              let verifyTotal = 0;
+              for (let vi = 0; vi < verifyCells.length; vi += CELL_CHUNK) {
+                const vChunk = verifyCells.slice(vi, vi + CELL_CHUNK);
+                const vResult = await saveVerifyCellsBatchApi({
+                  workbookId: wbId,
+                  cells: vChunk.map((vc) => ({
+                    sheetName: vc.sheetName,
+                    cellRef: vc.cellRef,
+                    valueRawV2: vc.valueRawV2,
+                    valueNumV2: vc.valueNumV2,
+                    valueTypeV2: vc.valueTypeV2,
+                  })),
+                });
+                verifyTotal += vResult?.cellsInserted ?? 0;
+              }
+              console.info(`[WorkbookMap] C9 verify saved: ${verifyTotal} cells for ${f.name}`);
+            } catch (verifyErr) {
+              // Non-fatal — log but don't block map completion
+              console.error(`[WorkbookMap] C9 verify parse/save failed for ${f.name}:`, verifyErr);
+            }
+
+            // Mark workbook as complete — deletes old version
+            try {
+              const completeResult = await completeWorkbookMapApi({
+                workbookId: wbId,
+                documentId: mapResult.workbook.documentId,
+              });
+              if (completeResult?.completed) {
+                console.info(`[WorkbookMap] ${f.name}: marked complete (${completeResult.cellCount} cells)`);
+              } else {
+                console.warn(`[WorkbookMap] ${f.name}: CompleteWorkbookMap returned completed=false`);
+              }
+            } catch (completeErr) {
+              console.error(`[WorkbookMap] CompleteWorkbookMap failed for ${f.name}:`, completeErr);
+            }
           }
         } catch (err) {
           // Non-fatal — log and continue to next file
@@ -3981,7 +4024,7 @@ export default function DealDashboardPage() {
         }
       }
     },
-    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookSheetApi, saveWorkbookStylesApi, saveWorkbookCellsBatchApi, indexDocumentChunks]
+    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookSheetApi, saveWorkbookStylesApi, saveWorkbookCellsBatchApi, saveVerifyCellsBatchApi, completeWorkbookMapApi, indexDocumentChunks]
   );
 
   const handleDeleteDoc = useCallback(async (docId: string) => {

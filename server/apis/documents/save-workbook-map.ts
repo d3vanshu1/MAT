@@ -8,7 +8,7 @@ const WorkbookInputSchema = z.object({
   roleSource: z.string(),
   fileHash: z.string(),
   captureVersion: z.number(),
-  loadStatus: z.string(),
+  loadStatus: z.string().optional(), // Ignored — always inserted as 'pending'
   loadReason: z.string().nullable(),
 });
 
@@ -33,38 +33,42 @@ export default api({
   async run(ctx, { workbook }) {
     const db = ctx.integrations.ic_diligence;
 
-    // Hash check — skip if unchanged AND complete
+    // Hash check — skip ONLY when load_status = 'complete' AND cells exist.
+    // A hash match against an incomplete or empty workbook must re-ingest.
     const existingRows = await db.query(
-      `SELECT id FROM workbooks WHERE document_id = $1 AND file_hash = $2`,
-      WorkbookIdSchema,
+      `SELECT id, load_status FROM workbooks
+       WHERE document_id = $1 AND file_hash = $2`,
+      z.object({ id: z.string(), load_status: z.string().nullable() }),
       [workbook.documentId, workbook.fileHash],
       { label: "SaveWorkbookMap: hash check" },
     );
 
-    if (existingRows.length > 0) {
-      const sheetCount = await db.query(
-        `SELECT count(*)::int AS cnt FROM workbook_sheets WHERE workbook_id = $1`,
+    if (existingRows.length > 0 && existingRows[0].load_status === "complete") {
+      const cellCount = await db.query(
+        `SELECT count(*)::int AS cnt FROM workbook_cells WHERE workbook_id = $1`,
         z.object({ cnt: z.number() }),
         [existingRows[0].id],
-        { label: "SaveWorkbookMap: verify completeness" },
+        { label: "SaveWorkbookMap: verify cells exist" },
       );
-      if (sheetCount[0].cnt > 0) {
+      if (cellCount[0].cnt > 0) {
         return { workbookId: existingRows[0].id, skippedByHash: true };
       }
     }
 
-    // Delete any existing workbook for this document (cascade)
+    // Transactional rebuild: do NOT delete old workbook yet.
+    // Old cells survive until CompleteWorkbookMap swaps them out.
+    // Delete any stale PENDING workbooks for this document (failed prior attempts).
     await db.execute(
-      `DELETE FROM workbooks WHERE document_id = $1`,
+      `DELETE FROM workbooks WHERE document_id = $1 AND (load_status = 'pending' OR load_status IS NULL)`,
       [workbook.documentId],
-      { label: "SaveWorkbookMap: clear previous" },
+      { label: "SaveWorkbookMap: clear stale pending" },
     );
 
-    // Insert workbook (style_tables and defined_names saved separately)
+    // Insert new workbook as PENDING — old complete workbook stays alive.
     const wbRows = await db.query(
       `INSERT INTO workbooks (document_id, workbook_role, role_source, file_hash,
          capture_version, style_tables, defined_names, load_status, load_reason)
-       VALUES ($1, $2, $3, $4, $5, '{}', '[]', $6, $7)
+       VALUES ($1, $2, $3, $4, $5, '{}', '[]', 'pending', $6)
        RETURNING id`,
       WorkbookIdSchema,
       [
@@ -73,10 +77,9 @@ export default api({
         workbook.roleSource,
         workbook.fileHash,
         workbook.captureVersion,
-        workbook.loadStatus,
         workbook.loadReason,
       ],
-      { label: "SaveWorkbookMap: insert workbook" },
+      { label: "SaveWorkbookMap: insert pending workbook" },
     );
 
     return { workbookId: wbRows[0].id, skippedByHash: false };
