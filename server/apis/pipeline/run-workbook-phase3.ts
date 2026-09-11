@@ -25,6 +25,12 @@ function inferFullYear(twoDigit: number): number {
   return twoDigit < 50 ? 2000 + twoDigit : 1900 + twoDigit;
 }
 
+function lastDayOfMonth(year: number, month: number): string {
+  // new Date(year, month, 0) gives last day of the month
+  const d = new Date(year, month, 0).getDate();
+  return `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
 function parseBasis(token: string): string {
   const t = token.toUpperCase().trim();
   if (t === "A" || t === "ACTUAL" || t === "ACTUALS") return "actual";
@@ -68,7 +74,7 @@ function parsePeriodToken(raw: string, fyEndMonth: number): ParsedPeriod | null 
     const basis = basisChar ? parseBasis(basisChar) : "unknown";
     const prefix = s.toUpperCase().startsWith("CY") ? "CY" : "FY";
     const endMonth = prefix === "CY" ? 12 : fyEndMonth;
-    const endDate = `${year}-${String(endMonth).padStart(2, "0")}-28`;
+    const endDate = lastDayOfMonth(year, endMonth);
     const startDate = endMonth === 12 ? `${year}-01-01` : `${year - 1}-${String(endMonth + 1).padStart(2, "0")}-01`;
     return {
       periodType: prefix, periodStart: startDate, periodEnd: endDate,
@@ -88,7 +94,7 @@ function parsePeriodToken(raw: string, fyEndMonth: number): ParsedPeriod | null 
     const qEndMonth = quarter * 3;
     return {
       periodType: "Q", periodStart: `${year}-${String(qStartMonth).padStart(2, "0")}-01`,
-      periodEnd: `${year}-${String(qEndMonth).padStart(2, "0")}-28`,
+      periodEnd: lastDayOfMonth(year, qEndMonth),
       periodLabel: `Q${quarter} ${year}`, periodBasis: basis,
     };
   }
@@ -104,7 +110,7 @@ function parsePeriodToken(raw: string, fyEndMonth: number): ParsedPeriod | null 
       return {
         periodType: "M",
         periodStart: `${year}-${String(month).padStart(2, "0")}-01`,
-        periodEnd: `${year}-${String(month).padStart(2, "0")}-28`,
+        periodEnd: lastDayOfMonth(year, month),
         periodLabel: `${monthMatch[1]} ${year}`, periodBasis: "unknown",
       };
     }
@@ -120,7 +126,7 @@ function parsePeriodToken(raw: string, fyEndMonth: number): ParsedPeriod | null 
       return {
         periodType: "M",
         periodStart: `${year}-${String(month).padStart(2, "0")}-01`,
-        periodEnd: `${year}-${String(month).padStart(2, "0")}-28`,
+        periodEnd: lastDayOfMonth(year, month),
         periodLabel: `${month}/${year}`, periodBasis: "unknown",
       };
     }
@@ -137,7 +143,7 @@ function parsePeriodToken(raw: string, fyEndMonth: number): ParsedPeriod | null 
         return {
           periodType: "LTM",
           periodStart: `${month === 1 ? year - 1 : year}-${String(month === 1 ? 1 : month - 11).padStart(2, "0")}-01`,
-          periodEnd: `${year}-${String(month).padStart(2, "0")}-28`,
+          periodEnd: lastDayOfMonth(year, month),
           periodLabel: `LTM ${ltmMatch[1]} ${year}`, periodBasis: "actual",
         };
       }

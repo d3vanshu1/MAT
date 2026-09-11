@@ -257,9 +257,9 @@ export async function findFigure(
     AND c.row_label IS NOT NULL
     AND c.period_start IS NOT NULL
     AND c.period_start = $2
-    AND c.period_end = $3
+    AND c.period_end BETWEEN ($3::date - INTERVAL '3 days') AND ($3::date + INTERVAL '3 days')
   `;
-  filtersApplied.push("period_exact");
+  filtersApplied.push("period_start_exact+end_3day");
 
   // Period type: stub filter
   // Never match a stub cell against a non-stub claim

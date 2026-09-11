@@ -14,24 +14,24 @@ const IC_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 // ---------------------------------------------------------------------------
 
 function parseClaimPeriod(raw: string): { type: string; start: string; end: string } | null {
-  if (!raw || raw === "NONE_STATED") return null;
+  if (!raw || raw === "NONE_STATED" || raw === "UNDATED" || /^(current|ongoing|historical|next \d+ years?|multiple years?)$/i.test(raw.trim())) return null;
 
   const s = raw.trim();
 
-  // FY year: "2026E", "2026A", "FY2026", "FY 2026", "2026", "FY26"
-  let m = s.match(/^(?:FY\s*)?(\d{4})[AEFafe]?$/);
+  // FY/CY year: "2026E", "2026A", "FY2026", "FY 2026", "CY 2025A", "FY2026E", "FY26", "FY25"
+  let m = s.match(/^(?:(?:FY|CY)\s*)?(\d{4})[AEFafe]?$/);
   if (m) {
     const y = parseInt(m[1]);
     return { type: "FY", start: y + "-01-01", end: y + "-12-31" };
   }
-  m = s.match(/^FY(\d{2})[AEFafe]?$/);
+  m = s.match(/^(?:FY|CY)\s*(\d{2})[AEFafe]?$/);
   if (m) {
     const y = 2000 + parseInt(m[1]);
     return { type: "FY", start: y + "-01-01", end: y + "-12-31" };
   }
 
-  // Range: "FY23-26", "2023-2026"
-  m = s.match(/^(?:FY\s*)?(\d{2,4})\s*[-–]\s*(\d{2,4})[AEFafe]?$/);
+  // Range: "FY23-26", "2023-2026", "2026E-2031E"
+  m = s.match(/^(?:(?:FY|CY)\s*)?(\d{2,4})[AEFafe]?\s*[-–]\s*(?:(?:FY|CY)\s*)?(\d{2,4})[AEFafe]?$/);
   if (m) {
     const y1 = parseInt(m[1]) < 100 ? 2000 + parseInt(m[1]) : parseInt(m[1]);
     const y2 = parseInt(m[2]) < 100 ? 2000 + parseInt(m[2]) : parseInt(m[2]);
