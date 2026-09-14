@@ -61,6 +61,27 @@ function collapseWhitespace(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Deep normalisation for quote_integrity matching.
+ * Handles: soft hyphens, non-breaking spaces, line breaks, quote/dash variants,
+ * zero-width chars, and whitespace collapse.
+ */
+function normaliseForQuoteMatch(s: string): string {
+  return s
+    // Strip zero-width and soft hyphens
+    .replace(/[\u00AD\u200B\u200C\u200D\uFEFF]/g, "")
+    // Non-breaking space → regular space
+    .replace(/[\u00A0\u202F\u2007\u2060]/g, " ")
+    // Normalise dashes: en-dash, em-dash, figure dash, minus sign → hyphen
+    .replace(/[\u2013\u2014\u2012\u2212]/g, "-")
+    // Normalise quotes: smart quotes → straight
+    .replace(/[\u2018\u2019\u201A]/g, "'")
+    .replace(/[\u201C\u201D\u201E]/g, '"')
+    // Collapse whitespace
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 // ---------------------------------------------------------------------------
 // Reference figure coordinate lookup set
 // ---------------------------------------------------------------------------
@@ -94,7 +115,7 @@ export interface VerifyCell {
   sheet_name: string;
   cell_ref: string;
   value_num_v2: number | null;
-  value_raw_v2: string | null;
+  value_raw_v2?: string | null;
 }
 
 export interface GateInput {
@@ -241,15 +262,23 @@ function checkQuoteIntegrity(
   const collapsedSnippet = collapseWhitespace(snippet);
   const collapsedDoc = docText; // Already collapsed at load time
 
-  if (!collapsedDoc.includes(collapsedSnippet)) {
-    return {
-      finding: f,
-      check: "quote_integrity",
-      reason: `snippet not found in source: "${snippet.slice(0, 60)}${snippet.length > 60 ? "…" : ""}"`,
-    };
+  if (collapsedDoc.includes(collapsedSnippet)) {
+    return null; // exact match after whitespace collapse
   }
 
-  return null;
+  // Deep normalisation: strip soft hyphens, normalise quotes/dashes, etc.
+  const normSnippet = normaliseForQuoteMatch(snippet);
+  const normDoc = normaliseForQuoteMatch(docText);
+
+  if (normDoc.includes(normSnippet)) {
+    return null; // match after deep normalisation
+  }
+
+  return {
+    finding: f,
+    check: "quote_integrity",
+    reason: `snippet not found in source: "${snippet.slice(0, 60)}${snippet.length > 60 ? "…" : ""}"`,
+  };
 }
 
 // ---------------------------------------------------------------------------

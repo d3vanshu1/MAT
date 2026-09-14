@@ -539,6 +539,7 @@ export default function DealDashboardPage() {
   const { run: saveWorkbookCellsBatchApi } = useApi("SaveWorkbookCellsBatch");
   const { run: saveVerifyCellsBatchApi } = useApi("SaveVerifyCellsBatch");
   const { run: completeWorkbookMapApi } = useApi("CompleteWorkbookMap");
+  const { run: runWorkbookPhase7Api } = useApi("RunWorkbookPhase7");
   const { run: numericVerifyApi } = useApi("NumericVerify");
   const { run: cancelModuleRunApi } = useApi("CancelModuleRun");
   const { run: checkRunCancelledApi } = useApi("CheckRunCancelled");
@@ -4011,6 +4012,40 @@ export default function DealDashboardPage() {
               });
               if (completeResult?.completed) {
                 console.info(`[WorkbookMap] ${f.name}: marked complete (${completeResult.cellCount} cells)`);
+
+                // Phase 7: Build precedent graph + anchor walk.
+                // Non-fatal — log errors but don't block upload completion.
+                // Batched by sheet to stay within API timeout limits.
+                try {
+                  const sheetCount = mapResult.sheets.length;
+                  const SHEET_BATCH = 10;
+                  let totalPrecedents = 0;
+
+                  // Batch precedent parsing by sheets
+                  for (let si = 0; si < sheetCount; si += SHEET_BATCH) {
+                    const batchResult = await runWorkbookPhase7Api({
+                      workbookId: wbId,
+                      skipAnchorWalk: true,
+                      sheetBatchStart: si,
+                      sheetBatchSize: SHEET_BATCH,
+                    });
+                    totalPrecedents += batchResult?.precedentsInserted ?? 0;
+                  }
+
+                  // Anchor walk (uses existing precedents)
+                  const walkResult = await runWorkbookPhase7Api({
+                    workbookId: wbId,
+                    skipPrecedentRebuild: true,
+                  });
+
+                  console.info(
+                    `[WorkbookMap] Phase 7 complete for ${f.name}: ` +
+                    `${totalPrecedents} precedents, ${walkResult?.anchorsFound ?? 0} anchors, ` +
+                    `${walkResult?.cellsWithDistance ?? 0} cells with distance`
+                  );
+                } catch (p7Err) {
+                  console.error(`[WorkbookMap] Phase 7 failed for ${f.name}:`, p7Err);
+                }
               } else {
                 console.warn(`[WorkbookMap] ${f.name}: CompleteWorkbookMap returned completed=false`);
               }
@@ -4024,7 +4059,7 @@ export default function DealDashboardPage() {
         }
       }
     },
-    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookSheetApi, saveWorkbookStylesApi, saveWorkbookCellsBatchApi, saveVerifyCellsBatchApi, completeWorkbookMapApi, indexDocumentChunks]
+    [dealId, docs, saveDocumentApi, saveDocTablesApi, saveWorkbookMapApi, saveWorkbookSheetApi, saveWorkbookStylesApi, saveWorkbookCellsBatchApi, saveVerifyCellsBatchApi, completeWorkbookMapApi, runWorkbookPhase7Api, indexDocumentChunks]
   );
 
   const handleDeleteDoc = useCallback(async (docId: string) => {

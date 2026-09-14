@@ -454,16 +454,38 @@ export default api({
     // C9: Load verify table for double-read. Always create Map — empty = all cells fail.
     const verifyCells = new Map<string, VerifyCell>();
     try {
-      const VRow = z.object({ sheet_name: z.string(), cell_ref: z.string(), value_num_v2: z.number().nullable(), value_raw_v2: z.string().nullable() });
-      const vRows = await ctx.integrations.db.query(
-        `SELECT v.sheet_name, v.cell_ref, v.value_num_v2, v.value_raw_v2
-         FROM workbook_cells_verify v JOIN workbooks w ON w.id = v.workbook_id
-         WHERE w.deal_id = $1`, VRow, [dealId],
-        { label: "Load verify cells for C9" },
-      );
-      for (const r of vRows) verifyCells.set(`${r.sheet_name}|${r.cell_ref}`, r);
-      console.log(`[DiagReconcileOnly] C9: ${vRows.length} verify cells loaded${vRows.length === 0 ? " — EMPTY, all cited cells will be rejected" : ""}`);
-    } catch { /* table may not exist */ }
+      const VRow = z.object({ sheet_name: z.string(), cell_ref: z.string(), value_num_v2: z.string().nullable() });
+      // Load verify cells in pages to stay under gRPC 4MB limit
+      const V_PAGE = 10000;
+      let vOffset = 0;
+      let vHasMore = true;
+      let vTotal = 0;
+      while (vHasMore) {
+        const vPage = await ctx.integrations.db.query(
+          `SELECT v.sheet_name, v.cell_ref, v.value_num_v2::text
+           FROM workbook_cells_verify v
+           JOIN workbooks w ON w.id = v.workbook_id
+           JOIN documents d ON d.id = w.document_id
+           WHERE d.deal_id = $1
+           ORDER BY v.sheet_name, v.cell_ref
+           LIMIT ${V_PAGE} OFFSET ${vOffset}`, VRow, [dealId],
+          { label: "Load verify cells page " + (vOffset / V_PAGE) },
+        );
+        for (const r of vPage) {
+          verifyCells.set(r.sheet_name + "|" + r.cell_ref, {
+            sheet_name: r.sheet_name,
+            cell_ref: r.cell_ref,
+            value_num_v2: r.value_num_v2 != null ? parseFloat(r.value_num_v2) : null,
+          });
+        }
+        vTotal += vPage.length;
+        vHasMore = vPage.length === V_PAGE;
+        vOffset += V_PAGE;
+      }
+      console.log(`[DiagReconcileOnly] C9: ${vTotal} verify cells loaded${vTotal === 0 ? " — EMPTY, all cited cells will be rejected" : ""}`);
+    } catch (verifyErr) {
+      console.warn(`[DiagReconcileOnly] C9: verify load failed, proceeding with empty verify map:`, String(verifyErr));
+    }
 
     // Run the gate
     const gateResult = runVerificationGate({

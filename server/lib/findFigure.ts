@@ -135,7 +135,6 @@ const CandidateRow = z.object({
   distance_to_anchor: z.number().nullable(),
   chain_break_reason: z.string().nullable(),
   sheet_formula_count: z.union([z.number(), z.string().transform(Number)]).nullable(),
-  pasted_ref_share: z.union([z.number(), z.string().transform(Number)]).nullable(),
 });
 
 // ---------------------------------------------------------------------------
@@ -360,8 +359,7 @@ export async function findFigure(
       c.feeds_returns,
       c.distance_to_anchor,
       c.chain_break_reason,
-      COALESCE(sf.formula_count, 0) AS sheet_formula_count,
-      COALESCE(rp.pasted_ref_share, 0) AS pasted_ref_share
+      COALESCE(sf.formula_count, 0) AS sheet_formula_count
     FROM workbook_cells c
     JOIN workbooks w ON w.id = c.workbook_id
     JOIN documents d ON d.id = w.document_id
@@ -371,27 +369,6 @@ export async function findFigure(
       FROM workbook_cells
       GROUP BY workbook_id, sheet_name
     ) sf ON sf.workbook_id = c.workbook_id AND sf.sheet_name = c.sheet_name
-    LEFT JOIN (
-      -- Restatement detection: share of cross-sheet refs pointing into pasted sheets
-      SELECT
-        p.workbook_id,
-        p.from_sheet AS sheet_name,
-        CASE WHEN COUNT(*) = 0 THEN 0
-          ELSE COUNT(*) FILTER (
-            WHERE ps_target.sheet_name IS NOT NULL
-          )::float / COUNT(*)
-        END AS pasted_ref_share
-      FROM workbook_precedents p
-      LEFT JOIN (
-        -- Identify pasted sheets: zero formulas
-        SELECT workbook_id, sheet_name
-        FROM workbook_cells
-        GROUP BY workbook_id, sheet_name
-        HAVING COUNT(formula) FILTER (WHERE formula IS NOT NULL AND formula != '') = 0
-      ) ps_target ON ps_target.workbook_id = p.workbook_id AND ps_target.sheet_name = p.to_sheet
-      WHERE p.from_sheet != p.to_sheet AND p.ref_kind != 'external'
-      GROUP BY p.workbook_id, p.from_sheet
-    ) rp ON rp.workbook_id = c.workbook_id AND rp.sheet_name = c.sheet_name
     WHERE ${whereClauses}
     LIMIT ${MAX_CANDIDATES}
   `;
@@ -451,21 +428,16 @@ export async function findFigure(
       ? -0.01 * Math.min(dta, 5)  // up to -0.05 for distant cells
       : 0;
 
-    // 2a: Sheet provenance — pasted / restatement / live
+    // 2a: Sheet provenance — pasted / live
     // pasted = zero formulas (imported data)
-    // restatement = live formulas but >50% of cross-sheet refs point to pasted sheets
-    // live = firm's own construction
+    // live = has formulas (firm's own construction)
+    // NOTE: restatement detection (live sheet restating pasted data) requires
+    // precomputed pasted_ref_share which is too heavy for per-query SQL.
+    // Will be added as a precomputed column in Phase 7.
     const sheetFormulas = r.sheet_formula_count ?? 0;
-    const pastedRefShare = r.pasted_ref_share ?? 0;
-    const RESTATEMENT_THRESHOLD = 0.50;
     const sheetProv: "pasted" | "restatement" | "live" | "unknown" =
-      sheetFormulas === 0 ? "pasted"
-      : pastedRefShare >= RESTATEMENT_THRESHOLD ? "restatement"
-      : "live";
-    const provenancePenalty =
-      sheetProv === "pasted" ? -0.10
-      : sheetProv === "restatement" ? -0.10  // same penalty as pasted — it's the other side's numbers
-      : 0;
+      sheetFormulas === 0 ? "pasted" : "live";
+    const provenancePenalty = sheetProv === "pasted" ? -0.10 : 0;
 
     // 1d: State-dependent penalty
     // A cell whose formula chain passes through a toggle/switch is less reliable
