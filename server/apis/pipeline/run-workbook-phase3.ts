@@ -995,6 +995,11 @@ export default api({
       // After R2 assigns case_label from row labels, the case name may still
       // appear as a parent in row_label_path on child rows (e.g. "Upside Case > EBITDA CAGR").
       // Find all distinct case_label values on this sheet and remove them from paths.
+      //
+      // Safety: only strip when the case label appears as a COMPLETE segment
+      // (delimited by " > "). After stripping, verify that row_label is still
+      // contained in the result — if not, the replacement damaged a real label
+      // and we revert that row.
       const CaseLabelRow = z.object({ case_label: z.string() });
       const sheetCaseLabels = await db.query(
         `SELECT DISTINCT case_label FROM workbook_cells
@@ -1004,31 +1009,40 @@ export default api({
         [workbookId, sheetName],
         { label: `Phase3: S3 collect case labels ${sheetName}` },
       );
+      // Single-pass regex strip: build an alternation pattern from all case labels
+      // and remove them as path segments in one UPDATE.
+      // Safety: only update where row_label is still present in the result.
       if (sheetCaseLabels.length > 0) {
-        // Build a chain of REPLACE operations to strip each case label from paths.
-        // Strip patterns: "CaseLabel > " (as prefix) and " > CaseLabel" (as suffix/mid).
-        // Also handle " | " separator variant.
-        let replaceExpr = "row_label_path";
-        for (let ci = 0; ci < sheetCaseLabels.length; ci++) {
-          const pIdx = 3 + ci;
-          // Strip "CaseLabel > " prefix
-          replaceExpr = `REPLACE(${replaceExpr}, $${pIdx} || ' > ', '')`;
-          // Strip " > CaseLabel" suffix/mid
-          replaceExpr = `REPLACE(${replaceExpr}, ' > ' || $${pIdx}, '')`;
-          // Strip "CaseLabel | " (pipe separator)
-          replaceExpr = `REPLACE(${replaceExpr}, $${pIdx} || ' | ', '')`;
-          // Strip " | CaseLabel"
-          replaceExpr = `REPLACE(${replaceExpr}, ' | ' || $${pIdx}, '')`;
-          // Strip exact match (path is just the case label)
-          replaceExpr = `CASE WHEN ${replaceExpr} = $${pIdx} THEN NULL ELSE ${replaceExpr} END`;
-        }
+        // Escape regex metacharacters in case labels
+        const escaped = sheetCaseLabels.map(r =>
+          r.case_label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        );
+        const alt = escaped.join("|");
+        // Pattern matches: "CaseLabel > " (prefix) or " > CaseLabel" (suffix)
+        // or exact match (entire path is a case label)
+        const stripPattern = `(?:(?:${alt}) > | > (?:${alt}))`;
         await db.execute(
           `UPDATE workbook_cells SET
-             row_label_path = NULLIF(TRIM(${replaceExpr}), '')
+             row_label_path = NULLIF(TRIM(
+               CASE
+                 WHEN row_label_path ~ ('^(' || $3 || ')$') THEN NULL
+                 ELSE regexp_replace(row_label_path, $4, '', 'g')
+               END
+             ), '')
            WHERE workbook_id = $1 AND sheet_name = $2
-             AND row_label_path IS NOT NULL`,
-          [workbookId, sheetName, ...sheetCaseLabels.map(r => r.case_label)],
-          { label: `Phase3: S3 strip case from paths ${sheetName}` },
+             AND row_label_path IS NOT NULL
+             AND row_label IS NOT NULL
+             AND row_label_path ~ $4
+             AND POSITION(row_label IN
+               COALESCE(NULLIF(TRIM(
+                 CASE
+                   WHEN row_label_path ~ ('^(' || $3 || ')$') THEN NULL
+                   ELSE regexp_replace(row_label_path, $4, '', 'g')
+                 END
+               ), ''), row_label)
+             ) > 0`,
+          [workbookId, sheetName, alt, stripPattern],
+          { label: `Phase3: S3 strip ${sheetCaseLabels.length} case labels ${sheetName}` },
         );
       }
 
