@@ -460,31 +460,6 @@ export default api({
         }
       }
 
-      // --- Build row_label_path ---
-      // Walk top to bottom with a stack
-      const rowPaths = new Map<number, string>();
-      const stack: Array<{ depth: number; label: string }> = [];
-      for (const r of sortedRows) {
-        if (r < dataRegionStart) continue;
-        const lbl = rowLabels.get(r)?.label;
-        if (!lbl) continue;
-        const depth = rowDepths.get(r) ?? 0;
-        // Pop stack until top is at lesser depth
-        while (stack.length > 0 && stack[stack.length - 1].depth >= depth) {
-          stack.pop();
-        }
-        // Section headers go on the stack but don't get a path entry for themselves
-        if (sectionHeaders.has(r)) {
-          stack.push({ depth, label: lbl });
-          const pathParts = stack.map((s) => s.label);
-          rowPaths.set(r, pathParts.join(" > "));
-          continue;
-        }
-        stack.push({ depth, label: lbl });
-        const pathParts = stack.map((s) => s.label);
-        rowPaths.set(r, pathParts.join(" > "));
-      }
-
       // --- Step 2.3: Aggregate classification ---
       // For each data row, check if it's an aggregate
       const aggregateRows = new Map<number, { evidence: string; componentRange: string | null }>();
@@ -542,6 +517,48 @@ export default api({
         if (lbl && hasSignPrefix(lbl)) {
           signRows.set(r, "negative_displayed");
         }
+      }
+
+      // --- Build row_label_path (R3: fix section stack) ---
+      // Walk top to bottom with a stack.
+      // R3 rules:
+      // - A row at depth ≤ the current section's depth closes that section.
+      // - Aggregate rows (SUM totals) do NOT push onto the stack — they close
+      //   a section but don't open a new one.
+      // - Cap depth at 3. Anything deeper is a stack that failed to pop.
+      // - Don't split on colon — "Marketing:Benefits:Life" is one label.
+      const rowPaths = new Map<number, string>();
+      const stack: Array<{ depth: number; label: string }> = [];
+      const MAX_STACK_DEPTH = 3;
+      for (const r of sortedRows) {
+        if (r < dataRegionStart) continue;
+        const lbl = rowLabels.get(r)?.label;
+        if (!lbl) continue;
+        const depth = Math.min(rowDepths.get(r) ?? 0, MAX_STACK_DEPTH);
+        // Pop stack until top is at lesser depth
+        while (stack.length > 0 && stack[stack.length - 1].depth >= depth) {
+          stack.pop();
+        }
+        // Aggregate rows (totals with SUM) close a section but don't open one.
+        // They get a path but do NOT push onto the stack.
+        const isAgg = aggregateRows.has(r);
+        if (isAgg) {
+          // Path for the aggregate itself = stack context + its own label
+          const pathParts = [...stack.map((s) => s.label), lbl];
+          rowPaths.set(r, pathParts.join(" > "));
+          continue; // do NOT push — this row closes the section
+        }
+        // Section headers go on the stack as parents
+        if (sectionHeaders.has(r)) {
+          stack.push({ depth, label: lbl });
+          const pathParts = stack.map((s) => s.label);
+          rowPaths.set(r, pathParts.join(" > "));
+          continue;
+        }
+        // Regular data row: push and build path
+        stack.push({ depth, label: lbl });
+        const pathParts = stack.map((s) => s.label);
+        rowPaths.set(r, pathParts.join(" > "));
       }
 
       // --- Build updates ---

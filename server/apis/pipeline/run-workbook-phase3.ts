@@ -885,6 +885,36 @@ export default api({
         await batchUpdateCols(colMapsDefault, `TRUE`, [], `all`);
       }
 
+      // --- R2: Case from row label axis ---
+      // On sheets like Case Drivers, case names sit in the label column
+      // ("Upside Case", "PEP Base Case", "Severe Downside Case").
+      // These should populate case_label/case_key, not row_label_path.
+      // Post-pass: find rows where row_label matches a case token,
+      // set case_label from it, and null out row_label_path.
+      await db.execute(
+        `WITH case_rows AS (
+           SELECT DISTINCT row_idx, row_label
+           FROM workbook_cells
+           WHERE workbook_id = $1 AND sheet_name = $2
+             AND row_label IS NOT NULL
+             AND case_label IS NULL
+             AND (
+               row_label ~* '\\m(base|upside|downside|bull|bear|management|mgmt|pep|conservative|aggressive|stress|severe)\\s*(case)?\\M'
+               OR row_label ~* '\\mcase\\M'
+             )
+         )
+         UPDATE workbook_cells c SET
+           case_label = TRIM(REGEXP_REPLACE(REPLACE(cr.row_label, E'\\r\\n', ' '), '\\s+', ' ', 'g')),
+           case_key = LOWER(REGEXP_REPLACE(TRIM(REGEXP_REPLACE(REPLACE(cr.row_label, E'\\r\\n', ' '), '\\s+', ' ', 'g')), '[\\s-]+', '_', 'g')),
+           case_source = 'row_label'
+         FROM case_rows cr
+         WHERE c.workbook_id = $1 AND c.sheet_name = $2
+           AND c.row_idx = cr.row_idx
+           AND c.case_label IS NULL`,
+        [workbookId, sheetName],
+        { label: `Phase3: R2 case from row label ${sheetName}` },
+      );
+
       totalCellsUpdated += cellRows.length;
       totalPeriodsFound += sheetPeriodsFound;
       totalCasesFound += sheetCasesFound;

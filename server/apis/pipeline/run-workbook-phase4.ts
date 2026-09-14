@@ -1,5 +1,5 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { parseExcelFormat } from "../../lib/excelFormatParser.js";
+import { parseExcelFormat, formatDisplayValue } from "../../lib/excelFormatParser.js";
 
 const IC_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -9,7 +9,7 @@ const IC_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
 /** What a text source tells us about unit, currency, and scale. */
 interface TextUnitInfo {
-  unitClass: "currency" | null;  // only currency is inferable from text
+  unitClass: "currency" | "percent" | "multiple" | "count" | "text" | null;
   currency: string | null;       // USD, GBP, EUR, etc.
   multiplier: number;            // 1, 1000, 1000000
 }
@@ -49,6 +49,84 @@ function detectUnitFromText(text: string): TextUnitInfo | null {
     currency,
     multiplier,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Unit / scale detection from row labels (R1 precedence level 2)
+// ---------------------------------------------------------------------------
+
+/** What a row label tells us about unit and scale. */
+interface LabelUnitInfo {
+  unitClass: "currency" | "percent" | "multiple" | "count" | "text" | null;
+  currency: string | null;
+  multiplier: number;
+}
+
+/**
+ * Parse a row label for explicit unit/scale indicators.
+ * Level 2 in the precedence chain — overrides sheet title, overridden by cell format.
+ */
+function detectUnitFromLabel(label: string): LabelUnitInfo | null {
+  if (!label) return null;
+
+  // --- Explicit currency + scale in label (CHECK FIRST) ---
+  // "($k)", "($ in thousands)", "($m)", "($ in millions)", "(£m)"
+  // Must come before count detection so "per Head ($k)" is currency, not count.
+  const labelCurrencyScale = label.match(/\(\s*([\$£€])\s*(?:in\s+)?(k|m|mm|thousands?|millions?|billions?)?\s*\)/i);
+  if (labelCurrencyScale) {
+    const sym = labelCurrencyScale[1];
+    const currency = CURRENCY_SYMBOLS_TEXT[sym] ?? "USD";
+    const scaleWord = (labelCurrencyScale[2] ?? "").toLowerCase();
+    let multiplier = 1;
+    if (scaleWord === "k" || scaleWord.startsWith("thousand")) multiplier = 1_000;
+    else if (scaleWord === "m" || scaleWord === "mm" || scaleWord.startsWith("million")) multiplier = 1_000_000;
+    else if (scaleWord.startsWith("billion")) multiplier = 1_000_000_000;
+    return { unitClass: "currency", currency, multiplier };
+  }
+
+  // --- Count / non-currency indicators ---
+  // Labels beginning with '#' or containing count-family words → count, never currency
+  // Checked AFTER explicit currency so "per Head ($k)" gets currency, not count.
+  if (/^#\s|\bnumber of\b|\bcount\b|\bsites\b|\b(?:head|heads|headcount)\b|\bFTE\b|\bper\s+(?:site|head|FTE|rep|unit)\b/i.test(label)) {
+    return { unitClass: "count", currency: null, multiplier: 1 };
+  }
+
+  // --- Percent in label ---
+  // "(%)", "% YoY", "% of Total", "margin %"
+  if (/\(%\)|%\s+(?:YoY|of|change|margin)|margin\s*%|\b%\b/i.test(label)) {
+    return { unitClass: "percent", currency: null, multiplier: 1 };
+  }
+
+  // --- Multiple in label ---
+  // "(x)", "turns"
+  if (/\(x\)|\bturns\b/i.test(label)) {
+    return { unitClass: "multiple", currency: null, multiplier: 1 };
+  }
+
+  return null;
+}
+
+/**
+ * Check whether a cell's number format is a literal-text identifier
+ * (e.g. '"Sales Rep" "#"General') rather than a real numeric format.
+ * If more than half the positive section is literal text, it's an identifier.
+ */
+function isLiteralTextFormat(fmt: string | null): boolean {
+  if (!fmt) return false;
+  const pos = fmt.split(";")[0] ?? "";
+  // Count characters inside quotes
+  let quotedLen = 0;
+  let inQuote = false;
+  for (let i = 0; i < pos.length; i++) {
+    if (pos[i] === '"' && (i === 0 || pos[i-1] !== '\\')) {
+      inQuote = !inQuote;
+    } else if (inQuote) {
+      quotedLen++;
+    }
+  }
+  // If more than half the positive section is quoted text, it's an identifier
+  const nonQuoteLen = pos.length - quotedLen - (pos.split('"').length - 1);
+  return quotedLen > 0 && quotedLen >= nonQuoteLen;
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +280,7 @@ export default api({
 
       while (true) {
         const cells = await db.query(
-          `SELECT id, value_type, number_format, col_header_raw
+          `SELECT id, value_type, number_format, col_header_raw, row_label, value_num::float AS value_num
            FROM workbook_cells
            WHERE workbook_id = $1 AND sheet_name = $2
              AND value_type IN ('number', 'date')
@@ -213,6 +291,8 @@ export default api({
             value_type: z.string(),
             number_format: z.string().nullable(),
             col_header_raw: z.string().nullable(),
+            row_label: z.string().nullable(),
+            value_num: z.number().nullable(),
           }),
           [workbookId, sheetName, PAGE, offset],
           { label: `Phase4: cells ${sheetName} off ${offset}` },
@@ -229,6 +309,23 @@ export default api({
           let idx = 1;
 
           for (const cell of batch) {
+            // --- R1: Literal-text format guard ---
+            // Formats like '"Sales Rep" "#"General' are identifiers, not numbers.
+            if (isLiteralTextFormat(cell.number_format)) {
+              // For text formats, display_value is the formatted text
+              const textDisplay = formatDisplayValue(cell.value_num, cell.number_format);
+              valueClauses.push(
+                `($${idx}::uuid, $${idx+1}, $${idx+2}, $${idx+3}::int, $${idx+4}::numeric, $${idx+5}, $${idx+6}, $${idx+7})`
+              );
+              params.push(cell.id, "text", null, 0, 1, "none", "cell_format", textDisplay);
+              idx += 8;
+              unitClassCounts["text"] = (unitClassCounts["text"] ?? 0) + 1;
+              unitSourceCounts["cell_format"] = (unitSourceCounts["cell_format"] ?? 0) + 1;
+              scaleCounts["1x"] = (scaleCounts["1x"] ?? 0) + 1;
+              scaleSourceCounts["none"] = (scaleSourceCounts["none"] ?? 0) + 1;
+              continue;
+            }
+
             const parsed = parseExcelFormat(cell.number_format, cell.value_type);
 
             let unitClass: string | null = null;
@@ -238,6 +335,7 @@ export default api({
             let scaleSource: string = "none";
             let unitSource: string = "none";
 
+            // --- Level 1: Cell's own number format (strongest) ---
             if (parsed) {
               unitClass = parsed.unitClass;
               currency = parsed.currency;
@@ -253,25 +351,61 @@ export default api({
               unitClass = "date";
               unitSource = "value_type";
             }
-            // No format string and number type → unknown. General tells you
-            // nothing — unit, currency, and scale all come from context.
-            // Never default a unit class without evidence.
 
-            // Which cells can inherit unit/currency/scale from text context?
-            // Cells already classified as percent, multiple, date, or text
-            // are self-describing — they never inherit external context.
+            // Which cells are self-describing? percent, multiple, date, text
+            // from the format are definitive — they never inherit external context.
             const selfDescribing = unitClass === "percent" || unitClass === "multiple"
               || unitClass === "date" || unitClass === "text";
 
-            // Can this cell's unit_class be upgraded by context?
-            // count/ratio from format are generic — a "#,##0" cell on a
-            // sheet titled "($ in Millions)" is a dollar amount, not a count.
-            // Only percent/multiple/date/text are immune to context upgrade.
-            const canUpgradeClass = !selfDescribing
+            // --- Level 2: Row label (R1 — overrides sheet title, not cell format) ---
+            // A label that states its own units wins over the sheet title.
+            // Labels beginning with '#' or containing count-family words → count, not currency.
+            let labelInfo: LabelUnitInfo | null = null;
+            if (!selfDescribing && cell.row_label) {
+              labelInfo = detectUnitFromLabel(cell.row_label);
+              if (labelInfo) {
+                // Label-detected count/percent/multiple override format-level count/ratio/null
+                if (labelInfo.unitClass === "count") {
+                  // Count from label is definitive — never upgrade to currency
+                  unitClass = "count";
+                  unitSource = "row_label";
+                  // Count rows don't inherit scale from sheet title
+                  scaleMultiplier = 1;
+                  scaleSource = "none";
+                } else if (labelInfo.unitClass === "percent") {
+                  unitClass = "percent";
+                  unitSource = "row_label";
+                  scaleMultiplier = 1;
+                  scaleSource = "none";
+                } else if (labelInfo.unitClass === "multiple") {
+                  unitClass = "multiple";
+                  unitSource = "row_label";
+                  scaleMultiplier = 1;
+                  scaleSource = "none";
+                } else if (labelInfo.unitClass === "currency") {
+                  // Label says currency with explicit scale (e.g. "($k)")
+                  if (!unitClass || unitClass === "count" || unitClass === "ratio") {
+                    unitClass = "currency";
+                    unitSource = "row_label";
+                  }
+                  if (!currency && labelInfo.currency) currency = labelInfo.currency;
+                  if (labelInfo.multiplier > 1 && scaleSource === "none") {
+                    scaleMultiplier = labelInfo.multiplier;
+                    scaleSource = "row_label";
+                  }
+                }
+              }
+            }
+
+            // Can this cell's unit_class still be upgraded by context (col header / sheet title)?
+            // After label processing: only if still generic (count/ratio/null from format)
+            // AND the label didn't override to a definitive type.
+            const labelDecided = labelInfo !== null;
+            const canUpgradeClass = !selfDescribing && !labelDecided
               && (unitClass === "count" || unitClass === "ratio" || !unitClass);
 
-            // Apply column header unit/scale
-            if (!selfDescribing && cell.col_header_raw) {
+            // --- Level 3: Column header ---
+            if (!selfDescribing && !labelDecided && cell.col_header_raw) {
               const colInfo = detectUnitFromText(cell.col_header_raw);
               if (colInfo) {
                 if (colInfo.unitClass && canUpgradeClass) {
@@ -286,8 +420,8 @@ export default api({
               }
             }
 
-            // Apply sheet-level unit/scale as last fallback
-            if (!selfDescribing && sheetUnitInfo) {
+            // --- Level 4: Sheet title (weakest) ---
+            if (!selfDescribing && !labelDecided && sheetUnitInfo) {
               if (sheetUnitInfo.unitClass && canUpgradeClass && unitSource !== "column_header") {
                 unitClass = sheetUnitInfo.unitClass;
                 unitSource = sheetUnitInfo.source;
@@ -301,15 +435,46 @@ export default api({
               }
             }
 
+            // --- Plausibility trip-wire (R1) ---
+            // If scale came from sheet_title and makes this cell implausibly large,
+            // reject it. Two checks:
+            //   1. Absolute ceiling: any single cell > $500M is suspect for a sub-$200M company
+            //   2. Relative ceiling: value_raw > 100 with 1M scale → $100M+, suspicious
+            //      for non-aggregate rows (the value is already large in absolute terms)
+            // Only trip if the cell format doesn't contain a currency symbol.
+            if (scaleSource === "sheet_title" && cell.value_num !== null && scaleMultiplier > 1) {
+              const absRaw = Math.abs(cell.value_num);
+              const scaledAbs = absRaw * scaleMultiplier;
+              const formatHasCurrency = parsed?.currency != null;
+              if (!formatHasCurrency) {
+                // Trip-wire 1: absolute ceiling at $500M
+                if (scaledAbs > 500_000_000) {
+                  scaleMultiplier = 1;
+                  scaleSource = "rejected_implausible";
+                }
+                // Trip-wire 2: raw value already large (>100) and scale is 1M+
+                // → the cell's own magnitude suggests it's already in display units.
+                // E.g., 160 on a "$M" sheet → $160M, but the cell is probably $160K.
+                // Only trip if raw > 100 AND scale >= 1M (raw 0–100 is normal for $M sheets).
+                else if (absRaw > 100 && scaleMultiplier >= 1_000_000) {
+                  scaleMultiplier = 1;
+                  scaleSource = "rejected_implausible";
+                }
+              }
+            }
+
+            // R4: compute display_value
+            const displayVal = formatDisplayValue(cell.value_num, cell.number_format);
+
             valueClauses.push(
-              `($${idx}::uuid, $${idx+1}, $${idx+2}, $${idx+3}::int, $${idx+4}::numeric, $${idx+5}, $${idx+6})`
+              `($${idx}::uuid, $${idx+1}, $${idx+2}, $${idx+3}::int, $${idx+4}::numeric, $${idx+5}, $${idx+6}, $${idx+7})`
             );
             params.push(
               cell.id,
               unitClass, currency, decimals,
-              scaleMultiplier, scaleSource, unitSource,
+              scaleMultiplier, scaleSource, unitSource, displayVal,
             );
-            idx += 7;
+            idx += 8;
 
             // Aggregate stats
             if (unitClass) unitClassCounts[unitClass] = (unitClassCounts[unitClass] ?? 0) + 1;
@@ -322,7 +487,7 @@ export default api({
 
           // Batch UPDATE via CTE
           await db.execute(
-            `WITH vals(cid, uc, cur, dec, sm, ss, us) AS (
+            `WITH vals(cid, uc, cur, dec, sm, ss, us, dv) AS (
                VALUES ${valueClauses.join(", ")}
              )
              UPDATE workbook_cells c SET
@@ -331,7 +496,8 @@ export default api({
                decimals = v.dec,
                scale_multiplier = v.sm,
                scale_source = v.ss,
-               unit_source = v.us
+               unit_source = v.us,
+               display_value = v.dv
              FROM vals v
              WHERE c.id = v.cid`,
             params,

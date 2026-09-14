@@ -287,6 +287,8 @@ function containsUnescaped(section: string, char: string): boolean {
   for (let i = 0; i < section.length; i++) {
     if (section[i] === '"') { inQuote = !inQuote; continue; }
     if (section[i] === "\\" && !inQuote) { i++; continue; }
+    // '_' means "pad with the width of next char" — skip the next char entirely
+    if (section[i] === "_" && !inQuote) { i++; continue; }
     if (section[i] === char && !inQuote) return true;
   }
   return false;
@@ -432,4 +434,134 @@ function inferFromValueType(valueType?: string): "currency" | "percent" | "multi
     case "boolean": return "text";
     default: return "count";
   }
+}
+
+// ---------------------------------------------------------------------------
+// R4: Display value renderer
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a raw numeric value the way Excel would display it.
+ *
+ * This renders the number per its format code — commas, decimals, percent
+ * multiply, currency symbols, negative-in-parens, zero-as-dash.
+ * Returns null when the format code isn't recognised (never a fallback
+ * to the raw number).
+ */
+export function formatDisplayValue(value: number | null, fmt: string | null): string | null {
+  if (value === null || value === undefined) return null;
+  if (!fmt || fmt === "General") {
+    // General: Excel's default — show as-is with reasonable precision
+    if (Number.isInteger(value)) return String(value);
+    return value.toPrecision(10).replace(/\.?0+$/, "");
+  }
+
+  const sections = splitFormatSections(fmt);
+  // Select section: positive;negative;zero;text
+  let section: string;
+  if (value > 0) {
+    section = sections[0];
+  } else if (value < 0) {
+    section = sections.length > 1 ? sections[1] : sections[0];
+  } else {
+    section = sections.length > 2 ? sections[2] : sections[0];
+  }
+
+  if (!section) return null;
+
+  // --- Zero section: literal text like "--", "–", " - " ---
+  if (value === 0) {
+    // Extract quoted literal from zero section
+    const zeroLit = extractQuotedText(section);
+    if (zeroLit !== null) return zeroLit;
+  }
+
+  // --- Determine if percent format ---
+  const isPercent = containsUnescaped(section, "%");
+  let num = isPercent ? value * 100 : value;
+
+  // For negative section, work with absolute value (parens/minus in format)
+  const isNeg = num < 0;
+  if (isNeg && sections.length > 1) num = Math.abs(num);
+
+  // --- Count trailing comma scale in format (display-level, not storage) ---
+  // Already accounted for in value_raw by Phase 4, so don't re-apply.
+  // Format trailing commas affect what we show, but value_raw is pre-scaled.
+
+  // --- Count decimal places from format ---
+  const decimals = countDecimals(section);
+
+  // --- Format the number ---
+  // Check for comma grouping
+  const hasComma = containsUnescaped(section, ",");
+  let formatted: string;
+  if (hasComma) {
+    // Comma-separated with fixed decimals
+    const parts = Math.abs(num).toFixed(decimals).split(".");
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    formatted = parts.join(".");
+  } else {
+    formatted = Math.abs(num).toFixed(decimals);
+  }
+
+  // --- Prefix: currency symbol ---
+  let prefix = "";
+  // "$" or [$$] or "£" etc.
+  const dollarMatch = section.match(/(?:"\$"|\[\$\$[^\]]*\])/);
+  if (dollarMatch) prefix = "$";
+  else if (containsUnescaped(section, "£")) prefix = "£";
+  else if (containsUnescaped(section, "€")) prefix = "€";
+
+  // --- Suffix ---
+  let suffix = "";
+  if (isPercent) suffix = "%";
+  // Literal suffix like "x"
+  const litSuf = extractLiteralSuffix(section);
+  if (litSuf && !isPercent) suffix = litSuf;
+
+  // --- Negative display ---
+  if (isNeg) {
+    if (hasParenNeg(section) || (sections.length > 1 && section.includes("("))) {
+      formatted = `(${prefix}${formatted}${suffix})`;
+    } else {
+      formatted = `-${prefix}${formatted}${suffix}`;
+    }
+  } else {
+    formatted = `${prefix}${formatted}${suffix}`;
+  }
+
+  return formatted;
+}
+
+/**
+ * Extract quoted literal text from a format section.
+ * Used for zero-display like "--", "–", " - ".
+ */
+function extractQuotedText(section: string): string | null {
+  const parts: string[] = [];
+  let i = 0;
+  let hasQuoted = false;
+  while (i < section.length) {
+    if (section[i] === '"') {
+      hasQuoted = true;
+      i++;
+      let lit = "";
+      while (i < section.length && section[i] !== '"') {
+        lit += section[i];
+        i++;
+      }
+      if (lit.trim()) parts.push(lit);
+      i++; // skip closing quote
+    } else if (section[i] === '\\' && i + 1 < section.length) {
+      // Escaped literal: \- becomes -
+      parts.push(section[i + 1]);
+      hasQuoted = true;
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+  if (!hasQuoted) return null;
+  const result = parts.join("").trim();
+  return result || null;
 }
