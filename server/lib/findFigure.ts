@@ -57,6 +57,7 @@ export interface FigureCandidate {
   feedsReturns: boolean | null;
   distanceToAnchor: number | null;
   chainBreakReason: string | null;
+  sheetProvenance: "pasted" | "live" | "unknown";
   score: number;
   scoreBreakdown: {
     tokenOverlap: number;
@@ -67,6 +68,7 @@ export interface FigureCandidate {
     signPenalty?: number;
     upstreamBonus?: number;
     statePenalty?: number;
+    provenancePenalty?: number;
   };
 }
 
@@ -130,6 +132,7 @@ const CandidateRow = z.object({
   feeds_returns: z.boolean().nullable(),
   distance_to_anchor: z.number().nullable(),
   chain_break_reason: z.string().nullable(),
+  sheet_formula_count: z.union([z.number(), z.string().transform(Number)]).nullable(),
 });
 
 // ---------------------------------------------------------------------------
@@ -353,10 +356,17 @@ export async function findFigure(
       c.feeds_entry_value,
       c.feeds_returns,
       c.distance_to_anchor,
-      c.chain_break_reason
+      c.chain_break_reason,
+      COALESCE(sf.formula_count, 0) AS sheet_formula_count
     FROM workbook_cells c
     JOIN workbooks w ON w.id = c.workbook_id
     JOIN documents d ON d.id = w.document_id
+    LEFT JOIN (
+      SELECT workbook_id, sheet_name,
+        COUNT(formula) FILTER (WHERE formula IS NOT NULL AND formula != '') AS formula_count
+      FROM workbook_cells
+      GROUP BY workbook_id, sheet_name
+    ) sf ON sf.workbook_id = c.workbook_id AND sf.sheet_name = c.sheet_name
     WHERE ${whereClauses}
     LIMIT ${MAX_CANDIDATES}
   `;
@@ -416,6 +426,11 @@ export async function findFigure(
       ? -0.01 * Math.min(dta, 5)  // up to -0.05 for distant cells
       : 0;
 
+    // 2a: Sheet provenance — pasted (imported) vs live (firm's own formulas)
+    const sheetFormulas = r.sheet_formula_count ?? 0;
+    const sheetProv: "pasted" | "live" | "unknown" = sheetFormulas === 0 ? "pasted" : "live";
+    const provenancePenalty = sheetProv === "pasted" ? -0.10 : 0;
+
     // 1d: State-dependent penalty
     // A cell whose formula chain passes through a toggle/switch is less reliable
     const stateDependent = (r.chain_break_reason ?? "").includes("switch")
@@ -466,7 +481,8 @@ export async function findFigure(
       feedsReturns: r.feeds_returns,
       distanceToAnchor: r.distance_to_anchor,
       chainBreakReason: r.chain_break_reason,
-      score: scores.total + sheetBonus + signPenalty + upstreamBonus + statePenalty,
+      sheetProvenance: sheetProv,
+      score: scores.total + sheetBonus + signPenalty + upstreamBonus + statePenalty + provenancePenalty,
       scoreBreakdown: {
         tokenOverlap: scores.tokenOverlap,
         pathBonus: scores.pathBonus,
@@ -476,6 +492,7 @@ export async function findFigure(
         signPenalty,
         upstreamBonus,
         statePenalty,
+        provenancePenalty,
       },
     };
   });
