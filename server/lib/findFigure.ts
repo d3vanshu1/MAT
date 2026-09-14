@@ -27,6 +27,7 @@ export interface FindFigureInput {
   scope?: string | null;        // optional segment/member filter
   dealId: string;
   sheetPreferences?: Record<string, string[]> | null; // sheet_name -> is_primary_for metric families
+  restatementSheets?: Set<string>;  // precomputed set of sheet names flagged as restatements
 }
 
 export interface FigureCandidate {
@@ -280,6 +281,9 @@ export async function findFigure(
 ): Promise<FindFigureResult> {
   const filtersApplied: string[] = [];
 
+  // Restatement sheets: passed in from caller (precomputed once per deal)
+  const restatementSheets = input.restatementSheets ?? new Set<string>();
+
   // Determine role
   let role = input.workbookRole;
   if (!role) {
@@ -428,16 +432,16 @@ export async function findFigure(
       ? -0.01 * Math.min(dta, 5)  // up to -0.05 for distant cells
       : 0;
 
-    // 2a: Sheet provenance — pasted / live
+    // 2a: Sheet provenance — pasted / restatement / live
     // pasted = zero formulas (imported data)
-    // live = has formulas (firm's own construction)
-    // NOTE: restatement detection (live sheet restating pasted data) requires
-    // precomputed pasted_ref_share which is too heavy for per-query SQL.
-    // Will be added as a precomputed column in Phase 7.
+    // restatement = live formulas but >50% cross-sheet refs into pasted sheets
+    // live = has formulas, firm's own construction
     const sheetFormulas = r.sheet_formula_count ?? 0;
     const sheetProv: "pasted" | "restatement" | "live" | "unknown" =
-      sheetFormulas === 0 ? "pasted" : "live";
-    const provenancePenalty = sheetProv === "pasted" ? -0.10 : 0;
+      sheetFormulas === 0 ? "pasted"
+      : restatementSheets.has(r.sheet_name) ? "restatement"
+      : "live";
+    const provenancePenalty = (sheetProv === "pasted" || sheetProv === "restatement") ? -0.10 : 0;
 
     // 1d: State-dependent penalty
     // A cell whose formula chain passes through a toggle/switch is less reliable

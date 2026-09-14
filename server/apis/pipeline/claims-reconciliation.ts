@@ -752,6 +752,7 @@ function candidateToFigure(c: FigureCandidate, docId: string): Figure {
     feeds_returns: c.feedsReturns,
     distance_to_anchor: c.distanceToAnchor,
     chain_break_reason: c.chainBreakReason,
+    sheet_provenance: c.sheetProvenance,
   } as Figure & Record<string, unknown>;
 }
 
@@ -948,19 +949,27 @@ function processMatch(
   // Align percentage scale: if claim is 54% and model stores 0.518, convert model to 51.8
   let modelVal = alignPercentageScale(claimVal, claim.unit, modelFig.value);
 
-  // 1a: Sign convention — compare on magnitude. A (-)‑prefixed row is the same
-  // quantity stated as a deduction. Use |modelVal| when signs disagree so the
-  // convention never manufactures a delta.
-  const isDeductionConvention = nf.sign_convention === "deduction"
+  // 1a/1.2: Sign convention — compare on magnitudes when signs disagree.
+  // A delta larger than both inputs means two numbers were added, not compared.
+  // Store the convention used on both sides for the finding.
+  const modelSign: "deduction" | "natural" = (
+    nf.sign_convention === "deduction"
     || nf.sign_convention === "negative_displayed"
-    || /^\([-–]\)/.test((modelFig.name ?? "").trim());
-  if (isDeductionConvention && claimVal > 0 && modelVal < 0) {
-    modelVal = Math.abs(modelVal);
-  } else if ((nf.sign_convention === "addition" || /^\(\+\)/.test((modelFig.name ?? "").trim())) && claimVal < 0 && modelVal > 0) {
-    modelVal = -modelVal;
+    || /^\([-–]\)/.test((modelFig.name ?? "").trim())
+  ) ? "deduction" : "natural";
+  const claimSign: "deduction" | "natural" = claimVal < 0 ? "deduction" : "natural";
+
+  // When signs disagree, compare magnitudes — the sign is a convention difference,
+  // not a quantity difference. Never let a convention difference manufacture a delta.
+  const signsDisagree = (claimVal > 0 && modelVal < 0) || (claimVal < 0 && modelVal > 0);
+  let comparableClaim = claimVal;
+  let comparableModel = modelVal;
+  if (signsDisagree) {
+    comparableClaim = Math.abs(claimVal);
+    comparableModel = Math.abs(modelVal);
   }
 
-  const deltaAbs = Math.abs(claimVal - modelVal);
+  const deltaAbs = Math.abs(comparableClaim - comparableModel);
 
   // FIX 7: Zero/near-zero denominator handling.
   // When modelVal is zero or near-zero (< £1k), percentage computation is undefined.
@@ -969,18 +978,18 @@ function processMatch(
   const DE_MINIMIS_THRESHOLD = 10_000; // £10k — below this, both values are negligible
   const NEAR_ZERO_THRESHOLD = 1_000;   // £1k — denominator too small for meaningful %
 
-  if (Math.abs(modelVal) < NEAR_ZERO_THRESHOLD && Math.abs(claimVal) < DE_MINIMIS_THRESHOLD) {
+  if (Math.abs(comparableModel) < NEAR_ZERO_THRESHOLD && Math.abs(comparableClaim) < DE_MINIMIS_THRESHOLD) {
     // Both values are trivially small — no meaningful divergence
     return { kind: "within_tolerance", finding: null };
   }
 
   let deltaPct: number;
-  if (Math.abs(modelVal) < NEAR_ZERO_THRESHOLD) {
+  if (Math.abs(comparableModel) < NEAR_ZERO_THRESHOLD) {
     // Model is zero/near-zero but claim is non-trivial: use absolute delta only.
     // Set deltaPct to null-equivalent (will not drive severity via percentage threshold).
     deltaPct = 0; // Severity will be driven solely by deltaAbs
   } else {
-    deltaPct = deltaAbs / Math.abs(modelVal);
+    deltaPct = deltaAbs / Math.abs(comparableModel);
   }
 
   // ----- C12: Approximation bands -----
@@ -1440,6 +1449,31 @@ export async function runReconciliation(
 
     console.log(`[Reconciliation:MAP] Processing ${dedupedClaims.length} claims via findFigure (29k+ candidates)`);
 
+    // Precompute restatement sheets once for the deal
+    const RestatementRow = z.object({ sheet_name: z.string() });
+    let restatementSheets = new Set<string>();
+    try {
+      const rstRows = await mapQueryFn(
+        `SELECT p.from_sheet AS sheet_name
+         FROM workbook_precedents p
+         JOIN workbooks w ON w.id = p.workbook_id
+         JOIN documents d ON d.id = w.document_id
+         LEFT JOIN (
+           SELECT workbook_id, sheet_name FROM workbook_cells
+           GROUP BY workbook_id, sheet_name
+           HAVING COUNT(formula) FILTER (WHERE formula IS NOT NULL AND formula != '') = 0
+         ) ps ON ps.workbook_id = p.workbook_id AND ps.sheet_name = p.to_sheet
+         WHERE d.deal_id = $1 AND p.from_sheet != p.to_sheet AND p.ref_kind != 'external'
+         GROUP BY p.from_sheet
+         HAVING COUNT(*) FILTER (WHERE ps.sheet_name IS NOT NULL)::float / GREATEST(COUNT(*), 1) > 0.5`,
+        RestatementRow, [dealId],
+      );
+      for (const r of rstRows) restatementSheets.add(r.sheet_name);
+      if (restatementSheets.size > 0) {
+        console.log(`[Reconciliation:MAP] Restatement sheets detected: ${[...restatementSheets].join(", ")}`);
+      }
+    } catch { /* non-critical */ }
+
     for (const claim of dedupedClaims) {
       // Skip UNDATED and NONE_STATED — same as old path
       const normalizedClaimPeriod = normalizePeriod(claim.period);
@@ -1500,6 +1534,7 @@ export async function runReconciliation(
           : null : null,
         caseKey: null,  // Let findFigure search all cases; C13 will gate downstream
         workbookRole: null,  // Let findFigure route by keyword
+        restatementSheets,
       };
 
       let ffResult: FindFigureResult;
@@ -2073,6 +2108,75 @@ export async function runReconciliation(
         number_format: (f.model_figure as any)?.number_format ?? null,
       };
     });
+
+  // ── 1.5: Basis test for aggregates ──────────────────────────────
+  // If a data_divergence's delta equals (within tolerance) the value of
+  // another labelled cell in the same sheet and period, the two sides
+  // are on different bases — one includes an item the other excludes.
+  // Reclassify as scope_mismatch with the accounting-for item named.
+  if (_useWorkbookMap && options?.queryFn) {
+    // Only check data_divergence findings that passed materiality (will be published)
+  const divergenceFindings = findings.filter(
+    f => f.finding_kind === "data_divergence" && f.model_figure && f.delta_abs != null && f.delta_abs >= 1000
+  );
+  if (divergenceFindings.length > 0) {
+    // Single batch query: load all cells for the sheets/periods these findings reference
+    const sheetPeriodPairs = new Set<string>();
+    for (const f of divergenceFindings) {
+      const fig = f.model_figure as unknown as Record<string, unknown>;
+      const sheet = fig.source_sheet as string | undefined;
+      if (sheet && f.model_figure!.period) sheetPeriodPairs.add(`${sheet}|${f.model_figure!.period}`);
+    }
+    // Load all candidate cells in one query
+    const allBasisRows: Array<{ sheet_name: string; period: string; row_label: string; value_num: number }> = [];
+    try {
+      const BasisBatchRow = z.object({
+        sheet_name: z.string(),
+        period: z.string(),
+        row_label: z.string(),
+        value_num: z.union([z.number(), z.string().transform(Number)]),
+      });
+      const pairs = [...sheetPeriodPairs].map(p => p.split("|"));
+      if (pairs.length > 0 && pairs.length <= 20) {
+        for (const [sheet, period] of pairs) {
+          const rows = await options.queryFn(
+            `SELECT c.sheet_name, c.period_start::text AS period, c.row_label,
+                    c.value_num::float * COALESCE(NULLIF(c.scale_multiplier::float, 0), 1) AS value_num
+             FROM workbook_cells c
+             JOIN workbooks w ON w.id = c.workbook_id
+             JOIN documents d ON d.id = w.document_id
+             WHERE d.deal_id = $1 AND c.sheet_name = $2 AND c.period_start = $3
+               AND c.value_num IS NOT NULL AND c.row_label IS NOT NULL
+             LIMIT 200`,
+            BasisBatchRow, [dealId, sheet, period],
+          );
+          allBasisRows.push(...rows);
+        }
+      }
+    } catch { /* non-critical */ }
+
+    // Check each finding
+    const TOLERANCE = 0.05;
+    for (const f of divergenceFindings) {
+      const fig = f.model_figure as unknown as Record<string, unknown>;
+      const sheet = fig.source_sheet as string | undefined;
+      if (!sheet) continue;
+      const delta = f.delta_abs!;
+      const candidates = allBasisRows.filter(
+        bc => bc.sheet_name === sheet && bc.period === f.model_figure!.period && bc.row_label !== fig.source_cell
+      );
+      const match = candidates.find(bc => {
+        const ratio = Math.abs(bc.value_num) > 0 ? Math.abs(delta - Math.abs(bc.value_num)) / Math.abs(bc.value_num) : Infinity;
+        return ratio < TOLERANCE;
+      });
+      if (match) {
+        f.finding_kind = "scope_mismatch" as any;
+        f.detail = (f.detail ?? "") +
+          `\n\n**Basis difference detected:** the delta (${(delta / 1e6).toFixed(1)}m) equals "${match.row_label}" (${(Math.abs(match.value_num) / 1e6).toFixed(1)}m) on the same sheet and period. The two sides likely differ by the inclusion/exclusion of this item.`;
+      }
+    }
+  }
+  }
 
   // ── Coverage split ──────────────────────────────────────────────
   // "We couldn't find the other side" is coverage, not a finding.

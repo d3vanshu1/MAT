@@ -25,6 +25,7 @@ import type { Figure } from "./numeric-verify-inline.js";
 export type GateCheck =
   | "quote_integrity"
   | "figure_existence"
+  | "cross_version"          // 1.3: finding cites pasted/restatement sheet
   | "delta_provenance"
   | "source_naming"
   | "unit_coherence"
@@ -139,6 +140,7 @@ export function runVerificationGate(input: GateInput): GateResult {
   const rejection_counts: Record<GateCheck, number> = {
     quote_integrity: 0,
     figure_existence: 0,
+    cross_version: 0,
     delta_provenance: 0,
     source_naming: 0,
     unit_coherence: 0,
@@ -223,6 +225,10 @@ function checkFinding(
   // Check 6: Parallel offset
   const offsetResult = checkParallelOffset(f, suspectScopes);
   if (offsetResult) return offsetResult;
+
+  // Check 6b (1.3): Cross-version — published data_divergence must cite a live cell
+  const crossVersionResult = checkCrossVersion(f);
+  if (crossVersionResult) return crossVersionResult;
 
   // Check 7 (C9): Double-read — model-side value cross-check
   const doubleReadResult = checkDoubleRead(f, verifyCells, doubleReadMismatches);
@@ -455,6 +461,33 @@ function checkFigureExistence(
   // Non-prenorm figures come from numeric_reports — they exist by construction
   // (loaded from the report). No additional check needed.
 
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// 1.3: Cross-version gate — a published data_divergence must cite a live cell.
+// A pasted/restatement sheet carries the other side's numbers and should not
+// produce findings — it's a coverage entry, not a discrepancy.
+// ---------------------------------------------------------------------------
+function checkCrossVersion(f: ReconciliationFinding): GateRejection | null {
+  if (f.finding_kind !== "data_divergence") return null;
+  if (!f.model_figure) return null;
+  const fig = f.model_figure as unknown as Record<string, unknown>;
+  const prov = fig.sheet_provenance;
+  if (prov === "pasted") {
+    return {
+      finding: f,
+      check: "cross_version",
+      reason: `finding cites sheet "${fig.source_sheet}" which has zero formulas (pasted data)`,
+    };
+  }
+  if (prov === "restatement") {
+    return {
+      finding: f,
+      check: "cross_version",
+      reason: `finding cites sheet "${fig.source_sheet}" which is a restatement of pasted data`,
+    };
+  }
   return null;
 }
 
