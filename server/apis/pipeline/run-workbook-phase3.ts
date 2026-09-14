@@ -726,6 +726,69 @@ export default api({
         colMapsDefault = buildColMap(headerBandRows, null, null);
       }
 
+      // ── S1: Column cadence detection ──
+      // Detect monthly/quarterly runs and reclassify December→FY errors.
+      function fixPeriodCadence(colMap: Map<number, { period: ParsedPeriod | null; caseInfo: any; headerRaw: string | null }>) {
+        // Collect dated columns
+        const dated: { col: number; start: string; entry: { period: ParsedPeriod | null; caseInfo: any; headerRaw: string | null } }[] = [];
+        for (const [col, entry] of colMap) {
+          if (entry.period?.periodStart && entry.period.periodStart.match(/^\d{4}-\d{2}-\d{2}$/)) {
+            dated.push({ col, start: entry.period.periodStart, entry });
+          }
+        }
+        if (dated.length < 3) return; // need at least 3 columns to detect cadence
+
+        dated.sort((a, b) => a.start.localeCompare(b.start));
+
+        // Compute steps between consecutive columns in months
+        const steps: number[] = [];
+        for (let i = 1; i < dated.length; i++) {
+          const [y1, m1] = dated[i - 1].start.split("-").map(Number);
+          const [y2, m2] = dated[i].start.split("-").map(Number);
+          steps.push((y2 - y1) * 12 + (m2 - m1));
+        }
+
+        // Median step
+        const sorted = [...steps].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+
+        if (median === 1) {
+          // Monthly run — reclassify any FY within it
+          for (const d of dated) {
+            if (d.entry.period && d.entry.period.periodType === "FY") {
+              const [yr, mo, dy] = d.entry.period.periodEnd!.split("-").map(Number);
+              d.entry.period = {
+                periodType: "point_date",
+                periodStart: d.entry.period.periodEnd!,
+                periodEnd: d.entry.period.periodEnd!,
+                periodLabel: d.entry.period.periodEnd!,
+                periodBasis: d.entry.period.periodBasis,
+              };
+            }
+          }
+        } else if (median === 3) {
+          // Quarterly run — reclassify any FY within it
+          for (const d of dated) {
+            if (d.entry.period && d.entry.period.periodType === "FY") {
+              const [yr, mo] = d.entry.period.periodEnd!.split("-").map(Number);
+              const q = Math.ceil(mo / 3);
+              d.entry.period = {
+                ...d.entry.period,
+                periodType: "Q",
+                periodLabel: `Q${q} ${yr}`,
+              };
+            }
+          }
+        }
+        // Annual (median ~12) or irregular: leave as-is
+      }
+
+      // Apply cadence fix to all column maps
+      const allColMaps = sectionColMaps.length > 0 ? sectionColMaps : (colMapsDefault ? [colMapsDefault] : []);
+      for (const m of allColMaps) {
+        fixPeriodCadence(m);
+      }
+
       // Sheet-level case from sheet name
       let sheetCaseLabel: string | null = null;
       const sheetCase = extractCase(sheetName);
@@ -770,7 +833,6 @@ export default api({
       let sheetCasesFound = 0;
       const countedPeriodCols = new Set<number>();
       const countedCaseCols = new Set<number>();
-      const allColMaps = sectionColMaps.length > 0 ? sectionColMaps : (colMapsDefault ? [colMapsDefault] : []);
       for (const m of allColMaps) {
         for (const [col, entry] of m) {
           if (entry.period && !countedPeriodCols.has(col)) { sheetPeriodsFound++; countedPeriodCols.add(col); }
@@ -906,7 +968,8 @@ export default api({
          UPDATE workbook_cells c SET
            case_label = TRIM(REGEXP_REPLACE(REPLACE(cr.row_label, E'\\r\\n', ' '), '\\s+', ' ', 'g')),
            case_key = LOWER(REGEXP_REPLACE(TRIM(REGEXP_REPLACE(REPLACE(cr.row_label, E'\\r\\n', ' '), '\\s+', ' ', 'g')), '[\\s-]+', '_', 'g')),
-           case_source = 'row_label'
+           case_source = 'row_label',
+           row_label_path = NULL
          FROM case_rows cr
          WHERE c.workbook_id = $1 AND c.sheet_name = $2
            AND c.row_idx = cr.row_idx

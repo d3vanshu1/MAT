@@ -1,5 +1,5 @@
 import { api, z, postgres } from "@superblocksteam/sdk-api";
-import { parseExcelFormat, formatDisplayValue } from "../../lib/excelFormatParser.js";
+import { parseExcelFormat, formatDisplayValue, isLiteralTextFormat } from "../../lib/excelFormatParser.js";
 
 const IC_DB = "ba09e2b9-2715-4460-8131-896f50b0c414";
 
@@ -106,28 +106,7 @@ function detectUnitFromLabel(label: string): LabelUnitInfo | null {
   return null;
 }
 
-/**
- * Check whether a cell's number format is a literal-text identifier
- * (e.g. '"Sales Rep" "#"General') rather than a real numeric format.
- * If more than half the positive section is literal text, it's an identifier.
- */
-function isLiteralTextFormat(fmt: string | null): boolean {
-  if (!fmt) return false;
-  const pos = fmt.split(";")[0] ?? "";
-  // Count characters inside quotes
-  let quotedLen = 0;
-  let inQuote = false;
-  for (let i = 0; i < pos.length; i++) {
-    if (pos[i] === '"' && (i === 0 || pos[i-1] !== '\\')) {
-      inQuote = !inQuote;
-    } else if (inQuote) {
-      quotedLen++;
-    }
-  }
-  // If more than half the positive section is quoted text, it's an identifier
-  const nonQuoteLen = pos.length - quotedLen - (pos.split('"').length - 1);
-  return quotedLen > 0 && quotedLen >= nonQuoteLen;
-}
+// isLiteralTextFormat is imported from excelFormatParser.ts (line 2)
 
 // ---------------------------------------------------------------------------
 // Main API
@@ -273,6 +252,44 @@ export default api({
         }
       }
 
+      // ── S2: Dominant format detection ──
+      // Find the most common format signature among cells the sheet-title scale would apply to.
+      // Cells with a different signature won't inherit the sheet-title scale.
+      type FormatSig = { hasCurrSym: boolean; decimals: number };
+      let dominantSig: FormatSig | null = null;
+      if (sheetUnitInfo) {
+        const sigCounts = new Map<string, { sig: FormatSig; count: number }>();
+        const sampleCells = await db.query(
+          `SELECT number_format, value_type
+           FROM workbook_cells
+           WHERE workbook_id = $1 AND sheet_name = $2
+             AND value_type = 'number' AND value_num IS NOT NULL
+           LIMIT 3000`,
+          z.object({ number_format: z.string().nullable(), value_type: z.string() }),
+          [workbookId, sheetName],
+          { label: `Phase4: dominant format sample ${sheetName}` },
+        );
+        for (const sc of sampleCells) {
+          if (!sc.number_format || isLiteralTextFormat(sc.number_format)) continue;
+          const p = parseExcelFormat(sc.number_format, sc.value_type);
+          if (!p) continue;
+          if (p.unitClass === "percent" || p.unitClass === "date" || p.unitClass === "text") continue;
+          const hasCurr = /[$£€¥]|\[\$/.test(sc.number_format ?? "");
+          const dec = p.decimals ?? 0;
+          const key = `${hasCurr ? "Y" : "N"}:${dec}`;
+          const prev = sigCounts.get(key);
+          if (prev) prev.count++;
+          else sigCounts.set(key, { sig: { hasCurrSym: hasCurr, decimals: dec }, count: 1 });
+        }
+        let maxCount = 0;
+        for (const [, v] of sigCounts) {
+          if (v.count > maxCount) {
+            maxCount = v.count;
+            dominantSig = v.sig;
+          }
+        }
+      }
+
       // --- Step 4.1 + 4.2: Process cells in batches ---
       let offset = 0;
       const PAGE = 2000;
@@ -400,8 +417,10 @@ export default api({
             // Can this cell's unit_class still be upgraded by context (col header / sheet title)?
             // After label processing: only if still generic (count/ratio/null from format)
             // AND the label didn't override to a definitive type.
+            // S4b: General format carries no evidence — don't promote to currency from sheet title.
+            const isGeneralFmt = !cell.number_format || cell.number_format === "General";
             const labelDecided = labelInfo !== null;
-            const canUpgradeClass = !selfDescribing && !labelDecided
+            const canUpgradeClass = !selfDescribing && !labelDecided && !isGeneralFmt
               && (unitClass === "count" || unitClass === "ratio" || !unitClass);
 
             // --- Level 3: Column header ---
@@ -421,6 +440,17 @@ export default api({
             }
 
             // --- Level 4: Sheet title (weakest) ---
+            // S2: Check if this cell's format matches the dominant format.
+            // If it doesn't, the sheet-title scale probably doesn't apply to this row.
+            let formatMismatch = false;
+            if (sheetUnitInfo && dominantSig && scaleSource === "none") {
+              const cellHasCurr = /[$£€¥]|\[\$/.test(cell.number_format ?? "");
+              const cellDec = parsed?.decimals ?? 0;
+              if (cellHasCurr !== dominantSig.hasCurrSym || cellDec !== dominantSig.decimals) {
+                formatMismatch = true;
+              }
+            }
+
             if (!selfDescribing && !labelDecided && sheetUnitInfo) {
               if (sheetUnitInfo.unitClass && canUpgradeClass && unitSource !== "column_header") {
                 unitClass = sheetUnitInfo.unitClass;
@@ -430,8 +460,14 @@ export default api({
                 currency = sheetUnitInfo.currency;
               }
               if (sheetUnitInfo.multiplier > 1 && scaleSource === "none") {
-                scaleMultiplier = sheetUnitInfo.multiplier;
-                scaleSource = sheetUnitInfo.source;
+                if (formatMismatch) {
+                  // Cell format differs from dominant — don't apply sheet-title scale
+                  scaleMultiplier = 1;
+                  scaleSource = "format_mismatch_no_evidence";
+                } else {
+                  scaleMultiplier = sheetUnitInfo.multiplier;
+                  scaleSource = sheetUnitInfo.source;
+                }
               }
             }
 

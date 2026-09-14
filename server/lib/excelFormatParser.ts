@@ -448,12 +448,59 @@ function inferFromValueType(valueType?: string): "currency" | "percent" | "multi
  * Returns null when the format code isn't recognised (never a fallback
  * to the raw number).
  */
+/**
+ * Returns true if the format is mostly literal text (identifiers like "Sales Rep #3").
+ */
+export function isLiteralTextFormat(fmt: string | null): boolean {
+  if (!fmt) return false;
+  const pos = fmt.split(";")[0] ?? "";
+  let quotedLen = 0;
+  let inQuote = false;
+  for (let i = 0; i < pos.length; i++) {
+    if (pos[i] === '"' && (i === 0 || pos[i-1] !== '\\')) {
+      inQuote = !inQuote;
+    } else if (inQuote) {
+      quotedLen++;
+    }
+  }
+  const nonQuoteLen = pos.length - quotedLen - (pos.split('"').length - 1);
+  return quotedLen > 0 && quotedLen >= nonQuoteLen;
+}
+
 export function formatDisplayValue(value: number | null, fmt: string | null): string | null {
   if (value === null || value === undefined) return null;
   if (!fmt || fmt === "General") {
-    // General: Excel's default — show as-is with reasonable precision
+    // S4b: General is not evidence of anything — render as-is
     if (Number.isInteger(value)) return String(value);
     return value.toPrecision(10).replace(/\.?0+$/, "");
+  }
+
+  // S4a: If the format is mostly literal text (identifiers like "Sales Rep #3"),
+  // render by walking the format and inserting the number where General/0/# appears.
+  if (isLiteralTextFormat(fmt)) {
+    const section = splitFormatSections(fmt)[0] ?? fmt;
+    let result = "";
+    let i = 0;
+    let numInserted = false;
+    while (i < section.length) {
+      if (section[i] === '"') {
+        i++;
+        while (i < section.length && section[i] !== '"') { result += section[i]; i++; }
+        i++; // skip closing "
+      } else if (section[i] === '\\' && i + 1 < section.length) {
+        result += section[i + 1]; i += 2;
+      } else if (/[0#?,.]/.test(section[i]) || section.slice(i).startsWith("General")) {
+        if (!numInserted) {
+          result += Number.isInteger(value) ? String(value) : value.toPrecision(10).replace(/\.?0+$/, "");
+          numInserted = true;
+        }
+        if (section.slice(i).startsWith("General")) { i += 7; } else { i++; }
+      } else {
+        i++;
+      }
+    }
+    if (!numInserted) result += String(value);
+    return result;
   }
 
   const sections = splitFormatSections(fmt);
