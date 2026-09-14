@@ -454,20 +454,26 @@ export default api({
             }
 
             if (!selfDescribing && !labelDecided && sheetUnitInfo) {
-              // T2: A sheet title may supply scale but NEVER unit_class=currency
-              // to a cell whose own format has no currency symbol.
-              // The cell's format is the authority on whether it's currency.
-              const cellFmtHasCurr = /[$£€¥]|\[\$/.test(cell.number_format ?? "");
+              // T2 (corrected): A sheet title MAY supply currency, EXCEPT where:
+              //   1. The cell's own format says otherwise (percent, multiple, date, text)
+              //   2. The row label names a non-currency quantity (days, count, shares, etc.)
+              // The accounting comma style _(* #,##0_) has no $ but IS currency on a P&L.
+              const t2BlockedByFormat = selfDescribing; // already caught above (percent/multiple/date/text)
+              const lbl = (cell.row_label ?? "").trim();
+              const t2BlockedByLabel = /\bdays?\b|\bDDR\b|\bDSO\b|\bDPO\b|\bDIO\b|\bcount\b|\bheadcount\b|\b(?:head|heads)\b|\bFTE\b|\bshares?\b|\bunits?\b|\bper\s+(?:site|head|FTE|rep|unit)\b|\bsites?\b|\binstalls?\b/i.test(lbl)
+                || /^#\s/.test(lbl)
+                || /\?\s*$/.test(lbl);
+              const t2Blocked = t2BlockedByFormat || t2BlockedByLabel;
+
               if (sheetUnitInfo.unitClass && canUpgradeClass && unitSource !== "column_header") {
-                if (sheetUnitInfo.unitClass === "currency" && !cellFmtHasCurr) {
-                  // Sheet says currency but cell format disagrees — don't upgrade
-                  // unitClass stays null (or whatever the label set)
+                if (sheetUnitInfo.unitClass === "currency" && t2Blocked) {
+                  // Sheet says currency but format/label disagrees — don't upgrade
                 } else {
                   unitClass = sheetUnitInfo.unitClass;
                   unitSource = sheetUnitInfo.source;
                 }
               }
-              if (sheetUnitInfo.currency && !currency && !isGeneralFmt && cellFmtHasCurr) {
+              if (sheetUnitInfo.currency && !currency && !isGeneralFmt && !t2Blocked) {
                 currency = sheetUnitInfo.currency;
               }
               if (sheetUnitInfo.multiplier > 1 && scaleSource === "none") {
