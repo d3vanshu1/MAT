@@ -38,7 +38,7 @@ export default api({
 
   input: z.object({
     dealId: z.string(),
-    numericReportId: z.string(),
+    numericReportId: z.string().nullable(),
     /** "summary" (default), "findings", or "rollup" (scope-level aggregation) */
     mode: z.enum(["summary", "findings", "rollup"]).nullable(),
     /** 0-based page for findings mode (10/page). Ignored in summary mode. */
@@ -224,6 +224,20 @@ export default api({
     c11_reasons: z.array(z.object({ reason: z.string(), detail: z.string() })).nullable().optional(),
     c13_not_comparable: z.number().optional(),
 
+    // --- Scope mismatch breakdown ---
+    scope_mismatch_breakdown: z.array(z.object({
+      scope: z.string(),
+      period: z.string(),
+      reason: z.string(),
+      matched_to: z.string().nullable(),
+      claim_value: z.number().nullable().optional(),
+      cell_value: z.number().nullable().optional(),
+      ratio: z.number().nullable().optional(),
+      cell_ref: z.string().nullable().optional(),
+      row_label: z.string().nullable().optional(),
+      number_format: z.string().nullable().optional(),
+    })).nullable().optional(),
+
     // --- Item 10: Period axis analysis ---
     period_axis: z.object({
       total_claims: z.number(),
@@ -258,12 +272,14 @@ export default api({
 
     // --- Step 2: Load figures from numeric_reports ---
     const ReportRow = z.object({ figures: z.any(), discrepancies: z.any() });
-    const reportRows = await ctx.integrations.db.query(
-      `SELECT figures, discrepancies FROM numeric_reports WHERE id = $1 LIMIT 1`,
-      ReportRow,
-      [numericReportId],
-      { label: "Load numeric report figures" }
-    );
+    const reportRows = numericReportId
+      ? await ctx.integrations.db.query(
+          `SELECT figures, discrepancies FROM numeric_reports WHERE id = $1 LIMIT 1`,
+          ReportRow,
+          [numericReportId],
+          { label: "Load numeric report figures" }
+        )
+      : [];
 
     let baseFigures: Figure[] = [];
     let discrepancies: Discrepancy[] = [];
@@ -777,6 +793,7 @@ export default api({
       c13_not_comparable: (result.findings as ReconciliationFinding[]).filter(
         f => f.finding_kind === "not_comparable"
       ).length,
+      scope_mismatch_breakdown: result.scope_mismatch_details ?? [],
     };
 
     // --- Summary mode: no findings array ---

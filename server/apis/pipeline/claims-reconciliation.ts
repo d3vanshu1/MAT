@@ -135,6 +135,13 @@ export interface ReconciliationResult {
   figure_fanout_max: number;
   /** Internal error from LLM matching step (null if LLM succeeded or wasn't attempted) */
   matching_error?: string | null;
+  /** Scope mismatch detail entries for diagnostics */
+  scope_mismatch_details?: Array<{
+    scope: string;
+    period: string;
+    reason: string;
+    matched_to: string | null;
+  }>;
   /** F22: Coverage entries routed away from findings (unreconcilable, scope_mismatch) */
   coverage_entries_count: number;
   /** F22: Findings that passed the quality gate */
@@ -2041,6 +2048,32 @@ export async function runReconciliation(
 
   // ----- U5: Findings dump — generate stable report ID & apply 3MB guard -----
   const findings_report_id = generateUUID();
+  // Capture scope mismatch details BEFORE coverage split wipes them.
+  // processMatch returns kind="scope_mismatch" but pushes findings as
+  // "scope_mismatch", "not_comparable", or "basis_divergence".
+  const SM_DETAIL_KINDS = new Set(["scope_mismatch", "not_comparable", "basis_divergence"]);
+  const scope_mismatch_details = findings
+    .filter(f => SM_DETAIL_KINDS.has(f.finding_kind ?? ""))
+    .map(f => {
+      const claimVal = f.claim ? normalizeClaimValue(f.claim) : null;
+      const modelVal = f.model_figure?.value ?? null;
+      const ratio = (claimVal != null && modelVal != null && modelVal !== 0)
+        ? Math.abs(claimVal / modelVal) : null;
+      return {
+        scope: f.claim?.scope_qualifier ?? "unknown",
+        period: f.claim?.period ?? "unknown",
+        reason: f.title ?? "",
+        matched_to: f.model_figure?.name ?? null,
+        claim_value: claimVal,
+        cell_value: modelVal,
+        ratio,
+        cell_ref: f.model_figure
+          ? `${f.model_figure.source_sheet}!${f.model_figure.source_cell}` : null,
+        row_label: f.model_figure?.name ?? null,
+        number_format: (f.model_figure as any)?.number_format ?? null,
+      };
+    });
+
   // ── Coverage split ──────────────────────────────────────────────
   // "We couldn't find the other side" is coverage, not a finding.
   // Route to a separate list before the quality gate.
@@ -2169,6 +2202,70 @@ export async function runReconciliation(
   findings.length = 0;
   findings.push(...gatedFindings);
 
+  // ── Series collapsing ─────────────────────────────────────────────
+  // If the same (scope_qualifier, finding_kind) appears across ≥3 periods,
+  // collapse into a single finding with a period series table.
+  const SERIES_MIN_PERIODS = 3;
+  const seriesGroups = new Map<string, typeof findings>();
+  for (const f of findings) {
+    const scope = f.claim?.scope_qualifier ?? "";
+    const kind = f.finding_kind ?? "";
+    const key = `${scope}|${kind}`;
+    if (!seriesGroups.has(key)) seriesGroups.set(key, []);
+    seriesGroups.get(key)!.push(f);
+  }
+
+  const collapsedFindings: typeof findings = [];
+  let seriesCollapsedCount = 0;
+  for (const [_key, group] of seriesGroups.entries()) {
+    if (group.length < SERIES_MIN_PERIODS) {
+      // Keep individual findings
+      collapsedFindings.push(...group);
+      continue;
+    }
+    // Collapse: use the finding with the highest severity as the representative
+    const sevOrder: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+    group.sort((a, b) => (sevOrder[a.severity] ?? 3) - (sevOrder[b.severity] ?? 3));
+    const representative = { ...group[0] };
+
+    // Build series table
+    const periodEntries = group
+      .sort((a, b) => (a.claim?.period ?? "").localeCompare(b.claim?.period ?? ""))
+      .map(f => ({
+        period: f.claim?.period ?? "?",
+        claimValue: f.claim?.value ?? null,
+        modelValue: f.model_figure?.value ?? null,
+        deltaAbs: f.delta_abs,
+        deltaPct: f.delta_pct,
+      }));
+    const scope = representative.claim?.scope_qualifier ?? "unknown";
+    const kind = representative.finding_kind ?? "unknown";
+    representative.title = `${scope}: ${kind} across ${group.length} periods`;
+    representative.detail =
+      `${scope} shows ${kind} across ${group.length} periods:\n` +
+      periodEntries.map(e =>
+        `  ${e.period}: claim=${e.claimValue ?? "?"}, model=${e.modelValue ?? "?"}, ` +
+        `delta=${e.deltaAbs != null ? "$" + (Math.abs(e.deltaAbs) / 1_000_000).toFixed(1) + "m" : "?"} ` +
+        `(${e.deltaPct != null ? (e.deltaPct * 100).toFixed(1) + "%" : "?"})`
+      ).join("\n") +
+      (representative.detail ? "\n\n" + representative.detail : "");
+    // Attach series data to the finding for downstream consumption
+    (representative as any).series_periods = periodEntries;
+    (representative as any).series_count = group.length;
+
+    collapsedFindings.push(representative);
+    seriesCollapsedCount += group.length - 1; // net reduction
+  }
+
+  if (seriesCollapsedCount > 0) {
+    console.log(
+      `[Reconciliation] Series collapsing: ${findings.length} → ${collapsedFindings.length} findings ` +
+      `(${seriesCollapsedCount} individual findings merged into series)`
+    );
+    findings.length = 0;
+    findings.push(...collapsedFindings);
+  }
+
   const MAX_PAYLOAD_BYTES = 3 * 1024 * 1024; // 3MB
   let findings_truncated = false;
   const payloadEstimate = JSON.stringify(findings).length;
@@ -2263,6 +2360,7 @@ export async function runReconciliation(
     figure_fanout_max: 0, // Populated by caller if figure fanout check is run
     ambiguous_reference_count,
     matching_error,
+    scope_mismatch_details,
     // F22: Coverage split baseline
     coverage_entries_count: coverageEntries.length,
     gate_passed_count: gatedFindings.length,

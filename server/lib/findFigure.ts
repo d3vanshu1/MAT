@@ -69,6 +69,7 @@ export interface FigureCandidate {
     upstreamBonus?: number;
     statePenalty?: number;
     provenancePenalty?: number;
+    feedsPriceBonus?: number;
   };
 }
 
@@ -78,6 +79,7 @@ export type DeclineReason =
   | "unit_conflict_only"
   | "case_ambiguity"
   | "stub_vs_annual"
+  | "cross_version"
   | "no_candidates";
 
 export interface FindFigureResult {
@@ -438,6 +440,12 @@ export async function findFigure(
       || (r.chain_break_reason ?? "").includes("stub_factor");
     const statePenalty = stateDependent ? -0.05 : 0;
 
+    // 2c: Feeds-the-price preference — cells that feed into entry value or returns
+    // calculations are more likely to be the correct citation because they're on the
+    // critical path the deal team actually used.
+    const feedsPrice = r.feeds_entry_value === true || r.feeds_returns === true;
+    const feedsPriceBonus = feedsPrice ? 0.10 : 0;
+
     // Sheet preference boost from manifest (ranking only, never a filter)
     let sheetBonus = 0;
     if (input.sheetPreferences && input.sheetPreferences[r.sheet_name]) {
@@ -482,7 +490,7 @@ export async function findFigure(
       distanceToAnchor: r.distance_to_anchor,
       chainBreakReason: r.chain_break_reason,
       sheetProvenance: sheetProv,
-      score: scores.total + sheetBonus + signPenalty + upstreamBonus + statePenalty + provenancePenalty,
+      score: scores.total + sheetBonus + signPenalty + upstreamBonus + statePenalty + provenancePenalty + feedsPriceBonus,
       scoreBreakdown: {
         tokenOverlap: scores.tokenOverlap,
         pathBonus: scores.pathBonus,
@@ -493,6 +501,7 @@ export async function findFigure(
         upstreamBonus,
         statePenalty,
         provenancePenalty,
+        feedsPriceBonus,
       },
     };
   });
@@ -542,6 +551,35 @@ export async function findFigure(
       candidatesConsidered: scored.length,
       filtersApplied,
     };
+  }
+
+  // 2b: Cross-version hard gate — pasted vs live disagreement
+  // If the best candidate is pasted but a live-sheet candidate exists for the same
+  // metric with a different value, the pasted data is stale → decline.
+  if (best.sheetProvenance === "pasted") {
+    const CROSS_VERSION_TOL = 0.005; // 0.5% relative tolerance
+    const liveAlternative = scored.find((c) => {
+      if (c.sheetProvenance !== "live") return false;
+      if (c.score < FLOOR_SCORE) return false;
+      // Same ballpark label match (token overlap > 0)
+      if (c.scoreBreakdown.tokenOverlap === 0) return false;
+      // Different value?
+      const bestAbs = Math.abs(best.scaledValue);
+      const candAbs = Math.abs(c.scaledValue);
+      if (bestAbs === 0 && candAbs === 0) return false; // both zero = agree
+      const denom = Math.max(bestAbs, candAbs, 1);
+      return Math.abs(bestAbs - candAbs) / denom > CROSS_VERSION_TOL;
+    });
+    if (liveAlternative) {
+      return {
+        status: "declined",
+        candidate: null,
+        declineReason: "cross_version",
+        topCandidates: top3,
+        candidatesConsidered: scored.length,
+        filtersApplied,
+      };
+    }
   }
 
   // Tie check
