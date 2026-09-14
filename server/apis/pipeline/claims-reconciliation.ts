@@ -381,6 +381,7 @@ export interface NormalizedFigure {
   scope_qualifier: string; // Claims-vocabulary scope: "Total Group Revenue", "Adjusted EBITDA", etc.
   period: string;         // Normalized period string
   basis: string | null;   // Measurement basis implied by the label mapping (null = not determinable)
+  sign_convention?: string | null; // "deduction" | "addition" | "natural" | null
 }
 
 /** Mapping rules: raw Excel label → {metric, scope_qualifier, basis} in claims vocabulary */
@@ -763,6 +764,7 @@ function candidateToNormalizedFigure(
     scope_qualifier: claim.scope_qualifier,
     period: normalizePeriod(claim.period),
     basis: claim.basis ?? null,
+    sign_convention: c.signConvention,
   };
 }
 
@@ -937,7 +939,19 @@ function processMatch(
   // ----- Compute delta (code-verified, never LLM-computed) -----
   const claimVal = normalizeClaimValue(claim);
   // Align percentage scale: if claim is 54% and model stores 0.518, convert model to 51.8
-  const modelVal = alignPercentageScale(claimVal, claim.unit, modelFig.value);
+  let modelVal = alignPercentageScale(claimVal, claim.unit, modelFig.value);
+
+  // 1a: Sign convention — compare on magnitude. A (-)‑prefixed row is the same
+  // quantity stated as a deduction. Use |modelVal| when signs disagree so the
+  // convention never manufactures a delta.
+  const isDeductionConvention = nf.sign_convention === "deduction"
+    || nf.sign_convention === "negative_displayed"
+    || /^\([-–]\)/.test((modelFig.name ?? "").trim());
+  if (isDeductionConvention && claimVal > 0 && modelVal < 0) {
+    modelVal = Math.abs(modelVal);
+  } else if ((nf.sign_convention === "addition" || /^\(\+\)/.test((modelFig.name ?? "").trim())) && claimVal < 0 && modelVal > 0) {
+    modelVal = -modelVal;
+  }
 
   const deltaAbs = Math.abs(claimVal - modelVal);
 

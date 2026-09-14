@@ -64,6 +64,9 @@ export interface FigureCandidate {
     aggregateNudge: number;
     editDistance: number;
     sheetPreference?: number;
+    signPenalty?: number;
+    upstreamBonus?: number;
+    statePenalty?: number;
   };
 }
 
@@ -165,9 +168,17 @@ function tokenOverlapScore(query: string, target: string): number {
   for (const t of qTokens) {
     if (tTokens.has(t)) overlap++;
   }
-  // Jaccard-like: overlap / union
-  const union = new Set([...qTokens, ...tTokens]).size;
-  return overlap / union;
+  // 1b: Length-normalised scoring.
+  // Coverage of query terms (what fraction of the claim's words does this label cover?)
+  const queryCoverage = overlap / qTokens.size;
+  // Precision penalty: short labels score high on coverage but are vague.
+  // A label that is a superset of the query words is better than a subset.
+  const targetCoverage = overlap / tTokens.size;
+  // Blend: favour labels that cover MORE of the query (recall) while penalising
+  // labels where the query covers most of the label (short generic fragments).
+  // F1-like harmonic mean, weighted toward query coverage.
+  if (queryCoverage === 0) return 0;
+  return (2 * queryCoverage * targetCoverage) / (queryCoverage + targetCoverage);
 }
 
 function normalizedEditDistance(a: string, b: string): number {
@@ -387,6 +398,31 @@ export async function findFigure(
       claimIsTotal,
     );
 
+    // 1a: Sign convention penalty — deductions rank below natural labels.
+    // Detect from stored sign_convention OR from label prefix pattern.
+    const signConv = r.sign_convention;
+    const labelTrimmed = r.row_label.trim();
+    const isDeduction = signConv === "deduction" || signConv === "negative_displayed"
+      || /^\([-–]\)/.test(labelTrimmed) || /^less[:\s]/i.test(labelTrimmed);
+    const isAddition = signConv === "addition"
+      || /^\(\+\)/.test(labelTrimmed) || /^plus[:\s]/i.test(labelTrimmed);
+    const signPenalty = isDeduction ? -0.08
+      : isAddition ? -0.03
+      : 0;
+
+    // 1c: Upstream tie-break — prefer cells closer to the origin of a value
+    const dta = r.distance_to_anchor;
+    const upstreamBonus = dta !== null && dta >= 0
+      ? -0.01 * Math.min(dta, 5)  // up to -0.05 for distant cells
+      : 0;
+
+    // 1d: State-dependent penalty
+    // A cell whose formula chain passes through a toggle/switch is less reliable
+    const stateDependent = (r.chain_break_reason ?? "").includes("switch")
+      || (r.chain_break_reason ?? "").includes("toggle")
+      || (r.chain_break_reason ?? "").includes("stub_factor");
+    const statePenalty = stateDependent ? -0.05 : 0;
+
     // Sheet preference boost from manifest (ranking only, never a filter)
     let sheetBonus = 0;
     if (input.sheetPreferences && input.sheetPreferences[r.sheet_name]) {
@@ -430,13 +466,16 @@ export async function findFigure(
       feedsReturns: r.feeds_returns,
       distanceToAnchor: r.distance_to_anchor,
       chainBreakReason: r.chain_break_reason,
-      score: scores.total + sheetBonus,
+      score: scores.total + sheetBonus + signPenalty + upstreamBonus + statePenalty,
       scoreBreakdown: {
         tokenOverlap: scores.tokenOverlap,
         pathBonus: scores.pathBonus,
         aggregateNudge: scores.aggregateNudge,
         editDistance: scores.editDistance,
         sheetPreference: sheetBonus,
+        signPenalty,
+        upstreamBonus,
+        statePenalty,
       },
     };
   });
