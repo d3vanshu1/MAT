@@ -729,22 +729,25 @@ export default api({
       // ── S1: Column cadence detection ──
       // Detect monthly/quarterly runs and reclassify December→FY errors.
       function fixPeriodCadence(colMap: Map<number, { period: ParsedPeriod | null; caseInfo: any; headerRaw: string | null }>) {
-        // Collect dated columns
-        const dated: { col: number; start: string; entry: { period: ParsedPeriod | null; caseInfo: any; headerRaw: string | null } }[] = [];
+        // Collect dated columns — use periodEnd for step detection because
+        // FY-classified months (Dec 31 → FY) have periodStart at Jan 1, which
+        // breaks the step computation. The end date is always the actual date.
+        const dated: { col: number; end: string; entry: { period: ParsedPeriod | null; caseInfo: any; headerRaw: string | null } }[] = [];
         for (const [col, entry] of colMap) {
-          if (entry.period?.periodStart && entry.period.periodStart.match(/^\d{4}-\d{2}-\d{2}$/)) {
-            dated.push({ col, start: entry.period.periodStart, entry });
+          const endDate = entry.period?.periodEnd;
+          if (endDate && endDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+            dated.push({ col, end: endDate, entry });
           }
         }
         if (dated.length < 3) return; // need at least 3 columns to detect cadence
 
-        dated.sort((a, b) => a.start.localeCompare(b.start));
+        dated.sort((a, b) => a.end.localeCompare(b.end));
 
-        // Compute steps between consecutive columns in months
+        // Compute steps between consecutive columns in months (using end dates)
         const steps: number[] = [];
         for (let i = 1; i < dated.length; i++) {
-          const [y1, m1] = dated[i - 1].start.split("-").map(Number);
-          const [y2, m2] = dated[i].start.split("-").map(Number);
+          const [y1, m1] = dated[i - 1].end.split("-").map(Number);
+          const [y2, m2] = dated[i].end.split("-").map(Number);
           steps.push((y2 - y1) * 12 + (m2 - m1));
         }
 
@@ -753,29 +756,39 @@ export default api({
         const median = sorted[Math.floor(sorted.length / 2)];
 
         if (median === 1) {
-          // Monthly run — reclassify any FY within it
+          // Monthly run — reclassify any FY or point_date within it to M
           for (const d of dated) {
-            if (d.entry.period && d.entry.period.periodType === "FY") {
-              const [yr, mo, dy] = d.entry.period.periodEnd!.split("-").map(Number);
+            if (d.entry.period && (d.entry.period.periodType === "FY" || d.entry.period.periodType === "point_date")) {
+              const endStr = d.entry.period.periodEnd ?? d.entry.period.periodStart;
+              const [yr, mo] = endStr.split("-").map(Number);
+              const mStart = `${yr}-${String(mo).padStart(2, "0")}-01`;
+              const mEnd = lastDayOfMonth(yr, mo);
+              const monthNames = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
               d.entry.period = {
-                periodType: "point_date",
-                periodStart: d.entry.period.periodEnd!,
-                periodEnd: d.entry.period.periodEnd!,
-                periodLabel: d.entry.period.periodEnd!,
+                periodType: "M",
+                periodStart: mStart,
+                periodEnd: mEnd,
+                periodLabel: `${monthNames[mo]} ${yr}`,
                 periodBasis: d.entry.period.periodBasis,
               };
             }
           }
         } else if (median === 3) {
-          // Quarterly run — reclassify any FY within it
+          // Quarterly run — reclassify any FY within it to Q
           for (const d of dated) {
             if (d.entry.period && d.entry.period.periodType === "FY") {
-              const [yr, mo] = d.entry.period.periodEnd!.split("-").map(Number);
+              const endStr = d.entry.period.periodEnd ?? d.entry.period.periodStart;
+              const [yr, mo] = endStr.split("-").map(Number);
               const q = Math.ceil(mo / 3);
+              const qStart = `${yr}-${String((q - 1) * 3 + 1).padStart(2, "0")}-01`;
+              const qEnd = lastDayOfMonth(yr, q * 3);
               d.entry.period = {
-                ...d.entry.period,
                 periodType: "Q",
+                periodStart: qStart,
+                periodEnd: qEnd,
                 periodLabel: `Q${q} ${yr}`,
+                periodBasis: d.entry.period.periodBasis,
               };
             }
           }
@@ -977,6 +990,47 @@ export default api({
         [workbookId, sheetName],
         { label: `Phase3: R2 case from row label ${sheetName}` },
       );
+
+      // --- S3: Strip consumed case tokens from row_label_path ---
+      // After R2 assigns case_label from row labels, the case name may still
+      // appear as a parent in row_label_path on child rows (e.g. "Upside Case > EBITDA CAGR").
+      // Find all distinct case_label values on this sheet and remove them from paths.
+      const CaseLabelRow = z.object({ case_label: z.string() });
+      const sheetCaseLabels = await db.query(
+        `SELECT DISTINCT case_label FROM workbook_cells
+         WHERE workbook_id = $1 AND sheet_name = $2
+           AND case_label IS NOT NULL AND case_source = 'row_label'`,
+        CaseLabelRow,
+        [workbookId, sheetName],
+        { label: `Phase3: S3 collect case labels ${sheetName}` },
+      );
+      if (sheetCaseLabels.length > 0) {
+        // Build a chain of REPLACE operations to strip each case label from paths.
+        // Strip patterns: "CaseLabel > " (as prefix) and " > CaseLabel" (as suffix/mid).
+        // Also handle " | " separator variant.
+        let replaceExpr = "row_label_path";
+        for (let ci = 0; ci < sheetCaseLabels.length; ci++) {
+          const pIdx = 3 + ci;
+          // Strip "CaseLabel > " prefix
+          replaceExpr = `REPLACE(${replaceExpr}, $${pIdx} || ' > ', '')`;
+          // Strip " > CaseLabel" suffix/mid
+          replaceExpr = `REPLACE(${replaceExpr}, ' > ' || $${pIdx}, '')`;
+          // Strip "CaseLabel | " (pipe separator)
+          replaceExpr = `REPLACE(${replaceExpr}, $${pIdx} || ' | ', '')`;
+          // Strip " | CaseLabel"
+          replaceExpr = `REPLACE(${replaceExpr}, ' | ' || $${pIdx}, '')`;
+          // Strip exact match (path is just the case label)
+          replaceExpr = `CASE WHEN ${replaceExpr} = $${pIdx} THEN NULL ELSE ${replaceExpr} END`;
+        }
+        await db.execute(
+          `UPDATE workbook_cells SET
+             row_label_path = NULLIF(TRIM(${replaceExpr}), '')
+           WHERE workbook_id = $1 AND sheet_name = $2
+             AND row_label_path IS NOT NULL`,
+          [workbookId, sheetName, ...sheetCaseLabels.map(r => r.case_label)],
+          { label: `Phase3: S3 strip case from paths ${sheetName}` },
+        );
+      }
 
       totalCellsUpdated += cellRows.length;
       totalPeriodsFound += sheetPeriodsFound;

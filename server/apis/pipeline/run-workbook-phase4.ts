@@ -456,12 +456,16 @@ export default api({
                 unitClass = sheetUnitInfo.unitClass;
                 unitSource = sheetUnitInfo.source;
               }
-              if (sheetUnitInfo.currency && !currency) {
+              if (sheetUnitInfo.currency && !currency && !isGeneralFmt) {
                 currency = sheetUnitInfo.currency;
               }
               if (sheetUnitInfo.multiplier > 1 && scaleSource === "none") {
-                if (formatMismatch) {
-                  // Cell format differs from dominant — don't apply sheet-title scale
+                if (isGeneralFmt) {
+                  // S4b: General format carries no evidence — don't inherit sheet-title scale
+                  scaleMultiplier = 1;
+                  scaleSource = "general_no_evidence";
+                } else if (formatMismatch) {
+                  // S2: Cell format differs from dominant — don't apply sheet-title scale
                   scaleMultiplier = 1;
                   scaleSource = "format_mismatch_no_evidence";
                 } else {
