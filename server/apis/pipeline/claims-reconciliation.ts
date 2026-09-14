@@ -1449,31 +1449,6 @@ export async function runReconciliation(
 
     console.log(`[Reconciliation:MAP] Processing ${dedupedClaims.length} claims via findFigure (29k+ candidates)`);
 
-    // Precompute restatement sheets once for the deal
-    const RestatementRow = z.object({ sheet_name: z.string() });
-    let restatementSheets = new Set<string>();
-    try {
-      const rstRows = await mapQueryFn(
-        `SELECT p.from_sheet AS sheet_name
-         FROM workbook_precedents p
-         JOIN workbooks w ON w.id = p.workbook_id
-         JOIN documents d ON d.id = w.document_id
-         LEFT JOIN (
-           SELECT workbook_id, sheet_name FROM workbook_cells
-           GROUP BY workbook_id, sheet_name
-           HAVING COUNT(formula) FILTER (WHERE formula IS NOT NULL AND formula != '') = 0
-         ) ps ON ps.workbook_id = p.workbook_id AND ps.sheet_name = p.to_sheet
-         WHERE d.deal_id = $1 AND p.from_sheet != p.to_sheet AND p.ref_kind != 'external'
-         GROUP BY p.from_sheet
-         HAVING COUNT(*) FILTER (WHERE ps.sheet_name IS NOT NULL)::float / GREATEST(COUNT(*), 1) > 0.5`,
-        RestatementRow, [dealId],
-      );
-      for (const r of rstRows) restatementSheets.add(r.sheet_name);
-      if (restatementSheets.size > 0) {
-        console.log(`[Reconciliation:MAP] Restatement sheets detected: ${[...restatementSheets].join(", ")}`);
-      }
-    } catch { /* non-critical */ }
-
     for (const claim of dedupedClaims) {
       // Skip UNDATED and NONE_STATED — same as old path
       const normalizedClaimPeriod = normalizePeriod(claim.period);
@@ -1534,14 +1509,13 @@ export async function runReconciliation(
           : null : null,
         caseKey: null,  // Let findFigure search all cases; C13 will gate downstream
         workbookRole: null,  // Let findFigure route by keyword
-        restatementSheets,
       };
 
       let ffResult: FindFigureResult;
       try {
         ffResult = await findFigure(mapQueryFn, ffInput);
       } catch (err) {
-        console.error(`[Reconciliation:MAP] findFigure error for "${claim.scope_qualifier}": ${err}`);
+        console.warn(`[Reconciliation:MAP] findFigure error for "${claim.scope_qualifier}": ${err}`);
         unreconcilable_count++;
         continue;
       }
@@ -2110,73 +2084,10 @@ export async function runReconciliation(
     });
 
   // ── 1.5: Basis test for aggregates ──────────────────────────────
-  // If a data_divergence's delta equals (within tolerance) the value of
-  // another labelled cell in the same sheet and period, the two sides
-  // are on different bases — one includes an item the other excludes.
-  // Reclassify as scope_mismatch with the accounting-for item named.
-  if (_useWorkbookMap && options?.queryFn) {
-    // Only check data_divergence findings that passed materiality (will be published)
-  const divergenceFindings = findings.filter(
-    f => f.finding_kind === "data_divergence" && f.model_figure && f.delta_abs != null && f.delta_abs >= 1000
-  );
-  if (divergenceFindings.length > 0) {
-    // Single batch query: load all cells for the sheets/periods these findings reference
-    const sheetPeriodPairs = new Set<string>();
-    for (const f of divergenceFindings) {
-      const fig = f.model_figure as unknown as Record<string, unknown>;
-      const sheet = fig.source_sheet as string | undefined;
-      if (sheet && f.model_figure!.period) sheetPeriodPairs.add(`${sheet}|${f.model_figure!.period}`);
-    }
-    // Load all candidate cells in one query
-    const allBasisRows: Array<{ sheet_name: string; period: string; row_label: string; value_num: number }> = [];
-    try {
-      const BasisBatchRow = z.object({
-        sheet_name: z.string(),
-        period: z.string(),
-        row_label: z.string(),
-        value_num: z.union([z.number(), z.string().transform(Number)]),
-      });
-      const pairs = [...sheetPeriodPairs].map(p => p.split("|"));
-      if (pairs.length > 0 && pairs.length <= 20) {
-        for (const [sheet, period] of pairs) {
-          const rows = await options.queryFn(
-            `SELECT c.sheet_name, c.period_start::text AS period, c.row_label,
-                    c.value_num::float * COALESCE(NULLIF(c.scale_multiplier::float, 0), 1) AS value_num
-             FROM workbook_cells c
-             JOIN workbooks w ON w.id = c.workbook_id
-             JOIN documents d ON d.id = w.document_id
-             WHERE d.deal_id = $1 AND c.sheet_name = $2 AND c.period_start = $3
-               AND c.value_num IS NOT NULL AND c.row_label IS NOT NULL
-             LIMIT 200`,
-            BasisBatchRow, [dealId, sheet, period],
-          );
-          allBasisRows.push(...rows);
-        }
-      }
-    } catch { /* non-critical */ }
-
-    // Check each finding
-    const TOLERANCE = 0.05;
-    for (const f of divergenceFindings) {
-      const fig = f.model_figure as unknown as Record<string, unknown>;
-      const sheet = fig.source_sheet as string | undefined;
-      if (!sheet) continue;
-      const delta = f.delta_abs!;
-      const candidates = allBasisRows.filter(
-        bc => bc.sheet_name === sheet && bc.period === f.model_figure!.period && bc.row_label !== fig.source_cell
-      );
-      const match = candidates.find(bc => {
-        const ratio = Math.abs(bc.value_num) > 0 ? Math.abs(delta - Math.abs(bc.value_num)) / Math.abs(bc.value_num) : Infinity;
-        return ratio < TOLERANCE;
-      });
-      if (match) {
-        f.finding_kind = "scope_mismatch" as any;
-        f.detail = (f.detail ?? "") +
-          `\n\n**Basis difference detected:** the delta (${(delta / 1e6).toFixed(1)}m) equals "${match.row_label}" (${(Math.abs(match.value_num) / 1e6).toFixed(1)}m) on the same sheet and period. The two sides likely differ by the inclusion/exclusion of this item.`;
-      }
-    }
-  }
-  }
+  // TODO: Precompute basis relationships at map time (Phase 7.6).
+  // For now, the test is deferred — it requires a precomputed table of
+  // cell pairs where one equals another plus a labelled item.
+  // The cross-version gate (1.3) and magnitude fix (1.2) are the critical items.
 
   // ── Coverage split ──────────────────────────────────────────────
   // "We couldn't find the other side" is coverage, not a finding.

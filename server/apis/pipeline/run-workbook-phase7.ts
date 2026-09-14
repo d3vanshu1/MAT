@@ -80,6 +80,7 @@ export default api({
     anchorsFound: z.number(),
     cellsWithDistance: z.number(),
     externalRefs: z.number(),
+    restatementSheets: z.number(),
   }),
 
   async run(ctx, { workbookId, skipAnchorWalk, skipPrecedentRebuild, sheetBatchStart, sheetBatchSize }) {
@@ -255,6 +256,7 @@ export default api({
         anchorsFound: 0,
         cellsWithDistance: 0,
         externalRefs: totalExternal,
+        restatementSheets: 0,
       };
     }
 
@@ -298,6 +300,7 @@ export default api({
         anchorsFound: 0,
         cellsWithDistance: 0,
         externalRefs: totalExternal,
+        restatementSheets: 0,
       };
     }
 
@@ -440,12 +443,71 @@ export default api({
       cellsWithDistance += chunk.length;
     }
 
+    // ── Step 7.5: Restatement detection ─────────────────────────────
+    // For each sheet with formulas, compute the share of its cross-sheet
+    // references that point into pasted (zero-formula) sheets.
+    // Store the result on workbook_sheets.col_properties as JSONB.
+    const RestatementCalcRow = z.object({
+      sheet_name: z.string(),
+      total_xrefs: z.coerce.number(),
+      pasted_xrefs: z.coerce.number(),
+      pasted_ref_share: z.coerce.number(),
+    });
+    let restatementSheetCount = 0;
+    try {
+      const rstRows = await q.query(
+        `SELECT
+           p.from_sheet AS sheet_name,
+           COUNT(*) AS total_xrefs,
+           COUNT(*) FILTER (WHERE ps.sheet_name IS NOT NULL) AS pasted_xrefs,
+           CASE WHEN COUNT(*) = 0 THEN 0
+             ELSE COUNT(*) FILTER (WHERE ps.sheet_name IS NOT NULL)::float / COUNT(*)
+           END AS pasted_ref_share
+         FROM workbook_precedents p
+         LEFT JOIN (
+           SELECT workbook_id, sheet_name FROM workbook_cells
+           WHERE workbook_id = $1
+           GROUP BY workbook_id, sheet_name
+           HAVING COUNT(formula) FILTER (WHERE formula IS NOT NULL AND formula != '') = 0
+         ) ps ON ps.workbook_id = p.workbook_id AND ps.sheet_name = p.to_sheet
+         WHERE p.workbook_id = $1 AND p.from_sheet != p.to_sheet AND p.ref_kind != 'external'
+         GROUP BY p.from_sheet
+         ORDER BY pasted_ref_share DESC
+         LIMIT 100`,
+        RestatementCalcRow, [workbookId],
+      );
+      // Log the distribution for threshold visibility
+      for (const r of rstRows) {
+        if (r.total_xrefs > 0) {
+          console.log(`[Phase7:Restatement] ${r.sheet_name}: ${r.pasted_xrefs}/${r.total_xrefs} = ${(r.pasted_ref_share * 100).toFixed(1)}% pasted refs`);
+        }
+      }
+      // Flag sheets with >50% pasted refs as restatements
+      // Store on workbook_sheets.col_properties as {restatement: true, pasted_ref_share: n}
+      for (const r of rstRows) {
+        const isRestatement = r.pasted_ref_share > 0.5;
+        const meta = { restatement: isRestatement, pasted_ref_share: r.pasted_ref_share };
+        await q.query(
+          `UPDATE workbook_sheets
+           SET col_properties = COALESCE(col_properties, '{}'::jsonb) || $3::jsonb
+           WHERE workbook_id = $1 AND sheet_name = $2`,
+          z.any(), [workbookId, r.sheet_name, JSON.stringify(meta)],
+          { label: `Update restatement flag: ${r.sheet_name}` },
+        );
+        if (isRestatement) restatementSheetCount++;
+      }
+      console.log(`[Phase7:Restatement] ${restatementSheetCount} restatement sheet(s) flagged`);
+    } catch (rstErr) {
+      console.warn(`[Phase7:Restatement] Failed: ${rstErr}`);
+    }
+
     return {
       precedentsInserted: totalPrecedents,
       hardcodedInputs,
       anchorsFound: totalAnchors,
       cellsWithDistance,
       externalRefs: totalExternal,
+      restatementSheets: restatementSheetCount,
     };
   },
 });

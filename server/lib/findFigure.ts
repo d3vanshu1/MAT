@@ -27,7 +27,6 @@ export interface FindFigureInput {
   scope?: string | null;        // optional segment/member filter
   dealId: string;
   sheetPreferences?: Record<string, string[]> | null; // sheet_name -> is_primary_for metric families
-  restatementSheets?: Set<string>;  // precomputed set of sheet names flagged as restatements
 }
 
 export interface FigureCandidate {
@@ -136,6 +135,7 @@ const CandidateRow = z.object({
   distance_to_anchor: z.number().nullable(),
   chain_break_reason: z.string().nullable(),
   sheet_formula_count: z.union([z.number(), z.string().transform(Number)]).nullable(),
+  is_restatement: z.union([z.boolean(), z.string().transform(s => s === "true" || s === "t")]).nullable(),
 });
 
 // ---------------------------------------------------------------------------
@@ -281,9 +281,6 @@ export async function findFigure(
 ): Promise<FindFigureResult> {
   const filtersApplied: string[] = [];
 
-  // Restatement sheets: passed in from caller (precomputed once per deal)
-  const restatementSheets = input.restatementSheets ?? new Set<string>();
-
   // Determine role
   let role = input.workbookRole;
   if (!role) {
@@ -363,10 +360,12 @@ export async function findFigure(
       c.feeds_returns,
       c.distance_to_anchor,
       c.chain_break_reason,
-      COALESCE(sf.formula_count, 0) AS sheet_formula_count
+      COALESCE(sf.formula_count, 0) AS sheet_formula_count,
+      COALESCE(ws.col_properties->>'restatement', 'false') = 'true' AS is_restatement
     FROM workbook_cells c
     JOIN workbooks w ON w.id = c.workbook_id
     JOIN documents d ON d.id = w.document_id
+    LEFT JOIN workbook_sheets ws ON ws.workbook_id = c.workbook_id AND ws.sheet_name = c.sheet_name
     LEFT JOIN (
       SELECT workbook_id, sheet_name,
         COUNT(formula) FILTER (WHERE formula IS NOT NULL AND formula != '') AS formula_count
@@ -439,7 +438,7 @@ export async function findFigure(
     const sheetFormulas = r.sheet_formula_count ?? 0;
     const sheetProv: "pasted" | "restatement" | "live" | "unknown" =
       sheetFormulas === 0 ? "pasted"
-      : restatementSheets.has(r.sheet_name) ? "restatement"
+      : r.is_restatement ? "restatement"
       : "live";
     const provenancePenalty = (sheetProv === "pasted" || sheetProv === "restatement") ? -0.10 : 0;
 
