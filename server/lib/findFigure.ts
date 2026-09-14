@@ -344,6 +344,12 @@ export async function findFigure(
     filtersApplied.push("only_rate_rows");
   }
 
+  // Safety property: unread cells cannot be cited
+  // A cell without 'read' in chain_break_reason has not passed all three
+  // reading quality checks (value, period, context). It cannot be a finding.
+  whereClauses += ` AND c.chain_break_reason LIKE '%read%'`;
+  filtersApplied.push("read_only");
+
   // Query
   const sql = `
     SELECT
