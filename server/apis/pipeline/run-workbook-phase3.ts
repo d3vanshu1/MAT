@@ -964,8 +964,9 @@ export default api({
       // On sheets like Case Drivers, case names sit in the label column
       // ("Upside Case", "PEP Base Case", "Severe Downside Case").
       // These should populate case_label/case_key, not row_label_path.
-      // Post-pass: find rows where row_label matches a case token,
-      // set case_label from it, and null out row_label_path.
+      // T3: Only match when the ENTIRE trimmed label is a case name.
+      // A token like "PEP" inside "PEP Equity % (Excl. Options)" is part
+      // of the label, not a case. Whole-label match only.
       await db.execute(
         `WITH case_rows AS (
            SELECT DISTINCT row_idx, row_label
@@ -973,10 +974,8 @@ export default api({
            WHERE workbook_id = $1 AND sheet_name = $2
              AND row_label IS NOT NULL
              AND case_label IS NULL
-             AND (
-               row_label ~* '\\m(base|upside|downside|bull|bear|management|mgmt|pep|conservative|aggressive|stress|severe)\\s*(case)?\\M'
-               OR row_label ~* '\\mcase\\M'
-             )
+             AND TRIM(REGEXP_REPLACE(REPLACE(row_label, E'\\r\\n', ' '), '\\s+', ' ', 'g'))
+                 ~* '^\\s*(base\\s*case|upside\\s*(case)?|downside\\s*(case)?|bull\\s*(case)?|bear\\s*(case)?|management\\s*(case)?|mgmt\\.?\\s*(case)?|pep\\s*(base\\s*)?case|conservative\\s*(case)?|aggressive\\s*(case)?|stress\\s*(case)?|severe\\s*downside\\s*(case)?|live\\s*case|case\\s*\\d*)\\s*$'
          )
          UPDATE workbook_cells c SET
            case_label = TRIM(REGEXP_REPLACE(REPLACE(cr.row_label, E'\\r\\n', ' '), '\\s+', ' ', 'g')),

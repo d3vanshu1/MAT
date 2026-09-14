@@ -440,23 +440,34 @@ export default api({
             }
 
             // --- Level 4: Sheet title (weakest) ---
-            // S2: Check if this cell's format matches the dominant format.
-            // If it doesn't, the sheet-title scale probably doesn't apply to this row.
+            // S2/T1: Check if this cell's format matches the dominant format.
+            // Trigger on DECIMAL COUNT only — not on currency symbol presence.
+            // Modellers put $ on the first column of a block and leave it off
+            // the rest; that's a display habit, not a change of denomination.
+            // A different decimal count (0 vs 1) signals a different unit scale.
             let formatMismatch = false;
             if (sheetUnitInfo && dominantSig && scaleSource === "none") {
-              const cellHasCurr = /[$£€¥]|\[\$/.test(cell.number_format ?? "");
               const cellDec = parsed?.decimals ?? 0;
-              if (cellHasCurr !== dominantSig.hasCurrSym || cellDec !== dominantSig.decimals) {
+              if (cellDec !== dominantSig.decimals) {
                 formatMismatch = true;
               }
             }
 
             if (!selfDescribing && !labelDecided && sheetUnitInfo) {
+              // T2: A sheet title may supply scale but NEVER unit_class=currency
+              // to a cell whose own format has no currency symbol.
+              // The cell's format is the authority on whether it's currency.
+              const cellFmtHasCurr = /[$£€¥]|\[\$/.test(cell.number_format ?? "");
               if (sheetUnitInfo.unitClass && canUpgradeClass && unitSource !== "column_header") {
-                unitClass = sheetUnitInfo.unitClass;
-                unitSource = sheetUnitInfo.source;
+                if (sheetUnitInfo.unitClass === "currency" && !cellFmtHasCurr) {
+                  // Sheet says currency but cell format disagrees — don't upgrade
+                  // unitClass stays null (or whatever the label set)
+                } else {
+                  unitClass = sheetUnitInfo.unitClass;
+                  unitSource = sheetUnitInfo.source;
+                }
               }
-              if (sheetUnitInfo.currency && !currency && !isGeneralFmt) {
+              if (sheetUnitInfo.currency && !currency && !isGeneralFmt && cellFmtHasCurr) {
                 currency = sheetUnitInfo.currency;
               }
               if (sheetUnitInfo.multiplier > 1 && scaleSource === "none") {

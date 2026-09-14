@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 
 export interface FormatParseResult {
-  unitClass: "currency" | "percent" | "multiple" | "count" | "ratio" | "date" | "text";
+  unitClass: "currency" | "percent" | "multiple" | "count" | "ratio" | "date" | "text" | null;
   currency: string | null;        // USD, GBP, EUR, etc.
   decimals: number;               // digit count after decimal in first section
   scaleFromFormat: number;        // 1, 1000, 1000000 from trailing commas
@@ -230,11 +230,14 @@ export function parseExcelFormat(fmt: string | null, valueType?: string): Format
   }
 
   // --- Plain numeric ---
+  // A plain numeric format with no currency/percent/multiple evidence is
+  // unit-silent. Don't guess count vs ratio from decimals — that's the
+  // label's job. Return null so downstream can decide from context.
   const decimals = countDecimals(posSection);
   const scale = countTrailingCommaScale(posSection);
 
   return {
-    unitClass: decimals === 0 ? "count" : "ratio",
+    unitClass: null,
     currency: null,
     decimals,
     scaleFromFormat: scale,
