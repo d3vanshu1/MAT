@@ -27,6 +27,7 @@ export interface FindFigureInput {
   scope?: string | null;        // optional segment/member filter
   dealId: string;
   sheetPreferences?: Record<string, string[]> | null; // sheet_name -> is_primary_for metric families
+  claimIsRate?: boolean;  // true = claim states a rate/%, false = level claim. Used to block rate/level cross-matching.
 }
 
 export interface FigureCandidate {
@@ -328,6 +329,19 @@ export async function findFigure(
     params.push(input.unitClass);
     whereClauses += ` AND (c.unit_class = $${params.length} OR c.unit_class IS NULL)`;
     filtersApplied.push(`unit:${input.unitClass}`);
+  }
+
+  // Rate/level cross-match block (hard gate)
+  // A rate row (detected by growth companion detection) must never match a level claim.
+  // A level row must never match a rate claim.
+  if (input.claimIsRate === false) {
+    // Level claim: exclude rate rows
+    whereClauses += ` AND (c.chain_break_reason IS NULL OR c.chain_break_reason NOT LIKE '%rate_row%')`;
+    filtersApplied.push("exclude_rate_rows");
+  } else if (input.claimIsRate === true) {
+    // Rate claim: only rate rows
+    whereClauses += ` AND c.chain_break_reason LIKE '%rate_row%'`;
+    filtersApplied.push("only_rate_rows");
   }
 
   // Query

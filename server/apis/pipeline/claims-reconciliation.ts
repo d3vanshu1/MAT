@@ -1509,6 +1509,8 @@ export async function runReconciliation(
           : null : null,
         caseKey: null,  // Let findFigure search all cases; C13 will gate downstream
         workbookRole: null,  // Let findFigure route by keyword
+        // Rate/level cross-match block: rate claims (%, x, bps) should only match rate rows
+        claimIsRate: claim.unit ? ["rate_pct", "multiplier"].includes(classifyClaimUnit(claim.unit)) : undefined,
       };
 
       let ffResult: FindFigureResult;
