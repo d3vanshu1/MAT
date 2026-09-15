@@ -203,6 +203,8 @@ export default api({
       rejection_counts: z.object({
         quote_integrity: z.number(),
         figure_existence: z.number(),
+        cross_version: z.number(),
+        non_finite_delta: z.number(),
         delta_provenance: z.number(),
         source_naming: z.number(),
         unit_coherence: z.number(),
@@ -503,7 +505,8 @@ export default api({
       `By check: quote=${gateResult.rejection_counts.quote_integrity} fig=${gateResult.rejection_counts.figure_existence} ` +
       `delta=${gateResult.rejection_counts.delta_provenance} source=${gateResult.rejection_counts.source_naming} ` +
       `unit=${gateResult.rejection_counts.unit_coherence} offset=${gateResult.rejection_counts.parallel_offset} ` +
-      `dbl_read=${gateResult.rejection_counts.double_read} snippet=${gateResult.rejection_counts.snippet_value}`
+      `dbl_read=${gateResult.rejection_counts.double_read} snippet=${gateResult.rejection_counts.snippet_value} ` +
+      `cross_ver=${gateResult.rejection_counts.cross_version} non_finite=${gateResult.rejection_counts.non_finite_delta}`
     );
     if (gateResult.doubleReadMismatches.length > 0) {
       console.log(`[DiagReconcileOnly] C9 MISMATCHES: ${JSON.stringify(gateResult.doubleReadMismatches)}`);

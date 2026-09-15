@@ -31,7 +31,8 @@ export type GateCheck =
   | "unit_coherence"
   | "parallel_offset"
   | "double_read"           // C9: model-side value cross-check
-  | "snippet_value";        // C9: memo-side cited number must appear in snippet
+  | "snippet_value"          // C9: memo-side cited number must appear in snippet
+  | "non_finite_delta";     // delta is infinity, NaN, or undefined (model value = 0)
 
 export interface GateRejection {
   finding: ReconciliationFinding;
@@ -141,6 +142,7 @@ export function runVerificationGate(input: GateInput): GateResult {
     quote_integrity: 0,
     figure_existence: 0,
     cross_version: 0,
+    non_finite_delta: 0,
     delta_provenance: 0,
     source_naming: 0,
     unit_coherence: 0,
@@ -229,6 +231,24 @@ function checkFinding(
   // Check 6b (1.3): Cross-version — published data_divergence must cite a live cell
   const crossVersionResult = checkCrossVersion(f);
   if (crossVersionResult) return crossVersionResult;
+
+  // Check 6c: Non-finite delta — a finding with infinity, NaN, or undefined delta cannot publish
+  if (f.model_figure) {
+    const mVal = f.model_figure.value ?? f.model_figure.value_raw;
+    const cVal = f.claim?.value;
+    if (mVal !== null && mVal !== undefined && cVal !== null && cVal !== undefined) {
+      const mNum = Number(mVal);
+      const cNum = Number(cVal);
+      if (mNum === 0 && cNum !== 0) {
+        return { finding: f, check: "non_finite_delta" as GateCheck, reason: "model value is zero, claim=" + String(cNum) + ", delta is undefined" };
+      }
+      const delta = Math.abs(Math.abs(cNum) - Math.abs(mNum));
+      const pct = Math.abs(mNum) > 0 ? delta / Math.abs(mNum) : Infinity;
+      if (!isFinite(pct) || isNaN(pct)) {
+        return { finding: f, check: "non_finite_delta" as GateCheck, reason: "delta percentage is " + String(pct) };
+      }
+    }
+  }
 
   // Check 7 (C9): Double-read — model-side value cross-check
   const doubleReadResult = checkDoubleRead(f, verifyCells, doubleReadMismatches);

@@ -344,10 +344,11 @@ export async function findFigure(
     filtersApplied.push("only_rate_rows");
   }
 
-  // Safety property: unread cells cannot be cited
-  // A cell without 'read' in chain_break_reason has not passed all three
-  // reading quality checks (value, period, context). It cannot be a finding.
-  whereClauses += ` AND c.chain_break_reason LIKE '%read%'`;
+  // Safety property: unread cells cannot be cited.
+  // A cell is "read" when it has all three dimensions gradeable:
+  //   value (has a formula), period (has a period), context (has a label).
+  // Computed at query time — no stored flag, no corruption of chain_break_reason.
+  whereClauses += ` AND c.formula IS NOT NULL AND c.period_start IS NOT NULL AND c.period_start != '' AND c.row_label IS NOT NULL`;
   filtersApplied.push("read_only");
 
   // Query
